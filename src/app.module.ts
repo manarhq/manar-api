@@ -19,6 +19,9 @@ import { TemporalModule } from './temporal/temporal.module';
 import { ApprovalsHttpModule } from './approvals/approvals-http.module';
 import { AuditModule } from './audit/audit.module';
 import { AuditHttpModule } from './audit/audit-http.module';
+import { AuditIndexerModule } from './audit/opensearch/audit-indexer.module';
+import { LiveEventsHttpModule } from './audit/live/live-events-http.module';
+import { EvidenceHttpModule } from './evidence/evidence-http.module';
 
 @Module({
   imports: [
@@ -37,6 +40,9 @@ import { AuditHttpModule } from './audit/audit-http.module';
     TemporalModule,
     ApprovalsHttpModule,
     AuditHttpModule,
+    AuditIndexerModule,
+    LiveEventsHttpModule,
+    EvidenceHttpModule,
   ],
   controllers: [AppController],
   providers: [

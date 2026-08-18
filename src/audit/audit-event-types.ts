@@ -29,6 +29,9 @@ export const AUDIT_EVENT_TYPES = {
   TOOL_INVOCATION_FAILED: 'tool.invocation.failed',
 
   POLICY_PUBLISHED: 'policy.published',
+
+  /** Phase 9b (Retention, Section 48) — written by `AuditRetentionWorkflow`'s Activity; see `src/audit/retention/`. */
+  AUDIT_RETENTION_EXECUTED: 'audit.retention_executed',
 } as const;
 
 export type AuditEventType =

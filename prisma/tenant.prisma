@@ -1069,3 +1069,48 @@ model AuditChainState {
 
   @@map("audit_chain_state")
 }
+
+/// Phase 9b (Retention, Section 48). Written exclusively by
+/// `AuditRetentionWorkflow`'s Activity (`src/audit/retention/`), immediately
+/// before it deletes the aged-out `AuditEvent` rows a given retention run
+/// prunes — never by any HTTP/CLI path (there is no update/delete endpoint
+/// for this model either; it is itself append-only). `anchorHash` is the
+/// last-to-be-pruned event's own `eventHash` (by `sequence` — i.e. the most
+/// recent among those being deleted, the one immediately preceding the
+/// oldest *surviving* event in the chain) — this is what lets
+/// `verifyAuditChain` (Phase 9a, `src/audit/audit.service.ts`) keep working
+/// after old events are gone: chain verification now accepts the oldest
+/// *remaining* event's `previousHash` as valid if it matches either `null`
+/// (true genesis — no retention has ever run) or a known
+/// `AuditChainAnchor.anchorHash` for this tenant, instead of requiring that
+/// ancestor row to still exist.
+///
+/// `tenantId` is carried explicitly even though this is already a
+/// per-tenant-isolated database (Phase 2 — see docs/tenant-isolation.md,
+/// same structural scoping `AuditEvent`/`AuditChainState` get for free) —
+/// kept for the same defense-in-depth/self-describing-row reason a handful
+/// of other models in this schema (e.g. `RoleBinding.grantedBy`) carry
+/// free-text provenance beyond what a foreign key alone would establish.
+model AuditChainAnchor {
+  id String @id @default(uuid())
+
+  tenantId String
+
+  /// The pruned segment's last `AuditEvent.eventHash` — see model doc
+  /// comment. Not a foreign key (the `AuditEvent` row it names has, by
+  /// definition, just been deleted in the same retention run).
+  anchorHash String
+
+  anchoredAt DateTime @default(now())
+
+  /// How many `AuditEvent` rows this retention run deleted — carried here
+  /// (rather than only in the paired `audit.retention_executed`
+  /// `AuditEvent`'s own `data`) so an operator can inspect retention
+  /// history without walking the audit chain itself.
+  eventsPrunedCount Int
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@map("audit_chain_anchors")
+}

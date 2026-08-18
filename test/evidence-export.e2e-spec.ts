@@ -1,0 +1,237 @@
+import 'dotenv/config';
+import { randomUUID } from 'node:crypto';
+import { Client as PgClient } from 'pg';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Test, TestingModule } from '@nestjs/testing';
+import {
+  FastifyAdapter,
+  NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import request from 'supertest';
+import { App } from 'supertest/types';
+import { AppModule } from '../src/app.module';
+import { ControlPrismaService } from '../src/database/control-prisma.service';
+import { KeycloakModule } from '../src/keycloak/keycloak.module';
+import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
+import { verifyEvidenceBundle } from '../src/evidence/evidence-signing.util';
+import type { EvidenceExportResult } from '../src/evidence/evidence-export.service';
+import {
+  assignRealmRole,
+  createRealmUser,
+  deleteRealm,
+  getUserToken,
+} from './support/keycloak-test-helpers';
+
+/**
+ * Phase 9b (Evidence export, Section 49) — "bundle for a known scenario
+ * contains the expected audit events + context, and its signature/hash
+ * verifies; tampering the exported JSON after the fact makes verification
+ * fail."
+ */
+describe('Evidence export (e2e)', () => {
+  let app: NestFastifyApplication;
+  let control: ControlPrismaService;
+  let provisioning: TenantProvisioningService;
+
+  const ADMIN_USERNAME = `evidence-admin-${randomUUID().slice(0, 8)}`;
+  const READ_ONLY_USERNAME = `evidence-ro-${randomUUID().slice(0, 8)}`;
+  const USER_PASSWORD = 'Passw0rd!Test';
+  const SIGNING_SECRET =
+    process.env.APPROVAL_GRANT_SIGNING_SECRET ??
+    'dev-only-approval-grant-signing-secret-change-me';
+
+  type ProvisionedTenant = Awaited<
+    ReturnType<TenantProvisioningService['provisionTenant']>
+  >;
+  let tenant: ProvisionedTenant;
+  let adminToken: string;
+  let readOnlyToken: string;
+  let agentId: string;
+  let taskId: string;
+
+  function uniqueSlug(label: string): string {
+    return `evd-${label}-${randomUUID().slice(0, 8)}`;
+  }
+
+  async function dropRealDatabase(databaseName: string): Promise<void> {
+    const admin = new PgClient({
+      connectionString: process.env.CONTROL_DATABASE_URL,
+    });
+    await admin.connect();
+    try {
+      await admin.query(
+        `DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`,
+      );
+    } finally {
+      await admin.end();
+    }
+  }
+
+  beforeAll(async () => {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule, KeycloakModule],
+    }).compile();
+    app = moduleFixture.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter(),
+    );
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+    await app.listen(0, '127.0.0.1');
+
+    control = app.get(ControlPrismaService);
+    provisioning = moduleFixture.get(TenantProvisioningService);
+
+    tenant = await provisioning.provisionTenant({
+      slug: uniqueSlug('t'),
+      name: 'Evidence Export Test Tenant',
+    });
+    if (!tenant.keycloakRealm) {
+      throw new Error('Expected provisioned tenant to have a Keycloak realm');
+    }
+    const clientSecretRef = await control.secretReference.findFirstOrThrow({
+      where: { tenantId: tenant.id, kind: 'KEYCLOAK_CLIENT_SECRET' },
+    });
+
+    const adminUserId = await createRealmUser(tenant.keycloakRealm, {
+      username: ADMIN_USERNAME,
+      email: `${ADMIN_USERNAME}@example.test`,
+      password: USER_PASSWORD,
+    });
+    await assignRealmRole(tenant.keycloakRealm, adminUserId, 'SECURITY_ADMIN');
+    adminToken = await getUserToken({
+      realm: tenant.keycloakRealm,
+      clientId: tenant.keycloakClientId!,
+      clientSecret: clientSecretRef.reference,
+      username: ADMIN_USERNAME,
+      password: USER_PASSWORD,
+    });
+
+    const readOnlyUserId = await createRealmUser(tenant.keycloakRealm, {
+      username: READ_ONLY_USERNAME,
+      email: `${READ_ONLY_USERNAME}@example.test`,
+      password: USER_PASSWORD,
+    });
+    await assignRealmRole(tenant.keycloakRealm, readOnlyUserId, 'READ_ONLY');
+    readOnlyToken = await getUserToken({
+      realm: tenant.keycloakRealm,
+      clientId: tenant.keycloakClientId!,
+      clientSecret: clientSecretRef.reference,
+      username: READ_ONLY_USERNAME,
+      password: USER_PASSWORD,
+    });
+
+    const agentResponse = await request(app.getHttpServer() as App)
+      .post('/agents')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        slug: `evd-agt-${randomUUID().slice(0, 8)}`,
+        displayName: 'Evidence Export Test Agent',
+      })
+      .expect(201);
+    agentId = (agentResponse.body as { id: string }).id;
+
+    const taskResponse = await request(app.getHttpServer() as App)
+      .post('/tasks')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        name: 'Evidence export scenario task',
+        assignedAgentId: agentId,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      })
+      .expect(201);
+    taskId = (taskResponse.body as { id: string }).id;
+
+    await request(app.getHttpServer() as App)
+      .post(`/tasks/${taskId}/revoke`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ reason: 'evidence export scenario cleanup' })
+      .expect(201);
+  }, 120_000);
+
+  afterAll(async () => {
+    if (tenant?.keycloakRealm) await deleteRealm(tenant.keycloakRealm);
+    if (tenant?.databaseBinding) {
+      await dropRealDatabase(tenant.databaseBinding.databaseName);
+      await control.tenantDatabaseBinding.deleteMany({
+        where: { tenantId: tenant.id },
+      });
+      await control.secretReference.deleteMany({
+        where: { tenantId: tenant.id },
+      });
+      await control.tenant.deleteMany({ where: { id: tenant.id } });
+    }
+    await app.close();
+  }, 60_000);
+
+  it('rejects a request with no filter dimension at all', async () => {
+    await request(app.getHttpServer() as App)
+      .post('/evidence/export')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({})
+      .expect(400);
+  });
+
+  it('rejects a caller without AUDITOR/SECURITY_ADMIN/TENANT_OWNER', async () => {
+    await request(app.getHttpServer() as App)
+      .post('/evidence/export')
+      .set('Authorization', `Bearer ${readOnlyToken}`)
+      .send({ taskId })
+      .expect(403);
+  });
+
+  it('returns a bundle containing the expected events + context, and its signature verifies; tampering breaks verification', async () => {
+    const response = await request(app.getHttpServer() as App)
+      .post('/evidence/export')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ taskId })
+      .expect(201);
+
+    const result = response.body as EvidenceExportResult;
+
+    expect(result.bundle.tenantId).toBe(tenant.id);
+    expect(result.bundle.filter.taskId).toBe(taskId);
+
+    const eventTypes = result.bundle.events.map((e) => e.eventType);
+    expect(eventTypes).toContain('task.created');
+    expect(eventTypes).toContain('task.revoked');
+    for (const event of result.bundle.events) {
+      expect(event.eventHash).toBeTruthy();
+    }
+
+    const taskContext = result.bundle.context.tasks.find(
+      (t) => t.id === taskId,
+    );
+    expect(taskContext).toBeDefined();
+    expect(taskContext?.assignedAgentId).toBe(agentId);
+    expect(taskContext?.status).toBe('REVOKED');
+
+    // Chain-segment self-consistency: consecutive previousHash/eventHash
+    // linkage among the exported events (Section 49's "let a recipient
+    // verify those specific events weren't tampered with").
+    for (let i = 1; i < result.bundle.events.length; i += 1) {
+      expect(result.bundle.events[i]!.previousHash).toBe(
+        result.bundle.events[i - 1]!.eventHash,
+      );
+    }
+
+    const verifyGood = await verifyEvidenceBundle(
+      result.bundle,
+      result.signature.signature,
+      SIGNING_SECRET,
+    );
+    expect(verifyGood).toEqual({ valid: true });
+
+    const tamperedBundle = {
+      ...result.bundle,
+      events: result.bundle.events.map((e, i) =>
+        i === 0 ? { ...e, data: { tampered: true } } : e,
+      ),
+    };
+    const verifyTampered = await verifyEvidenceBundle(
+      tamperedBundle,
+      result.signature.signature,
+      SIGNING_SECRET,
+    );
+    expect(verifyTampered.valid).toBe(false);
+  });
+});

@@ -160,6 +160,9 @@ export class AuditService {
       correlationId: event.correlationId,
       actor: input.actor,
       data: input.data,
+      previousHash: event.previousHash,
+      eventHash: event.eventHash,
+      sequence: event.sequence,
     };
 
     // Deliberately not awaited — see method doc comment.
@@ -214,6 +217,18 @@ export class AuditService {
    * Section 47's mandatory "modify an old event, prove verification fails
    * *and correctly reports where*" test depends on this.
    *
+   * **Anchor-aware (Phase 9b, Section 48)**: the very first event walked
+   * (the oldest one *remaining*, not necessarily this tenant's true
+   * genesis event — `AuditRetentionWorkflow` may have pruned everything
+   * before it) is valid if its `previousHash` is either `null` (true
+   * genesis — retention has never run for this tenant) OR matches a known
+   * `AuditChainAnchor.anchorHash` for this tenant (`src/audit/retention/`)
+   * — the hash `AuditRetentionWorkflow` recorded for the last event it
+   * pruned, immediately before deleting it. Every event *after* the first
+   * is checked exactly as before (against the *previous remaining* event's
+   * own `eventHash`) — retention never breaks linkage among surviving
+   * events, only the link to history that no longer exists.
+   *
    * Also confirms the chain's *tail* matches `AuditChainState` — a
    * mismatch there (the bookkeeping row disagreeing with the event table
    * itself) is reported as `brokenAt: 'audit_chain_state'`, distinct from
@@ -226,9 +241,23 @@ export class AuditService {
       orderBy: { sequence: 'asc' },
     });
 
+    const knownAnchorHashes = new Set(
+      (await tenantClient.auditChainAnchor.findMany()).map(
+        (anchor) => anchor.anchorHash,
+      ),
+    );
+
     let expectedPreviousHash: string | null = null;
+    let isFirstRemainingEvent = true;
     for (const event of events) {
-      if (event.previousHash !== expectedPreviousHash) {
+      const previousHashIsValid = isFirstRemainingEvent
+        ? event.previousHash === null ||
+          (event.previousHash !== null &&
+            knownAnchorHashes.has(event.previousHash))
+        : event.previousHash === expectedPreviousHash;
+      isFirstRemainingEvent = false;
+
+      if (!previousHashIsValid) {
         return { valid: false, brokenAt: event.id };
       }
 

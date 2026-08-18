@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { Logger } from '@nestjs/common';
 import { WorkerAppModule } from './temporal/worker-app.module';
 import { ApprovalActivitiesFactory } from './temporal/activities/approval.activities';
+import { AuditRetentionActivitiesFactory } from './temporal/activities/audit-retention.activities';
 import type { AppConfig } from './config/env.validation';
 
 /**
@@ -47,7 +48,10 @@ async function bootstrap(): Promise<void> {
   const namespace = configService.get('TEMPORAL_NAMESPACE', { infer: true });
   const taskQueue = configService.get('TEMPORAL_TASK_QUEUE', { infer: true });
 
-  const activities = appContext.get(ApprovalActivitiesFactory).build();
+  const activities = {
+    ...appContext.get(ApprovalActivitiesFactory).build(),
+    ...appContext.get(AuditRetentionActivitiesFactory).build(),
+  };
 
   const connection = await NativeConnection.connect({ address });
 
@@ -55,14 +59,16 @@ async function bootstrap(): Promise<void> {
     connection,
     namespace,
     taskQueue,
-    // Resolves to this same directory's compiled workflow module
-    // (`dist/temporal/workflows/approval.workflow.js` in a built image,
-    // the tsc-compiled equivalent under dev — `nest start`/`nest build`
-    // both compile via tsc, never webpack, for this project — see
-    // nest-cli.json). Temporal's own Worker bundles whatever this path
-    // resolves to into an isolated deterministic sandbox itself; it does
-    // not matter whether the path is TS or JS source.
-    workflowsPath: require.resolve('./temporal/workflows/approval.workflow'),
+    // Resolves to this same directory's compiled workflow *bundle*
+    // (`dist/temporal/workflows/index.js` in a built image, the
+    // tsc-compiled equivalent under dev — `nest start`/`nest build` both
+    // compile via tsc, never webpack, for this project — see
+    // nest-cli.json). Re-exports both `ApprovalWorkflow` (Phase 8) and
+    // `AuditRetentionWorkflow` (Phase 9b) — see
+    // `src/temporal/workflows/index.ts`'s doc comment for why one Worker
+    // polling one task queue registers every workflow this codebase has,
+    // rather than a second Worker/task queue per workflow.
+    workflowsPath: require.resolve('./temporal/workflows/index'),
     activities,
   });
 

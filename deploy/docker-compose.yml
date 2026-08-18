@@ -389,7 +389,91 @@ services:
       retries: 20
       start_period: 15s
 
+  # Phase 9b (OpenSearch Indexing, OCSF, Live SSE, Evidence Export &
+  # Retention): SSE fanout backbone. `AuditIndexerService` (the same Kafka
+  # consumer that indexes every `AuditEvent` into OpenSearch below)
+  # publishes each event to a per-tenant Redis pub/sub channel
+  # (`manar:audit-live:<tenantId>`) — `GET /events/live` subscribes to that
+  # channel for the lifetime of one SSE connection, so a live event reaches
+  # every connected dashboard client regardless of which API replica
+  # originally recorded it. The official `redis` Docker Hub image (Redis
+  # 8.x, "docker.io/library/redis") — nothing here needs Sentinel/Cluster
+  # mode, a single instance is enough for local dev and for this MVP's
+  # fanout-only usage (no persistence requirement: a dashboard reconnecting
+  # after a dropped SSE connection just resumes seeing new events, it never
+  # needs to replay ones it missed — Postgres/OpenSearch remain the durable
+  # record). No password/ACL configured (`protected-mode` stays off) — the
+  # same "no auth needed for local-only infra" posture OpenFGA/Temporal
+  # already take in this file; nothing outside this repo's own processes
+  # ever reaches this port.
+  redis:
+    image: redis:8.10-alpine
+    container_name: manar-redis
+    restart: unless-stopped
+    ports:
+      # Default Redis port — nothing else local binds it.
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Phase 9b: the search/indexing backbone `AuditIndexerService` upserts
+  # every `manar.audit-events` Kafka message into (keyed by `eventId`, so
+  # Kafka's at-least-once redelivery never double-indexes — Section 29).
+  # Postgres remains authoritative (`pnpm manar audit:reindex` fully
+  # reconstructs this index from Postgres alone — see docs/audit-chain.md);
+  # OpenSearch here is a queryable projection, never a second source of
+  # truth. `opensearchproject/opensearch` is the official OpenSearch
+  # Project image. `discovery.type=single-node` is OpenSearch's own
+  # documented single-container local-dev mode (no cluster
+  # formation/quorum needed). `DISABLE_SECURITY_PLUGIN=true` turns off the
+  # security plugin's TLS/auth demands entirely (OpenSearch 2.12+ otherwise
+  # refuses to start without a custom strong admin password) — the same
+  # "no auth needed for local-only infra nothing outside this repo's own
+  # processes ever reaches" posture `redis` above and OpenFGA/Temporal
+  # elsewhere in this file already take; never appropriate for a real
+  # deployment, which must re-enable the security plugin and configure
+  # real credentials/TLS instead. `bootstrap.memory_lock=true` (with the
+  # matching `memlock` ulimit) is OpenSearch's own documented recommendation
+  # to prevent the JVM heap from being swapped to disk; `OPENSEARCH_JAVA_OPTS`
+  # caps the heap at 512m, comfortably enough for local dev/test volumes
+  # without assuming a large host.
+  opensearch:
+    image: opensearchproject/opensearch:3.8.0
+    container_name: manar-opensearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: 'true'
+      bootstrap.memory_lock: 'true'
+      OPENSEARCH_JAVA_OPTS: '-Xms512m -Xmx512m'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      # Default OpenSearch REST API port — nothing else local binds it.
+      - '9200:9200'
+    volumes:
+      - manar-opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'curl -s http://127.0.0.1:9200/_cluster/health >/dev/null 2>&1',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
 volumes:
   manar-postgres-data:
   manar-keycloak-data:
   manar-kafka-data:
+  manar-opensearch-data:

@@ -72,6 +72,10 @@ function fakeConfigService(
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:29092',
     KAFKA_CLIENT_ID: 'audit-chain-e2e-test',
     KAFKA_AUDIT_TOPIC: process.env.KAFKA_AUDIT_TOPIC ?? 'manar.audit-events',
+    OPENSEARCH_NODE: process.env.OPENSEARCH_NODE ?? 'http://localhost:9200',
+    OPENSEARCH_AUDIT_INDEX:
+      process.env.OPENSEARCH_AUDIT_INDEX ?? 'manar-audit-events',
+    REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
     ...overrides,
   };
   return {
