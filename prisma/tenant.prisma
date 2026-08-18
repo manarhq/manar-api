@@ -8,6 +8,8 @@
 // docs/tenant-isolation.md). Phase 3 (Human Authentication) adds the first
 // real models: a local projection of each tenant's Keycloak-authenticated
 // users and their coarse role assignments — see docs/human-auth.md.
+// Phase 4 (Agent Identity & Enrollment) adds agents as independent security
+// principals with X.509-based workload identity — see docs/agent-identity.md.
 datasource db {
   provider = "postgresql"
 }
@@ -53,6 +55,15 @@ model UserProfile {
 
   roleBindings RoleBinding[]
 
+  /// Phase 4: agents/enrollment tokens this user has created — "createdBy"
+  /// is a free-text-adjacent audit trail elsewhere in this schema (see
+  /// RoleBinding.grantedBy's doc comment for the precedent), but here it's
+  /// a real FK since agent creation is always attributable to an
+  /// authenticated Manar user (JwtAuthGuard's AuthContext), never a
+  /// Keycloak-side actor.
+  createdAgents           Agent[]
+  createdEnrollmentTokens AgentEnrollmentToken[]
+
   @@map("user_profiles")
 }
 
@@ -75,4 +86,140 @@ model RoleBinding {
 
   @@unique([userId, role])
   @@map("role_bindings")
+}
+
+/// Agent lifecycle state (Phase 4, Section 13-17 of the master prompt).
+/// PENDING_ENROLLMENT: created by a human, no working certificate yet.
+/// ACTIVE: has passed enrollment (POST /agents/enroll) with a valid,
+/// unrevoked certificate. REVOKED: `CertificateAuthorityService.revoke`
+/// ran — the agent's certificate no longer authenticates on the mTLS
+/// surface (AgentMtlsGuard checks this on every request, not just at TLS
+/// handshake time — see docs/agent-identity.md). KILLED is reserved for a
+/// later, dedicated kill-switch phase (Section 32) — not set by anything
+/// in this phase, kept here now so that later phase avoids a destructive
+/// migration to extend this enum.
+enum AgentStatus {
+  PENDING_ENROLLMENT
+  ACTIVE
+  REVOKED
+  KILLED
+}
+
+/// An agent: an independent security principal with workload identity
+/// based on asymmetric crypto + an X.509 certificate (never a shared
+/// secret/API key). `identifier` is this agent's SPIFFE-like identity URI
+/// (`agent://<tenantSlug>/<slug>`) — the exact string
+/// `CertificateAuthorityService` requires an enrollment CSR's Subject
+/// Alternative Name to match before it will ever ask OpenBao to sign
+/// anything, and the same string `AgentMtlsGuard` looks up an mTLS
+/// request's verified client certificate by. Unique per tenant database,
+/// so unique globally in effect (Phase 2's isolation model: there is no
+/// shared table for two tenants' agents to collide in).
+model Agent {
+  id          String      @id @default(uuid())
+  slug        String      @unique
+  identifier  String      @unique
+  displayName String
+  status      AgentStatus @default(PENDING_ENROLLMENT)
+
+  /// Unused until Phase 5+ (agent capabilities/task scoping is explicitly
+  /// out of scope this phase) — kept minimal (an empty object) rather than
+  /// omitted so that phase doesn't need a destructive migration to add it.
+  capabilities Json @default("{}")
+
+  createdAt DateTime    @default(now())
+  createdBy String
+  creator   UserProfile @relation(fields: [createdBy], references: [id])
+
+  groupMemberships AgentGroupMembership[]
+  enrollmentTokens AgentEnrollmentToken[]
+  certificates     AgentCertificate[]
+
+  @@map("agents")
+}
+
+/// Minimal this phase — membership only, no group-based policy yet (that's
+/// Phase 5+, alongside agent capabilities/task scoping).
+model AgentGroup {
+  id   String @id @default(uuid())
+  name String @unique
+
+  createdAt DateTime @default(now())
+
+  memberships AgentGroupMembership[]
+
+  @@map("agent_groups")
+}
+
+model AgentGroupMembership {
+  id String @id @default(uuid())
+
+  agentId String
+  agent   Agent @relation(fields: [agentId], references: [id])
+
+  groupId String
+  group   AgentGroup @relation(fields: [groupId], references: [id])
+
+  addedAt DateTime @default(now())
+
+  @@unique([agentId, groupId])
+  @@map("agent_group_memberships")
+}
+
+/// A single-use enrollment token (Section 14). The raw token is only ever
+/// returned once, at creation time (`POST /agents/:id/enrollment-tokens`'s
+/// response) — never stored or retrievable again. `tokenHash` is what's
+/// persisted (see `src/agents/enrollment-token.util.ts` for the hashing
+/// scheme), so a control/tenant DB compromise alone can't be used to
+/// enroll an agent. `expiresAt` is short (15 minutes — see
+/// `AgentsService.ENROLLMENT_TOKEN_TTL_MS`); `usedAt` enforces single-use:
+/// once set, a second enrollment attempt with the same token is rejected
+/// even if it somehow leaked.
+model AgentEnrollmentToken {
+  id String @id @default(uuid())
+
+  agentId String
+  agent   Agent @relation(fields: [agentId], references: [id])
+
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdAt DateTime    @default(now())
+  createdBy String
+  creator   UserProfile @relation(fields: [createdBy], references: [id])
+
+  @@map("agent_enrollment_tokens")
+}
+
+/// Metadata for a certificate `CertificateAuthorityService` has issued.
+/// Never stores the private key (it never leaves the enrolling agent — see
+/// packages/sdk-node) or the full certificate PEM (OpenBao is the system
+/// of record for the certificate material itself; this row is what lets
+/// `AgentMtlsGuard` check "is this specific serial revoked" without a
+/// round-trip to OpenBao on every mTLS request — defense in depth beyond
+/// the TLS layer's own chain validation, since a cert can be individually
+/// revoked before its `notAfter`).
+model AgentCertificate {
+  id String @id @default(uuid())
+
+  agentId String
+  agent   Agent @relation(fields: [agentId], references: [id])
+
+  /// Canonical form: uppercase hex, no separators (see
+  /// `certificate-authority.service.ts`'s serial-number normalization doc
+  /// comment for why this differs from OpenBao's own colon-separated
+  /// format).
+  serialNumber String @unique
+  subject      String
+
+  notBefore DateTime
+  notAfter  DateTime
+
+  revokedAt        DateTime?
+  revocationReason String?
+
+  createdAt DateTime @default(now())
+
+  @@map("agent_certificates")
 }
