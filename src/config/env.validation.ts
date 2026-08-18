@@ -7,6 +7,7 @@ import { OpenFgaConfigSchema } from '../authorization/openfga.config';
 import { TemporalConfigSchema } from '../temporal/temporal.config';
 import { ApprovalsConfigSchema } from '../approvals/approvals.config';
 import { KafkaConfigSchema } from '../audit/kafka.config';
+import { AiAdvisoryConfigSchema } from '../ai-advisory/ai-advisory.config';
 
 /**
  * Application-level environment schema.
@@ -38,7 +39,8 @@ export const AppConfigSchema = z
   .extend(OpenFgaConfigSchema.shape)
   .extend(TemporalConfigSchema.shape)
   .extend(ApprovalsConfigSchema.shape)
-  .extend(KafkaConfigSchema.shape);
+  .extend(KafkaConfigSchema.shape)
+  .extend(AiAdvisoryConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

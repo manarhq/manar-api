@@ -389,6 +389,76 @@ services:
       retries: 20
       start_period: 15s
 
+  # Phase 10b (AI Advisory Pipeline Integration): manar-ai's real gRPC
+  # `AnalysisService` (Phase 10a, a separate repo — `../manar-ai`, a
+  # sibling checkout of this one) — the only thing `AiAdvisoryClient`
+  # (src/ai-advisory/) ever calls. Plaintext this phase, matching manar-ai's
+  # own deliberate Phase 10a scope call (mTLS deferred — see
+  # docs/ai-security-model.md). Runs `python -m app.grpc.server` (the gRPC
+  # service), not the image's own default CMD (`uvicorn app.main:app`,
+  # manar-ai's separate REST *debug* interface — not what `manar-api`
+  # depends on).
+  #
+  # AI_PROVIDER=ollama with a deliberately unresolvable OLLAMA_HOST: this
+  # container's own gRPC layer, deterministic DLP pattern-matching layer
+  # (`app/dlp/patterns.py`, unconditional, no LLM dependency — Section 73),
+  # and documented fail-secure envelopes (manar-ai's
+  # docs/ai-security-model.md's "Fail loudly, never fail open or fail
+  # silent") are all real and exercised end-to-end by this service. Wiring
+  # in a genuinely working local LLM (e.g. Ollama) was deliberately not
+  # done here: real inference latency for a model capable of following this
+  # service's structured-output contract is many seconds per call on
+  # typical local hardware — inconsistent with `AiAdvisoryClient`'s
+  # sub-2-second per-request budget on the hot authorization/tool-invoke
+  # path (`AI_ADVISORY_TIMEOUT_MS`), and would make this compose file's
+  # behavior flaky/slow rather than more real. A DNS-unresolvable
+  # `.invalid` hostname (RFC 2606) makes manar-ai's own internal provider
+  # calls fail *fast* (immediate resolution failure, not a slow timeout),
+  # so `AnalyzeDlp`/`AnalyzeRisk`/`AnalyzePromptInjection` all still return
+  # promptly with manar-ai's own real fail-secure envelopes. Content-
+  # dependent AI-signal test scenarios (a genuine high-confidence risk
+  # score, a genuine prompt-injection detection) use a small local
+  # contract-conformant test double instead — see
+  # test/ai-advisory.e2e-spec.ts's own doc comment for the full rationale.
+  manar-ai:
+    build:
+      context: ../../manar-ai
+    container_name: manar-ai
+    restart: unless-stopped
+    command: ['python', '-m', 'app.grpc.server']
+    environment:
+      PORT: 8000
+      ENVIRONMENT: local
+      LOG_LEVEL: INFO
+      GRPC_PORT: 50051
+      AI_PROVIDER: ollama
+      OLLAMA_HOST: http://ollama-not-configured.invalid:11434
+      OLLAMA_TIMEOUT_SECONDS: 5
+    ports:
+      # Matches AiAdvisoryConfigSchema's AI_ADVISORY_GRPC_TARGET default
+      # (localhost:50051) — every process that reads that config runs on
+      # the host, never inside this compose network.
+      - '50051:50051'
+    healthcheck:
+      # No standard gRPC health-checking protocol is registered by
+      # app/grpc/server.py (out of scope for manar-ai's Phase 10a) and this
+      # image ships no curl/wget/grpc_health_probe — a plain TCP connect via
+      # the Python already on PATH (python:3.13-slim base image) is enough
+      # to confirm the gRPC listener itself is up, mirroring
+      # packages/demo-soc-tools's own "no curl in the image, write a small
+      # inline probe instead" precedent above.
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
 volumes:
   manar-postgres-data:
   manar-keycloak-data:
