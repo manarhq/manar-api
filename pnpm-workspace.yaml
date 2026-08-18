@@ -13,3 +13,4 @@ allowBuilds:
   unrs-resolver: false
 minimumReleaseAgeExclude:
   - '@types/pg@8.23.1'
+  - '@openfga/sdk@0.9.7'

@@ -5,8 +5,14 @@ import { CorrelationIdMiddleware } from '../logging/correlation-id.middleware';
 import { LoggingInterceptor } from '../logging/logging.interceptor';
 import { LoggingModule } from '../logging/logging.module';
 import { DatabaseModule } from '../database/database.module';
+import { OpenBaoModule } from '../openbao/openbao.module';
+import { AgentsModule } from '../agents/agents.module';
+import { AuthorizationModule } from '../authorization/authorization.module';
+import { AgentAuthorizeModule } from '../authorization/agent-authorize.module';
+import { TasksModule } from '../tasks/tasks.module';
+import { DelegationModule } from '../delegation/delegation.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
-import { AgentMtlsGuard } from './agent-mtls.guard';
+import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
 /**
  * Root module for the *second*, agent-facing Nest application
@@ -17,16 +23,37 @@ import { AgentMtlsGuard } from './agent-mtls.guard';
  * listener's TLS posture (mandatory client-cert mTLS) must never apply to
  * the human-facing HTTP listener or vice versa. Each `NestFactory.create()`
  * call gets its own DI container, so `@Global()` modules like
- * `DatabaseModule`/`LoggingModule` need importing here explicitly too —
- * "global" only means "global within one application's module graph."
+ * `DatabaseModule`/`LoggingModule`/`AuthorizationModule` need importing
+ * here explicitly too — "global" only means "global within one
+ * application's module graph."
+ *
+ * Phase 5 adds the real endpoints under `/agent/v1/*` this listener was
+ * built for (`AgentWhoamiController` was Phase 4's placeholder proving the
+ * mTLS plumbing worked end-to-end): `AgentAuthorizeModule`
+ * (`POST /agent/v1/authorize`) and `DelegationModule`
+ * (`POST /agent/v1/tasks/:id/delegate`). `AgentsModule`/`TasksModule` here
+ * are the *services-only* modules (no controllers — see their own doc
+ * comments) so this listener never exposes the JWT-gated `/agents` or
+ * `/tasks` human-facing routes, which would be structurally unreachable
+ * here anyway (`rejectUnauthorized: true` on this listener refuses any
+ * connection without a client certificate before Nest ever routes a
+ * request) quite apart from being the wrong surface for them.
  */
 @Module({
-  imports: [AppConfigModule, LoggingModule, DatabaseModule],
-  controllers: [AgentWhoamiController],
-  providers: [
-    AgentMtlsGuard,
-    { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+  imports: [
+    AppConfigModule,
+    LoggingModule,
+    DatabaseModule,
+    OpenBaoModule,
+    AgentMtlsGuardModule,
+    AgentsModule,
+    AuthorizationModule,
+    TasksModule,
+    AgentAuthorizeModule,
+    DelegationModule,
   ],
+  controllers: [AgentWhoamiController],
+  providers: [{ provide: APP_INTERCEPTOR, useClass: LoggingInterceptor }],
 })
 export class AgentMtlsAppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {

@@ -52,6 +52,13 @@ function fakeConfigService(
       process.env.AGENT_MTLS_SERVER_KEY_PATH ?? 'deploy/openbao/server-key.pem',
     AGENT_MTLS_CLIENT_CA_PATH:
       process.env.AGENT_MTLS_CLIENT_CA_PATH ?? 'deploy/openbao/ca-chain.pem',
+    OPENFGA_API_URL: process.env.OPENFGA_API_URL ?? 'http://localhost:8080',
+    OPENFGA_STORE_NAME: process.env.OPENFGA_STORE_NAME ?? 'manar',
+    OPENFGA_STORE_ID: process.env.OPENFGA_STORE_ID,
+    OPENFGA_AUTHORIZATION_MODEL_ID: process.env.OPENFGA_AUTHORIZATION_MODEL_ID,
+    OPENFGA_MODEL_FILE_PATH:
+      process.env.OPENFGA_MODEL_FILE_PATH ??
+      'src/authorization/model/manar.fga',
     ...overrides,
   };
   return {

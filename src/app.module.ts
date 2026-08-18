@@ -10,7 +10,10 @@ import { HealthModule } from './health/health.module';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
 import { OpenBaoModule } from './openbao/openbao.module';
-import { AgentsModule } from './agents/agents.module';
+import { AgentsHttpModule } from './agents/agents-http.module';
+import { AuthorizationModule } from './authorization/authorization.module';
+import { TasksModule } from './tasks/tasks.module';
+import { TasksHttpModule } from './tasks/tasks-http.module';
 
 @Module({
   imports: [
@@ -20,7 +23,10 @@ import { AgentsModule } from './agents/agents.module';
     DatabaseModule,
     AuthModule,
     OpenBaoModule,
-    AgentsModule,
+    AgentsHttpModule,
+    AuthorizationModule,
+    TasksModule,
+    TasksHttpModule,
   ],
   controllers: [AppController],
   providers: [
