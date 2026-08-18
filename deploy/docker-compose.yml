@@ -1,0 +1,38 @@
+# Local development infra for manar-api.
+#
+# Grows phase-by-phase as later phases need it (Keycloak/OpenFGA/OpenBao/
+# Kafka/Temporal/Redis/OpenSearch) — per YAGNI, only Postgres is added now
+# (Phase 2: Persistence & Tenancy).
+#
+# Control DB and tenant DBs are separate *databases* on this one Postgres
+# server for local dev — isolation is enforced by Postgres's database
+# boundary, not by server separation. Production may split tenant DBs
+# across separate server instances without changing the application-level
+# contract (TenantDatabaseManager resolves a connection string per tenant;
+# it doesn't assume same-server).
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    container_name: manar-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: manar
+      POSTGRES_PASSWORD: manar
+      POSTGRES_DB: manar_control
+    ports:
+      # Host port 55432, not the default 5432: this machine already runs a
+      # native PostgreSQL 17 service bound to 127.0.0.1:5432 outside Docker.
+      - '55432:5432'
+    volumes:
+      # Postgres 18's image switched to storing data at /var/lib/postgresql
+      # directly (pg_ctlcluster-style major-version subdirectories) instead
+      # of the older /var/lib/postgresql/data convention.
+      - manar-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U manar -d manar_control']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  manar-postgres-data:

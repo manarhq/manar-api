@@ -1,0 +1,123 @@
+// Control DB schema — provisioning/routing metadata only.
+//
+// No business/security data (agents, tasks, policies, audit, etc.) is ever
+// stored here — enforced by review, not by a runtime check, since Prisma
+// schemas are compile-time-fixed. See docs/tenant-isolation.md.
+//
+// The datasource block intentionally has no `url` — Prisma 7 driver
+// adapters resolve the connection at runtime (see
+// src/database/control-prisma.service.ts), and the CLI/migration-time
+// connection is resolved by prisma/control.config.ts instead.
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/control-client"
+  // This project is CommonJS (no "type": "module" in package.json, Nest
+  // built via ts-loader/tsc to CJS). Prisma 7's client generator defaults
+  // to ESM output, which would break under Nest's CJS setup.
+  moduleFormat = "cjs"
+}
+
+enum TenantStatus {
+  PROVISIONING
+  ACTIVE
+  SUSPENDED
+  DEPROVISIONING
+  DELETED
+}
+
+/// Data-residency posture per Section 54 of the master prompt. Captured
+/// from day one even though only UAE is exercised in this phase, so later
+/// phases never need a destructive schema change to add residency
+/// awareness.
+enum TenantResidency {
+  UAE
+  CUSTOM_REGION
+  AIR_GAPPED
+}
+
+enum SecretKind {
+  DATABASE_CREDENTIAL
+}
+
+/// ENV is the only implementation this phase (see EnvSecretProvider).
+/// OPENBAO is reserved for Phase 4/17's OpenBao-backed secret provider —
+/// listed here now so the enum never needs a destructive migration when
+/// that swap-in lands.
+enum SecretProvider {
+  ENV
+  OPENBAO
+}
+
+model Tenant {
+  id     String @id @default(uuid())
+  slug   String @unique
+  name   String
+
+  status TenantStatus @default(PROVISIONING)
+
+  residency              TenantResidency @default(UAE)
+  allowExternalAi        Boolean         @default(false)
+  allowOutboundTelemetry Boolean         @default(false)
+  allowCloudStorage      Boolean         @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  databaseBinding  TenantDatabaseBinding?
+  secretReferences SecretReference[]
+
+  @@map("tenants")
+}
+
+model TenantDatabaseBinding {
+  id       String @id @default(uuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  databaseName String @unique
+
+  secretReferenceId String          @unique
+  secretReference    SecretReference @relation(fields: [secretReferenceId], references: [id])
+
+  /// Reuses TenantStatus, scoped to database-provisioning progress rather
+  /// than tenant lifecycle — the two are related but not always identical
+  /// (e.g. a tenant can be ACTIVE while its binding is still PROVISIONING
+  /// for a brief window during `provisionTenant`).
+  provisioningStatus TenantStatus @default(PROVISIONING)
+
+  provisionedAt        DateTime?
+  lastMigratedAt        DateTime?
+  lastMigrationVersion  String?
+
+  /// Host/port/engine-version notes and similar deployment-topology
+  /// metadata. Folded in here rather than a separate 1:1 model per
+  /// Section 70's normalization guidance (avoid a model that only ever has
+  /// one row per binding).
+  deploymentMetadata Json?
+
+  @@map("tenant_database_bindings")
+}
+
+model SecretReference {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  kind     SecretKind     @default(DATABASE_CREDENTIAL)
+  provider SecretProvider @default(ENV)
+
+  /// Opaque string interpreted per `provider`. For ENV, this is the name
+  /// of the environment variable holding the base Postgres connection URL
+  /// (see EnvSecretProvider) — never the credential value itself.
+  reference String
+
+  createdAt DateTime @default(now())
+
+  databaseBinding TenantDatabaseBinding?
+
+  @@map("secret_references")
+}
