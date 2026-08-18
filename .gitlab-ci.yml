@@ -1,0 +1,55 @@
+stages:
+  - lint
+  - typecheck
+  - test
+  - build
+
+variables:
+  PNPM_HOME: '$CI_PROJECT_DIR/.pnpm'
+
+# GitLab's recommended pnpm setup/caching pattern (https://pnpm.io/continuous-integration#gitlab-ci):
+# install the pnpm binary via its standalone script, point its store at a
+# project-local directory, and cache that directory keyed on pnpm-lock.yaml.
+default:
+  image: node:24.14.1
+  before_script:
+    - export PATH="$PNPM_HOME/bin:$PATH"
+    - curl -fsSL https://get.pnpm.io/install.sh | sh -
+    - pnpm config set store-dir .pnpm-store
+    - pnpm install --frozen-lockfile
+
+cache:
+  key:
+    files:
+      - pnpm-lock.yaml
+  paths:
+    - .pnpm-store
+
+lint:
+  stage: lint
+  script:
+    - pnpm lint
+
+typecheck:
+  stage: typecheck
+  script:
+    - pnpm typecheck
+
+test:unit:
+  stage: test
+  script:
+    - pnpm test
+
+test:e2e:
+  stage: test
+  script:
+    - pnpm test:e2e
+
+build:
+  stage: build
+  script:
+    - pnpm build
+  artifacts:
+    paths:
+      - dist
+    expire_in: 1 week
