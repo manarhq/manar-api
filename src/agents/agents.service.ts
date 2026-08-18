@@ -74,7 +74,10 @@ export class AgentsService {
     });
     if (!agent) throw new AgentNotFoundError(agentId);
 
-    const rawToken = generateEnrollmentToken(tenantSlug);
+    const rawToken = generateEnrollmentToken({
+      tenantSlug,
+      agentSlug: agent.slug,
+    });
     const tokenHash = hashEnrollmentToken(rawToken);
     const expiresAt = new Date(
       Date.now() + AgentsService.ENROLLMENT_TOKEN_TTL_MS,

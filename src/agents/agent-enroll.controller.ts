@@ -13,7 +13,7 @@ import { AgentsService } from './agents.service';
 import { EnrollAgentRequestSchema } from './agents.validation';
 import { CsrValidationError } from './certificate-authority.errors';
 import { EnrollmentTokenInvalidError } from './agents.errors';
-import { parseEnrollmentTokenTenantSlug } from './enrollment-token.util';
+import { parseEnrollmentTokenParts } from './enrollment-token.util';
 import { parseBodyOrThrow } from './parse-body.util';
 
 /**
@@ -42,13 +42,13 @@ export class AgentEnrollController {
   async enroll(@Body() body: unknown) {
     const input = parseBodyOrThrow(EnrollAgentRequestSchema, body);
 
-    const tenantSlug = parseEnrollmentTokenTenantSlug(input.token);
-    if (!tenantSlug) {
+    const tokenParts = parseEnrollmentTokenParts(input.token);
+    if (!tokenParts) {
       throw new UnauthorizedException('Invalid enrollment token');
     }
 
     const tenant = await this.control.tenant.findUnique({
-      where: { slug: tenantSlug },
+      where: { slug: tokenParts.tenantSlug },
     });
     if (!tenant) {
       throw new UnauthorizedException('Invalid enrollment token');

@@ -21,5 +21,10 @@
     "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
     "types": ["vitest/globals"]
-  }
+  },
+  // packages/sdk-node is a separate workspace package with its own
+  // package.json/tsconfig/dependencies (see that directory) — excluded here
+  // so the root `tsc` program doesn't merge two independently-versioned
+  // packages into one compilation. `pnpm typecheck` (package.json) runs both.
+  "exclude": ["node_modules", "packages"]
 }

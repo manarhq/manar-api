@@ -1,0 +1,20 @@
+{
+  "name": "@manar/sdk-node",
+  "version": "0.0.1",
+  "description": "Manar agent identity SDK for Node.js — keypair/CSR generation, enrollment, and encrypted local identity storage.",
+  "private": true,
+  "license": "UNLICENSED",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@peculiar/x509": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.3"
+  }
+}
