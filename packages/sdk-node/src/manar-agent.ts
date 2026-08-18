@@ -77,14 +77,15 @@ export interface DelegateTaskResponse {
 }
 
 /**
- * Minimal Phase 4 agent SDK (Section 68's full ergonomics -- task fetch,
- * execute, delegate -- arrive with later phases that add the server
- * capabilities behind them). This phase ships exactly one operation:
- * enrollment.
+ * Agent SDK covering enrollment (Phase 4), authorization checks, and
+ * delegation (Phase 5 -- Section 68's full ergonomics, e.g. an actual
+ * tool-execution loop, still arrive with later phases that add the server
+ * capabilities behind them).
  *
  * ```ts
- * const manar = new ManarAgent({ endpoint, identityStore });
+ * const manar = new ManarAgent({ endpoint, mtlsEndpoint, identityStore });
  * await manar.enroll(enrollmentToken);
+ * const decision = await manar.authorize({ taskId, toolId, actionId, resource });
  * ```
  */
 export class ManarAgent {

@@ -64,8 +64,25 @@ test:e2e:
   # Password Credentials grant. Phase 4's agent-identity e2e suite
   # (test/agent-identity.e2e-spec.ts) additionally needs a real OpenBao —
   # it signs/revokes real certificates via the actual PKI secrets engine,
-  # never mocked (see docs/agent-identity.md) — so this job needs all
-  # three live services, mirroring how Phase 2/3 added Postgres/Keycloak.
+  # never mocked (see docs/agent-identity.md). Phase 5's
+  # task-delegation e2e suite (test/task-delegation.e2e-spec.ts)
+  # additionally needs a real OpenFGA — every authorization decision is
+  # checked against a real running server, never mocked (see
+  # docs/authorization-model.md) — so this job needs all four live
+  # dependencies, mirroring how Phase 2/3/4 added Postgres/Keycloak/OpenBao.
+  #
+  # OpenFGA itself is deliberately NOT a `services:` entry the way
+  # Postgres/Keycloak/OpenBao are: GitLab CI's `services:` are plain Docker
+  # containers with no way to run a one-shot "migrate" command before the
+  # long-running "run" command starts (no `depends_on`/ordering support the
+  # way deploy/docker-compose.yml has) — OpenFGA requires its schema
+  # migrated before `openfga run` will serve traffic. Since this job's own
+  # container also has no Docker available to sequence a second container
+  # from a script step, the OpenFGA binary is downloaded and run directly
+  # inside this job's own container instead (a single static Go binary —
+  # no Docker needed), migrated then backgrounded, mirroring how
+  # deploy/docker-compose.yml's openfga-migrate → openfga sequencing works,
+  # just via shell steps instead of compose `depends_on`.
   services:
     - postgres:18.6-alpine
     - name: quay.io/keycloak/keycloak:26.7.1
@@ -111,6 +128,15 @@ test:e2e:
     AGENT_MTLS_SERVER_KEY_PATH: deploy/openbao/server-key.pem
     AGENT_MTLS_CLIENT_CA_PATH: deploy/openbao/ca-chain.pem
     AGENT_MTLS_CA_CHAIN_PATH: deploy/openbao/ca-chain.pem
+    # OpenFGA runs directly inside this job's own container (see the
+    # services: comment above) — reachable at localhost, unlike the other
+    # three dependencies above which are separate `services:` containers
+    # reached by alias.
+    OPENFGA_API_URL: http://localhost:8080
+    OPENFGA_STORE_NAME: manar
+    OPENFGA_MODEL_FILE_PATH: src/authorization/model/manar.fga
+    OPENFGA_DATASTORE_URI: postgres://manar:manar@postgres:5432/openfga?sslmode=disable
+    OPENFGA_VERSION: v1.18.3
   script:
     - pnpm db:migrate:control:deploy
     # GitLab CI's `services:` don't support Docker healthchecks the way
@@ -136,6 +162,39 @@ test:e2e:
         sleep 1;
       done'
     - pnpm infra:openbao-init
+    # Creates the `openfga` database on the shared Postgres server (see
+    # deploy/docker-compose.yml's openfga-db-init service for the local-dev
+    # equivalent) — using the `pg` package already installed by `pnpm
+    # install` above rather than a `psql` CLI this image doesn't ship,
+    # matching this file's established "no curl/wget/extra CLIs, use
+    # node" convention.
+    - >
+      node -e "
+      const { Client } = require('pg');
+      const c = new Client({ connectionString: 'postgresql://manar:manar@postgres:5432/manar_control' });
+      c.connect()
+        .then(() => c.query('CREATE DATABASE openfga'))
+        .then(() => c.end())
+        .catch((e) => { console.error(e); process.exit(1); });
+      "
+    # Downloads the OpenFGA server as a single static binary (no Docker
+    # needed — see the services: comment above), migrates its schema
+    # against the database just created, then runs it in the background on
+    # its default port (8080).
+    - >
+      node -e "
+      fetch('https://github.com/openfga/openfga/releases/download/' + process.env.OPENFGA_VERSION + '/openfga_' + process.env.OPENFGA_VERSION.slice(1) + '_linux_amd64.tar.gz')
+        .then((r) => r.arrayBuffer())
+        .then((b) => require('fs').writeFileSync('openfga.tar.gz', Buffer.from(b)));
+      "
+    - tar xzf openfga.tar.gz openfga && chmod +x openfga
+    - ./openfga migrate --datastore-engine postgres --datastore-uri "$OPENFGA_DATASTORE_URI"
+    - ./openfga run --datastore-engine postgres --datastore-uri "$OPENFGA_DATASTORE_URI" &
+    - >
+      timeout 60 bash -c '
+      until node -e "fetch(\"http://localhost:8080/healthz\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
+        sleep 1;
+      done'
     - pnpm --filter @manar/sdk-node build
     - pnpm test:e2e
 

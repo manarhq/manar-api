@@ -1,7 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OpenFgaClient, type TypeDefinition } from '@openfga/sdk';
+import {
+  ClientWriteRequestOnDuplicateWrites,
+  OpenFgaClient,
+  type TypeDefinition,
+} from '@openfga/sdk';
 import { transformer } from '@openfga/syntax-transformer';
 import { AppConfig } from '../config/env.validation';
 
@@ -21,59 +25,121 @@ export interface TupleKey {
  * A thin, honest wrapper: `write`/`check` below do not catch or interpret
  * errors — a network failure, a malformed store, or OpenFGA being
  * completely down all surface as a rejected promise, exactly as the SDK
- * throws it. `AuthorizationService` is where the fail-closed *policy*
- * decision belongs (Section 22: if any check can't be evaluated
- * trustworthily, DENY) — this service's job is only to make the call
- * honestly, never to silently swallow a failure into an ambiguous result.
+ * throws it (or, if OpenFGA was already unreachable at boot — see
+ * `onModuleInit` — a clear "not initialized" error). `AuthorizationService`
+ * is where the fail-closed *policy* decision belongs (Section 22: if any
+ * check can't be evaluated trustworthily, DENY) — this service's job is
+ * only to make the call honestly, never to silently swallow a failure into
+ * an ambiguous result.
+ *
+ * `onModuleInit` itself deliberately does NOT let a store/model resolution
+ * failure crash the whole application's bootstrap: if OpenFGA happens to
+ * be unreachable at boot (a transient outage, a slow-starting sidecar,
+ * ...), this service logs the failure and stays in a "not ready" state
+ * rather than taking the entire app down with it — every subsequent
+ * `check()`/`write()` call then fails fast with a clear error (which
+ * `AuthorizationService` converts to DENY, same as a mid-flight outage
+ * would), and the app keeps serving every *other* endpoint normally. This
+ * is also what makes the OpenFGA-outage e2e test possible without
+ * disrupting the shared local OpenFGA instance other, concurrently-running
+ * test files/suites depend on: that test boots a second, throwaway
+ * `AgentMtlsAppModule` instance pointed at a genuinely unreachable port,
+ * confirms it fails closed, and never touches the real shared container.
  */
 @Injectable()
 export class OpenFgaClientService implements OnModuleInit {
   private readonly logger = new Logger(OpenFgaClientService.name);
-  private client!: OpenFgaClient;
-  private _storeId!: string;
-  private _authorizationModelId!: string;
+  private client: OpenFgaClient | null = null;
+  private _storeId: string | null = null;
+  private _authorizationModelId: string | null = null;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {}
 
-  get storeId(): string {
+  get storeId(): string | null {
     return this._storeId;
   }
 
-  get authorizationModelId(): string {
+  get authorizationModelId(): string | null {
     return this._authorizationModelId;
   }
 
   async onModuleInit(): Promise<void> {
-    const apiUrl = this.configService.get('OPENFGA_API_URL', { infer: true });
-    const bootstrapClient = new OpenFgaClient({ apiUrl });
+    try {
+      const apiUrl = this.configService.get('OPENFGA_API_URL', {
+        infer: true,
+      });
+      const bootstrapClient = new OpenFgaClient({ apiUrl });
 
-    this._storeId = await this.resolveStoreId(bootstrapClient);
-    this.client = new OpenFgaClient({ apiUrl, storeId: this._storeId });
-    this._authorizationModelId = await this.resolveAuthorizationModelId();
+      const storeId = await this.resolveStoreId(bootstrapClient);
+      const client = new OpenFgaClient({ apiUrl, storeId });
+      this.client = client;
+      this._storeId = storeId;
+      this._authorizationModelId =
+        await this.resolveAuthorizationModelId(client);
 
-    this.logger.log(
-      `OpenFGA ready: store=${this._storeId} model=${this._authorizationModelId}`,
-    );
+      this.logger.log(
+        `OpenFGA ready: store=${this._storeId} model=${this._authorizationModelId}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        'OpenFGA store/model resolution failed at boot — every authorization check will fail closed until this resolves (never crashing the whole app over a transient OpenFGA outage)',
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
   }
 
-  /** Writes/deletes relationship tuples — see TaskGrantSyncService for the only caller. */
+  /**
+   * Writes/deletes relationship tuples — see TaskGrantSyncService for the
+   * only caller. `conflict.onDuplicateWrites: 'ignore'` makes this
+   * idempotent: several tasks sharing the same `toolId`/`actionId`
+   * (`tool`/`tool_action`/`resource` object IDs are deliberately *not*
+   * task-scoped — see openfga-object-id.util.ts — they're a shared
+   * vocabulary across every task that references the same tool) will
+   * legitimately attempt to write the exact same supporting-graph tuple
+   * more than once. OpenFGA's default (`'error'`) treats re-writing an
+   * already-identical tuple as a failure; re-asserting a fact that's
+   * already true is not an error condition here.
+   */
   async write(input: {
     writes?: TupleKey[];
     deletes?: TupleKey[];
   }): Promise<void> {
     if (!input.writes?.length && !input.deletes?.length) return;
-    await this.client.write(
+    await this.requireClient().write(
       { writes: input.writes, deletes: input.deletes },
-      { authorizationModelId: this._authorizationModelId },
+      {
+        authorizationModelId: this.requireModelId(),
+        conflict: {
+          onDuplicateWrites: ClientWriteRequestOnDuplicateWrites.Ignore,
+        },
+      },
     );
   }
 
   /** A single relationship check — throws on any transport/server failure, deliberately not swallowed here (see class doc comment). */
   async check(tuple: TupleKey): Promise<boolean> {
-    const result = await this.client.check(tuple, {
-      authorizationModelId: this._authorizationModelId,
+    const result = await this.requireClient().check(tuple, {
+      authorizationModelId: this.requireModelId(),
     });
     return result.allowed ?? false;
+  }
+
+  private requireClient(): OpenFgaClient {
+    if (!this.client) {
+      throw new Error(
+        'OpenFgaClientService has no working OpenFGA client (store/model resolution failed or has not completed yet)',
+      );
+    }
+    return this.client;
+  }
+
+  private requireModelId(): string {
+    if (!this._authorizationModelId) {
+      throw new Error(
+        'OpenFgaClientService has no resolved authorization model ID',
+      );
+    }
+    return this._authorizationModelId;
   }
 
   private async resolveStoreId(client: OpenFgaClient): Promise<string> {
@@ -111,7 +177,9 @@ export class OpenFgaClientService implements OnModuleInit {
    * wasteful (and would churn `authorizationModelId` on every boot in
    * local dev with no schema change), so this comparison avoids that.
    */
-  private async resolveAuthorizationModelId(): Promise<string> {
+  private async resolveAuthorizationModelId(
+    client: OpenFgaClient,
+  ): Promise<string> {
     const pinned = this.configService.get('OPENFGA_AUTHORIZATION_MODEL_ID', {
       infer: true,
     });
@@ -126,7 +194,7 @@ export class OpenFgaClientService implements OnModuleInit {
       type_definitions: TypeDefinition[];
     };
 
-    const latest = await this.client
+    const latest = await client
       .readLatestAuthorizationModel()
       .catch(() => null);
 
@@ -141,7 +209,7 @@ export class OpenFgaClientService implements OnModuleInit {
     }
 
     this.logger.log('Writing a new OpenFGA authorization model version');
-    const written = await this.client.writeAuthorizationModel(desired);
+    const written = await client.writeAuthorizationModel(desired);
     return written.authorization_model_id;
   }
 }
