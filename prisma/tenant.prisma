@@ -72,6 +72,10 @@ model UserProfile {
   /// chain fully reconstructable per Section 20.
   requestedTasks Task[]
 
+  /// Phase 6: every PolicyVersion (DRAFT or PUBLISHED) records the human
+  /// who authored it — see PolicyVersion's doc comment.
+  authoredPolicyVersions PolicyVersion[]
+
   @@map("user_profiles")
 }
 
@@ -385,4 +389,123 @@ model TaskDelegation {
   createdAt DateTime @default(now())
 
   @@map("task_delegations")
+}
+
+/// A `PolicyVersion`'s lifecycle (Phase 6, Sections 21-22). A new version
+/// always starts DRAFT — never enforced by `PolicyEngine` (see that
+/// module's doc comment) until it's explicitly PUBLISHED via `POST
+/// /policies/:id/versions/:versionId/publish`. There is no third
+/// state: a published version is never un-published, edited, or deleted —
+/// superseding one always means publishing a *new* version (`version`
+/// n+1), never mutating this one in place (see PolicyVersion's own doc
+/// comment).
+enum PolicyVersionStatus {
+  DRAFT
+  PUBLISHED
+}
+
+/// A named, versioned policy — Phase 6's deterministic org-defined
+/// restriction layered *on top of* an already-OpenFGA-permitted action
+/// (see docs/policy-model.md and docs/authorization-model.md for how this
+/// relates to Phase 5's task-scope authorization, which this phase does
+/// NOT re-decide). `name` is unique per tenant database, so effectively
+/// globally unique (Phase 2's per-tenant database isolation model — see
+/// docs/tenant-isolation.md).
+///
+/// A `Policy` row itself carries no rule content — that lives entirely on
+/// its `PolicyVersion`s (immutable once published). "The policy's current
+/// content" always means "the latest PUBLISHED PolicyVersion for this
+/// Policy" (`PolicyEngine.evaluate` resolves this per policy, per tenant,
+/// on every authorization check — see that module's doc comment for why
+/// this is a live per-request DB read rather than a cached snapshot this
+/// phase).
+model Policy {
+  id          String  @id @default(uuid())
+  name        String  @unique
+  description String?
+
+  createdAt DateTime @default(now())
+
+  versions PolicyVersion[]
+
+  @@map("policies")
+}
+
+/// One immutable, content-addressed snapshot of a `Policy`'s rule set
+/// (Sections 21-22 — "GUI/YAML/JSON must manipulate the same underlying
+/// model; published versions are immutable"). `content` is the declarative
+/// rule set this version represents — see docs/policy-model.md for the
+/// schema (`src/policy/policy-content.schema.ts`'s `PolicyContentSchema`)
+/// and `src/policy/policy-content-codec.ts` for the YAML⇄JSON round-trip
+/// that produces it identically regardless of which format an author
+/// submitted.
+///
+/// **Published versions are never mutated or deleted** — there is
+/// deliberately no update/delete endpoint for one at all (see
+/// `src/policy/policy.controller.ts`'s doc comment); editing a published
+/// policy always means creating version n+1 via `POST
+/// /policies/:id/versions`, and a rollback is likewise a *new* version
+/// (n+1) whose `content` happens to match an older version's — never an
+/// in-place revert — with `reason` explicitly saying so and
+/// `previousVersionId` still pointing at the version immediately before it
+/// in this policy's chain (not at the older version being rolled back to),
+/// so the full chain stays linear and auditable end to end.
+///
+/// `version` is a monotonically increasing integer, unique per `policyId`
+/// (`@@unique([policyId, version])`) — the *n*-th version ever created for
+/// this policy, DRAFT or PUBLISHED alike; `PolicyEngine` only ever
+/// consults the PUBLISHED one with the highest `version`.
+model PolicyVersion {
+  id String @id @default(uuid())
+
+  policyId String
+  policy   Policy @relation(fields: [policyId], references: [id])
+
+  version Int
+  status  PolicyVersionStatus @default(DRAFT)
+
+  /// The declarative rule set itself — see docs/policy-model.md. Validated
+  /// against `PolicyContentSchema` before this row is ever written
+  /// (`PolicyService`); `PolicyEngine` re-validates on every read anyway
+  /// (fail-closed — see that module's doc comment on why "can't parse
+  /// stored content" is a genuine failure, distinct from "no rule
+  /// matched").
+  content Json
+
+  /// sha256 hex of `content` after deterministic canonicalization (key
+  /// order does not affect this value — see
+  /// `src/policy/policy-content-codec.ts`'s `computeContentHash`). Proves a
+  /// YAML submission and its JSON equivalent produce byte-identical stored
+  /// intent, and lets a caller cheaply confirm "is this the version I
+  /// think it is" without diffing the full `content` blob.
+  contentHash String
+
+  authorId String
+  author   UserProfile @relation(fields: [authorId], references: [id])
+
+  /// Free-text: why this version was created (a normal edit's rationale,
+  /// or an explicit "Rollback to version N" for a rollback — see model doc
+  /// comment). Optional for a policy's very first version.
+  reason String?
+
+  /// Self-FK to the version immediately preceding this one in this
+  /// policy's chain at creation time (null only for a policy's first
+  /// version) — *always* the chain predecessor, even for a rollback (whose
+  /// `content` is copied from some *older*, not-necessarily-immediate
+  /// version — see model doc comment). This is what keeps the full
+  /// version history a single unbroken, auditable chain regardless of how
+  /// many rollbacks occur.
+  previousVersionId String?
+  previousVersion   PolicyVersion?  @relation("PolicyVersionChain", fields: [previousVersionId], references: [id])
+  supersededBy      PolicyVersion[] @relation("PolicyVersionChain")
+
+  /// Set exactly once, the moment `POST
+  /// /policies/:id/versions/:versionId/publish` transitions this row
+  /// DRAFT → PUBLISHED. Null for a DRAFT.
+  publishedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([policyId, version])
+  @@map("policy_versions")
 }

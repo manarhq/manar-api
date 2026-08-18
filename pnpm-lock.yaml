@@ -43,6 +43,9 @@ importers:
       jose:
         specifier: ^6.2.9
         version: 6.2.9
+      js-yaml:
+        specifier: ^5.3.0
+        version: 5.3.0
       nest-commander:
         specifier: ^3.20.1
         version: 3.20.1(@nestjs/common@11.2.1(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@11.2.1)(@types/inquirer@8.2.13)(@types/node@24.13.3)(typescript@5.9.3)
@@ -4080,6 +4083,13 @@ packages:
     resolution:
       {
         integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==,
+      }
+    hasBin: true
+
+  js-yaml@5.3.0:
+    resolution:
+      {
+        integrity: sha512-muutsYr+e2+d3rTgUGslq5rxbBlUy3cJ61IsHag2QNDQV+7zXWjkUpmALIajhrlLlrgRUiymj6U3zUr/TMK84Q==,
       }
     hasBin: true
 
@@ -8715,6 +8725,10 @@ snapshots:
   js-tokens@4.0.0: {}
 
   js-yaml@4.3.1:
+    dependencies:
+      argparse: 2.0.1
+
+  js-yaml@5.3.0:
     dependencies:
       argparse: 2.0.1
 
