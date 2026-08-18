@@ -22,6 +22,14 @@
 # follows the same "nothing ephemeral" posture as the rest of this file —
 # its Postgres storage engine, not the in-memory option, even for local
 # dev.
+#
+# Kafka is added in Phase 9a (Tamper-Evident Audit Chain & Kafka Event
+# Backbone) as the domain-event backbone every `AuditEvent`
+# (`AuditService.record`) is also published to — see docs/audit-chain.md.
+# KRaft mode (no ZooKeeper): Kafka 4.x has removed ZooKeeper support
+# entirely (KIP-500/KIP-833), and the official `apache/kafka` image ships
+# KRaft-only — running a deprecated ZooKeeper-backed topology here would be
+# actively wrong, not merely old-fashioned.
 services:
   postgres:
     image: postgres:18.6-alpine
@@ -315,6 +323,73 @@ services:
     ports:
       - '8083:8080'
 
+  # Phase 9a (Tamper-Evident Audit Chain & Kafka Event Backbone): a
+  # single-node, combined broker+controller KRaft cluster — the current
+  # (Kafka 4.x, no ZooKeeper) recommended topology for a single local-dev
+  # broker per the official Apache Kafka documentation. `apache/kafka` is
+  # the official ASF-maintained image (as opposed to a third-party
+  # Confluent/Bitnami build) — nothing here needs any of those distros'
+  # extra tooling. `manar.audit-events` is the one topic every
+  # `AuditService.record` call publishes its envelope to (see
+  # docs/audit-chain.md) — `KafkaPublisherService` creates it automatically
+  # on first connect (the same "resolve-or-create, no separate init job"
+  # posture `OpenFgaClientService.onModuleInit` already establishes), so no
+  # topic-creation step is needed here.
+  #
+  # Two listeners, same "internal vs. host-mapped" split Postgres/Keycloak/
+  # OpenFGA above don't need (they're only ever reached by this repo's own
+  # Node processes, which always run on the host, never inside this compose
+  # network) but Kafka's own advertised-listener contract requires
+  # explicitly: `PLAINTEXT` (`kafka:9092`) is what a client *inside* the
+  # compose network would use; `PLAINTEXT_HOST` (`localhost:29092`, host
+  # port 29092 — not Kafka's own default 9092, kept clear of anything else
+  # locally bound to it) is what every actual client in this repo uses
+  # (`manar-api`'s own HTTP/worker processes and every test suite all run
+  # on the host, never inside Docker).
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: manar-kafka
+    restart: unless-stopped
+    ports:
+      - '29092:29092'
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # A single-broker, single-controller cluster has nothing to replicate
+      # across — 1 is the only value that makes sense for any of these
+      # three, and is required (the image's own defaults assume a
+      # multi-broker cluster and refuse to start otherwise).
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # No KAFKA_KRAFT_CLUSTER_ID set — the image generates and persists one
+      # itself on first boot for a single-node cluster; only a genuine
+      # multi-node cluster needs one generated and shared explicitly ahead
+      # of time.
+    volumes:
+      - manar-kafka-data:/tmp/kraft-combined-logs
+    healthcheck:
+      # apache/kafka is a full JVM image with its own bin/ scripts on PATH
+      # (KAFKA_HOME=/opt/kafka) — no /dev/tcp workaround needed, unlike
+      # Keycloak's shell-but-no-curl image above.
+      test:
+        [
+          'CMD-SHELL',
+          '/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
 volumes:
   manar-postgres-data:
   manar-keycloak-data:
+  manar-kafka-data:

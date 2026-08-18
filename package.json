@@ -35,6 +35,7 @@
     "manar": "nest build && node dist/cli.js"
   },
   "dependencies": {
+    "@confluentinc/kafka-javascript": "^1.10.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",

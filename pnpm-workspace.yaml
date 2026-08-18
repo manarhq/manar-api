@@ -13,6 +13,7 @@ packages:
   - 'packages/*'
 
 allowBuilds:
+  '@confluentinc/kafka-javascript': true
   '@prisma/engines': true
   '@swc/core': false
   prisma: true
