@@ -30,6 +30,7 @@ import { TaskGrantSyncService } from '../src/authorization/task-grant-sync.servi
 import { TasksService } from '../src/tasks/tasks.service';
 import { PolicyEngine } from '../src/policy/policy-engine.service';
 import { RiskEngine } from '../src/risk/risk-engine.service';
+import { ToolRegistryService } from '../src/tools/tool-registry.service';
 import {
   assignRealmRole,
   createRealmUser,
@@ -644,12 +645,15 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     // PolicyEngine/RiskEngine (Phase 6) are never actually reached in this
     // scenario -- OpenFGA denies first (step 5), well before either would
     // run -- but AuthorizationService's constructor still needs real
-    // instances, same as tasksServiceForBrokenClient above.
+    // instances, same as tasksServiceForBrokenClient above. RiskEngine's
+    // ToolRegistryService dependency (Phase 7b) is likewise never actually
+    // queried here for the same reason -- a real instance with no tenant
+    // client ever passed to it is enough to satisfy the constructor.
     const brokenAuthorizationService = new AuthorizationService(
       tasksServiceForBrokenClient,
       brokenOpenFga,
       new PolicyEngine(),
-      new RiskEngine(tasksServiceForBrokenClient),
+      new RiskEngine(tasksServiceForBrokenClient, new ToolRegistryService()),
     );
 
     const tenantClient = await tenantDatabaseManager.getClient(tenant.id);

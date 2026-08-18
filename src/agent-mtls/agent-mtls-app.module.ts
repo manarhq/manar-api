@@ -11,6 +11,7 @@ import { AuthorizationModule } from '../authorization/authorization.module';
 import { AgentAuthorizeModule } from '../authorization/agent-authorize.module';
 import { TasksModule } from '../tasks/tasks.module';
 import { DelegationModule } from '../delegation/delegation.module';
+import { ToolInvokeModule } from '../tools/tool-invoke.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
@@ -37,7 +38,10 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
  * `/tasks` human-facing routes, which would be structurally unreachable
  * here anyway (`rejectUnauthorized: true` on this listener refuses any
  * connection without a client certificate before Nest ever routes a
- * request) quite apart from being the wrong surface for them.
+ * request) quite apart from being the wrong surface for them. Phase 7b
+ * adds `ToolInvokeModule` (`POST /agent/v1/tools/invoke`) — the first
+ * endpoint on this listener that actually executes something, on top of
+ * this exact same unchanged `AuthorizationService` pipeline.
  */
 @Module({
   imports: [
@@ -51,6 +55,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     TasksModule,
     AgentAuthorizeModule,
     DelegationModule,
+    ToolInvokeModule,
   ],
   controllers: [AgentWhoamiController],
   providers: [{ provide: APP_INTERCEPTOR, useClass: LoggingInterceptor }],
