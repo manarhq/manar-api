@@ -28,6 +28,7 @@ import { AuthorizationService } from '../src/authorization/authorization.service
 import { OpenFgaClientService } from '../src/authorization/openfga-client.service';
 import { TaskGrantSyncService } from '../src/authorization/task-grant-sync.service';
 import { TasksService } from '../src/tasks/tasks.service';
+import type { AuditService } from '../src/audit/audit.service';
 import { PolicyEngine } from '../src/policy/policy-engine.service';
 import { RiskEngine } from '../src/risk/risk-engine.service';
 import { ToolRegistryService } from '../src/tools/tool-registry.service';
@@ -641,6 +642,9 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
 
     const tasksServiceForBrokenClient = new TasksService(
       new TaskGrantSyncService(brokenOpenFga),
+      {
+        recordSafely: () => Promise.resolve(undefined),
+      } as unknown as AuditService,
     );
     // PolicyEngine/RiskEngine (Phase 6) are never actually reached in this
     // scenario -- OpenFGA denies first (step 5), well before either would
@@ -654,6 +658,9 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       brokenOpenFga,
       new PolicyEngine(),
       new RiskEngine(tasksServiceForBrokenClient, new ToolRegistryService()),
+      {
+        recordSafely: () => Promise.resolve(undefined),
+      } as unknown as AuditService,
     );
 
     const tenantClient = await tenantDatabaseManager.getClient(tenant.id);

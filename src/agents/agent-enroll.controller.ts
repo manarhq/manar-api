@@ -61,6 +61,7 @@ export class AgentEnrollController {
     try {
       const issued = await this.agentsService.enroll(
         tenantClient,
+        tenant.id,
         input.token,
         input.csr,
       );

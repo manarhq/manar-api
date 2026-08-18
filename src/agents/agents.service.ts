@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import { AuditService } from '../audit/audit.service';
 import { buildAgentIdentifier } from './agent-identifier';
 import {
   AgentNotFoundError,
@@ -49,6 +51,7 @@ export class AgentsService {
 
   constructor(
     private readonly certificateAuthority: CertificateAuthorityService,
+    private readonly auditService: AuditService,
   ) {}
 
   async createAgent(tenantClient: TenantPrismaClient, input: CreateAgentInput) {
@@ -108,6 +111,7 @@ export class AgentsService {
    */
   async enroll(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
     rawToken: string,
     csrPem: string,
   ): Promise<IssuedCertificate> {
@@ -117,9 +121,26 @@ export class AgentsService {
       include: { agent: true },
     });
 
-    if (!tokenRow) throw new EnrollmentTokenInvalidError('not_found');
-    if (tokenRow.usedAt) throw new EnrollmentTokenInvalidError('used');
+    if (!tokenRow) {
+      await this.recordEnrollmentFailure(tenantClient, tenantId, 'not_found');
+      throw new EnrollmentTokenInvalidError('not_found');
+    }
+    if (tokenRow.usedAt) {
+      await this.recordEnrollmentFailure(
+        tenantClient,
+        tenantId,
+        'used',
+        tokenRow.agentId,
+      );
+      throw new EnrollmentTokenInvalidError('used');
+    }
     if (tokenRow.expiresAt.getTime() < Date.now()) {
+      await this.recordEnrollmentFailure(
+        tenantClient,
+        tenantId,
+        'expired',
+        tokenRow.agentId,
+      );
       throw new EnrollmentTokenInvalidError('expired');
     }
 
@@ -129,6 +150,12 @@ export class AgentsService {
     });
     if (claim.count === 0) {
       // Lost a race with a concurrent enrollment attempt for this same token.
+      await this.recordEnrollmentFailure(
+        tenantClient,
+        tenantId,
+        'used',
+        tokenRow.agentId,
+      );
       throw new EnrollmentTokenInvalidError('used');
     }
 
@@ -147,13 +174,27 @@ export class AgentsService {
       `Agent "${tokenRow.agent.identifier}" enrolled successfully`,
     );
 
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.AGENT_ENROLLED,
+      actor: { type: 'agent', id: tokenRow.agentId },
+      data: {
+        agentId: tokenRow.agentId,
+        agentIdentifier: tokenRow.agent.identifier,
+        serialNumber: issued.serialNumber,
+        notBefore: issued.notBefore,
+        notAfter: issued.notAfter,
+      },
+    });
+
     return issued;
   }
 
   async revokeAgent(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
     agentId: string,
     reason: string,
+    revokedByUserId: string,
   ): Promise<void> {
     const agent = await tenantClient.agent.findUnique({
       where: { id: agentId },
@@ -161,5 +202,27 @@ export class AgentsService {
     if (!agent) throw new AgentNotFoundError(agentId);
 
     await this.certificateAuthority.revoke(tenantClient, agentId, reason);
+
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.AGENT_REVOKED,
+      actor: { type: 'human', id: revokedByUserId },
+      data: { agentId, agentIdentifier: agent.identifier, reason },
+    });
+  }
+
+  /** `agent.enrollment_failed` — actor is `system:unauthenticated` (Section 14: `POST /agents/enroll` has no JWT/human identity to attribute this to) unless a specific agent could still be resolved (a stale/reused token still names a real agent — see call sites above). */
+  private async recordEnrollmentFailure(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    reason: 'not_found' | 'used' | 'expired',
+    agentId?: string,
+  ): Promise<void> {
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.AGENT_ENROLLMENT_FAILED,
+      actor: agentId
+        ? { type: 'agent', id: agentId }
+        : { type: 'system', id: 'system:unauthenticated' },
+      data: { reason },
+    });
   }
 }

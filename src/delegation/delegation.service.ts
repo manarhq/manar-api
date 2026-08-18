@@ -6,6 +6,8 @@ import {
   deserializeTriple,
   isSubset,
 } from '../authorization/grant-triples';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import { AuditService } from '../audit/audit.service';
 import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import { TaskNotFoundError } from '../tasks/tasks.errors';
 import type { DelegateTaskRequest } from './delegation.validation';
@@ -48,6 +50,7 @@ export class DelegationService {
   constructor(
     private readonly tasksService: TasksService,
     private readonly agentsService: AgentsService,
+    private readonly auditService: AuditService,
   ) {}
 
   async delegate(
@@ -157,12 +160,31 @@ export class DelegationService {
         expiresAt,
         maxExecutions: input.maxExecutions,
         riskCeiling: input.riskCeiling,
+        // The delegating agent, not the root human requester — see
+        // CreateTaskInput.actor's doc comment.
+        actor: { type: 'agent', id: callerAgentId },
       },
     );
 
     this.logger.log(
       `Task "${parentTaskId}" delegated to new agent "${childAgent.identifier}" (child task "${childTask.id}")`,
     );
+
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.TASK_DELEGATED,
+      actor: { type: 'agent', id: callerAgentId },
+      data: {
+        parentTaskId: parentTask.id,
+        childTaskId: childTask.id,
+        childAgentId: childAgent.id,
+        childAgentIdentifier: childAgent.identifier,
+        allowedToolActions: input.allowedToolActions,
+        allowedResourceSelectors: input.allowedResourceSelectors,
+        forbiddenActions: input.forbiddenActions,
+        expiresAt: childTask.expiresAt,
+        maxExecutions: childTask.maxExecutions,
+      },
+    });
 
     return {
       childTask,

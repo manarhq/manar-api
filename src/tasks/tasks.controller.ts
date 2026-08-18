@@ -105,7 +105,13 @@ export class TasksController {
     );
 
     try {
-      await this.tasksService.revokeTask(tenantClient, taskId, input.reason);
+      await this.tasksService.revokeTask(
+        tenantClient,
+        auth.tenant.id,
+        taskId,
+        input.reason,
+        auth.user.id,
+      );
     } catch (error) {
       if (error instanceof TaskNotFoundError) {
         throw new NotFoundException(error.message);

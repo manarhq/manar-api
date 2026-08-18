@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { TaskGrantSyncService } from '../authorization/task-grant-sync.service';
+import type { AuditService } from '../audit/audit.service';
 import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import { ToolRegistryService } from '../tools/tool-registry.service';
 import { RiskEngine } from './risk-engine.service';
@@ -108,7 +109,12 @@ function fakeTenantClient(options: {
 }
 
 describe('RiskEngine', () => {
-  const tasksService = new TasksService({} as TaskGrantSyncService);
+  const tasksService = new TasksService(
+    {} as TaskGrantSyncService,
+    {
+      recordSafely: () => Promise.resolve(undefined),
+    } as unknown as AuditService,
+  );
   const toolRegistry = new ToolRegistryService();
 
   it('scores a root task with an innocuous action at the baseline', async () => {

@@ -113,7 +113,13 @@ export class AgentsController {
     );
 
     await mapAgentNotFound(() =>
-      this.agentsService.revokeAgent(tenantClient, agentId, input.reason),
+      this.agentsService.revokeAgent(
+        tenantClient,
+        auth.tenant.id,
+        agentId,
+        input.reason,
+        auth.user.id,
+      ),
     );
 
     return { status: 'REVOKED' };

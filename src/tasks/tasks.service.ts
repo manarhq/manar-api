@@ -9,6 +9,9 @@ import {
   parseToolActions,
 } from '../authorization/grant-triples';
 import { TaskGrantSyncService } from '../authorization/task-grant-sync.service';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import type { AuditActor } from '../audit/audit-event-types';
+import { AuditService } from '../audit/audit.service';
 import { AncestorChainTooDeepError, TaskNotFoundError } from './tasks.errors';
 
 /**
@@ -50,6 +53,15 @@ export interface CreateTaskInput {
   expiresAt: Date;
   maxExecutions?: number | null;
   riskCeiling?: number;
+  /**
+   * Who actually caused this task to be created — Phase 9a's audit `actor`.
+   * Defaults to `{ type: 'human', id: requesterId }` when omitted (a root
+   * task, created directly by `TasksController`) — `DelegationService`
+   * passes the *delegating agent* explicitly instead, since a delegated
+   * child task's `requesterId` is deliberately the root requester (see
+   * `Task.requesterId`'s schema doc comment), not the actual actor.
+   */
+  actor?: AuditActor;
 }
 
 export interface LivenessResult {
@@ -75,7 +87,10 @@ const MAX_ANCESTOR_DEPTH = 64;
 export class TasksService {
   private readonly logger = new Logger(TasksService.name);
 
-  constructor(private readonly grantSync: TaskGrantSyncService) {}
+  constructor(
+    private readonly grantSync: TaskGrantSyncService,
+    private readonly auditService: AuditService,
+  ) {}
 
   /**
    * Creates a Task row (root when `input.parentTaskId` is unset, a
@@ -125,6 +140,24 @@ export class TasksService {
       forbiddenActions: input.forbiddenActions,
     });
 
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+      actor: input.actor ?? { type: 'human', id: input.requesterId },
+      data: {
+        taskId: task.id,
+        requesterId: task.requesterId,
+        assignedAgentId: task.assignedAgentId,
+        parentTaskId: task.parentTaskId,
+        allowedToolActions: input.allowedToolActions,
+        allowedResourceSelectors: input.allowedResourceSelectors,
+        forbiddenActions: input.forbiddenActions,
+        startsAt: task.startsAt,
+        expiresAt: task.expiresAt,
+        maxExecutions: task.maxExecutions,
+        riskCeiling: task.riskCeiling,
+      },
+    });
+
     return task;
   }
 
@@ -139,8 +172,10 @@ export class TasksService {
 
   async revokeTask(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
     taskId: string,
     reason: string,
+    revokedByUserId: string,
   ): Promise<void> {
     const task = await this.getTaskOrThrow(tenantClient, taskId);
     await tenantClient.task.update({
@@ -148,10 +183,14 @@ export class TasksService {
       data: { status: 'REVOKED' },
     });
     // No Task.revocationReason column (the design spec's Task schema
-    // doesn't include one — kept minimal, matching it exactly); this is
-    // this phase's "structured logs only" audit trail for the revoke
-    // action itself (full audit hash-chaining is Phase 9's scope).
+    // doesn't include one — kept minimal, matching it exactly).
     this.logger.log(`Task "${task.id}" revoked: ${reason}`);
+
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.TASK_REVOKED,
+      actor: { type: 'human', id: revokedByUserId },
+      data: { taskId: task.id, reason },
+    });
   }
 
   /**
