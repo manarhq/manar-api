@@ -188,6 +188,143 @@ LoggerService` (rejected — `nest-winston` already does this
 - **Alternatives considered**: None — Commitlint is the standard tool
   for this and was specified directly.
 
+## Phase 2: Persistence & Tenancy
+
+### postgres (Docker image)
+
+- **Purpose**: Local dev Postgres server (`deploy/docker-compose.yml`) —
+  hosts the control DB and every tenant DB as separate databases on one
+  server for local dev.
+- **Selected version**: `postgres:18.6-alpine`
+- **License**: PostgreSQL License (permissive, MIT-like)
+- **Official docs consulted**: Docker Hub's `library/postgres` tags API
+  (<https://hub.docker.com/_/postgres/>) queried directly
+  (`hub.docker.com/v2/repositories/library/postgres/tags`) to confirm the
+  current stable major version and latest patch as of this phase (18.6,
+  published 2026-08-16) rather than trusting a possibly-stale web search
+  summary — Postgres 18 GA'd September 2025, making it the current stable
+  major as of this phase (August 2026).
+- **Installation method**: `docker compose -f deploy/docker-compose.yml up`
+- **Why selected**: A pinned, specific patch version (not `latest`) per the
+  design spec, for reproducible local dev across machines/time. `-alpine`
+  variant for a smaller pulled image.
+- **Alternatives considered**: `postgres:17` (rejected — 18 is current
+  stable, no reason to pin an older major for a fresh phase);
+  `postgres:latest` (rejected explicitly by the design spec — unpinned
+  tags silently change over time).
+
+### prisma / @prisma/client / @prisma/adapter-pg
+
+- **Purpose**: ORM/query builder and CLI (`prisma`), generated typed client
+  (`@prisma/client`, the runtime package the two generated clients under
+  `src/generated/` depend on), and the Postgres driver adapter
+  (`@prisma/adapter-pg`) that Prisma 7's client construction requires.
+- **Selected version**: `^7.9.1` (all three, matched to avoid version
+  skew between the CLI and the generated clients)
+- **License**: Apache-2.0
+- **Official docs consulted**: <https://www.prisma.io/docs/orm/prisma-schema/overview/location>
+  (multi-file vs. multi-schema — confirmed the project needs _separate_
+  schema+config pairs, not the `prismaSchemaFolder` preview feature, which
+  only splits one schema across files), <https://www.prisma.io/docs/orm/reference/prisma-config-reference>
+  (confirmed `--config` lets each schema have its own `migrations.path`
+  and `datasource.url`), <https://www.prisma.io/docs/guides/frameworks/nestjs>
+  (current NestJS integration pattern — `prisma-client` generator,
+  `PrismaPg` driver adapter), and direct empirical verification against the
+  installed 7.9.1 CLI (Prisma 7 is a major release from July 2026; the
+  client generator defaults to ESM output, which required explicitly
+  setting `moduleFormat = "cjs"` in both generator blocks once this project's
+  CommonJS Nest setup broke against the ESM default — confirmed via
+  <https://github.com/prisma/prisma/pull/27828> and reproduced locally).
+- **Installation method**: `pnpm add prisma @prisma/client @prisma/adapter-pg pg dotenv`;
+  `pnpm approve-builds` required for `prisma`/`@prisma/engines`'s install
+  scripts (pnpm's default blocks dependency install scripts — see
+  `pnpm-workspace.yaml`'s `allowBuilds`).
+- **Why selected**: Explicitly required by the design spec — two
+  independent Prisma schemas (`prisma/control.prisma`, `prisma/tenant.prisma`),
+  each with its own generated client (`src/generated/control-client`,
+  `src/generated/tenant-client`) and its own `prisma.config.ts`
+  (`prisma/control.config.ts`, `prisma/tenant.config.ts`), selected via
+  each CLI invocation's `--schema`/`--config` flags (see `db:generate`,
+  `db:migrate:control` in `package.json`). Prisma 7 requires a driver
+  adapter for every client (no built-in query engine any more —
+  `new PrismaClient()` with no arguments throws), which is why
+  `@prisma/adapter-pg` + `pg` are direct dependencies rather than Prisma
+  managing its own connection internally.
+- **Alternatives considered**: Drizzle ORM (rejected — Prisma is this
+  project's decided ORM per the master questionnaire; not revisited here);
+  staying on a pre-7 Prisma major (rejected — 7.9.1 is current stable, and
+  the driver-adapter model is exactly the "construct a client with a
+  runtime connection string" capability `TenantDatabaseManager.getClient`
+  needs, via `datasourceUrl`'s Prisma-7 equivalent, `new PrismaPg({
+connectionString })`).
+
+### pg / @types/pg
+
+- **Purpose**: Raw Postgres client, used directly (not through Prisma) for
+  administrative operations that don't fit a Prisma-managed connection:
+  issuing `CREATE DATABASE` (which cannot run inside a transaction block)
+  and `DROP DATABASE` (`TenantDatabaseManager.createTenantDatabase` /
+  `dangerouslyDropTenantDatabase`). Also the underlying driver
+  `@prisma/adapter-pg` wraps, made a direct (non-transitive) dependency for
+  the same phantom-dependency reason `fastify` was in Phase 1.
+- **Selected version**: `pg@^8.23.0`, `@types/pg@^8.23.1` (dev)
+- **License**: MIT
+- **Official docs consulted**: <https://node-postgres.com/> (`Client`
+  API — `connect()`/`query()`/`end()`)
+- **Installation method**: `pnpm add pg` / `pnpm add -D @types/pg`
+- **Why selected**: The standard, de facto Postgres driver for Node;
+  required directly by `@prisma/adapter-pg`'s own peer dependency and by
+  `TenantDatabaseManager`'s administrative DDL operations.
+- **Alternatives considered**: `postgres` (the `postgres.js` package —
+  rejected: `@prisma/adapter-pg` is built specifically on `pg`, and using a
+  second driver for the raw-admin path would mean maintaining two
+  Postgres client configurations instead of one).
+
+### dotenv
+
+- **Purpose**: Loads `.env` into `process.env` for the Prisma CLI config
+  files (`prisma/control.config.ts`, `prisma/tenant.config.ts`), which run
+  as standalone processes outside Nest's `ConfigModule` (which does its own
+  independent `.env` loading via `@nestjs/config` for the running app).
+- **Selected version**: `^17.4.2`
+- **License**: BSD-2-Clause
+- **Official docs consulted**: <https://www.prisma.io/docs/orm/reference/prisma-config-reference>
+  (shows `import 'dotenv/config'` as the recommended first line of
+  `prisma.config.ts`)
+- **Installation method**: `pnpm add dotenv` (a regular dependency, not
+  dev-only: `TenantDatabaseManager.provisionTenant` spawns `prisma migrate
+deploy` — which loads `prisma/tenant.config.ts`, which imports
+  `dotenv/config` — as a runtime child process, including in production)
+- **Why selected**: Was already a transitive dependency of `@nestjs/config`
+  and `prisma`, but pnpm's strict `node_modules` layout doesn't expose
+  transitive dependencies to application-authored code (the same phantom-
+  dependency reasoning as `fastify` in Phase 1) — made explicit.
+- **Alternatives considered**: None — this is what Prisma's own docs use
+  for CLI-time env loading.
+
+### nest-commander
+
+- **Purpose**: `pnpm manar tenant:create ...` CLI (`src/cli.ts`,
+  `src/cli/`) — the only way to provision a tenant this phase (Section 11).
+- **Selected version**: `^3.20.1`
+- **License**: MIT
+- **Official docs consulted**: <https://github.com/jmcdo29/nest-commander>
+  (README — `CommandRunner`/`@Command`/`@Option` pattern, `CommandFactory.run`)
+  and `npm view nest-commander peerDependencies` (confirmed
+  `^11.0.0` compatibility with this project's `@nestjs/core`/`@nestjs/common`
+  before installing).
+- **Installation method**: `pnpm add nest-commander`
+- **Why selected**: Explicitly named by the design spec; the standard way
+  to build CLI commands inside a Nest application with full DI access
+  (reusing `DatabaseModule` rather than re-implementing tenant provisioning
+  outside Nest's dependency graph).
+- **Alternatives considered**: `nestjs-command` (a similarly-purposed
+  community package — rejected: `nest-commander` is more actively
+  maintained and is the package explicitly named in the design spec);
+  a bare Node script bypassing Nest DI entirely (rejected — would need to
+  hand-wire `ConfigService`/`ControlPrismaService`/`TenantDatabaseManager`
+  construction, duplicating what `CliModule` already gives for free).
+
 ## Removed this phase
 
 - `@nestjs/platform-express`, `@types/express` — superseded by the
