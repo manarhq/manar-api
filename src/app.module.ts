@@ -9,6 +9,8 @@ import { LoggingInterceptor } from './logging/logging.interceptor';
 import { HealthModule } from './health/health.module';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
+import { OpenBaoModule } from './openbao/openbao.module';
+import { AgentsModule } from './agents/agents.module';
 
 @Module({
   imports: [
@@ -17,6 +19,8 @@ import { AuthModule } from './auth/auth.module';
     HealthModule,
     DatabaseModule,
     AuthModule,
+    OpenBaoModule,
+    AgentsModule,
   ],
   controllers: [AppController],
   providers: [

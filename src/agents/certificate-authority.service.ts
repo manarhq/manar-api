@@ -1,0 +1,210 @@
+import { webcrypto } from 'node:crypto';
+import { Injectable, Logger } from '@nestjs/common';
+import * as x509 from '@peculiar/x509';
+import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import { OpenBaoPkiClient } from '../openbao/openbao-pki.client';
+import { CsrValidationError } from './certificate-authority.errors';
+import {
+  normalizeSerialNumber,
+  toColonSeparatedHex,
+} from './serial-number.util';
+
+// @peculiar/x509 needs a WebCrypto provider; Node's own `crypto.webcrypto`
+// is used everywhere else in this codebase reaches for crypto (see
+// packages/sdk-node's identity store), so this is the same provider, not a
+// polyfill.
+x509.cryptoProvider.set(webcrypto as unknown as Crypto);
+
+export interface IssuedCertificate {
+  certificatePem: string;
+  /** Full PEM chain (intermediate + root) — returned to the enrolling agent so it can pin its trust anchor. */
+  caChainPem: string;
+  /** Canonical form: uppercase hex, no separators — see serial-number.util.ts. */
+  serialNumber: string;
+  notBefore: Date;
+  notAfter: Date;
+}
+
+/**
+ * OpenBao only *signs* certificates — Manar owns every policy decision
+ * around agent workload identity (Section 16 of the master prompt):
+ *
+ *   1. Validates the CSR's Subject Alternative Name against the enrolling
+ *      agent's expected `agent://<tenantSlug>/<slug>` identifier — this
+ *      check runs entirely inside this service, *before* OpenBao is ever
+ *      called, and is the actual security boundary. OpenBao's
+ *      `sign-verbatim` (see OpenBaoPkiClient) signs *exactly* whatever
+ *      subject/SAN the CSR contains with no name-constraint enforcement of
+ *      its own by design — trusting it to reject a mismatched CSR would be
+ *      trusting a system that was never asked to check in the first place.
+ *   2. Enforces a short leaf-certificate TTL
+ *      (`AGENT_LEAF_CERTIFICATE_TTL`, 24h — see that constant's doc
+ *      comment for why).
+ *   3. Calls OpenBao's `sign-verbatim` against the intermediate CA's agent
+ *      signing role.
+ *   4. Persists the issued certificate's metadata (never its private key,
+ *      which never even exists here — see packages/sdk-node) to
+ *      `AgentCertificate`.
+ *   5. `revoke(...)` calls OpenBao's revoke endpoint and updates local
+ *      state so `AgentMtlsGuard` can reject the very next request using
+ *      that certificate — immediate revocation is a mandatory invariant
+ *      (Section 71), not a best-effort one.
+ */
+@Injectable()
+export class CertificateAuthorityService {
+  private readonly logger = new Logger(CertificateAuthorityService.name);
+
+  /**
+   * Short-lived by design — an agent identity certificate compromised
+   * outside of Manar's own revocation path (e.g. exfiltrated from a
+   * compromised host) self-expires quickly. 24h was chosen as a concrete,
+   * documented value per the design spec ("e.g. 24h"); certificate
+   * auto-renewal before expiry is explicitly out of scope this phase (a
+   * later phase's SDK responsibility). Must match `LEAF_TTL` in
+   * deploy/openbao-init.mjs (the signing role's own `max_ttl` ceiling).
+   */
+  static readonly AGENT_LEAF_CERTIFICATE_TTL = '24h';
+
+  constructor(private readonly openBao: OpenBaoPkiClient) {}
+
+  /**
+   * Validates `csrPem`'s SAN against `agent.identifier`, signs it via
+   * OpenBao, and persists the resulting `AgentCertificate` row. Throws
+   * `CsrValidationError` (never reaches OpenBao) if the CSR's subject
+   * doesn't match — the caller (`AgentsService.enroll`) is responsible for
+   * translating that into an HTTP 400.
+   */
+  async issueCertificate(
+    tenantClient: TenantPrismaClient,
+    agent: { id: string; identifier: string },
+    csrPem: string,
+  ): Promise<IssuedCertificate> {
+    await this.validateCsr(csrPem, agent.identifier);
+
+    const signed = await this.openBao.signVerbatim(
+      csrPem,
+      CertificateAuthorityService.AGENT_LEAF_CERTIFICATE_TTL,
+    );
+
+    const issuedCert = new x509.X509Certificate(signed.certificatePem);
+    const serialNumber = normalizeSerialNumber(issuedCert.serialNumber);
+
+    await tenantClient.agentCertificate.create({
+      data: {
+        agentId: agent.id,
+        serialNumber,
+        subject: issuedCert.subject,
+        notBefore: issuedCert.notBefore,
+        notAfter: issuedCert.notAfter,
+      },
+    });
+
+    return {
+      certificatePem: signed.certificatePem,
+      caChainPem: signed.caChainPem,
+      serialNumber,
+      notBefore: issuedCert.notBefore,
+      notAfter: issuedCert.notAfter,
+    };
+  }
+
+  /**
+   * Revokes every currently-unrevoked certificate for `agentId` (normally
+   * exactly one — enrollment issues one certificate per agent this phase,
+   * no renewal) via OpenBao's revoke endpoint, then marks them revoked
+   * locally and sets `Agent.status = REVOKED`. `AgentMtlsGuard` checks
+   * both the agent's status *and* the specific certificate serial's
+   * `revokedAt` on every request (defense in depth beyond OpenBao's own
+   * CRL/OCSP, which nothing in this phase's mTLS listener consults
+   * per-request) — so a revoked agent's certificate stops working on its
+   * very next request, not merely at next renewal (Section 71's mandatory
+   * immediate-revocation invariant).
+   *
+   * If an OpenBao revoke call fails partway through, already-revoked
+   * certificates stay revoked but the DB update (and `Agent.status`) is
+   * not applied for the remainder — consistent with this codebase's
+   * existing "no automatic rollback, fail loud, leave state for manual
+   * inspection" stance (see `TenantDatabaseManager.provisionTenant`).
+   */
+  async revoke(
+    tenantClient: TenantPrismaClient,
+    agentId: string,
+    reason: string,
+  ): Promise<void> {
+    const activeCertificates = await tenantClient.agentCertificate.findMany({
+      where: { agentId, revokedAt: null },
+    });
+
+    for (const certificate of activeCertificates) {
+      await this.openBao.revoke(toColonSeparatedHex(certificate.serialNumber));
+    }
+
+    await tenantClient.$transaction([
+      tenantClient.agentCertificate.updateMany({
+        where: { agentId, revokedAt: null },
+        data: { revokedAt: new Date(), revocationReason: reason },
+      }),
+      tenantClient.agent.update({
+        where: { id: agentId },
+        data: { status: 'REVOKED' },
+      }),
+    ]);
+
+    this.logger.log(
+      `Revoked ${activeCertificates.length} certificate(s) for agent "${agentId}": ${reason}`,
+    );
+  }
+
+  /**
+   * The actual security boundary (see class doc comment). Parses the CSR,
+   * verifies its self-signature (proof that the requester actually holds
+   * the private key matching the CSR's public key — without this, anyone
+   * could submit a CSR naming someone else's public key), and requires
+   * *exactly one* URI-type Subject Alternative Name that matches
+   * `expectedIdentifier` character-for-character. The CSR's CN/subject
+   * string is deliberately not enforced here — the SAN URI is the
+   * authoritative identity (the same SPIFFE-style convention
+   * `AgentMtlsGuard` reads back out of an issued certificate), a free-text
+   * CN is not.
+   */
+  private async validateCsr(
+    csrPem: string,
+    expectedIdentifier: string,
+  ): Promise<void> {
+    let csr: x509.Pkcs10CertificateRequest;
+    try {
+      csr = new x509.Pkcs10CertificateRequest(csrPem);
+    } catch (error) {
+      throw new CsrValidationError(
+        `Could not parse CSR as a PKCS#10 certificate request: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    // Proof of possession: the CSR is self-signed by the private key
+    // matching its embedded public key. Without this check, a caller could
+    // submit a CSR naming a public key it doesn't actually hold the
+    // private half of.
+    const signatureValid = await csr.verify();
+    if (!signatureValid) {
+      throw new CsrValidationError(
+        'CSR signature does not verify against its own public key',
+      );
+    }
+
+    const sanExtension = csr.extensions.find(
+      (extension): extension is x509.SubjectAlternativeNameExtension =>
+        extension instanceof x509.SubjectAlternativeNameExtension,
+    );
+    const uriNames = (sanExtension?.names.items ?? [])
+      .filter((name) => name.type === 'url')
+      .map((name) => name.value);
+
+    if (uriNames.length !== 1 || uriNames[0] !== expectedIdentifier) {
+      throw new CsrValidationError(
+        `CSR Subject Alternative Name (URI) does not match this agent's expected identifier. Expected exactly one URI SAN equal to "${expectedIdentifier}", got: ${JSON.stringify(uriNames)}`,
+      );
+    }
+  }
+}
