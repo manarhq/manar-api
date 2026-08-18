@@ -134,4 +134,58 @@ describe('EDR endpoints', () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  // ---- Phase 7b integration-pass routes: HttpToolAdapter's
+  // `POST {baseEndpoint}/{action.name}` with `{ resource, params }` wire
+  // convention ----
+
+  it('POST /v1/edr/get-host returns the host named by "resource"', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/edr/get-host',
+      headers: AUTH_HEADER,
+      payload: { resource: 'WS-042', params: {} },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<EdrHost>().id).toBe('WS-042');
+  });
+
+  it('POST /v1/edr/get-host 404s for an unknown "resource"', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/edr/get-host',
+      headers: AUTH_HEADER,
+      payload: { resource: 'NOPE', params: {} },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('POST /v1/edr/isolate-host isolates the host named by "resource", visible on a subsequent get-host', async () => {
+    const isolateRes = await app.inject({
+      method: 'POST',
+      url: '/v1/edr/isolate-host',
+      headers: AUTH_HEADER,
+      payload: { resource: 'WS-042', params: {} },
+    });
+    expect(isolateRes.statusCode).toBe(200);
+    expect(isolateRes.json<EdrHost>().isolated).toBe(true);
+
+    const getRes = await app.inject({
+      method: 'POST',
+      url: '/v1/edr/get-host',
+      headers: AUTH_HEADER,
+      payload: { resource: 'WS-042', params: {} },
+    });
+    expect(getRes.json<EdrHost>().isolated).toBe(true);
+  });
+
+  it('POST /v1/edr/isolate-host 404s for an unknown "resource"', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/edr/isolate-host',
+      headers: AUTH_HEADER,
+      payload: { resource: 'NOPE', params: {} },
+    });
+    expect(res.statusCode).toBe(404);
+  });
 });

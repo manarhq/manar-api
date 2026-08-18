@@ -15,6 +15,42 @@ export default function edrRoutes(
 ): void {
   const { store } = opts;
 
+  // ---- Phase 7b integration-pass routes ----
+  //
+  // `HttpToolAdapter` (manar-api's `src/tools/http-tool.adapter.ts`) calls
+  // any registered HTTP `Tool` with a fixed, generic wire convention:
+  // `POST {baseEndpoint}/{action.name}` with a JSON body `{ resource,
+  // params }`. That convention was designed for an arbitrary future real
+  // tool vendor's API, not this service's own hand-rolled REST-ish
+  // `/hosts/:id[/action]` routes above (which predate Phase 7b and exist
+  // for this package's own direct tests). Rather than special-case the
+  // generic adapter for this one demo tool, this service exposes thin
+  // action-name routes alongside its existing ones — same store, same
+  // semantics, just addressed the way `HttpToolAdapter` expects. Mounted
+  // under the `/edr` prefix, so the full paths are `POST /v1/edr/get-host`
+  // and `POST /v1/edr/isolate-host`.
+  fastify.post('/get-host', (request, reply) => {
+    const { resource } = request.body as { resource: string };
+    const host = store.getHost(resource);
+
+    if (!host) {
+      return reply.code(404).send({ error: `Host ${resource} not found` });
+    }
+
+    return host;
+  });
+
+  fastify.post('/isolate-host', (request, reply) => {
+    const { resource } = request.body as { resource: string };
+    const host = store.isolateHost(resource);
+
+    if (!host) {
+      return reply.code(404).send({ error: `Host ${resource} not found` });
+    }
+
+    return host;
+  });
+
   fastify.get('/hosts/:id', (request, reply) => {
     const { id } = request.params as { id: string };
     const host = store.getHost(id);

@@ -147,6 +147,16 @@ test:e2e:
     OPENFGA_MODEL_FILE_PATH: src/authorization/model/manar.fga
     OPENFGA_DATASTORE_URI: postgres://manar:manar@postgres:5432/openfga?sslmode=disable
     OPENFGA_VERSION: v1.18.3
+    # Phase 7a/7b integration pass
+    # (test/tool-gateway-demo-integration.e2e-spec.ts): the real
+    # packages/demo-soc-tools service, run directly in this job's own
+    # container the same way OpenFGA is above (no Docker available here to
+    # run its Dockerfile/deploy/docker-compose.yml service the way local
+    # dev does) — a plain Node process on localhost, no host-port remap
+    # needed since there's no port clash to avoid inside an isolated CI
+    # job.
+    DEMO_SOC_TOOLS_BASE_URL: http://localhost:3100
+    DEMO_TOOLS_API_KEY: manar-dev-demo-tools-key
   script:
     - pnpm db:migrate:control:deploy
     # GitLab CI's `services:` don't support Docker healthchecks the way
@@ -206,6 +216,18 @@ test:e2e:
         sleep 1;
       done'
     - pnpm --filter @manar/sdk-node build
+    # Phase 7a/7b integration pass: build and run the real demo-soc-tools
+    # service in the background (see the DEMO_SOC_TOOLS_BASE_URL/
+    # DEMO_TOOLS_API_KEY variables above), then wait for its own health
+    # endpoint before running the suite that depends on it.
+    - pnpm --filter @manar/demo-soc-tools build
+    - >
+      PORT=3100 DEMO_TOOLS_API_KEY="$DEMO_TOOLS_API_KEY" node packages/demo-soc-tools/dist/main.js &
+    - >
+      timeout 30 bash -c '
+      until node -e "fetch(\"$DEMO_SOC_TOOLS_BASE_URL/health/ready\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
+        sleep 1;
+      done'
     - pnpm test:e2e
 
 build:

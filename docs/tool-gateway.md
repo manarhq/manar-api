@@ -329,7 +329,17 @@ call sites that construct it directly were updated to pass one).
 
 - Any real connection to Phase 7a's actual demo tool service (a separate
   integration pass, once both land — this phase's tests use their own
-  local fixture servers instead, per the design spec).
+  local fixture servers instead, per the design spec). **Done**: once
+  both phases merged to `main`, this integration pass was completed —
+  see `test/tool-gateway-demo-integration.e2e-spec.ts`, which registers a
+  real `Tool`/`ToolAction` pointing at the real, running
+  `packages/demo-soc-tools` container and independently re-verifies its
+  state changed. `HttpToolAdapter`'s wire convention didn't line up with
+  that service's original hand-rolled REST routes, so
+  `packages/demo-soc-tools/src/routes/edr.ts` gained two small
+  action-name wrapper routes (`POST /v1/edr/get-host`,
+  `POST /v1/edr/isolate-host`) rather than special-casing the generic,
+  already-tested adapter for one demo tool.
 - Approval fulfillment for `REQUIRE_APPROVAL` (Phase 8).
 - Full audit hash chain (Phase 9) — `ToolInvocation` is operational only.
 - Rate limiting / retry-with-backoff frameworks beyond the simple policy
