@@ -1,14 +1,13 @@
-// Tenant DB schema — datasource + generator blocks only, intentionally no
-// models yet.
+// Tenant DB schema.
 //
 // Every tenant gets a fully isolated Postgres database generated from this
-// schema (see TenantDatabaseManager.provisionTenant). Phase 3 onward add
-// their own models here incrementally as real domain modules land.
-// Inventing placeholder domain models now, just to have "something to
-// test," would be exactly the kind of premature scaffolding this project's
-// guidelines forbid — isolation is proven structurally instead (see
-// test/tenant-isolation and docs/tenant-isolation.md), not via a model's
-// data.
+// schema (see TenantDatabaseManager.provisionTenant). Phase 2 shipped this
+// file with datasource/generator blocks only and no models — deliberately,
+// to avoid inventing placeholder domain models just to have "something to
+// test" (isolation was proven structurally instead, see
+// docs/tenant-isolation.md). Phase 3 (Human Authentication) adds the first
+// real models: a local projection of each tenant's Keycloak-authenticated
+// users and their coarse role assignments — see docs/human-auth.md.
 datasource db {
   provider = "postgresql"
 }
@@ -19,4 +18,61 @@ generator client {
   // See prisma/control.prisma's generator block for why this is forced to
   // cjs — this project is CommonJS, Prisma 7 defaults to ESM output.
   moduleFormat = "cjs"
+}
+
+/// The eight application roles (Section 11 of the master prompt). Values
+/// must match `src/auth/roles.ts`'s `ROLES` constant, and the Keycloak
+/// realm role names `TenantProvisioningService` seeds for every tenant,
+/// character-for-character — see that file's doc comment for why there is
+/// deliberately no translation layer between the three.
+enum Role {
+  TENANT_OWNER
+  SECURITY_ADMIN
+  AI_GOVERNANCE_MANAGER
+  SOC_OPERATOR
+  APPROVER
+  AUDITOR
+  DEVELOPER
+  READ_ONLY
+}
+
+/// A local projection of a Keycloak-authenticated human identity — never a
+/// credential store (Manar's own code never stores or sees passwords;
+/// Keycloak owns credentials entirely). Rows are found-or-created by
+/// `JwtAuthGuard` the first time a given `keycloakSubject` (the JWT `sub`
+/// claim) is seen for this tenant.
+model UserProfile {
+  id              String @id @default(uuid())
+  keycloakSubject String @unique
+
+  email       String
+  displayName String
+
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  roleBindings RoleBinding[]
+
+  @@map("user_profiles")
+}
+
+/// Coarse role assignment, checked by `RolesGuard`/`@RequireRole(...)`.
+/// Fine-grained, resource-scoped authorization is a later phase (OpenFGA,
+/// Phase 5) — not built here. A user can hold multiple roles.
+model RoleBinding {
+  id     String      @id @default(uuid())
+  userId String
+  user   UserProfile @relation(fields: [userId], references: [id])
+
+  role Role
+
+  grantedAt DateTime @default(now())
+  /// Free-text identifier of who/what granted this role (a Keycloak admin
+  /// username, or "system:bootstrap" for the first role a newly-seen user
+  /// is granted). Not a foreign key to UserProfile — the granter need not
+  /// be a Manar user at all (e.g. a Keycloak-side realm admin).
+  grantedBy String
+
+  @@unique([userId, role])
+  @@map("role_bindings")
 }
