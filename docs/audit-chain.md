@@ -318,3 +318,198 @@ each (e.g. `RiskEngine` gaining a `ToolRegistryService` parameter in Phase
   retention/deletion (all Phase 9b — this phase produces what those
   consume).
 - Webhooks (a later phase).
+
+# OpenSearch indexing, live SSE, evidence export, and retention
+
+The rest of Phase 9b — folded into this document rather than four
+separate files, since all four build directly on Phase 9a's audit chain
+(`docs/audit-chain.md`) and share infrastructure.
+
+## OpenSearch indexing (Section 45)
+
+`AuditIndexerService` (`src/audit/opensearch/audit-indexer.service.ts`) is
+a Kafka consumer on Phase 9a's `manar.audit-events` topic. For every
+message, it upserts the event into OpenSearch by `eventId`
+(`OpenSearchIndexService.upsertAuditEvent`, `src/audit/opensearch/opensearch-client.service.ts`)
+— OpenSearch's Index API with an explicit `id` always _replaces_ any
+existing document at that id, so Kafka's at-least-once redelivery never
+double-indexes. **Postgres remains authoritative** — the index is a
+queryable projection, never a second source of truth.
+
+A single, tenant-tagged index (`OPENSEARCH_AUDIT_INDEX`, default
+`manar-audit-events`) rather than one index per tenant, for MVP
+simplicity — every document carries `tenantId`. `data`/`actor` are mapped
+`enabled: false` (stored, not indexed) to avoid dynamic-mapping conflicts
+across ~15 structurally-different `eventType`s sharing one index — see
+that service's own doc comment.
+
+### Consumer group id and `fromBeginning`
+
+`AuditIndexerService` uses a fresh random Kafka consumer group id
+(`manar-audit-indexer-<uuid>`) every process boot, not a fixed name —
+avoids every concurrently-running test file's own `AppModule` instance
+competing for the topic's single partition under one shared group id.
+
+`fromBeginning: false`: a fresh group starts from the topic's _current_
+end, never replaying full history. Historical backfill is deliberately
+`pnpm manar audit:reindex`'s job (reading straight from Postgres, not
+Kafka) — the live consumer's job is only to keep the index current going
+forward. This also keeps a fresh group's catch-up time bounded regardless
+of how much history the topic has accumulated over the deployment's
+lifetime.
+
+### Disaster recovery: `pnpm manar audit:reindex --tenant <id>`
+
+`AuditReindexService` (`src/audit/opensearch/audit-reindex.service.ts`)
+reads every `AuditEvent` for one tenant straight from Postgres (paginated
+by `sequence`) and upserts each into OpenSearch — the real
+disaster-recovery path if the index is ever lost or corrupted, never
+reading from Kafka (a from-scratch rebuild must not depend on Kafka
+retaining however much history has passed). `src/cli/commands/audit-reindex.command.ts`
+is a thin `nest-commander` wrapper around it (Phase 2's CLI convention —
+see `src/cli/commands/tenant-create.command.ts`).
+
+## Live SSE (Section 62)
+
+`GET /events/live` (JWT-guarded, tenant-scoped, no role restriction —
+unlike `/audit/verify`/`/evidence/export`, a live activity feed is
+reasonable for any authenticated tenant user to watch). Implemented as a
+Server-Sent Events stream (`src/audit/live/live-events.controller.ts`).
+
+**Publishing side**: rather than publish directly from
+`AuditService.record`'s hot path, `AuditIndexerService` (the same Kafka
+consumer that indexes into OpenSearch) also publishes every consumed
+envelope to Redis (`RedisPubSubService.publish`,
+`src/audit/live/redis-pubsub.service.ts`), on a per-tenant channel
+(`manar:audit-live:<tenantId>`). This keeps `AuditService.record` free of
+any new dependency on Redis's availability/latency, consistent with
+Phase 9a's "a Kafka outage adds zero latency to hot call sites" posture
+for `KafkaPublisherService` — the live feed is downstream of the same
+already-fire-and-forget Kafka publish, one hop further.
+
+**Subscribing side**: `GET /events/live` subscribes to its caller's
+tenant channel for the connection's lifetime
+(`RedisPubSubService.subscribeTenant`, a fresh dedicated Redis connection
+per open SSE connection — `node-redis`'s own documented pub/sub contract:
+a subscribed connection can't run other commands) and streams each
+message as an `audit-event` SSE frame. Unsubscribes and disconnects the
+instant the client closes the connection.
+
+Redis here is fanout-only, never a durable store: a client that
+reconnects after a dropped SSE connection just resumes seeing new events —
+Postgres/OpenSearch remain the durable record for anything missed.
+
+## Evidence export (Section 49)
+
+`POST /evidence/export` (JWT-guarded, `AUDITOR`/`SECURITY_ADMIN`/
+`TENANT_OWNER`) — `src/evidence/`. Accepts a filter (`since`/`until`
+time window and/or `agentId`/`taskId`/`correlationId`; at least one
+required) and returns a signed JSON bundle
+(`EvidenceExportService.export`, `src/evidence/evidence-export.service.ts`).
+
+**Filtering**: `since`/`until`/`correlationId` are real `AuditEvent`
+columns. `agentId`/`taskId` aren't columns (they live inside the
+heterogeneous per-`eventType` `data`/`actor` JSON) — the service
+post-filters a time/correlation-scoped result set against a bounded,
+documented set of well-known reference fields
+(`actor.id`/`data.agentId`/`data.assignedAgentId`/`data.childAgentId` for
+`agentId`; `data.taskId`/`data.parentTaskId`/`data.childTaskId` for
+`taskId`) — a real, tested match, not a full-text scan of arbitrary nested
+content.
+
+**Context gathered from real tables** (never duplicated into a new
+export-specific model): `Agent` + `AgentCertificate` for any referenced
+agent, `Task` + `TaskDelegation` for any referenced task,
+`PolicyVersion`(+`Policy` name) for any referenced policy version,
+`ApprovalRequest`/`ApprovalDecision`/`AuthorizationGrant` for any
+referenced approval request, `ToolInvocation` for any referenced task.
+Risk-assessment data (score, reason codes) is already embedded in the
+matched `AuditEvent`s' own `data` — no separate risk-assessment table
+exists to join against.
+
+**Signing**: reuses Phase 8's grant-signing crypto utility — literally the
+same `toKey` HS256 key-derivation function `src/approvals/grant-token.util.ts`'s
+`signGrantToken`/`verifyGrantToken` use (exported for this purpose,
+otherwise unchanged), the same `jose` `SignJWT`/`jwtVerify` mechanism, and
+the same `APPROVAL_GRANT_SIGNING_SECRET` config secret —
+`src/evidence/evidence-signing.util.ts`. The signature covers
+`sha256(canonicalize(bundleContent))` (`canonicalize` is Phase 9a's own
+deterministic-JSON tool, `src/audit/canonical-json.ts`), not the raw JSON
+text, so verification is independent of incidental re-serialization while
+still failing for any real content change.
+
+**Independent tamper-evidence**: the exported `events` array carries every
+matched `AuditEvent`'s full hash-chain fields (`id`, `previousHash`,
+`eventHash`, ...) in chain order — a recipient can recompute each event's
+`eventHash` via the same public formula `computeEventHash` uses
+(`src/audit/audit-hash.ts`) and confirm consecutive `previousHash`/
+`eventHash` linkage _independent of trusting the export process itself_.
+Full verification back to genesis additionally requires either the first
+exported event's `previousHash` being `null`, or a separately-trusted
+`GET /audit/verify` call against this tenant — the bundle alone proves
+_internal_ consistency of the exported segment, not "this is the complete
+history."
+
+## Retention (Section 48)
+
+Default 30 days (`DEFAULT_AUDIT_RETENTION_WINDOW_MS`,
+`src/audit/retention/audit-retention.constants.ts`). **No API/CLI path
+deletes an individual `AuditEvent` row** — the only place `auditEvent.deleteMany`
+is ever called in this codebase is inside `AuditRetentionService.pruneTenantAuditEvents`
+(`src/audit/retention/audit-retention.service.ts`), itself only reachable
+via `AuditRetentionWorkflow`'s Temporal Activity.
+
+`AuditRetentionWorkflow` (`src/temporal/workflows/audit-retention.workflow.ts`)
+reuses Phase 8's Temporal worker process (`src/worker.main.ts`, now
+bundling both `ApprovalWorkflow` and `AuditRetentionWorkflow` off one
+`workflowsPath` — see `src/temporal/workflows/index.ts`). One execution
+= one retention pass for one tenant:
+
+1. Finds `AuditEvent` rows older than the retention window.
+2. If none, a genuine no-op — no anchor, no `audit.retention_executed`
+   event.
+3. Otherwise, in one transaction: writes a new `AuditChainAnchor`
+   (`tenantId`, `anchorHash` = the last-to-be-pruned event's own
+   `eventHash`, `eventsPrunedCount`), then deletes the aged rows.
+4. Writes a new `audit.retention_executed` `AuditEvent` via the real
+   (not `recordSafely`) `AuditService.record` — this event's
+   `previousHash` comes from the tenant's current `AuditChainState`
+   exactly like any other event, naturally becoming the new chain tail.
+
+Not wired to an automatic Temporal Schedule this phase — started directly
+via `@temporalio/client`'s `workflow.start`/`.execute` (this phase's own
+tests do exactly that). A future phase can add per-tenant Schedules
+without changing the workflow/Activity themselves.
+
+### `verifyAuditChain` is anchor-aware
+
+Updated (`src/audit/audit.service.ts`) so a pruned chain still verifies:
+the oldest _remaining_ event's `previousHash` is valid if it's `null`
+(true genesis) **or** matches a known `AuditChainAnchor.anchorHash` for
+this tenant — instead of requiring the (now-deleted) ancestor row to still
+exist. Every event after the first is checked exactly as before, against
+the _previous remaining_ event's own `eventHash`.
+
+## Testing
+
+- `test/audit-opensearch-indexing.e2e-spec.ts`: reindex is real (drop the
+  index, run `AuditReindexService.reindexTenant`, confirm every Postgres
+  `AuditEvent` is now present in OpenSearch); Kafka redelivery of the same
+  `eventId` through the real `AuditIndexerService` doesn't double-index.
+- `src/audit/ocsf/ocsf-mapper.spec.ts`: covered types match the documented
+  shape; uncovered types are clearly labeled, never forced.
+- `test/audit-live-sse.e2e-spec.ts`: a real triggered event (task
+  creation via `POST /tasks`) arrives on an open `GET /events/live`
+  connection for the correct tenant; a different tenant's open connection
+  does not receive it.
+- `test/evidence-export.e2e-spec.ts`: a bundle for a known scenario
+  contains the expected events + context and its signature verifies;
+  tampering the exported JSON afterward fails verification.
+- `src/temporal/workflows/audit-retention.workflow.spec.ts`: the
+  workflow's own approve/no-op logic, time-skipping `TestWorkflowEnvironment`,
+  mocked Activities (mirrors `approval.workflow.spec.ts`).
+- `test/audit-retention.e2e-spec.ts`: seeds events older than the window,
+  runs `AuditRetentionWorkflow` against real Postgres/Temporal (an
+  in-process worker, mirroring `test/approvals.e2e-spec.ts`), confirms old
+  events are gone, an anchor was recorded, a `retention_executed` event
+  exists, and `verifyAuditChain` still reports valid for the pruned chain.
