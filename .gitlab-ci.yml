@@ -7,14 +7,17 @@ stages:
 variables:
   PNPM_HOME: '$CI_PROJECT_DIR/.pnpm'
 
-# GitLab's recommended pnpm setup/caching pattern (https://pnpm.io/continuous-integration#gitlab-ci):
-# install the pnpm binary via its standalone script, point its store at a
-# project-local directory, and cache that directory keyed on pnpm-lock.yaml.
+# Install pnpm via Corepack (bundled with Node) instead of piping the
+# get.pnpm.io install script into a shell: Corepack fetches the exact
+# version pinned in package.json's "packageManager" field from the npm
+# registry, which verifies package integrity - no unpinned remote script
+# execution.
 default:
   image: node:24.14.1
   before_script:
     - export PATH="$PNPM_HOME/bin:$PATH"
-    - curl -fsSL https://get.pnpm.io/install.sh | sh -
+    - corepack enable
+    - corepack prepare --activate
     - pnpm config set store-dir .pnpm-store
     - pnpm install --frozen-lockfile
 
