@@ -70,6 +70,12 @@ test:e2e:
   # checked against a real running server, never mocked (see
   # docs/authorization-model.md) — so this job needs all four live
   # dependencies, mirroring how Phase 2/3/4 added Postgres/Keycloak/OpenBao.
+  # Phase 7b's tool-gateway e2e suite (test/tool-gateway.e2e-spec.ts)
+  # additionally exercises this same OpenBao instance's KV v2 engine
+  # (OpenBaoSecretProvider — see docs/tool-gateway.md) and a minimal test
+  # MCP server (docs/mcp.md) that runs in-process inside the test itself
+  # (a plain node:http listener on an ephemeral port — no extra `services:`
+  # entry needed, unlike OpenFGA below).
   #
   # OpenFGA itself is deliberately NOT a `services:` entry the way
   # Postgres/Keycloak/OpenBao are: GitLab CI's `services:` are plain Docker
@@ -123,6 +129,10 @@ test:e2e:
     OPENBAO_PKI_ROOT_PATH: pki
     OPENBAO_PKI_INTERMEDIATE_PATH: pki_int
     OPENBAO_PKI_AGENT_ROLE: manar-agent
+    # Phase 7b: KV v2 mount OpenBaoSecretProvider reads Tool.credentialReference
+    # values from — see docs/tool-gateway.md. pnpm infra:openbao-init (run
+    # below) enables this mount idempotently, same as the PKI engines above.
+    OPENBAO_KV_MOUNT_PATH: secret
     AGENT_MTLS_PORT: '3443'
     AGENT_MTLS_SERVER_CERT_PATH: deploy/openbao/server-cert.pem
     AGENT_MTLS_SERVER_KEY_PATH: deploy/openbao/server-key.pem

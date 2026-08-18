@@ -3,6 +3,7 @@ import {
   Controller,
   ConflictException,
   ForbiddenException,
+  HttpCode,
   NotFoundException,
   Post,
   Res,
@@ -55,6 +56,7 @@ export class ToolInvokeController {
 
   @Post('tools/invoke')
   @UseGuards(AgentMtlsGuard)
+  @HttpCode(200)
   async invoke(
     @CurrentAgent() agent: AgentContext,
     @Body() body: unknown,
