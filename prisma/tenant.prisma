@@ -76,6 +76,10 @@ model UserProfile {
   /// who authored it — see PolicyVersion's doc comment.
   authoredPolicyVersions PolicyVersion[]
 
+  /// Phase 8: every ApprovalDecision this user has made (APPROVE/DENY) —
+  /// see that model's doc comment.
+  approvalDecisions ApprovalDecision[]
+
   @@map("user_profiles")
 }
 
@@ -157,6 +161,12 @@ model Agent {
   /// through `CredentialBrokerService` — see `ToolInvocation`'s own doc
   /// comment.
   toolInvocations ToolInvocation[]
+
+  /// Phase 8: every ApprovalRequest/AuthorizationGrant naming this agent as
+  /// the one that would (or did) execute the pending action — see those
+  /// models' own doc comments.
+  approvalRequests    ApprovalRequest[]
+  authorizationGrants AuthorizationGrant[]
 
   @@map("agents")
 }
@@ -373,6 +383,11 @@ model Task {
   /// `ToolInvocation`'s own doc comment.
   toolInvocations ToolInvocation[]
 
+  /// Phase 8: every ApprovalRequest/AuthorizationGrant issued for an
+  /// action under this task — see those models' own doc comments.
+  approvalRequests    ApprovalRequest[]
+  authorizationGrants AuthorizationGrant[]
+
   @@map("tasks")
 }
 
@@ -514,6 +529,15 @@ model PolicyVersion {
   publishedAt DateTime?
 
   createdAt DateTime @default(now())
+
+  /// Phase 8: an ApprovalRequest/AuthorizationGrant may record which
+  /// PolicyVersion was published at the moment it was produced — nullable
+  /// on both, since a REQUIRE_APPROVAL decision can also come purely from
+  /// RiskEngine's score exceeding `task.riskCeiling` with no policy rule
+  /// having matched at all (see `AuthorizationService`'s
+  /// `risk_ceiling_exceeded` reason) — see those models' own doc comments.
+  approvalRequests    ApprovalRequest[]
+  authorizationGrants AuthorizationGrant[]
 
   @@unique([policyId, version])
   @@map("policy_versions")
@@ -698,4 +722,231 @@ model ToolInvocation {
 enum ToolInvocationStatus {
   SUCCESS
   FAILURE
+}
+
+/// `ApprovalRequest.status` (Phase 8, Sections 27/28/31). A new request is
+/// always `PENDING` -- the only state `ApprovalWorkflow` itself creates it
+/// in, before that workflow ever runs. `APPROVED`/`DENIED` are set by the
+/// workflow's own re-evaluation Activity once a human `decide`s (`DENIED`
+/// also covers the case where re-evaluation itself fails the approved
+/// decision -- see docs/approvals.md's "why DENIED, not a third failure
+/// state" note). `EXPIRED` is set by the workflow's own timeout Activity
+/// when nobody decides before `expiresAt` -- never by anything polling or
+/// reading this row.
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  DENIED
+  EXPIRED
+}
+
+/// `ApprovalDecision.decision` -- a human's raw input to `ApprovalWorkflow`
+/// (via its `decide` signal), recorded verbatim before any re-evaluation
+/// happens. Note this is distinct from `ApprovalRequest.status`: an
+/// `APPROVE` decision can still produce a `DENIED` request status if
+/// re-evaluation at approval time no longer supports it (Section 27 -- see
+/// `ApprovalStatus`'s doc comment).
+enum ApprovalDecisionType {
+  APPROVE
+  DENY
+}
+
+/// A pending (or resolved) human-approval gate for one specific
+/// `REQUIRE_APPROVAL` decision from `AuthorizationService`'s pipeline
+/// (Phase 8, Sections 27/28/31 -- see docs/approvals.md). Created by `POST
+/// /agent/v1/tools/invoke` the moment that pipeline yields
+/// `REQUIRE_APPROVAL`, in the same call that starts the `ApprovalWorkflow`
+/// this row's `temporalWorkflowId` names -- no tool call is ever attempted
+/// at this point (Section 80's "pending action cannot execute before
+/// approval" invariant).
+///
+/// `toolId`/`actionId`/`resource`/`params` are the *exact* values from the
+/// original `POST /agent/v1/tools/invoke` request that triggered this
+/// approval -- never re-derived or re-typed later. `params` in particular
+/// is what `AuthorizationGrant.parameterHash` (once issued) binds to: the
+/// agent's eventual retried request must match these exact values byte for
+/// byte (after canonicalization -- see `src/approvals/parameter-hash.util.ts`)
+/// or its grant is rejected (Section 80's parameter-binding invariant).
+///
+/// `policyVersionId` is nullable: a `REQUIRE_APPROVAL` decision can come
+/// from a matched policy rule (`policyVersionId` set, to the version whose
+/// rule matched) *or* purely from `RiskEngine`'s score exceeding
+/// `task.riskCeiling` with no policy rule having matched at all -- see
+/// `AuthorizationService`'s `risk_ceiling_exceeded` reason, which leaves no
+/// version to record.
+model ApprovalRequest {
+  id String @id @default(uuid())
+
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id])
+
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id])
+
+  toolId   String
+  actionId String
+  resource String
+  /// The exact `params` submitted to `POST /agent/v1/tools/invoke` -- see
+  /// model doc comment for why this must never be re-derived.
+  params Json
+
+  /// The `RiskEngine.finalRiskScore` (0-100) that was part of why this
+  /// request required approval -- carried here (rather than only in
+  /// structured logs) so a human decision-maker and the eventual
+  /// `AuthorizationGrant` can both see exactly what was being approved.
+  riskScore Int
+
+  /// The published `PolicyVersion` whose rule produced this
+  /// `REQUIRE_APPROVAL` decision -- null when the decision came purely
+  /// from `RiskEngine`'s score exceeding `task.riskCeiling` with no policy
+  /// rule matching at all. See model doc comment.
+  policyVersionId String?
+  policyVersion   PolicyVersion? @relation(fields: [policyVersionId], references: [id])
+
+  status ApprovalStatus @default(PENDING)
+
+  requestedAt DateTime @default(now())
+  /// This request's own timeout -- `ApprovalWorkflow`'s `decide` signal
+  /// wait races against this exact instant (Temporal `sleep`, not a cron
+  /// job polling this column). Nobody deciding before this passes ->
+  /// `status = EXPIRED`, and no `AuthorizationGrant` is ever issuable for
+  /// this request again (see `APPROVAL_REQUEST_TTL_MS`,
+  /// `src/approvals/approvals.config.ts` -- 30 minutes by default).
+  expiresAt DateTime
+
+  /// The `ApprovalWorkflow` run this request is bound to 1:1 -- what
+  /// `POST /approvals/:id/decide` signals and what this row's own
+  /// `status`/`AuthorizationGrant` are ultimately written by (from inside
+  /// that workflow's own Activities, never directly by the decide/poll
+  /// HTTP handlers themselves).
+  temporalWorkflowId String @unique
+
+  /// 1:many even though this phase only ever produces one row per request
+  /// (decision #33: one approver) -- this is what lets a future N-of-M
+  /// approval chain be added without a schema migration; N-of-M logic
+  /// itself is out of scope this phase (see docs/approvals.md).
+  decisions ApprovalDecision[]
+
+  /// Set only when this request's outcome was `APPROVED` and
+  /// re-evaluation at approval time still supported it -- 1:1 (a request
+  /// produces at most one grant, ever; see `AuthorizationGrant`'s own doc
+  /// comment for why a *replay* of an already-consumed grant is rejected
+  /// rather than a new one being issued).
+  grant AuthorizationGrant?
+
+  createdAt DateTime @default(now())
+
+  @@map("approval_requests")
+}
+
+/// One human's raw decision on an `ApprovalRequest` (Phase 8, decision #33:
+/// exactly one approver decides, this phase) -- written by
+/// `ApprovalWorkflow`'s own re-evaluation Activity after processing the
+/// `decide` signal `POST /approvals/:id/decide` sends, never written
+/// directly by that HTTP handler itself (workflow code has no I/O of its
+/// own -- Section 28 -- but the *Activity* it invokes does the actual
+/// write, and is the only thing that ever does). Modeled 1:many against
+/// `ApprovalRequest` (see that model's own doc comment) even though this
+/// phase only ever produces one row per request.
+model ApprovalDecision {
+  id String @id @default(uuid())
+
+  approvalRequestId String
+  approvalRequest   ApprovalRequest @relation(fields: [approvalRequestId], references: [id])
+
+  approverId String
+  approver   UserProfile @relation(fields: [approverId], references: [id])
+
+  decision ApprovalDecisionType
+  reason   String?
+
+  decidedAt DateTime @default(now())
+
+  @@map("approval_decisions")
+}
+
+/// A short-lived, signed, single-use, exactly parameter-bound grant of
+/// authority to execute one specific pending tool action (Phase 8, Section
+/// 31 -- see docs/approvals.md for the full grant-token format and how
+/// `id` doubles as its `jti`). Issued by `ApprovalWorkflow`'s
+/// re-evaluation Activity, and only when: the originating
+/// `ApprovalRequest`'s task is still `ACTIVE`/unexpired/under its
+/// execution limit, its agent is still `ACTIVE`, and a fresh
+/// `PolicyEngine`/`RiskEngine` evaluation (re-run at *this* moment, never
+/// trusting the original, possibly-stale decision -- Section 27) still
+/// does not deny the action outright. At most one `AuthorizationGrant` is
+/// ever created per `ApprovalRequest` (`approvalRequestId` is `@unique`) --
+/// there is no "issue another grant for the same request" path anywhere in
+/// this codebase; a consumed, expired, or otherwise-invalid grant is
+/// simply rejected on retry (Section 80's approval-replay invariant),
+/// never silently re-issued.
+///
+/// `parameterHash` binds this grant to the *exact* `taskId`/`toolId`/
+/// `actionId`/`resource`/`params` of the originating `ApprovalRequest` --
+/// `POST /agent/v1/tools/invoke`'s retried request (with `grantToken` set)
+/// must recompute an identical hash from its own body or the grant is
+/// rejected, even if every other field matches (Section 80's
+/// parameter-binding invariant -- see
+/// `src/approvals/parameter-hash.util.ts`).
+///
+/// `consumedAt` enforces single-use: `POST /agent/v1/tools/invoke` sets it
+/// via a conditional `UPDATE ... WHERE consumedAt IS NULL` (the same
+/// race-closing pattern `AuthorizationService.incrementExecutionCount`
+/// already uses for `Task.executionCount`) the moment a valid grant is
+/// actually used to reach `CredentialBrokerService.invoke` -- a second use
+/// of the same token, concurrent or sequential, always loses that race and
+/// is denied. `revokedAt` is unused this phase (kill-switch-driven grant
+/// revocation is a dedicated later phase) -- the column exists now purely
+/// so that phase needs no migration.
+model AuthorizationGrant {
+  id String @id @default(uuid())
+
+  approvalRequestId String          @unique
+  approvalRequest   ApprovalRequest @relation(fields: [approvalRequestId], references: [id])
+
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id])
+
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id])
+
+  toolId   String
+  actionId String
+  resource String
+
+  /// sha256 hex of the canonicalized `{ taskId, toolId, actionId, resource,
+  /// params }` this grant was issued for -- see model doc comment.
+  parameterHash String
+
+  /// The `PolicyVersion` re-evaluation confirmed was still published at
+  /// grant-issuance time -- null under the same condition
+  /// `ApprovalRequest.policyVersionId` is (see that field's doc comment).
+  policyVersionId String?
+  policyVersion   PolicyVersion? @relation(fields: [policyVersionId], references: [id])
+
+  /// `RiskEngine.finalRiskScore` as of *re-evaluation* (grant-issuance
+  /// time), not necessarily equal to `ApprovalRequest.riskScore` (the
+  /// original, possibly-stale score) -- Section 27's "don't assume an
+  /// action remains safe because approval happened N minutes ago" made
+  /// concrete: this is the score that actually justified issuing this
+  /// grant.
+  riskScore Int
+
+  issuedAt DateTime @default(now())
+  /// Short -- `APPROVAL_GRANT_TTL_MS` (`src/approvals/approvals.config.ts`,
+  /// 5 minutes by default): an agent that doesn't retry
+  /// `POST /agent/v1/tools/invoke` with this grant soon after `APPROVED`
+  /// becomes visible via `GET /agent/v1/approvals/:id` finds it expired
+  /// and must go through approval again from scratch (no grant-renewal
+  /// path exists).
+  expiresAt DateTime
+
+  /// Set the moment this grant is actually used to reach
+  /// `CredentialBrokerService.invoke` -- see model doc comment. Null means
+  /// unconsumed (still usable, if unexpired).
+  consumedAt DateTime?
+  /// Unused this phase -- see model doc comment.
+  revokedAt DateTime?
+
+  @@map("authorization_grants")
 }
