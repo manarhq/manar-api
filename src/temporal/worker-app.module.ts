@@ -7,7 +7,9 @@ import { PolicyModule } from '../policy/policy.module';
 import { RiskModule } from '../risk/risk.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
 import { AuditModule } from '../audit/audit.module';
+import { AuditRetentionModule } from '../audit/retention/audit-retention.module';
 import { ApprovalActivitiesFactory } from './activities/approval.activities';
+import { AuditRetentionActivitiesFactory } from './activities/audit-retention.activities';
 
 /**
  * Root module for the separate Temporal worker process
@@ -35,8 +37,9 @@ import { ApprovalActivitiesFactory } from './activities/approval.activities';
     PolicyModule,
     RiskModule,
     ApprovalsModule,
+    AuditRetentionModule,
   ],
-  providers: [ApprovalActivitiesFactory],
-  exports: [ApprovalActivitiesFactory],
+  providers: [ApprovalActivitiesFactory, AuditRetentionActivitiesFactory],
+  exports: [ApprovalActivitiesFactory, AuditRetentionActivitiesFactory],
 })
 export class WorkerAppModule {}
