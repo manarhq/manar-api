@@ -160,6 +160,9 @@ export class AuditService {
       correlationId: event.correlationId,
       actor: input.actor,
       data: input.data,
+      previousHash: event.previousHash,
+      eventHash: event.eventHash,
+      sequence: event.sequence,
     };
 
     // Deliberately not awaited — see method doc comment.

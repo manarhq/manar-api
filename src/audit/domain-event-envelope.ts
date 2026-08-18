@@ -28,6 +28,21 @@ export interface DomainEventEnvelope {
   correlationId: string;
   actor: { type: 'human' | 'agent' | 'system'; id: string };
   data: unknown;
+  /**
+   * Phase 9b addition — the same tamper-evident hash-chain linkage fields
+   * `AuditEvent` itself carries (`src/audit/audit.service.ts`), included so
+   * a downstream consumer (`AuditIndexerService`, indexing into OpenSearch
+   * — see `docs/audit-chain.md`) can carry a faithful copy of the chain
+   * position without a separate Postgres round-trip per message.
+   * Deliberately **optional** (not added to the required base envelope
+   * shape above): `test/audit-kafka-idempotency.e2e-spec.ts` (Phase 9a)
+   * constructs its own literal envelopes without these fields, and must
+   * keep passing unmodified — see that suite's own doc comment. Every
+   * envelope `AuditService.record` actually publishes sets all three.
+   */
+  previousHash?: string | null;
+  eventHash?: string;
+  sequence?: number;
 }
 
 /** This phase ships exactly one envelope schema version — see `DomainEventEnvelope.eventVersion`'s doc comment. */
