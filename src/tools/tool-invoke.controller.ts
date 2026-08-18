@@ -26,6 +26,7 @@ import { ApprovalWorkflow } from '../temporal/workflows/approval.workflow';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import {
+  DlpBlockedError,
   ToolActionNotFoundError,
   ToolDisabledError,
   ToolNotFoundError,
@@ -189,6 +190,17 @@ export class ToolInvokeController {
       }
       if (error instanceof ToolDisabledError) {
         throw new ConflictException(error.message);
+      }
+      if (error instanceof DlpBlockedError) {
+        // Phase 10b: a severe DLP finding on outbound params blocked the
+        // call before any tool contact — same 403/DENY shape as an
+        // AuthorizationService DENY (see that branch above), generic
+        // reason (never echoes the sensitive value or finding type back to
+        // the caller — see DlpBlockedError's own doc comment).
+        throw new ForbiddenException({
+          decision: 'DENY',
+          reason: 'dlp_policy_violation',
+        });
       }
       throw error;
     }

@@ -21,3 +21,21 @@ export class ToolDisabledError extends Error {
     this.name = 'ToolDisabledError';
   }
 }
+
+/**
+ * Phase 10b: thrown by `CredentialBrokerService.invoke` when
+ * `AiAdvisoryClient.analyzeDlp` reports a severe finding on outbound
+ * `params` — the call is blocked before any tool contact is ever attempted
+ * (see docs/ai-security-model.md's DLP-before-call checkpoint). The
+ * message is deliberately generic (never echoes the sensitive value, or
+ * even the finding type, back to the caller) — mirrors
+ * `AuthorizationService`'s own "not_authorized" generic-DENY-reason
+ * posture for the same "don't let a caller probe the shape of a security
+ * control via its own error messages" reason.
+ */
+export class DlpBlockedError extends Error {
+  constructor() {
+    super('dlp_policy_violation');
+    this.name = 'DlpBlockedError';
+  }
+}

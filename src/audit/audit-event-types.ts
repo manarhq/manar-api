@@ -29,6 +29,14 @@ export const AUDIT_EVENT_TYPES = {
   TOOL_INVOCATION_FAILED: 'tool.invocation.failed',
 
   POLICY_PUBLISHED: 'policy.published',
+
+  // Phase 10b (AI Advisory Pipeline Integration) — see docs/ai-security-model.md.
+  /** A severe DLP finding on outbound tool-call params blocked the call before any tool contact. */
+  DLP_BLOCKED: 'dlp.blocked',
+  /** A DLP finding in a tool's returned result was redacted before being returned to the agent. */
+  DLP_RESULT_REDACTED: 'dlp.result_redacted',
+  /** `AiAdvisoryClient.analyzePromptInjection` detected a prompt-injection attempt in a tool's returned result. */
+  PROMPT_INJECTION_DETECTED: 'prompt_injection.detected',
 } as const;
 
 export type AuditEventType =
