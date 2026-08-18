@@ -55,3 +55,18 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000)+'/health/live',res=>{process.exit(res.statusCode===200?0:1)}).on('error',()=>process.exit(1))"
 
 CMD ["node", "dist/main.js"]
+
+# ---- worker: identical image, different entrypoint ----
+# Phase 8 (Approval Engine): the Temporal worker (src/worker.main.ts) runs
+# as its own process, never sharing an event loop with the Fastify HTTP
+# server `runtime`'s own CMD starts (Section 28). Rather than a wholly
+# separate build (which would duplicate every layer above verbatim), this
+# stage is `runtime` with only its CMD replaced — the same artifact, run
+# as two different container images/deployments (e.g. one Kubernetes
+# Deployment for `runtime`, a second for `worker`) so either can scale,
+# restart, and fail independently. No HEALTHCHECK here: this process
+# serves no HTTP endpoint to probe (a real deployment would instead use
+# Temporal's own worker-heartbeat visibility, or a liveness probe on the
+# process itself, e.g. `docker inspect`'s running state).
+FROM runtime AS worker
+CMD ["node", "dist/worker.main.js"]
