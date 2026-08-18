@@ -37,7 +37,9 @@ export interface AuthorizeRequest {
 }
 
 export type AuthorizeDecision =
-  { decision: 'ALLOW' } | { decision: 'DENY'; reason: string };
+  | { decision: 'ALLOW' }
+  | { decision: 'DENY'; reason: string }
+  | { decision: 'REQUIRE_APPROVAL'; reason: string; riskScore: number };
 
 export interface DelegateTaskGrant {
   toolId: string;
@@ -142,12 +144,15 @@ export class ManarAgent {
 
   /**
    * `POST /agent/v1/authorize` over mTLS using this agent's enrolled
-   * identity (Phase 5). Always resolves to a `{ decision }` object, never
-   * throws for a DENY -- a DENY is a legitimate, expected answer, not a
+   * identity (Phase 5; `REQUIRE_APPROVAL` added Phase 6). Always resolves
+   * to a `{ decision }` object, never throws for a DENY or a
+   * REQUIRE_APPROVAL -- both are legitimate, expected answers, not a
    * transport/request error (this mirrors `AuthorizeController`'s own
-   * "never map a DENY to an HTTP error status" contract). Throws only for
-   * a genuine transport failure, a malformed request, or if this agent has
-   * never enrolled.
+   * "never map a non-ALLOW decision to an HTTP error status" contract).
+   * `REQUIRE_APPROVAL` is a stable decision value from Phase 6 onward but
+   * has no path to ever resolve to execution yet (Phase 8) -- it is
+   * correctly a dead end for now. Throws only for a genuine transport
+   * failure, a malformed request, or if this agent has never enrolled.
    */
   async authorize(request: AuthorizeRequest): Promise<AuthorizeDecision> {
     const identity = await this.requireIdentity();

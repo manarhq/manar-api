@@ -33,6 +33,8 @@ export interface TaskRecord {
   allowedToolActions: unknown;
   allowedResourceSelectors: unknown;
   forbiddenActions: unknown;
+  /** 0-100 — activated by `RiskEngine`/`AuthorizationService` starting Phase 6 (see docs/policy-model.md); Phase 5 defined this field but nothing consulted it yet. */
+  riskCeiling: number;
 }
 
 export interface CreateTaskInput {

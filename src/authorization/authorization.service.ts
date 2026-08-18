@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import { TaskNotFoundError } from '../tasks/tasks.errors';
+import { PolicyEngine } from '../policy/policy-engine.service';
+import { RiskEngine } from '../risk/risk-engine.service';
 import { parseToolActions } from './grant-triples';
 import {
   ANY_RESOURCE_PATTERN,
@@ -12,7 +14,9 @@ import { OpenFgaClientService } from './openfga-client.service';
 import type { AuthorizeRequest } from './authorize-request.validation';
 
 export type AuthorizeDecision =
-  { decision: 'ALLOW' } | { decision: 'DENY'; reason: string };
+  | { decision: 'ALLOW' }
+  | { decision: 'DENY'; reason: string }
+  | { decision: 'REQUIRE_APPROVAL'; reason: string; riskScore: number };
 
 /**
  * `POST /agent/v1/authorize`'s pipeline (Section 22 — fail-closed at every
@@ -33,9 +37,17 @@ export type AuthorizeDecision =
  *      this task's grant tuples (tried against both the exact resource and
  *      the `"*"` "any resource for this tool action" wildcard grant — see
  *      docs/authorization-model.md's known-limitation note).
- *   6. On ALLOW, atomically increment `executionCount` — a conditional
- *      `UPDATE` that also closes the race against a concurrent request
- *      exhausting `maxExecutions` between step 3's read and this write.
+ *   6. On OpenFGA ALLOW, `PolicyEngine.evaluate` (Phase 6, Sections 21-22)
+ *      — an extra, org-defined restriction layered *on top of* the
+ *      already-permitted action above; it never re-decides steps 1-5. A
+ *      policy `DENY` short-circuits to DENY immediately.
+ *   7. `RiskEngine.score` (Phase 6) — a deterministic 0-100 risk score.
+ *      `REQUIRE_APPROVAL` if the matched policy's own effect says so, OR
+ *      the score exceeds this task's `riskCeiling`.
+ *   8. Otherwise ALLOW: atomically increment `executionCount` — a
+ *      conditional `UPDATE` that also closes the race against a
+ *      concurrent request exhausting `maxExecutions` between step 3's read
+ *      and this write.
  *
  * Steps 1-4 return a specific, non-leaky reason (deterministic app-layer
  * state, safe to expose). Step 5's DENY is deliberately generic
@@ -44,7 +56,12 @@ export type AuthorizeDecision =
  * (network failure, wrong port, container down) is caught and treated as
  * DENY too (`authorization_backend_unavailable`) — never as ALLOW, and
  * never as an unhandled 5xx that could be mistaken for anything but a
- * definite non-ALLOW.
+ * definite non-ALLOW. Steps 6-7 (Phase 6) are inserted strictly *after*
+ * Phase 5's own OpenFGA check and *before* its `executionCount` increment
+ * — none of Phase 5's steps 1-5 are touched. `REQUIRE_APPROVAL` is a real,
+ * stable decision from this phase onward, but this phase implements no
+ * path to ever fulfil one (Phase 8) — it's correctly a dead end for now.
+ * See docs/policy-model.md.
  */
 @Injectable()
 export class AuthorizationService {
@@ -53,6 +70,8 @@ export class AuthorizationService {
   constructor(
     private readonly tasksService: TasksService,
     private readonly openFga: OpenFgaClientService,
+    private readonly policyEngine: PolicyEngine,
+    private readonly riskEngine: RiskEngine,
   ) {}
 
   async authorize(
@@ -144,7 +163,57 @@ export class AuthorizationService {
       return { decision: 'DENY', reason: 'not_authorized' };
     }
 
-    // Step 6.
+    // Step 6 (Phase 6): PolicyEngine — an extra, org-defined restriction
+    // on top of the already-OpenFGA-permitted action above, never a
+    // re-decision of it. See PolicyEngine's own doc comment for why "no
+    // rule matched" (effect ALLOW, the common case) is never conflated
+    // with "couldn't evaluate" (also effect DENY, but for a genuine
+    // load/parse failure — logged there, not re-logged here).
+    const policyResult = await this.policyEngine.evaluate(
+      tenantClient,
+      tenantId,
+      {
+        toolId: request.toolId,
+        actionId: request.actionId,
+        resource: request.resource,
+      },
+    );
+    if (policyResult.effect === 'DENY') {
+      return {
+        decision: 'DENY',
+        reason: policyResult.failureReason
+          ? 'policy_evaluation_failed'
+          : 'policy_denied',
+      };
+    }
+
+    // Step 7 (Phase 6): RiskEngine. finalRiskScore vs. this task's own
+    // riskCeiling (Phase 5's field, unused until now) — either that or
+    // the matched policy rule itself asking for approval routes this
+    // request to REQUIRE_APPROVAL instead of ALLOW.
+    const riskResult = await this.riskEngine.score(tenantClient, {
+      toolId: request.toolId,
+      actionId: request.actionId,
+      resource: request.resource,
+      task,
+      policyMatch: policyResult.matchedRule,
+    });
+
+    if (
+      policyResult.effect === 'REQUIRE_APPROVAL' ||
+      riskResult.finalRiskScore > task.riskCeiling
+    ) {
+      return {
+        decision: 'REQUIRE_APPROVAL',
+        reason:
+          policyResult.effect === 'REQUIRE_APPROVAL'
+            ? 'policy_requires_approval'
+            : 'risk_ceiling_exceeded',
+        riskScore: riskResult.finalRiskScore,
+      };
+    }
+
+    // Step 8 (was Phase 5's step 6).
     const incremented = await this.incrementExecutionCount(tenantClient, task);
     if (!incremented) {
       return { decision: 'DENY', reason: 'task_execution_limit_reached' };
