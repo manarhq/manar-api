@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   Body,
   Controller,
@@ -9,13 +10,19 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { FastifyReply } from 'fastify';
+import type { AppConfig } from '../config/env.validation';
 import { CurrentAgent } from '../agent-mtls/agent-context';
 import type { AgentContext } from '../agent-mtls/agent-context';
 import { AgentMtlsGuard } from '../agent-mtls/agent-mtls.guard';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { AuthorizationService } from '../authorization/authorization.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { ApprovalRequestService } from '../approvals/approval-request.service';
+import { GrantService } from '../approvals/grant.service';
+import { TemporalClientService } from '../temporal/temporal-client.service';
+import { ApprovalWorkflow } from '../temporal/workflows/approval.workflow';
 import {
   ToolActionNotFoundError,
   ToolDisabledError,
@@ -25,26 +32,40 @@ import { CredentialBrokerService } from './credential-broker.service';
 import { ToolInvokeRequestSchema } from './tool-invoke.validation';
 
 /**
- * `POST /agent/v1/tools/invoke` — mTLS-gated, the first `/agent/v1/*`
- * endpoint that actually *does* something beyond deciding (Phase 7b).
- * A thin wrapper: calls the EXISTING, unchanged `AuthorizationService`
- * (Phase 5/6) to get an `ALLOW | DENY | REQUIRE_APPROVAL` decision, then:
+ * `POST /agent/v1/tools/invoke` — mTLS-gated (Phase 7b), extended by
+ * Phase 8 to give `REQUIRE_APPROVAL` a real fulfillment path (see
+ * docs/approvals.md; docs/tool-gateway.md covers the rest of this
+ * controller's Phase 7b shape, unchanged).
  *
- *   - `DENY` -> 403 with the decision's own `reason`; no tool call is ever
- *     attempted (`CredentialBrokerService.invoke` is never called).
- *   - `REQUIRE_APPROVAL` -> 202, `{ status: 'PENDING', reason, riskScore }`
- *     — a clearly-not-success, clearly-not-failure signal, same dead end
- *     Phase 6 left this decision at (Phase 8 gives it a real fulfillment
- *     path); no tool call is ever attempted here either.
- *   - `ALLOW` -> `CredentialBrokerService.invoke(...)`, whose
- *     `ToolInvocationResult` (itself possibly `{ success: false, ... }` if
- *     the *tool* failed — a request the gateway itself handled
- *     successfully, distinct from an authorization failure) is returned
- *     as the response body. `ToolNotFoundError`/`ToolActionNotFoundError`
- *     (the requested `toolId`/`actionId` don't resolve to a registered
- *     tool at all) map to 404; `ToolDisabledError` maps to 409.
+ * Two request shapes now share this one endpoint:
  *
- * Never duplicates or forks `AuthorizationService`'s own pipeline.
+ *   - **No `grantToken`** (the normal first attempt): calls the EXISTING,
+ *     unchanged `AuthorizationService.authorize(...)` pipeline exactly as
+ *     Phase 7b did.
+ *       - `DENY` -> 403, no tool call ever attempted.
+ *       - `REQUIRE_APPROVAL` -> creates an `ApprovalRequest`, starts
+ *         `ApprovalWorkflow`, responds 202
+ *         `{ status: 'PENDING', reason, riskScore, approvalId }` — no
+ *         tool call is ever attempted (Section 80's "pending action cannot
+ *         execute before approval" invariant; `status: 'PENDING'` keeps
+ *         Phase 7b's own response shape intact for existing callers,
+ *         `approvalId` is Phase 8's addition for the poll/retry flow).
+ *       - `ALLOW` -> `CredentialBrokerService.invoke(...)`, unchanged.
+ *   - **`grantToken` present** (an agent's retry after
+ *     `GET /agent/v1/approvals/:id` reported `APPROVED`): skips
+ *     `AuthorizationService.authorize` entirely — that gate was already
+ *     satisfied once, at approval time (`GrantService.reevaluateAndIssueGrant`,
+ *     inside the workflow's own Activity) — and instead validates the
+ *     grant itself (`GrantService.validateAndConsumeGrant`: signature,
+ *     expiry, single-use, and Section 80's parameter-binding invariant —
+ *     `parameterHash` recomputed from *this exact request* must match). A
+ *     valid, matching grant proceeds straight to
+ *     `CredentialBrokerService.invoke` exactly like the `ALLOW` path
+ *     above, and is marked consumed. An invalid/expired/consumed/
+ *     mismatched grant -> 403, no tool call ever attempted.
+ *
+ * Never duplicates or forks `AuthorizationService`'s own pipeline, and
+ * never calls it at all on the `grantToken` path.
  */
 @Controller('agent/v1')
 export class ToolInvokeController {
@@ -52,6 +73,10 @@ export class ToolInvokeController {
     private readonly authorizationService: AuthorizationService,
     private readonly credentialBroker: CredentialBrokerService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly approvalRequestService: ApprovalRequestService,
+    private readonly grantService: GrantService,
+    private readonly temporalClient: TemporalClientService,
+    private readonly configService: ConfigService<AppConfig, true>,
   ) {}
 
   @Post('tools/invoke')
@@ -66,6 +91,29 @@ export class ToolInvokeController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       agent.tenant.id,
     );
+
+    if (input.grantToken) {
+      const validation = await this.grantService.validateAndConsumeGrant(
+        tenantClient,
+        {
+          tenantId: agent.tenant.id,
+          agentId: agent.agent.id,
+          taskId: input.taskId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          params: input.params,
+          grantToken: input.grantToken,
+        },
+      );
+      if (!validation.valid) {
+        throw new ForbiddenException({
+          decision: 'DENY',
+          reason: validation.reason,
+        });
+      }
+      return this.invokeViaBroker(tenantClient, agent, input);
+    }
 
     const decision = await this.authorizationService.authorize(
       tenantClient,
@@ -92,17 +140,33 @@ export class ToolInvokeController {
       });
     }
     if (decision.decision === 'REQUIRE_APPROVAL') {
-      // A clearly-not-success, clearly-not-failure signal (202) — no tool
-      // call is attempted; Phase 8 gives this decision a real fulfillment
-      // path later (same dead end Phase 6 already left it at).
+      const approvalId = await this.startApproval(tenantClient, agent, input, {
+        riskScore: decision.riskScore,
+        policyVersionId: decision.policyVersionId,
+      });
       reply.status(202);
       return {
         status: 'PENDING',
         reason: decision.reason,
         riskScore: decision.riskScore,
+        approvalId,
       };
     }
 
+    return this.invokeViaBroker(tenantClient, agent, input);
+  }
+
+  private async invokeViaBroker(
+    tenantClient: Awaited<ReturnType<TenantDatabaseManager['getClient']>>,
+    agent: AgentContext,
+    input: {
+      taskId: string;
+      toolId: string;
+      actionId: string;
+      resource: string;
+      params: unknown;
+    },
+  ) {
     try {
       return await this.credentialBroker.invoke(tenantClient, {
         taskId: input.taskId,
@@ -124,5 +188,61 @@ export class ToolInvokeController {
       }
       throw error;
     }
+  }
+
+  /**
+   * Creates the `ApprovalRequest` row and starts its 1:1 `ApprovalWorkflow`
+   * — Section 80's invariant that no tool call is ever attempted on this
+   * path holds structurally: this method never calls
+   * `CredentialBrokerService` at all. Returns the new `ApprovalRequest.id`
+   * (`approvalId` in the response body).
+   */
+  private async startApproval(
+    tenantClient: Awaited<ReturnType<TenantDatabaseManager['getClient']>>,
+    agent: AgentContext,
+    input: {
+      taskId: string;
+      toolId: string;
+      actionId: string;
+      resource: string;
+      params: unknown;
+    },
+    decision: { riskScore: number; policyVersionId: string | null },
+  ): Promise<string> {
+    const requestTtlMs = this.configService.get('APPROVAL_REQUEST_TTL_MS', {
+      infer: true,
+    });
+    const expiresAt = new Date(Date.now() + requestTtlMs);
+    const temporalWorkflowId = `approval-${randomUUID()}`;
+
+    const approvalRequest = await this.approvalRequestService.create(
+      tenantClient,
+      {
+        taskId: input.taskId,
+        agentId: agent.agent.id,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        params: input.params,
+        riskScore: decision.riskScore,
+        policyVersionId: decision.policyVersionId,
+        expiresAt,
+        temporalWorkflowId,
+      },
+    );
+
+    await this.temporalClient.workflow.start(ApprovalWorkflow, {
+      workflowId: temporalWorkflowId,
+      taskQueue: this.temporalClient.taskQueue,
+      args: [
+        {
+          tenantId: agent.tenant.id,
+          approvalRequestId: approvalRequest.id,
+          expiresAtEpochMs: expiresAt.getTime(),
+        },
+      ],
+    });
+
+    return approvalRequest.id;
   }
 }

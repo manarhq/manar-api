@@ -12,6 +12,8 @@ import { AgentAuthorizeModule } from '../authorization/agent-authorize.module';
 import { TasksModule } from '../tasks/tasks.module';
 import { DelegationModule } from '../delegation/delegation.module';
 import { ToolInvokeModule } from '../tools/tool-invoke.module';
+import { TemporalModule } from '../temporal/temporal.module';
+import { AgentApprovalsModule } from '../approvals/agent-approvals.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
@@ -41,7 +43,11 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
  * request) quite apart from being the wrong surface for them. Phase 7b
  * adds `ToolInvokeModule` (`POST /agent/v1/tools/invoke`) — the first
  * endpoint on this listener that actually executes something, on top of
- * this exact same unchanged `AuthorizationService` pipeline.
+ * this exact same unchanged `AuthorizationService` pipeline. Phase 8 adds
+ * `TemporalModule` (starts/signals `ApprovalWorkflow` — see
+ * docs/approvals.md) and `AgentApprovalsModule`
+ * (`GET /agent/v1/approvals/:id`, the endpoint an agent polls after a
+ * `PENDING_APPROVAL` response).
  */
 @Module({
   imports: [
@@ -56,6 +62,8 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     AgentAuthorizeModule,
     DelegationModule,
     ToolInvokeModule,
+    TemporalModule,
+    AgentApprovalsModule,
   ],
   controllers: [AgentWhoamiController],
   providers: [{ provide: APP_INTERCEPTOR, useClass: LoggingInterceptor }],
