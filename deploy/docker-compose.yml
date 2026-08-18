@@ -9,7 +9,9 @@
 # OpenBao only signs and revokes (see docs/agent-identity.md); OpenFGA is
 # added in Phase 5 (Tasks, Delegation & OpenFGA) as the relationship-based
 # authorization engine task grants are enforced against — see
-# docs/authorization-model.md.
+# docs/authorization-model.md. Temporal is added in Phase 8 (Approval
+# Engine) as the durable workflow engine `ApprovalWorkflow` runs on — see
+# docs/approvals.md.
 #
 # Control DB and tenant DBs are separate *databases* on this one Postgres
 # server for local dev — isolation is enforced by Postgres's database
@@ -250,6 +252,68 @@ services:
       timeout: 5s
       retries: 10
       start_period: 5s
+
+  # Phase 8 (Approval Engine): Temporal, the durable workflow engine
+  # `ApprovalWorkflow` runs on — it waits (days, if need be) for a human
+  # `decide` signal or its own timeout, entirely independent of this
+  # process's own uptime. `temporalio/auto-setup`'s own entrypoint creates
+  # its `temporal`/`temporal_visibility` databases itself (via
+  # `temporal-sql-tool create`, against `POSTGRES_USER`, which — like every
+  # other service in this file — has full privileges on the shared Postgres
+  # server) the first time it boots, so unlike OpenFGA above there is no
+  # separate db-init job needed here. "postgres12" is the correct
+  # `DB` driver value for any Postgres major version >= 12 per Temporal's
+  # own docs — it is not tied to literally running Postgres 12 (this file
+  # runs Postgres 18).
+  temporal:
+    image: temporalio/auto-setup:1.29.0
+    container_name: manar-temporal
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: manar
+      POSTGRES_PWD: manar
+      POSTGRES_SEEDS: postgres
+    ports:
+      # Default Temporal frontend gRPC port — nothing else local binds it.
+      - '7233:7233'
+    healthcheck:
+      # temporalio/auto-setup binds its own gRPC listener to the
+      # container's own IP, not loopback — `--address localhost:7233`
+      # fails for that reason (a known quirk of this image, not a
+      # misconfiguration here); `$$(hostname -i)` (escaped so docker
+      # compose doesn't try to interpolate it itself) is the documented
+      # workaround.
+      test:
+        [
+          'CMD-SHELL',
+          'temporal operator cluster health --address $$(hostname -i):7233',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  # Temporal Web UI — local inspection only (workflow history, pending
+  # signals, retried Activities); never required by any app code or test.
+  # Host port 8083, not the image's own default 8080: OpenFGA's HTTP API
+  # already claims 8080 on this machine (see that service above).
+  temporal-ui:
+    image: temporalio/ui:2.36.0
+    container_name: manar-temporal-ui
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - '8083:8080'
 
 volumes:
   manar-postgres-data:
