@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DatabaseConfigSchema } from '../database/database.config';
 
 /**
  * Application-level environment schema.
@@ -6,17 +7,23 @@ import { z } from 'zod';
  * Keep this schema scoped to the config every module in this phase actually
  * needs (PORT, NODE_ENV, LOG_LEVEL). Later phases that introduce their own
  * modules (database, auth, etc.) should add their own schema alongside that
- * module rather than growing this one into a god-schema.
+ * module rather than growing this one into a god-schema — see
+ * `src/database/database.config.ts`'s `DatabaseConfigSchema`, merged in
+ * below. `@nestjs/config`'s `validate()` extension point only accepts a
+ * single function, so the merge happens here while each schema's fields
+ * stay defined next to the module that owns them.
  */
-export const AppConfigSchema = z.object({
-  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  NODE_ENV: z
-    .enum(['development', 'production', 'test'])
-    .default('development'),
-  LOG_LEVEL: z
-    .enum(['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'])
-    .default('info'),
-});
+export const AppConfigSchema = z
+  .object({
+    PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+    NODE_ENV: z
+      .enum(['development', 'production', 'test'])
+      .default('development'),
+    LOG_LEVEL: z
+      .enum(['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'])
+      .default('info'),
+  })
+  .extend(DatabaseConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

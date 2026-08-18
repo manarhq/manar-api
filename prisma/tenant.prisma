@@ -1,0 +1,22 @@
+// Tenant DB schema — datasource + generator blocks only, intentionally no
+// models yet.
+//
+// Every tenant gets a fully isolated Postgres database generated from this
+// schema (see TenantDatabaseManager.provisionTenant). Phase 3 onward add
+// their own models here incrementally as real domain modules land.
+// Inventing placeholder domain models now, just to have "something to
+// test," would be exactly the kind of premature scaffolding this project's
+// guidelines forbid — isolation is proven structurally instead (see
+// test/tenant-isolation and docs/tenant-isolation.md), not via a model's
+// data.
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/tenant-client"
+  // See prisma/control.prisma's generator block for why this is forced to
+  // cjs — this project is CommonJS, Prisma 7 defaults to ESM output.
+  moduleFormat = "cjs"
+}
