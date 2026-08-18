@@ -284,8 +284,10 @@ export class CredentialBrokerService {
    * the tool's own returned result, both advisory-only in the sense that
    * neither can undo the already-completed call itself:
    *
-   *   1. DLP after-call: any finding on `result.data` -> the returned
-   *      `data` is replaced with `redactedToolResultPlaceholder(...)`
+   *   1. DLP after-call: any *real* finding on `result.data` (excluding
+   *      manar-ai's own `source: "system"` AI-unavailable status marker,
+   *      which is never a real match) -> the returned `data` is replaced
+   *      with `redactedToolResultPlaceholder(...)`
    *      (whole-value redaction -- see that function's doc comment for why
    *      precise substring splicing isn't possible from this contract) and
    *      the full finding metadata (never the raw matched value) is
@@ -319,10 +321,19 @@ export class CredentialBrokerService {
     const dlpAfter: DlpAdvisory | null = await this.aiAdvisoryClient.analyzeDlp(
       { content: JSON.stringify(originalData ?? null) },
     );
-    if (dlpAfter && dlpAfter.findings.length > 0) {
+    // `source: "system"` is manar-ai's own AI-backend-unavailable status
+    // marker, never a real match (see that field's doc comment on
+    // DlpFinding) -- redacting on that alone would mean manar-ai's own LLM
+    // outage redacts every clean tool result, the same "AI unavailability
+    // must not add restriction beyond the deterministic floor" bug the
+    // before-call SEVERITY_MEDIUM threshold decision (see
+    // DLP_BLOCKING_SEVERITIES) already had to account for.
+    const realFindings =
+      dlpAfter?.findings.filter((f) => f.source !== 'system') ?? [];
+    if (realFindings.length > 0) {
       outcome = {
         ...outcome,
-        data: redactedToolResultPlaceholder(dlpAfter.findings),
+        data: redactedToolResultPlaceholder(realFindings),
       };
       await this.auditService.recordSafely(tenantClient, input.tenantId, {
         eventType: AUDIT_EVENT_TYPES.DLP_RESULT_REDACTED,
@@ -332,8 +343,8 @@ export class CredentialBrokerService {
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
-          overallSeverity: dlpAfter.overallSeverity,
-          findings: dlpAfter.findings.map((f) => ({
+          overallSeverity: dlpAfter?.overallSeverity,
+          findings: realFindings.map((f) => ({
             type: f.type,
             source: f.source,
             redactedPreview: f.redactedPreview,

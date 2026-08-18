@@ -151,10 +151,14 @@ the block happens before credential resolution.
 ### After-call: redacts findings in the tool's own result
 
 `AiAdvisoryClient.analyzeDlp({ content: JSON.stringify(result.data) })`
-runs after a _successful_ tool call. Any finding (`findings.length > 0`,
-regardless of severity — this cannot undo an already-completed call, so
-the bar for "worth redacting" is much lower than "worth blocking") causes
-`result.data` to be replaced with a fixed placeholder
+runs after a _successful_ tool call. Any _real_ finding (excluding
+manar-ai's own `source: "system"` AI-unavailable status marker — see the
+before-call section above for why that exclusion matters: without it,
+manar-ai's own LLM-backend outage would redact every clean tool result,
+not just genuinely sensitive ones — regardless of severity otherwise, since
+this cannot undo an already-completed call, so the bar for "worth
+redacting" is much lower than "worth blocking") causes `result.data` to be
+replaced with a fixed placeholder
 (`redactedToolResultPlaceholder` — `{ redacted: true, reason:
 'sensitive_data_detected', findingCount, findingTypes }`) before it's
 returned to the agent, and records `dlp.result_redacted` (same
