@@ -4,6 +4,9 @@ import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import { TaskNotFoundError } from '../tasks/tasks.errors';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { RiskEngine } from '../risk/risk-engine.service';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import type { AuditEventType } from '../audit/audit-event-types';
+import { AuditService } from '../audit/audit.service';
 import { parseToolActions } from './grant-triples';
 import {
   ANY_RESOURCE_PATTERN,
@@ -87,6 +90,7 @@ export class AuthorizationService {
     private readonly openFga: OpenFgaClientService,
     private readonly policyEngine: PolicyEngine,
     private readonly riskEngine: RiskEngine,
+    private readonly auditService: AuditService,
   ) {}
 
   async authorize(
@@ -95,6 +99,29 @@ export class AuthorizationService {
     authenticatedAgentId: string,
     request: AuthorizeRequest,
   ): Promise<AuthorizeDecision> {
+    // Phase 9a: every branch below records an `authorization.allowed`/
+    // `authorization.denied`/`authorization.pending_approval` AuditEvent
+    // before returning — via `this.audit(...)`, a thin wrapper so each
+    // branch stays a single `return` statement while still carrying
+    // "enough data to reconstruct why" (Section 46: matched policy, risk
+    // score, OpenFGA result) in `data`. Never changes what's returned to
+    // the caller — `auditService.recordSafely` never throws.
+    const audit = (
+      eventType: AuditEventType,
+      data: Record<string, unknown>,
+    ): Promise<unknown> =>
+      this.auditService.recordSafely(tenantClient, tenantId, {
+        eventType,
+        actor: { type: 'agent', id: authenticatedAgentId },
+        data: {
+          taskId: request.taskId,
+          toolId: request.toolId,
+          actionId: request.actionId,
+          resource: request.resource,
+          ...data,
+        },
+      });
+
     let task: TaskRecord;
     try {
       task = await this.tasksService.getTaskOrThrow(
@@ -103,6 +130,9 @@ export class AuthorizationService {
       );
     } catch (error) {
       if (error instanceof TaskNotFoundError) {
+        await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+          reason: 'task_not_found',
+        });
         return { decision: 'DENY', reason: 'task_not_found' };
       }
       throw error;
@@ -110,6 +140,10 @@ export class AuthorizationService {
 
     // Step 1.
     if (task.assignedAgentId !== authenticatedAgentId) {
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+        reason: 'not_assigned_agent',
+        assignedAgentId: task.assignedAgentId,
+      });
       return { decision: 'DENY', reason: 'not_assigned_agent' };
     }
 
@@ -122,6 +156,9 @@ export class AuthorizationService {
       now,
     );
     if (!liveness.ok) {
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+        reason: liveness.reason,
+      });
       return { decision: 'DENY', reason: liveness.reason as string };
     }
 
@@ -131,6 +168,9 @@ export class AuthorizationService {
       (f) => f.toolId === request.toolId && f.actionId === request.actionId,
     );
     if (isForbidden) {
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+        reason: 'forbidden_action',
+      });
       return { decision: 'DENY', reason: 'forbidden_action' };
     }
 
@@ -152,8 +192,10 @@ export class AuthorizationService {
     );
 
     let allowed: boolean;
+    let exactAllowed = false;
+    let wildcardAllowed = false;
     try {
-      const [exactAllowed, wildcardAllowed] = await Promise.all([
+      [exactAllowed, wildcardAllowed] = await Promise.all([
         this.openFga.check({
           user: agentSubject,
           relation: 'can_use',
@@ -171,10 +213,17 @@ export class AuthorizationService {
         `OpenFGA check failed for task "${task.id}" — failing closed (DENY)`,
         error instanceof Error ? error.stack : undefined,
       );
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+        reason: 'authorization_backend_unavailable',
+      });
       return { decision: 'DENY', reason: 'authorization_backend_unavailable' };
     }
 
     if (!allowed) {
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+        reason: 'not_authorized',
+        openFgaResult: { exactAllowed, wildcardAllowed },
+      });
       return { decision: 'DENY', reason: 'not_authorized' };
     }
 
@@ -194,12 +243,16 @@ export class AuthorizationService {
       },
     );
     if (policyResult.effect === 'DENY') {
-      return {
-        decision: 'DENY',
-        reason: policyResult.failureReason
-          ? 'policy_evaluation_failed'
-          : 'policy_denied',
-      };
+      const reason = policyResult.failureReason
+        ? 'policy_evaluation_failed'
+        : 'policy_denied';
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+        reason,
+        matchedRule: policyResult.matchedRule ?? null,
+        policyVersionId: policyResult.policyVersionId ?? null,
+        policyFailureReason: policyResult.failureReason ?? null,
+      });
+      return { decision: 'DENY', reason };
     }
 
     // Step 7 (Phase 6): RiskEngine. finalRiskScore vs. this task's own
@@ -218,12 +271,21 @@ export class AuthorizationService {
       policyResult.effect === 'REQUIRE_APPROVAL' ||
       riskResult.finalRiskScore > task.riskCeiling
     ) {
+      const reason =
+        policyResult.effect === 'REQUIRE_APPROVAL'
+          ? 'policy_requires_approval'
+          : 'risk_ceiling_exceeded';
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_PENDING_APPROVAL, {
+        reason,
+        riskScore: riskResult.finalRiskScore,
+        riskReasonCodes: riskResult.reasonCodes,
+        policyVersionId: policyResult.policyVersionId ?? null,
+        matchedRule: policyResult.matchedRule ?? null,
+        riskCeiling: task.riskCeiling,
+      });
       return {
         decision: 'REQUIRE_APPROVAL',
-        reason:
-          policyResult.effect === 'REQUIRE_APPROVAL'
-            ? 'policy_requires_approval'
-            : 'risk_ceiling_exceeded',
+        reason,
         riskScore: riskResult.finalRiskScore,
         policyVersionId: policyResult.policyVersionId ?? null,
       };
@@ -241,9 +303,18 @@ export class AuthorizationService {
       task,
     );
     if (!incremented) {
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+        reason: 'task_execution_limit_reached',
+      });
       return { decision: 'DENY', reason: 'task_execution_limit_reached' };
     }
 
+    await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_ALLOWED, {
+      riskScore: riskResult.finalRiskScore,
+      policyVersionId: policyResult.policyVersionId ?? null,
+      matchedRule: policyResult.matchedRule ?? null,
+      openFgaResult: { exactAllowed, wildcardAllowed },
+    });
     return { decision: 'ALLOW' };
   }
 }

@@ -23,6 +23,8 @@ import { ApprovalRequestService } from '../approvals/approval-request.service';
 import { GrantService } from '../approvals/grant.service';
 import { TemporalClientService } from '../temporal/temporal-client.service';
 import { ApprovalWorkflow } from '../temporal/workflows/approval.workflow';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import { AuditService } from '../audit/audit.service';
 import {
   ToolActionNotFoundError,
   ToolDisabledError,
@@ -77,6 +79,7 @@ export class ToolInvokeController {
     private readonly grantService: GrantService,
     private readonly temporalClient: TemporalClientService,
     private readonly configService: ConfigService<AppConfig, true>,
+    private readonly auditService: AuditService,
   ) {}
 
   @Post('tools/invoke')
@@ -169,6 +172,7 @@ export class ToolInvokeController {
   ) {
     try {
       return await this.credentialBroker.invoke(tenantClient, {
+        tenantId: agent.tenant.id,
         taskId: input.taskId,
         agentId: agent.agent.id,
         toolId: input.toolId,
@@ -241,6 +245,21 @@ export class ToolInvokeController {
           expiresAtEpochMs: expiresAt.getTime(),
         },
       ],
+    });
+
+    await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
+      eventType: AUDIT_EVENT_TYPES.APPROVAL_REQUESTED,
+      actor: { type: 'agent', id: agent.agent.id },
+      data: {
+        approvalRequestId: approvalRequest.id,
+        taskId: input.taskId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        riskScore: decision.riskScore,
+        policyVersionId: decision.policyVersionId,
+        expiresAt,
+      },
     });
 
     return approvalRequest.id;

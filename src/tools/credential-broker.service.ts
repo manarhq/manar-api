@@ -2,6 +2,8 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { SECRET_PROVIDER } from '../database/secret-provider';
 import type { SecretProvider } from '../database/secret-provider';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import { AuditService } from '../audit/audit.service';
 import {
   ToolActionNotFoundError,
   ToolDisabledError,
@@ -13,6 +15,8 @@ import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
 import { ToolRegistryService } from './tool-registry.service';
 
 export interface CredentialBrokerInvokeInput {
+  /** Phase 9a: needed only to attribute audit events to the right tenant chain — `CredentialBrokerService` never used a raw tenant id before this (tenant isolation already comes from `tenantClient` itself). */
+  tenantId: string;
   taskId: string;
   agentId: string;
   toolId: string;
@@ -66,6 +70,7 @@ export class CredentialBrokerService {
     @Inject(SECRET_PROVIDER) private readonly secretProvider: SecretProvider,
     private readonly httpAdapter: HttpToolAdapter,
     private readonly mcpAdapter: McpToolAdapter,
+    private readonly auditService: AuditService,
   ) {}
 
   async invoke(
@@ -82,10 +87,38 @@ export class CredentialBrokerService {
         tenantClient,
         input.toolId,
       );
+      const notFoundReason = tool ? 'tool_action_not_found' : 'tool_not_found';
+      await this.auditService.recordSafely(tenantClient, input.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED,
+        actor: { type: 'agent', id: input.agentId },
+        data: {
+          taskId: input.taskId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          reason: notFoundReason,
+        },
+      });
       if (!tool) throw new ToolNotFoundError(input.toolId);
       throw new ToolActionNotFoundError(input.toolId, input.actionId);
     }
     const { tool, action } = resolved;
+
+    // Phase 9a: `tool.invocation.started` — the earliest point real
+    // toolRowId/actionRowId exist to reference, mirroring the same
+    // constraint `recordInvocation`'s own FK-backed `ToolInvocation` row
+    // has always had (see step 1's early-return above, which never records
+    // an operational row either, for the same reason).
+    await this.auditService.recordSafely(tenantClient, input.tenantId, {
+      eventType: AUDIT_EVENT_TYPES.TOOL_INVOCATION_STARTED,
+      actor: { type: 'agent', id: input.agentId },
+      data: {
+        taskId: input.taskId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+      },
+    });
 
     if (!tool.enabled) {
       await this.recordInvocation(tenantClient, input, {
@@ -95,6 +128,17 @@ export class CredentialBrokerService {
         errorMessage: 'Tool is disabled',
         toolRowId: tool.id,
         actionRowId: action.id,
+      });
+      await this.auditService.recordSafely(tenantClient, input.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED,
+        actor: { type: 'agent', id: input.agentId },
+        data: {
+          taskId: input.taskId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          reason: 'tool_disabled',
+        },
       });
       throw new ToolDisabledError(input.toolId);
     }
@@ -139,6 +183,28 @@ export class CredentialBrokerService {
         : (result.errorMessage ?? 'unknown error'),
       toolRowId: tool.id,
       actionRowId: action.id,
+    });
+
+    // Phase 9a: `data` deliberately never includes the resolved credential
+    // (a hard rule — see `test/tool-gateway.e2e-spec.ts`'s existing
+    // credential-secrecy scenario, extended by
+    // `test/audit-retrofit.e2e-spec.ts` to grep the AuditEvent row too) nor
+    // the raw request/response payload — the same conservative posture the
+    // operational `ToolInvocation` row above already takes (`resource`/
+    // `status`/`errorMessage` are shape/summary only).
+    await this.auditService.recordSafely(tenantClient, input.tenantId, {
+      eventType: result.success
+        ? AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED
+        : AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED,
+      actor: { type: 'agent', id: input.agentId },
+      data: {
+        taskId: input.taskId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        status: result.success ? 'SUCCESS' : 'FAILURE',
+        errorMessage: result.success ? null : (result.errorMessage ?? null),
+      },
     });
 
     return result;

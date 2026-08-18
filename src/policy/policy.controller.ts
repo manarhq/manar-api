@@ -178,7 +178,13 @@ export class PolicyController {
     );
 
     const published = await mapPolicyErrors(() =>
-      this.policyService.publishVersion(tenantClient, policyId, versionId),
+      this.policyService.publishVersion(
+        tenantClient,
+        auth.tenant.id,
+        policyId,
+        versionId,
+        auth.user.id,
+      ),
     );
     return shapeVersion(published);
   }

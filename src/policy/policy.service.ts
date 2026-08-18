@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import { AuditService } from '../audit/audit.service';
 import { computeContentHash } from './policy-content-codec';
 import { PolicyContent } from './policy-content.schema';
 import {
@@ -31,6 +33,8 @@ export interface CreatePolicyVersionInput {
 @Injectable()
 export class PolicyService {
   private readonly logger = new Logger(PolicyService.name);
+
+  constructor(private readonly auditService: AuditService) {}
 
   /** Creates a `Policy` + its first (`version` 1) `DRAFT` `PolicyVersion`. */
   async createPolicy(
@@ -97,8 +101,10 @@ export class PolicyService {
   /** `DRAFT` -> `PUBLISHED`. The only transition this service ever performs on an existing version's `status` — there is no other update path (see module doc comment). */
   async publishVersion(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
     policyId: string,
     versionId: string,
+    publishedByUserId: string,
   ) {
     const version = await this.getVersionOrThrow(
       tenantClient,
@@ -117,6 +123,19 @@ export class PolicyService {
     this.logger.log(
       `Policy "${policyId}" version "${versionId}" (v${published.version}) published`,
     );
+
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.POLICY_PUBLISHED,
+      actor: { type: 'human', id: publishedByUserId },
+      data: {
+        policyId,
+        versionId: published.id,
+        version: published.version,
+        contentHash: published.contentHash,
+        publishedAt: published.publishedAt,
+      },
+    });
+
     return published;
   }
 
