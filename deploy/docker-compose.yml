@@ -1,19 +1,25 @@
 # Local development infra for manar-api.
 #
-# Grows phase-by-phase as later phases need it (OpenFGA/Kafka/Temporal/
-# Redis/OpenSearch) — per YAGNI. Postgres was added in Phase 2 (Persistence
-# & Tenancy); Keycloak is added in Phase 3 (Human Authentication) as the
+# Grows phase-by-phase as later phases need it (Kafka/Temporal/Redis/
+# OpenSearch) — per YAGNI. Postgres was added in Phase 2 (Persistence &
+# Tenancy); Keycloak is added in Phase 3 (Human Authentication) as the
 # human identity provider (realm-per-tenant model — see docs/human-auth.md);
 # OpenBao is added in Phase 4 (Agent Identity & Enrollment) as the PKI
 # backend for agent workload identity — Manar owns CSR/enrollment policy,
-# OpenBao only signs and revokes (see docs/agent-identity.md).
+# OpenBao only signs and revokes (see docs/agent-identity.md); OpenFGA is
+# added in Phase 5 (Tasks, Delegation & OpenFGA) as the relationship-based
+# authorization engine task grants are enforced against — see
+# docs/authorization-model.md.
 #
 # Control DB and tenant DBs are separate *databases* on this one Postgres
 # server for local dev — isolation is enforced by Postgres's database
 # boundary, not by server separation. Production may split tenant DBs
 # across separate server instances without changing the application-level
 # contract (TenantDatabaseManager resolves a connection string per tenant;
-# it doesn't assume same-server).
+# it doesn't assume same-server). OpenFGA's own `openfga` database (below)
+# follows the same "nothing ephemeral" posture as the rest of this file —
+# its Postgres storage engine, not the in-memory option, even for local
+# dev.
 services:
   postgres:
     image: postgres:18.6-alpine
@@ -110,6 +116,88 @@ services:
       # no /dev/tcp workaround is needed — `bao status` exits 0 once the dev
       # server is up (dev mode auto-unseals on boot).
       test: ['CMD', 'bao', 'status']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # Phase 5 (Tasks, Delegation & OpenFGA): a one-shot job that creates the
+  # `openfga` database on the shared Postgres server before OpenFGA's own
+  # `migrate` command runs against it. Postgres has no `CREATE DATABASE IF
+  # NOT EXISTS` — this makes re-running `pnpm infra:up` against an
+  # already-initialized volume safe (mirrors the idempotency guard
+  # deploy/openbao-init.mjs uses for the same reason, just via SQL instead
+  # of a Node script since this only needs one conditional statement).
+  openfga-db-init:
+    image: postgres:18.6-alpine
+    container_name: manar-openfga-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: manar
+    entrypoint: ['sh', '-c']
+    command:
+      - >
+        psql -h postgres -U manar -d manar_control -tc
+        "SELECT 1 FROM pg_database WHERE datname = 'openfga'" |
+        grep -q 1 ||
+        psql -h postgres -U manar -d manar_control -c "CREATE DATABASE openfga"
+
+  # OpenFGA (https://openfga.org) requires its schema to be migrated before
+  # `openfga run` will serve traffic — this is a separate, explicit command
+  # (not run automatically by the server), mirroring the official
+  # openfga/openfga docker-compose.yaml's own migrate-then-run sequencing.
+  openfga-migrate:
+    image: openfga/openfga:v1.18.3
+    container_name: manar-openfga-migrate
+    depends_on:
+      openfga-db-init:
+        condition: service_completed_successfully
+    command:
+      - migrate
+      - --datastore-engine=postgres
+      - --datastore-uri=postgres://manar:manar@postgres:5432/openfga?sslmode=disable
+
+  # The relationship-based authorization engine Phase 5's AuthorizationService
+  # calls (see docs/authorization-model.md). Postgres storage engine, not
+  # the in-memory option, for the same "nothing ephemeral" reason every
+  # other service in this file uses real storage. The playground/UI
+  # (port 3000) is left enabled by the image's own default for local
+  # inspection of the model/tuples during development — never reachable
+  # outside this docker network in a real deployment.
+  openfga:
+    image: openfga/openfga:v1.18.3
+    container_name: manar-openfga
+    restart: unless-stopped
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://manar:manar@postgres:5432/openfga?sslmode=disable
+      OPENFGA_PLAYGROUND_ENABLED: 'true'
+    ports:
+      # Default OpenFGA HTTP API port — nothing else local binds it.
+      - '8080:8080'
+      # Host port 8082, not the default 8081: Keycloak's own host port
+      # (8081, see above) already claims it on this machine.
+      - '8082:8081'
+      # Playground UI (3000) is deliberately NOT published to the host —
+      # this machine's port 3000 is already used by other local projects
+      # (e.g. manar-web's dev server), and the playground isn't needed for
+      # anything this phase's app code or tests do. It's still reachable
+      # from inside the compose network if ever needed for manual
+      # inspection (`docker compose exec` / a temporary port-forward).
+    healthcheck:
+      # The openfga/openfga image is a shell-less scratch-style image (no
+      # /bin/sh at all, so a CMD-SHELL /dev/tcp probe like Keycloak's
+      # healthcheck above can't run here) — but it bundles
+      # `grpc_health_probe`, which the official openfga/openfga
+      # docker-compose.yaml uses for exactly this reason, invoked directly
+      # (CMD, not CMD-SHELL) against the gRPC health service.
+      test: ['CMD', '/usr/local/bin/grpc_health_probe', '-addr=localhost:8081']
       interval: 5s
       timeout: 5s
       retries: 20
