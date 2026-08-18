@@ -245,6 +245,36 @@ export class TasksService {
     return this.evaluateLiveness(task, now);
   }
 
+  /**
+   * Atomically increments `executionCount`, guarded by `maxExecutions`
+   * when set (a conditional `UPDATE ... WHERE executionCount < maxExecutions`)
+   * — closes the race against a concurrent request exhausting the limit
+   * between an earlier liveness read and this write. Returns `false` if
+   * the limit was already reached. Shared by `AuthorizationService` (the
+   * `ALLOW` path's own execution-count increment) and `GrantService`
+   * (Phase 8 — the same increment happens once, at
+   * `AuthorizationGrant`-issuance time, for an approved action) — one
+   * implementation, not two copies of the same race-closing update.
+   */
+  async incrementExecutionCount(
+    tenantClient: TenantPrismaClient,
+    task: TaskRecord,
+  ): Promise<boolean> {
+    if (task.maxExecutions == null) {
+      await tenantClient.task.update({
+        where: { id: task.id },
+        data: { executionCount: { increment: 1 } },
+      });
+      return true;
+    }
+
+    const result = await tenantClient.task.updateMany({
+      where: { id: task.id, executionCount: { lt: task.maxExecutions } },
+      data: { executionCount: { increment: 1 } },
+    });
+    return result.count > 0;
+  }
+
   /** `task`'s own grant set — its `allowedToolActions` x `allowedResourceSelectors`, minus anything in its own `forbiddenActions`. Does NOT account for ancestors — see `getEffectiveGrantSet` for that. */
   getOwnGrantSet(task: TaskRecord): Set<string> {
     return computeGrantSet(

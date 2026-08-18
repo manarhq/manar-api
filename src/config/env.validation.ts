@@ -4,6 +4,8 @@ import { KeycloakConfigSchema } from '../keycloak/keycloak.config';
 import { OpenBaoConfigSchema } from '../openbao/openbao.config';
 import { AgentMtlsConfigSchema } from '../agent-mtls/agent-mtls.config';
 import { OpenFgaConfigSchema } from '../authorization/openfga.config';
+import { TemporalConfigSchema } from '../temporal/temporal.config';
+import { ApprovalsConfigSchema } from '../approvals/approvals.config';
 
 /**
  * Application-level environment schema.
@@ -32,7 +34,9 @@ export const AppConfigSchema = z
   .extend(KeycloakConfigSchema.shape)
   .extend(OpenBaoConfigSchema.shape)
   .extend(AgentMtlsConfigSchema.shape)
-  .extend(OpenFgaConfigSchema.shape);
+  .extend(OpenFgaConfigSchema.shape)
+  .extend(TemporalConfigSchema.shape)
+  .extend(ApprovalsConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

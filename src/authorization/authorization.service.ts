@@ -16,7 +16,22 @@ import type { AuthorizeRequest } from './authorize-request.validation';
 export type AuthorizeDecision =
   | { decision: 'ALLOW' }
   | { decision: 'DENY'; reason: string }
-  | { decision: 'REQUIRE_APPROVAL'; reason: string; riskScore: number };
+  | {
+      decision: 'REQUIRE_APPROVAL';
+      reason: string;
+      riskScore: number;
+      /**
+       * Phase 8: the published `PolicyVersion` whose rule produced this
+       * decision — `null` when it came purely from `RiskEngine`'s score
+       * exceeding `task.riskCeiling` with no policy rule matching at all
+       * (see `PolicyEvaluationResult`'s doc comment). `ToolInvokeController`
+       * carries this into the `ApprovalRequest` it creates
+       * (`docs/approvals.md`) — `AuthorizeController`'s own response is
+       * unaffected in shape for existing callers, since this is purely an
+       * additive field on an already-typed-generically response.
+       */
+      policyVersionId: string | null;
+    };
 
 /**
  * `POST /agent/v1/authorize`'s pipeline (Section 22 — fail-closed at every
@@ -210,42 +225,25 @@ export class AuthorizationService {
             ? 'policy_requires_approval'
             : 'risk_ceiling_exceeded',
         riskScore: riskResult.finalRiskScore,
+        policyVersionId: policyResult.policyVersionId ?? null,
       };
     }
 
-    // Step 8 (was Phase 5's step 6).
-    const incremented = await this.incrementExecutionCount(tenantClient, task);
+    // Step 8 (was Phase 5's step 6). `TasksService.incrementExecutionCount`
+    // (Phase 8 hoisted this atomic, race-closing increment out of this
+    // class and into `TasksService` — the same single-conditional-update
+    // pattern `AgentsService.enroll` uses for single-use enrollment tokens
+    // — since `GrantService`, Phase 8, needs to perform this exact same
+    // increment once for an approved action, at grant-issuance time; one
+    // implementation, not two copies that could drift).
+    const incremented = await this.tasksService.incrementExecutionCount(
+      tenantClient,
+      task,
+    );
     if (!incremented) {
       return { decision: 'DENY', reason: 'task_execution_limit_reached' };
     }
 
     return { decision: 'ALLOW' };
-  }
-
-  /**
-   * Atomically increments `executionCount`, guarded by `maxExecutions`
-   * when set (a conditional `UPDATE ... WHERE executionCount < maxExecutions`
-   * — the same single-conditional-update race-closing pattern
-   * `AgentsService.enroll` uses for single-use enrollment tokens). Returns
-   * `false` if a concurrent request already exhausted the limit between
-   * step 3's read and this write.
-   */
-  private async incrementExecutionCount(
-    tenantClient: TenantPrismaClient,
-    task: TaskRecord,
-  ): Promise<boolean> {
-    if (task.maxExecutions == null) {
-      await tenantClient.task.update({
-        where: { id: task.id },
-        data: { executionCount: { increment: 1 } },
-      });
-      return true;
-    }
-
-    const result = await tenantClient.task.updateMany({
-      where: { id: task.id, executionCount: { lt: task.maxExecutions } },
-      data: { executionCount: { increment: 1 } },
-    });
-    return result.count > 0;
   }
 }
