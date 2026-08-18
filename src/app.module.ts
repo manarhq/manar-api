@@ -8,9 +8,16 @@ import { CorrelationIdMiddleware } from './logging/correlation-id.middleware';
 import { LoggingInterceptor } from './logging/logging.interceptor';
 import { HealthModule } from './health/health.module';
 import { DatabaseModule } from './database/database.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
-  imports: [AppConfigModule, LoggingModule, HealthModule, DatabaseModule],
+  imports: [
+    AppConfigModule,
+    LoggingModule,
+    HealthModule,
+    DatabaseModule,
+    AuthModule,
+  ],
   controllers: [AppController],
   providers: [
     AppService,

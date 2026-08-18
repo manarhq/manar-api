@@ -31,6 +31,9 @@ importers:
       fastify:
         specifier: ^5.12.0
         version: 5.12.0
+      jose:
+        specifier: ^6.2.9
+        version: 6.2.9
       nest-commander:
         specifier: ^3.20.1
         version: 3.20.1(@nestjs/common@11.2.1(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@11.2.1)(@types/inquirer@8.2.13)(@types/node@24.13.3)(typescript@5.9.3)
@@ -3880,6 +3883,12 @@ packages:
         integrity: sha512-ekilCSN1jwRvIbgeg/57YFh8qQDNbwDb9xT/qu2DAHbFFZUicIl4ygVaAvzveMhMVr3LnpSKTNnwt8PoOfmKhQ==,
       }
     hasBin: true
+
+  jose@6.2.9:
+    resolution:
+      {
+        integrity: sha512-XrchZOFZUl/T3vTwRe8XK+cJrGtMF4th1ARnDfwbBXFKThGhlsxEE4Zu03AD/bjJSt/9jT/mxrOCkJWOg77aPA==,
+      }
 
   js-tokens@10.0.0:
     resolution:
@@ -8337,6 +8346,8 @@ snapshots:
       supports-color: 8.1.1
 
   jiti@2.6.1: {}
+
+  jose@6.2.9: {}
 
   js-tokens@10.0.0: {}
 
