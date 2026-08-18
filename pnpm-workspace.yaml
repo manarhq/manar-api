@@ -16,6 +16,7 @@ allowBuilds:
   '@prisma/engines': true
   '@swc/core': false
   prisma: true
+  protobufjs: false
   unrs-resolver: false
 minimumReleaseAgeExclude:
   - '@types/pg@8.23.1'
