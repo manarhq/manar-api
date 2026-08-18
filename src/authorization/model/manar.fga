@@ -1,0 +1,82 @@
+# Manar OpenFGA authorization model (Phase 5: Tasks, Delegation & OpenFGA).
+#
+# See docs/authorization-model.md for the full modeling rationale. Summary:
+#
+#   - Permission flows through `task`, never attached to `agent` directly
+#     (Section 18 — agents start with effectively zero permanent authority).
+#     `grant#can_use` computes to "whoever is the task's assigned_agent" via
+#     `assigned_agent from of_task` — an agent that stops being a task's
+#     assigned_agent (or was never it) loses `can_use` automatically, with
+#     no tuple ever written naming the agent directly on the grant.
+#
+#   - A `grant` is a synthetic per-(task, tool_action, resource-or-"*")
+#     object — one tuple written per entry in the cross-join of a task's
+#     `allowedToolActions` x `allowedResourceSelectors` (see
+#     src/authorization/grant-triples.ts). `AuthorizationService` computes
+#     the same deterministic object ID the writer used
+#     (src/authorization/openfga-object-id.util.ts) and calls `check()`
+#     against it directly — no ListObjects/expand scan needed.
+#
+#   - `forbidden_agent` is a directly-assignable relation (required by
+#     OpenFGA's `but not` exclusion operator — the excluded side cannot
+#     itself be a computed/`from` relation) written onto every grant object
+#     whose (toolId, actionId) appears in a task's `forbiddenActions`. This
+#     mirrors the JSON column's "explicit denies win over allows" rule
+#     *inside* the model itself (not just as an app-layer short-circuit
+#     before OpenFGA is ever called) — defense in depth, so OpenFGA's own
+#     check() independently enforces the same deny even if the app-layer
+#     short-circuit were ever bypassed by a bug.
+#
+#   - `tenant`/`tool`/`tool_action`/`resource` are wired into the graph for
+#     real (tuples written at grant-creation time — see
+#     TaskGrantSyncService) even though `can_use`'s own computation only
+#     strictly needs `of_task` + `forbidden_agent`. This keeps the model an
+#     actual Zanzibar-style relationship graph of the domain, not a
+#     decorative type list satisfying the spec's naming requirement.
+#
+#   - Ancestor-chain walking (Section 20's ancestor task must be
+#     ACTIVE/unexpired/under its own execution limit) and expiry/
+#     maxExecutions are *not* represented here at all — those are real-time
+#     checks AuthorizationService runs directly against Postgres task rows
+#     (steps 2-3 of the authorize pipeline), deliberately never mirrored
+#     into OpenFGA. This is what makes revoking a parent task immediately
+#     invalidate every descendant's authorization with zero cascade writes:
+#     OpenFGA has no notion of task status/expiry to go stale in the first
+#     place.
+model
+  schema 1.1
+
+type user
+
+type tenant
+  relations
+    define member: [user]
+
+type agent
+  relations
+    define tenant: [tenant]
+
+type tool
+  relations
+    define tenant: [tenant]
+
+type tool_action
+  relations
+    define tool: [tool]
+
+type resource
+  relations
+    define tool: [tool]
+
+type task
+  relations
+    define tenant: [tenant]
+    define assigned_agent: [agent]
+
+type grant
+  relations
+    define of_task: [task]
+    define tool_action: [tool_action]
+    define resource: [resource]
+    define forbidden_agent: [agent]
+    define can_use: (assigned_agent from of_task) but not forbidden_agent

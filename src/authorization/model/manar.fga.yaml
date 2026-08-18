@@ -1,0 +1,77 @@
+# OpenFGA model test suite (`fga model test`) for src/authorization/model/manar.fga.
+# Covers the four mandatory scenarios from the Phase 5 design spec's
+# "OpenFGA authorization model" section — see docs/authorization-model.md.
+# Run with `pnpm fga:test` (requires the `openfga/cli` Docker image; this
+# suite exercises the model file directly, no running OpenFGA server or
+# network access needed).
+name: Manar authorization model
+model_file: manar.fga
+
+tuples:
+  # agent-a is task-1's assigned_agent -- its only source of authority.
+  - user: agent:tenant-1_agent-a
+    relation: assigned_agent
+    object: task:tenant-1_task-1
+
+  # A grant task-1 actually holds (e.g. "read" on some tool_action/resource
+  # pair -- the grant object's identity already encodes which one; the
+  # model itself doesn't need to know).
+  - user: task:tenant-1_task-1
+    relation: of_task
+    object: grant:tenant-1_task-1_granted-action
+
+  # A *different* grant on the same task, additionally marked forbidden for
+  # agent-a specifically (mirrors Task.forbiddenActions -- see
+  # TaskGrantSyncService).
+  - user: task:tenant-1_task-1
+    relation: of_task
+    object: grant:tenant-1_task-1_forbidden-action
+  - user: agent:tenant-1_agent-a
+    relation: forbidden_agent
+    object: grant:tenant-1_task-1_forbidden-action
+
+tests:
+  - name: assigned-agent-can-perform-a-granted-action
+    description: >
+      The task's assigned_agent can use a grant tied to its own task --
+      permission flows through the task, not attached to the agent
+      directly.
+    check:
+      - user: agent:tenant-1_agent-a
+        object: grant:tenant-1_task-1_granted-action
+        assertions:
+          can_use: true
+
+  - name: different-agent-cannot-use-anothers-task-grant
+    description: >
+      An agent that is NOT the task's assigned_agent can never use that
+      task's grant, regardless of the grant itself.
+    check:
+      - user: agent:tenant-1_agent-b
+        object: grant:tenant-1_task-1_granted-action
+        assertions:
+          can_use: false
+
+  - name: action-not-in-the-grant-list-is-denied
+    description: >
+      A grant object with no tuples ever written for it (an action never
+      granted to this task at all) denies by default -- OpenFGA's closed-
+      world assumption, not an explicit deny.
+    check:
+      - user: agent:tenant-1_agent-a
+        object: grant:tenant-1_task-1_never-granted-action
+        assertions:
+          can_use: false
+
+  - name: explicitly-forbidden-action-denied-even-if-otherwise-allowed
+    description: >
+      forbidden_agent wins over "assigned_agent from of_task" even though
+      agent-a's task-assignment relationship is otherwise identical to the
+      granted-action case above -- proves the model's own `but not`
+      exclusion enforces the deny, independent of any app-layer
+      short-circuit.
+    check:
+      - user: agent:tenant-1_agent-a
+        object: grant:tenant-1_task-1_forbidden-action
+        assertions:
+          can_use: false
