@@ -1,0 +1,275 @@
+import {
+  BadRequestException,
+  Body,
+  ConflictException,
+  Controller,
+  Get,
+  NotFoundException,
+  Param,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
+import { CurrentAuth } from '../auth/auth-context';
+import type { AuthContext } from '../auth/auth-context';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RequireRole } from '../auth/require-role.decorator';
+import { RolesGuard } from '../auth/roles.guard';
+import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { parseBodyOrThrow } from '../agents/parse-body.util';
+import {
+  dumpPolicyContentYaml,
+  resolveSubmittedContent,
+} from './policy-content-codec';
+import { PolicyContent } from './policy-content.schema';
+import {
+  PolicyNotFoundError,
+  PolicyVersionNotDraftError,
+  PolicyVersionNotFoundError,
+} from './policy.errors';
+import { PolicyService } from './policy.service';
+import {
+  CreatePolicyRequestSchema,
+  CreatePolicyVersionRequestSchema,
+} from './policy.validation';
+
+/** Translates the service layer's typed domain errors into HTTP responses — same pattern `AgentsController`'s `mapAgentNotFound` establishes. */
+async function mapPolicyErrors<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (
+      error instanceof PolicyNotFoundError ||
+      error instanceof PolicyVersionNotFoundError
+    ) {
+      throw new NotFoundException(error.message);
+    }
+    if (error instanceof PolicyVersionNotDraftError) {
+      throw new ConflictException(error.message);
+    }
+    throw error;
+  }
+}
+
+/** Resolves `content`/`contentYaml` into a validated `PolicyContent`, mapping any schema-validation failure (malformed JSON shape, or YAML that fails `PolicyContentSchema` once parsed) to a 400 — same "no stack trace leaked" convention `parseBodyOrThrow` uses. */
+function resolveContentOrThrow(body: {
+  content?: unknown;
+  contentYaml?: string;
+}): PolicyContent {
+  try {
+    return resolveSubmittedContent(body);
+  } catch (error) {
+    throw new BadRequestException(
+      `Invalid policy content: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
+ * Human-facing policy management (Sections 21-22) — JWT-guarded, entirely
+ * separate from the mTLS agent surface (`AuthorizeController` is the only
+ * consumer of `PolicyEngine` on that side, and never exposes any of this).
+ * Gated the same way `TasksController` is
+ * (`SECURITY_ADMIN`/`TENANT_OWNER`/`AI_GOVERNANCE_MANAGER`) for every
+ * endpoint except publishing, which the design spec calls out explicitly
+ * as narrower (`SECURITY_ADMIN`/`TENANT_OWNER` only — no
+ * `AI_GOVERNANCE_MANAGER`) — a method-level `@RequireRole(...)` overrides
+ * the class-level one (`RolesGuard` uses `getAllAndOverride`, handler
+ * metadata wins).
+ *
+ * **There is no update or delete endpoint for a published `PolicyVersion`
+ * anywhere in this controller, permanently** (Section 21/22 — published
+ * versions are immutable) — editing always means `POST
+ * /policies/:id/versions` (a new `DRAFT`), and a rollback is likewise a
+ * new version whose `content` happens to match an older one (see
+ * docs/policy-model.md). This is not "not built yet"; it will never be
+ * built.
+ */
+@Controller('policies')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@RequireRole('SECURITY_ADMIN', 'TENANT_OWNER', 'AI_GOVERNANCE_MANAGER')
+export class PolicyController {
+  constructor(
+    private readonly policyService: PolicyService,
+    private readonly tenantDatabaseManager: TenantDatabaseManager,
+  ) {}
+
+  @Post()
+  async createPolicy(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
+    const input = parseBodyOrThrow(CreatePolicyRequestSchema, body);
+    const content = resolveContentOrThrow(input);
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+
+    const { policy, version } = await this.policyService.createPolicy(
+      tenantClient,
+      {
+        name: input.name,
+        description: input.description ?? null,
+        content,
+        authorId: auth.user.id,
+        reason: input.reason ?? null,
+      },
+    );
+
+    return {
+      id: policy.id,
+      name: policy.name,
+      description: policy.description,
+      createdAt: policy.createdAt,
+      latestVersion: shapeVersion(version),
+    };
+  }
+
+  @Post(':id/versions')
+  async createVersion(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') policyId: string,
+    @Body() body: unknown,
+  ) {
+    const input = parseBodyOrThrow(CreatePolicyVersionRequestSchema, body);
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+
+    return mapPolicyErrors(async () => {
+      let content: PolicyContent;
+      let reason = input.reason ?? null;
+
+      if (input.rollbackToVersionId) {
+        const target = await this.policyService.getVersionOrThrow(
+          tenantClient,
+          policyId,
+          input.rollbackToVersionId,
+        );
+        // Already-validated, already-stored content -- re-parsing it
+        // through resolveSubmittedContent would be redundant work for no
+        // extra safety, since it was validated once at write time and is
+        // never mutated afterward (PolicyVersion is immutable).
+        content = target.content as PolicyContent;
+        reason = reason
+          ? `${reason} (rollback to version ${target.version})`
+          : `Rollback to version ${target.version}`;
+      } else {
+        content = resolveContentOrThrow(input);
+      }
+
+      const version = await this.policyService.createVersion(
+        tenantClient,
+        policyId,
+        { content, authorId: auth.user.id, reason },
+      );
+      return shapeVersion(version);
+    });
+  }
+
+  @Post(':id/versions/:versionId/publish')
+  @RequireRole('SECURITY_ADMIN', 'TENANT_OWNER')
+  async publishVersion(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') policyId: string,
+    @Param('versionId') versionId: string,
+  ) {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+
+    const published = await mapPolicyErrors(() =>
+      this.policyService.publishVersion(tenantClient, policyId, versionId),
+    );
+    return shapeVersion(published);
+  }
+
+  @Get(':id')
+  async getPolicy(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') policyId: string,
+  ) {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+
+    const { policy, current } = await mapPolicyErrors(() =>
+      this.policyService.getCurrentPublished(tenantClient, policyId),
+    );
+
+    return {
+      id: policy.id,
+      name: policy.name,
+      description: policy.description,
+      createdAt: policy.createdAt,
+      currentVersion: current ? shapeVersion(current) : null,
+    };
+  }
+
+  @Get(':id/versions')
+  async listVersions(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') policyId: string,
+  ) {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+
+    const versions = await mapPolicyErrors(() =>
+      this.policyService.listVersions(tenantClient, policyId),
+    );
+    return versions.map(shapeVersion);
+  }
+
+  @Get(':id/versions/:versionId')
+  async getVersion(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') policyId: string,
+    @Param('versionId') versionId: string,
+    @Query('format') format: string | undefined,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+
+    const version = await mapPolicyErrors(() =>
+      this.policyService.getVersionOrThrow(tenantClient, policyId, versionId),
+    );
+
+    if (format === 'yaml') {
+      reply.header('Content-Type', 'text/yaml; charset=utf-8');
+      return dumpPolicyContentYaml(version.content as PolicyContent);
+    }
+
+    return shapeVersion(version);
+  }
+}
+
+/** Shapes a `PolicyVersion` row for an API response -- the same fields regardless of which endpoint returned it. */
+function shapeVersion(version: {
+  id: string;
+  policyId: string;
+  version: number;
+  status: string;
+  content: unknown;
+  contentHash: string;
+  authorId: string;
+  reason: string | null;
+  previousVersionId: string | null;
+  publishedAt: Date | null;
+  createdAt: Date;
+}) {
+  return {
+    id: version.id,
+    policyId: version.policyId,
+    version: version.version,
+    status: version.status,
+    content: version.content,
+    contentHash: version.contentHash,
+    authorId: version.authorId,
+    reason: version.reason,
+    previousVersionId: version.previousVersionId,
+    publishedAt: version.publishedAt,
+    createdAt: version.createdAt,
+  };
+}

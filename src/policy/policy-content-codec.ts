@@ -69,3 +69,26 @@ export function computeContentHash(content: unknown): string {
   const canonicalJson = JSON.stringify(canonicalize(content));
   return createHash('sha256').update(canonicalJson, 'utf8').digest('hex');
 }
+
+/**
+ * Resolves a `CreatePolicyRequest`/`CreatePolicyVersionRequest` body's
+ * `content` (already-parsed JSON) or `contentYaml` (a YAML document
+ * string) into a single validated `PolicyContent` — the one place both
+ * input formats converge before anything is ever written to a
+ * `PolicyVersion` row, so JSON and YAML submissions share the exact same
+ * validation/error path (Section 21). Throws (via Zod, same as
+ * `parsePolicyContent`/`parsePolicyContentYaml`) on malformed content in
+ * either format; the caller (`PolicyController`, via `parseBodyOrThrow`'s
+ * sibling convention) maps that to a 400. Assumes exactly one of the two
+ * is present — `CreatePolicyRequestSchema`/`CreatePolicyVersionRequestSchema`
+ * already enforce that at the Zod-schema level before this is ever called.
+ */
+export function resolveSubmittedContent(body: {
+  content?: unknown;
+  contentYaml?: string;
+}): PolicyContent {
+  if (body.contentYaml !== undefined) {
+    return parsePolicyContentYaml(body.contentYaml);
+  }
+  return PolicyContentSchema.parse(body.content);
+}

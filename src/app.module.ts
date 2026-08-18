@@ -14,6 +14,7 @@ import { AgentsHttpModule } from './agents/agents-http.module';
 import { AuthorizationModule } from './authorization/authorization.module';
 import { TasksModule } from './tasks/tasks.module';
 import { TasksHttpModule } from './tasks/tasks-http.module';
+import { PolicyHttpModule } from './policy/policy-http.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { TasksHttpModule } from './tasks/tasks-http.module';
     AuthorizationModule,
     TasksModule,
     TasksHttpModule,
+    PolicyHttpModule,
   ],
   controllers: [AppController],
   providers: [
