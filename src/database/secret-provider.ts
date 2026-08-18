@@ -1,10 +1,15 @@
 /**
- * The single swap point for how a tenant's database credential is
- * resolved. `EnvSecretProvider` (this phase's only implementation) reads a
- * base connection URL from a named environment variable.
- * `OpenBaoSecretProvider` (Phase 4/17) will implement the same interface
- * against a real secret store — no caller changes when it arrives. See
- * docs/tenant-isolation.md.
+ * The single swap point for how a secret (a tenant database credential, or
+ * — since Phase 7b — a `Tool.credentialReference`) is resolved.
+ * `EnvSecretProvider` reads a value from a named environment variable;
+ * `OpenBaoSecretProvider` (Phase 7b, `src/database/openbao-secret-provider.ts`)
+ * reads one from OpenBao's KV v2 secrets engine. `DatabaseModule` binds the
+ * `SECRET_PROVIDER` token to `CompositeSecretProvider`
+ * (`src/database/composite-secret-provider.ts`), which dispatches to
+ * whichever concrete provider a given reference's `provider` field
+ * actually names — a caller holding a `SecretProvider` never needs to know
+ * or care which backend answered `resolve()`. See docs/tenant-isolation.md
+ * and docs/tool-gateway.md.
  */
 export interface SecretReferenceDescriptor {
   /**

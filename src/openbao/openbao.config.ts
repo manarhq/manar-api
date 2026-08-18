@@ -36,6 +36,16 @@ export const OpenBaoConfigSchema = z.object({
    * boundary, not this role.
    */
   OPENBAO_PKI_AGENT_ROLE: z.string().min(1).default('manar-agent'),
+
+  /**
+   * Mount path of the KV v2 secrets engine `OpenBaoSecretProvider` (Phase
+   * 7b) reads `Tool.credentialReference` values from. OpenBao's own `-dev`
+   * mode (see deploy/docker-compose.yml) mounts a `kv-v2` engine at
+   * `secret/` automatically, matching this default — `deploy/openbao-init.mjs`
+   * still enables it explicitly (idempotently) rather than relying on that
+   * dev-mode default, since a non-dev OpenBao server has no such default.
+   */
+  OPENBAO_KV_MOUNT_PATH: z.string().min(1).default('secret'),
 });
 
 export type OpenBaoConfig = z.infer<typeof OpenBaoConfigSchema>;

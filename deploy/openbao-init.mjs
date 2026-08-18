@@ -45,6 +45,8 @@ const ROOT_PATH = 'pki';
 const INTERMEDIATE_PATH = 'pki_int';
 const AGENT_ROLE = 'manar-agent';
 const SERVER_ROLE = 'manar-server';
+// Must match OPENBAO_KV_MOUNT_PATH's default in src/openbao/openbao.config.ts.
+const KV_MOUNT_PATH = process.env.OPENBAO_KV_MOUNT_PATH ?? 'secret';
 
 const ROOT_TTL = '87600h'; // 10y — root stays offline for issuance after this script.
 const INTERMEDIATE_TTL = '43800h'; // 5y — the online issuer.
@@ -93,6 +95,29 @@ async function ensureMount(mountPath, maxLeaseTtl) {
 }
 
 /**
+ * Phase 7b (Tool Registry, Credential Broker & Proxy Execution): the KV v2
+ * mount `OpenBaoSecretProvider` reads `Tool.credentialReference` values
+ * from. OpenBao's `-dev` mode already auto-mounts a `kv-v2` engine at
+ * `secret/` (see deploy/docker-compose.yml's `openbao` service) — this is
+ * still enabled explicitly and idempotently, exactly like `ensureMount`
+ * above does for the PKI engines, rather than relying on that dev-only
+ * default, since a non-dev OpenBao deployment has no such default and this
+ * script is meant to describe the *whole* required bootstrap.
+ */
+async function ensureKvV2Mount(mountPath) {
+  const mounts = await baoRequest('GET', 'sys/mounts');
+  if (mounts?.data?.[`${mountPath}/`]) {
+    console.log(`==> Mount "${mountPath}/" already exists, skipping enable`);
+    return;
+  }
+  console.log(`==> Enabling KV v2 secrets engine at "${mountPath}/"`);
+  await baoRequest('POST', `sys/mounts/${mountPath}`, {
+    type: 'kv',
+    options: { version: '2' },
+  });
+}
+
+/**
  * `root/generate/internal` and `intermediate/generate/internal` are NOT
  * idempotent by themselves — calling either again silently replaces the
  * existing CA/key with a brand new one, invalidating every certificate
@@ -112,6 +137,7 @@ async function main() {
 
   await ensureMount(ROOT_PATH, ROOT_TTL);
   await ensureMount(INTERMEDIATE_PATH, INTERMEDIATE_TTL);
+  await ensureKvV2Mount(KV_MOUNT_PATH);
 
   if (await caAlreadyIssued(ROOT_PATH)) {
     console.log('==> Root CA already generated, skipping');
