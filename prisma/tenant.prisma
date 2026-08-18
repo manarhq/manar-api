@@ -64,6 +64,14 @@ model UserProfile {
   createdAgents           Agent[]
   createdEnrollmentTokens AgentEnrollmentToken[]
 
+  /// Phase 5: every Task ultimately traces back to a human requester — even
+  /// a delegated child Task's `requesterId` is the *root* task's original
+  /// requester (see docs/task-delegation.md), never the delegating agent
+  /// (Task.requesterId is a UserProfile FK; an agent has no UserProfile
+  /// row). This is what makes the Human → Task → Agent → Task → Agent
+  /// chain fully reconstructable per Section 20.
+  requestedTasks Task[]
+
   @@map("user_profiles")
 }
 
@@ -134,6 +142,12 @@ model Agent {
   groupMemberships AgentGroupMembership[]
   enrollmentTokens AgentEnrollmentToken[]
   certificates     AgentCertificate[]
+
+  /// Phase 5: tasks currently assigned to this agent — an agent's *only*
+  /// source of authority (Section 18: agents start with effectively zero
+  /// useful permanent authority; `capabilities` above stays unused this
+  /// phase too). See docs/authorization-model.md.
+  assignedTasks Task[]
 
   @@map("agents")
 }
@@ -222,4 +236,153 @@ model AgentCertificate {
   createdAt DateTime @default(now())
 
   @@map("agent_certificates")
+}
+
+/// Task lifecycle state (Phase 5, Sections 18-20). A new task goes straight
+/// to ACTIVE at creation — there is no approval step yet (Phase 6/8), so
+/// PENDING is never actually set by anything this phase; it's kept in the
+/// enum now (rather than added later) for the same reason `AgentStatus.KILLED`
+/// was kept unused ahead of its own phase — avoids a destructive migration
+/// once approvals land. EXPIRED/COMPLETED are likewise not transitioned to
+/// by any code this phase: expiry is enforced by comparing `expiresAt`
+/// against `now` at authorization time, not by a background job flipping
+/// status (see docs/authorization-model.md — this is deliberate, it's what
+/// the "expired task denies even though its OpenFGA tuples still exist"
+/// test proves). REVOKED is the one status this phase's code actually
+/// sets (`POST /tasks/:id/revoke`), and is central to the revocation-cascade
+/// invariant: revoking a task must immediately invalidate every descendant
+/// task's authorization, enforced by AuthorizationService walking the live
+/// ancestor chain on every check — never by cascading a write to
+/// descendants (Section 20).
+enum TaskStatus {
+  PENDING
+  ACTIVE
+  EXPIRED
+  REVOKED
+  COMPLETED
+}
+
+/// A narrowly-scoped, expiring grant of authority to exactly one agent
+/// (Sections 18-20 of the master prompt) — the *only* way an agent ever
+/// gets to do anything: agents start with zero permanent authority
+/// (`Agent.capabilities` stays an unused empty object forever), and every
+/// action an agent takes is authorized against the task it's currently
+/// assigned to, never against the agent itself.
+///
+/// `allowedToolActions`/`allowedResourceSelectors`/`forbiddenActions` are
+/// the human/audit-readable record of what was granted — Postgres columns,
+/// queryable/diffable in the ordinary way. The *enforcement* substrate
+/// `AuthorizationService` actually checks against is a mirrored set of
+/// OpenFGA relationship tuples, written at task-creation/delegation time by
+/// `TaskGrantSyncService` (see docs/authorization-model.md for the full
+/// modeling rationale and why these are kept in sync rather than treated as
+/// two independent sources of truth for the same decision).
+///
+/// `parentTaskId` is the self-referencing edge `AuthorizationService` walks
+/// (recursively, on every authorization check — Section 20's real-time
+/// revocation-cascade mechanism) to confirm every ancestor task is still
+/// ACTIVE/unexpired/under its own execution limit. `TaskDelegation` exists
+/// *alongside* this FK purely to make the delegation chain queryable/
+/// auditable as a first-class row without walking the self-FK — see that
+/// model's own doc comment.
+model Task {
+  id          String  @id @default(uuid())
+  name        String
+  description String?
+
+  /// The human who ultimately requested this task. For a root task, the
+  /// human who called `POST /tasks`. For a *delegated* (child) task, this
+  /// is deliberately still the root task's original requester (resolved by
+  /// walking `parentTaskId` to the top), never the delegating agent — an
+  /// agent has no `UserProfile` row to point this FK at, and Section 20's
+  /// full reconstructable chain (Human → Task → Agent → Task → Agent → …)
+  /// depends on every task in the chain tracing back to the same
+  /// originating human. See docs/task-delegation.md.
+  requesterId String
+  requester   UserProfile @relation(fields: [requesterId], references: [id])
+
+  /// The *only* agent that may exercise this task's grants — permission
+  /// flows through the task, never attached to the agent directly (Section
+  /// 18). `AgentMtlsGuard`-resolved `AgentContext.agent.id` must match this
+  /// exactly before `AuthorizationService` even reaches OpenFGA (step 1 of
+  /// the authorize pipeline).
+  assignedAgentId String
+  assignedAgent   Agent  @relation(fields: [assignedAgentId], references: [id])
+
+  /// Self-referencing edge for the ancestor chain (see model doc comment).
+  /// Null for a root task.
+  parentTaskId String?
+  parentTask   Task?   @relation("TaskParent", fields: [parentTaskId], references: [id])
+  childTasks   Task[]  @relation("TaskParent")
+
+  /// `{ toolId, actionId }[]` — the set of tool actions this task may
+  /// invoke. Crossed with `allowedResourceSelectors` (matched by `toolId`)
+  /// at tuple-write time to produce the concrete grant set — see
+  /// `src/authorization/grant-triples.ts`.
+  allowedToolActions Json @default("[]")
+
+  /// `{ toolId, pattern }[]` — the resources each tool action above may
+  /// touch. `pattern` is either a literal resource identifier or the
+  /// literal wildcard string `"*"` ("any resource for this tool action") —
+  /// this phase deliberately does not implement glob/prefix pattern
+  /// matching (that's real policy-engine territory, Phase 6/8's scope, not
+  /// this phase's relationship-authorization engine); see
+  /// docs/authorization-model.md's "known limitation" section.
+  allowedResourceSelectors Json @default("[]")
+
+  /// `{ toolId, actionId }[]` — explicit denies that win over
+  /// `allowedToolActions` even for an otherwise-matching grant (checked
+  /// before OpenFGA is ever called — step 4 of the authorize pipeline —
+  /// *and* mirrored into OpenFGA's own tuples as a `but not` exclusion, so
+  /// the deny is enforced from both angles, not just the faster app-layer
+  /// short-circuit).
+  forbiddenActions Json @default("[]")
+
+  status TaskStatus @default(ACTIVE)
+
+  startsAt       DateTime  @default(now())
+  expiresAt      DateTime
+  maxExecutions  Int?
+  /// Incremented atomically (a single conditional `UPDATE`, closing the
+  /// same race `AgentEnrollmentToken`'s single-use claim closes — see
+  /// `AgentsService.enroll`'s doc comment) on every ALLOW decision. Never
+  /// decremented; there is no notion of "returning" a used execution.
+  executionCount Int       @default(0)
+
+  /// 0-100, conservative default. Not enforced by anything this phase (no
+  /// risk scoring yet — Phase 6/8) — captured now so that phase doesn't
+  /// need a destructive migration to add it, matching this codebase's
+  /// established precedent (e.g. `Tenant.residency` in Phase 2).
+  riskCeiling Int @default(20)
+
+  createdAt DateTime @default(now())
+
+  delegationsAsParent TaskDelegation[] @relation("DelegationParent")
+  delegationAsChild   TaskDelegation?  @relation("DelegationChild")
+
+  @@map("tasks")
+}
+
+/// Exists purely to make the delegation chain queryable/auditable as a
+/// first-class row independent of walking `Task.parentTaskId` — kept thin
+/// per the design spec ("exists mainly to make the delegation chain
+/// queryable/auditable... keep it thin"). `Task.parentTaskId` (set on the
+/// child at creation time) is what `AuthorizationService` actually walks at
+/// authorization-check time; this table is not consulted on that hot path.
+model TaskDelegation {
+  id String @id @default(uuid())
+
+  parentTaskId String
+  parentTask   Task @relation("DelegationParent", fields: [parentTaskId], references: [id])
+
+  /// One parent may delegate to many children over time, but each child
+  /// task has exactly one delegation record (it has exactly one
+  /// `parentTaskId`) — `@unique` makes that structural, not just a
+  /// convention.
+  childTaskId String @unique
+  childTask   Task   @relation("DelegationChild", fields: [childTaskId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@map("task_delegations")
 }
