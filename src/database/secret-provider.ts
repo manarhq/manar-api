@@ -7,7 +7,17 @@
  * docs/tenant-isolation.md.
  */
 export interface SecretReferenceDescriptor {
-  provider: 'ENV' | 'OPENBAO';
+  /**
+   * `CONTROL_DB` (Phase 3) is a valid `SecretReference.provider` value —
+   * see `prisma/control.prisma`'s `SecretProvider` enum doc — but is
+   * resolved directly by callers that read `SecretReference.reference` as
+   * a literal value (e.g. `TenantProvisioningService`'s Keycloak client
+   * secret), never through `SecretProvider.resolve()`/`EnvSecretProvider`,
+   * which only implements `ENV` this phase and throws for anything else.
+   * Included in this union so the type accepts every value the Prisma
+   * `SecretProvider` enum can produce.
+   */
+  provider: 'ENV' | 'OPENBAO' | 'CONTROL_DB';
   reference: string;
 }
 

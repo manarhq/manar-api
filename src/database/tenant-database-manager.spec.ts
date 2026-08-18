@@ -32,6 +32,12 @@ function fakeConfigService(
     TENANT_DB_BASE_URL: process.env.TENANT_DB_BASE_URL ?? '',
     TENANT_DB_CLIENT_CACHE_MAX: 50,
     TENANT_DB_CLIENT_IDLE_TTL_MS: 10 * 60 * 1000,
+    KEYCLOAK_BASE_URL: process.env.KEYCLOAK_BASE_URL ?? '',
+    KEYCLOAK_ADMIN_USERNAME: process.env.KEYCLOAK_ADMIN_USERNAME ?? '',
+    KEYCLOAK_ADMIN_PASSWORD: process.env.KEYCLOAK_ADMIN_PASSWORD ?? '',
+    KEYCLOAK_ADMIN_CLIENT_ID:
+      process.env.KEYCLOAK_ADMIN_CLIENT_ID ?? 'admin-cli',
+    KEYCLOAK_CLIENT_ID: process.env.KEYCLOAK_CLIENT_ID ?? 'manar-api',
     ...overrides,
   };
   return {

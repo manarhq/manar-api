@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DatabaseConfigSchema } from '../database/database.config';
+import { KeycloakConfigSchema } from '../keycloak/keycloak.config';
 
 /**
  * Application-level environment schema.
@@ -8,7 +9,8 @@ import { DatabaseConfigSchema } from '../database/database.config';
  * needs (PORT, NODE_ENV, LOG_LEVEL). Later phases that introduce their own
  * modules (database, auth, etc.) should add their own schema alongside that
  * module rather than growing this one into a god-schema — see
- * `src/database/database.config.ts`'s `DatabaseConfigSchema`, merged in
+ * `src/database/database.config.ts`'s `DatabaseConfigSchema` and
+ * `src/keycloak/keycloak.config.ts`'s `KeycloakConfigSchema`, merged in
  * below. `@nestjs/config`'s `validate()` extension point only accepts a
  * single function, so the merge happens here while each schema's fields
  * stay defined next to the module that owns them.
@@ -23,7 +25,8 @@ export const AppConfigSchema = z
       .enum(['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'])
       .default('info'),
   })
-  .extend(DatabaseConfigSchema.shape);
+  .extend(DatabaseConfigSchema.shape)
+  .extend(KeycloakConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

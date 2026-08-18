@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { Command, CommandRunner, Option } from 'nest-commander';
-import { TenantDatabaseManager } from '../../database/tenant-database-manager.service';
+import { TenantProvisioningService } from '../../keycloak/tenant-provisioning.service';
 import {
   TenantProvisioningError,
   TenantSlugConflictError,
@@ -22,16 +22,21 @@ const RESIDENCY_CHOICES = ['UAE', 'CUSTOM_REGION', 'AIR_GAPPED'] as const;
  *
  * This is the *only* way to create a tenant this phase (Section 11 — no
  * `/admin/all-tenants` HTTP endpoint, no application-level super admin, no
- * cross-tenant browsing surface at all).
+ * cross-tenant browsing surface at all). Provisions both the tenant's
+ * isolated database (Phase 2) and its Keycloak realm/roles/client
+ * (Phase 3) via `TenantProvisioningService`.
  */
 @Command({
   name: 'tenant:create',
-  description: 'Provision a new tenant and its isolated database',
+  description:
+    'Provision a new tenant, its isolated database, and its Keycloak realm',
 })
 export class TenantCreateCommand extends CommandRunner {
   private readonly logger = new Logger(TenantCreateCommand.name);
 
-  constructor(private readonly tenantDatabaseManager: TenantDatabaseManager) {
+  constructor(
+    private readonly tenantProvisioningService: TenantProvisioningService,
+  ) {
     super();
   }
 
@@ -40,7 +45,7 @@ export class TenantCreateCommand extends CommandRunner {
     options: TenantCreateOptions,
   ): Promise<void> {
     try {
-      const tenant = await this.tenantDatabaseManager.provisionTenant({
+      const tenant = await this.tenantProvisioningService.provisionTenant({
         slug: options.slug,
         name: options.name,
         residency: options.residency,
@@ -50,7 +55,7 @@ export class TenantCreateCommand extends CommandRunner {
       });
 
       this.logger.log(
-        `Provisioned tenant "${tenant.slug}" (id=${tenant.id}, database=${tenant.databaseBinding?.databaseName})`,
+        `Provisioned tenant "${tenant.slug}" (id=${tenant.id}, database=${tenant.databaseBinding?.databaseName}, keycloakRealm=${tenant.keycloakRealm})`,
       );
       process.exitCode = 0;
     } catch (error) {
