@@ -1,3 +1,11 @@
+# Phase 4 (Agent Identity & Enrollment): the TypeScript agent SDK
+# (packages/sdk-node) is kept in this repo's pnpm workspace rather than a
+# fourth git repo — it's tightly coupled to manar-api's enrollment API
+# surface, and there's no concrete technical requirement for a separate
+# repo yet. See docs/agent-identity.md.
+packages:
+  - 'packages/*'
+
 allowBuilds:
   '@prisma/engines': true
   '@swc/core': false

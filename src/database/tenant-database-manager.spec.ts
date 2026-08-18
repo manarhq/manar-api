@@ -38,6 +38,21 @@ function fakeConfigService(
     KEYCLOAK_ADMIN_CLIENT_ID:
       process.env.KEYCLOAK_ADMIN_CLIENT_ID ?? 'admin-cli',
     KEYCLOAK_CLIENT_ID: process.env.KEYCLOAK_CLIENT_ID ?? 'manar-api',
+    OPENBAO_ADDR: process.env.OPENBAO_ADDR ?? 'http://localhost:8200',
+    OPENBAO_TOKEN: process.env.OPENBAO_TOKEN ?? 'manar-dev-root-token',
+    OPENBAO_PKI_ROOT_PATH: process.env.OPENBAO_PKI_ROOT_PATH ?? 'pki',
+    OPENBAO_PKI_INTERMEDIATE_PATH:
+      process.env.OPENBAO_PKI_INTERMEDIATE_PATH ?? 'pki_int',
+    OPENBAO_PKI_AGENT_ROLE: process.env.OPENBAO_PKI_AGENT_ROLE ?? 'manar-agent',
+    AGENT_MTLS_PORT: 3443,
+    AGENT_MTLS_SERVER_CERT_PATH:
+      process.env.AGENT_MTLS_SERVER_CERT_PATH ??
+      'deploy/openbao/server-cert.pem',
+    AGENT_MTLS_SERVER_KEY_PATH:
+      process.env.AGENT_MTLS_SERVER_KEY_PATH ?? 'deploy/openbao/server-key.pem',
+    AGENT_MTLS_CLIENT_CA_PATH:
+      process.env.AGENT_MTLS_CLIENT_CA_PATH ??
+      'deploy/openbao/intermediate-ca.pem',
     ...overrides,
   };
   return {

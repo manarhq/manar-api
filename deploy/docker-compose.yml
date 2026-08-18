@@ -1,10 +1,12 @@
 # Local development infra for manar-api.
 #
-# Grows phase-by-phase as later phases need it (OpenFGA/OpenBao/Kafka/
-# Temporal/Redis/OpenSearch) — per YAGNI. Postgres was added in Phase 2
-# (Persistence & Tenancy); Keycloak is added in Phase 3 (Human
-# Authentication) as the human identity provider (realm-per-tenant model —
-# see docs/human-auth.md).
+# Grows phase-by-phase as later phases need it (OpenFGA/Kafka/Temporal/
+# Redis/OpenSearch) — per YAGNI. Postgres was added in Phase 2 (Persistence
+# & Tenancy); Keycloak is added in Phase 3 (Human Authentication) as the
+# human identity provider (realm-per-tenant model — see docs/human-auth.md);
+# OpenBao is added in Phase 4 (Agent Identity & Enrollment) as the PKI
+# backend for agent workload identity — Manar owns CSR/enrollment policy,
+# OpenBao only signs and revokes (see docs/agent-identity.md).
 #
 # Control DB and tenant DBs are separate *databases* on this one Postgres
 # server for local dev — isolation is enforced by Postgres's database
@@ -75,6 +77,43 @@ services:
       timeout: 5s
       retries: 20
       start_period: 30s
+
+  # PKI backend for Phase 4 (Agent Identity & Enrollment). `-dev` mode boots
+  # an in-memory, auto-unsealed OpenBao server with no secrets engines
+  # configured — unlike Postgres/Keycloak there is no automatic bootstrap
+  # here: run `node deploy/openbao-init.mjs` once this container is healthy
+  # to enable the PKI secrets engine, generate the root CA, generate and
+  # sign an intermediate CA, mount it as the online issuer (root stays
+  # unused for issuance — standard practice), and create the agent signing
+  # role. See docs/agent-identity.md.
+  openbao:
+    image: openbao/openbao:2.6.1
+    container_name: manar-openbao
+    restart: unless-stopped
+    # Required by OpenBao's own docs for the mlock() syscall it uses to
+    # prevent secrets from being swapped to disk, even in -dev mode.
+    cap_add:
+      - IPC_LOCK
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: manar-dev-root-token
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      # Also read by the `bao` CLI the healthcheck below invokes inside the
+      # container — without it, `bao status` defaults to https://127.0.0.1:8200.
+      BAO_ADDR: http://127.0.0.1:8200
+    command: ['server', '-dev']
+    ports:
+      # Default OpenBao/Vault port — unlike Postgres/Keycloak above, this one
+      # isn't commonly bound by other local services, so no need to remap.
+      - '8200:8200'
+    healthcheck:
+      # Unlike Keycloak's image, openbao/openbao ships its own `bao` CLI, so
+      # no /dev/tcp workaround is needed — `bao status` exits 0 once the dev
+      # server is up (dev mode auto-unseals on boot).
+      test: ['CMD', 'bao', 'status']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
 volumes:
   manar-postgres-data:

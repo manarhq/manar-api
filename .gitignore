@@ -50,6 +50,11 @@ lerna-debug.log*
 .temp
 .tmp
 
+# OpenBao-issued PKI material written by deploy/openbao-init.mjs (Phase 4).
+# Regenerable by re-running the script against a fresh OpenBao dev instance;
+# never something to commit (the server cert's private key lives here).
+/deploy/openbao/
+
 # Runtime data
 pids
 *.pid
