@@ -60,6 +60,14 @@ function fakeConfigService(
     OPENFGA_MODEL_FILE_PATH:
       process.env.OPENFGA_MODEL_FILE_PATH ??
       'src/authorization/model/manar.fga',
+    TEMPORAL_ADDRESS: process.env.TEMPORAL_ADDRESS ?? 'localhost:7233',
+    TEMPORAL_NAMESPACE: process.env.TEMPORAL_NAMESPACE ?? 'default',
+    TEMPORAL_TASK_QUEUE: process.env.TEMPORAL_TASK_QUEUE ?? 'manar-approvals',
+    APPROVAL_GRANT_SIGNING_SECRET:
+      process.env.APPROVAL_GRANT_SIGNING_SECRET ??
+      'test-approval-grant-signing-secret',
+    APPROVAL_GRANT_TTL_MS: 300_000,
+    APPROVAL_REQUEST_TTL_MS: 1_800_000,
     ...overrides,
   };
   return {
