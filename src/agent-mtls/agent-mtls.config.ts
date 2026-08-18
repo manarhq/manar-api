@@ -34,15 +34,24 @@ export const AgentMtlsConfigSchema = z.object({
 
   /**
    * PEM file: the CA(s) this listener trusts to have signed an agent's
-   * client certificate (the intermediate CA — see
-   * `deploy/openbao-init.mjs`). Node's TLS layer rejects the handshake
-   * outright for a client cert that doesn't chain to this trust anchor,
-   * before `AgentMtlsGuard` (defense in depth beyond that) ever runs.
+   * client certificate. Node's TLS layer rejects the handshake outright
+   * for a client cert that doesn't chain to this trust anchor, before
+   * `AgentMtlsGuard` (defense in depth beyond that) ever runs.
+   *
+   * Deliberately the FULL chain (intermediate + root — `ca-chain.pem`,
+   * see `deploy/openbao-init.mjs`), not the intermediate alone: Node's
+   * `tls`/`https` `ca` option does not treat a listed certificate as an
+   * implicit trust anchor the way OpenSSL's CLI `-partial_chain` flag
+   * does — verifying a leaf issued by the intermediate requires the
+   * intermediate's *own* issuer (the root) to also be present, or every
+   * client certificate fails closed with `UNABLE_TO_GET_ISSUER_CERT`
+   * (confirmed against a bare `https.createServer`, independent of
+   * Fastify/Nest, while diagnosing this exact failure mode).
    */
   AGENT_MTLS_CLIENT_CA_PATH: z
     .string()
     .min(1)
-    .default('deploy/openbao/intermediate-ca.pem'),
+    .default('deploy/openbao/ca-chain.pem'),
 });
 
 export type AgentMtlsConfig = z.infer<typeof AgentMtlsConfigSchema>;

@@ -38,11 +38,11 @@ async function bootstrap(): Promise<void> {
         cert: readFileSync(bootstrapConfig.AGENT_MTLS_SERVER_CERT_PATH),
         key: readFileSync(bootstrapConfig.AGENT_MTLS_SERVER_KEY_PATH),
         // The trust anchor for CLIENT certificates (mutual TLS) — the
-        // intermediate CA agent certificates are issued under (see
-        // deploy/openbao-init.mjs). Node's TLS layer refuses the
-        // handshake outright for a client cert that doesn't chain to
-        // this, before AgentMtlsGuard (defense in depth beyond that) ever
-        // runs.
+        // FULL chain (intermediate + root, see agent-mtls.config.ts's doc
+        // comment for why not the intermediate alone). Node's TLS layer
+        // refuses the handshake outright for a client cert that doesn't
+        // chain to this, before AgentMtlsGuard (defense in depth beyond
+        // that) ever runs.
         ca: readFileSync(bootstrapConfig.AGENT_MTLS_CLIENT_CA_PATH),
         requestCert: true,
         rejectUnauthorized: true,

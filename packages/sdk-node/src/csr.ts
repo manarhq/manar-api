@@ -1,3 +1,11 @@
+// @peculiar/x509 depends on tsyringe, which requires a `Reflect` polyfill
+// to be loaded before it is. manar-api's own app gets this for free
+// (NestJS always loads reflect-metadata as part of its own bootstrap), but
+// this package is meant to run standalone in a plain Node agent process
+// with no NestJS anywhere in it -- so this import is required here,
+// deliberately first, rather than assuming a consumer's entry point
+// happens to load it already.
+import 'reflect-metadata';
 import { webcrypto } from 'node:crypto';
 import * as x509 from '@peculiar/x509';
 

@@ -51,8 +51,7 @@ function fakeConfigService(
     AGENT_MTLS_SERVER_KEY_PATH:
       process.env.AGENT_MTLS_SERVER_KEY_PATH ?? 'deploy/openbao/server-key.pem',
     AGENT_MTLS_CLIENT_CA_PATH:
-      process.env.AGENT_MTLS_CLIENT_CA_PATH ??
-      'deploy/openbao/intermediate-ca.pem',
+      process.env.AGENT_MTLS_CLIENT_CA_PATH ?? 'deploy/openbao/ca-chain.pem',
     ...overrides,
   };
   return {
