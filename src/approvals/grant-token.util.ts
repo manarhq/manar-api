@@ -12,7 +12,15 @@ export interface GrantTokenClaims {
   parameterHash: string;
 }
 
-function toKey(secret: string): Uint8Array {
+/**
+ * Exported (Phase 9b) so `src/evidence/evidence-signing.util.ts` can reuse
+ * the exact same HS256 key-derivation this module's own
+ * `signGrantToken`/`verifyGrantToken` use, rather than a second,
+ * independently-typed derivation of the same secret — see that file's doc
+ * comment. Purely additive: `signGrantToken`/`verifyGrantToken` themselves
+ * are unchanged.
+ */
+export function toKey(secret: string): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
