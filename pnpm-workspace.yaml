@@ -3,6 +3,12 @@
 # fourth git repo — it's tightly coupled to manar-api's enrollment API
 # surface, and there's no concrete technical requirement for a separate
 # repo yet. See docs/agent-identity.md.
+#
+# Phase 7a (Demo SOC Tool Backends): packages/demo-soc-tools joins the
+# same 'packages/*' glob below — a standalone Fastify service (own
+# package.json/tsconfig/Dockerfile), not coupled to manar-api's own app
+# code, kept here for the same "no separate repo needed yet" reason. See
+# docs/superpowers/specs/2026-08-19-phase7a-demo-soc-tools-design.md.
 packages:
   - 'packages/*'
 

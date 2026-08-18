@@ -1,0 +1,16 @@
+# Documents this package's own build-irrelevant paths. The compose build
+# (deploy/docker-compose.yml) uses the repo root as its context, so the
+# root .dockerignore is what's actually consulted there — this file
+# exists for symmetry with the root Dockerfile's convention and covers
+# any local/manual build invoked with this directory as context instead.
+node_modules
+dist
+coverage
+
+*.log
+
+.env
+.env.*
+!.env.example
+
+**/*.spec.ts

@@ -203,6 +203,54 @@ services:
       retries: 20
       start_period: 10s
 
+  # Phase 7a (Demo SOC Tool Backends): a standalone, deterministic-state
+  # demo SIEM/EDR/IAM/Firewall HTTP API — genuinely mutates its own
+  # in-memory state (isolate/release a host, disable a user, block/unblock
+  # an IP, etc.), it just doesn't persist across restarts (`POST
+  # /_demo/reset` restores seed state on demand). This is what Phase 7b's
+  # tool gateway proxies real HTTP calls to; it has no dependency on and
+  # no connection to Postgres/Keycloak/OpenBao/OpenFGA above. See
+  # docs/superpowers/specs/2026-08-19-phase7a-demo-soc-tools-design.md.
+  demo-soc-tools:
+    build:
+      # Context is the repo root, not this service's own directory — see
+      # packages/demo-soc-tools/Dockerfile's header comment for why (this
+      # package shares the root pnpm workspace's lockfile).
+      context: ..
+      dockerfile: packages/demo-soc-tools/Dockerfile
+    container_name: manar-demo-soc-tools
+    restart: unless-stopped
+    environment:
+      PORT: 3100
+      NODE_ENV: production
+      LOG_LEVEL: info
+      # Static bearer token this service authenticates with — Phase 7b's
+      # CredentialBrokerService is meant to fetch the real value from
+      # OpenBao and inject it, not read it from here; this default only
+      # exists so `docker compose up` works out of the box for local/demo
+      # use, same posture as Keycloak/OpenBao's dev credentials above.
+      DEMO_TOOLS_API_KEY: manar-dev-demo-tools-key
+    ports:
+      # Host port 3101, not 3100: 3100 is a common local dev-server port
+      # other projects on this machine bind outside Docker — same "avoid a
+      # clash with something already running locally" reasoning as
+      # Postgres/Keycloak's non-default host ports above. The container's
+      # own PORT stays 3100 (see `environment` above); only the host-side
+      # mapping changes.
+      - '3101:3100'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "require('http').get('http://127.0.0.1:3100/health/live',res=>{process.exit(res.statusCode===200?0:1)}).on('error',()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
 volumes:
   manar-postgres-data:
   manar-keycloak-data:

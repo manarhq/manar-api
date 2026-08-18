@@ -1,0 +1,24 @@
+{
+  "name": "@manar/demo-soc-tools",
+  "version": "0.0.1",
+  "description": "Standalone, deterministic-state demo SOC tool backend (SIEM/EDR/IAM/Firewall) — a real HTTP API Manar's tool gateway (Phase 7b) proxies to. Not connected to Manar's own auth/agent/task pipeline.",
+  "private": true,
+  "license": "UNLICENSED",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "fastify": "^5.12.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
+  }
+}
