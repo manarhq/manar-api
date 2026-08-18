@@ -1,8 +1,10 @@
 # Local development infra for manar-api.
 #
-# Grows phase-by-phase as later phases need it (Keycloak/OpenFGA/OpenBao/
-# Kafka/Temporal/Redis/OpenSearch) — per YAGNI, only Postgres is added now
-# (Phase 2: Persistence & Tenancy).
+# Grows phase-by-phase as later phases need it (OpenFGA/OpenBao/Kafka/
+# Temporal/Redis/OpenSearch) — per YAGNI. Postgres was added in Phase 2
+# (Persistence & Tenancy); Keycloak is added in Phase 3 (Human
+# Authentication) as the human identity provider (realm-per-tenant model —
+# see docs/human-auth.md).
 #
 # Control DB and tenant DBs are separate *databases* on this one Postgres
 # server for local dev — isolation is enforced by Postgres's database
@@ -34,5 +36,46 @@ services:
       timeout: 5s
       retries: 10
 
+  # Human identity provider (Phase 3). One Keycloak realm per tenant —
+  # realm/role/client provisioning happens via the Admin REST API from
+  # TenantProvisioningService, not by hand. `start-dev` is Keycloak's
+  # current documented local-development invocation (persistent storage,
+  # relaxed hostname/TLS checks) — never used in production, where a real
+  # `start` invocation with an explicit hostname and TLS termination is
+  # required instead.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.1
+    container_name: manar-keycloak
+    restart: unless-stopped
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # Health endpoints (used by the healthcheck below) live on the
+      # management interface (port 9000 by default) since Keycloak 26 and
+      # are disabled unless explicitly enabled.
+      KC_HEALTH_ENABLED: 'true'
+    ports:
+      # Host port 8081, not the default 8080: keeps this consistent with
+      # Postgres's non-default host port above and avoids clashing with
+      # other local services that commonly bind 8080.
+      - '8081:8080'
+    volumes:
+      - manar-keycloak-data:/opt/keycloak/data
+    healthcheck:
+      # The quay.io/keycloak/keycloak image ships no curl/wget; Keycloak's
+      # own docs recommend a raw /dev/tcp bash redirection against the
+      # management port's /health/ready endpoint instead.
+      test:
+        [
+          'CMD-SHELL',
+          'exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e "GET /health/ready HTTP/1.1\r\nhost: localhost\r\nConnection: close\r\n\r\n" >&3 && cat <&3 | grep -q "\"status\": \"UP\""',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
 volumes:
   manar-postgres-data:
+  manar-keycloak-data:
