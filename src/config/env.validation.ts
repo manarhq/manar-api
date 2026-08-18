@@ -6,6 +6,7 @@ import { AgentMtlsConfigSchema } from '../agent-mtls/agent-mtls.config';
 import { OpenFgaConfigSchema } from '../authorization/openfga.config';
 import { TemporalConfigSchema } from '../temporal/temporal.config';
 import { ApprovalsConfigSchema } from '../approvals/approvals.config';
+import { KafkaConfigSchema } from '../audit/kafka.config';
 
 /**
  * Application-level environment schema.
@@ -36,7 +37,8 @@ export const AppConfigSchema = z
   .extend(AgentMtlsConfigSchema.shape)
   .extend(OpenFgaConfigSchema.shape)
   .extend(TemporalConfigSchema.shape)
-  .extend(ApprovalsConfigSchema.shape);
+  .extend(ApprovalsConfigSchema.shape)
+  .extend(KafkaConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

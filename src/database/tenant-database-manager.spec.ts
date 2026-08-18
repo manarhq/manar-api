@@ -68,6 +68,9 @@ function fakeConfigService(
       'test-approval-grant-signing-secret',
     APPROVAL_GRANT_TTL_MS: 300_000,
     APPROVAL_REQUEST_TTL_MS: 1_800_000,
+    KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:29092',
+    KAFKA_CLIENT_ID: process.env.KAFKA_CLIENT_ID ?? 'manar-api',
+    KAFKA_AUDIT_TOPIC: process.env.KAFKA_AUDIT_TOPIC ?? 'manar.audit-events',
     ...overrides,
   };
   return {

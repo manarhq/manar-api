@@ -6,6 +6,7 @@ import { TasksModule } from '../tasks/tasks.module';
 import { PolicyModule } from '../policy/policy.module';
 import { RiskModule } from '../risk/risk.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
+import { AuditModule } from '../audit/audit.module';
 import { ApprovalActivitiesFactory } from './activities/approval.activities';
 
 /**
@@ -29,6 +30,7 @@ import { ApprovalActivitiesFactory } from './activities/approval.activities';
     AppConfigModule,
     DatabaseModule,
     OpenBaoModule,
+    AuditModule,
     TasksModule,
     PolicyModule,
     RiskModule,

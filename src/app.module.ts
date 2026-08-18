@@ -17,6 +17,8 @@ import { TasksHttpModule } from './tasks/tasks-http.module';
 import { PolicyHttpModule } from './policy/policy-http.module';
 import { TemporalModule } from './temporal/temporal.module';
 import { ApprovalsHttpModule } from './approvals/approvals-http.module';
+import { AuditModule } from './audit/audit.module';
+import { AuditHttpModule } from './audit/audit-http.module';
 
 @Module({
   imports: [
@@ -26,6 +28,7 @@ import { ApprovalsHttpModule } from './approvals/approvals-http.module';
     DatabaseModule,
     AuthModule,
     OpenBaoModule,
+    AuditModule,
     AgentsHttpModule,
     AuthorizationModule,
     TasksModule,
@@ -33,6 +36,7 @@ import { ApprovalsHttpModule } from './approvals/approvals-http.module';
     PolicyHttpModule,
     TemporalModule,
     ApprovalsHttpModule,
+    AuditHttpModule,
   ],
   controllers: [AppController],
   providers: [

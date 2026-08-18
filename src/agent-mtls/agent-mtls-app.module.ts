@@ -14,6 +14,7 @@ import { DelegationModule } from '../delegation/delegation.module';
 import { ToolInvokeModule } from '../tools/tool-invoke.module';
 import { TemporalModule } from '../temporal/temporal.module';
 import { AgentApprovalsModule } from '../approvals/agent-approvals.module';
+import { AuditModule } from '../audit/audit.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
@@ -55,6 +56,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     LoggingModule,
     DatabaseModule,
     OpenBaoModule,
+    AuditModule,
     AgentMtlsGuardModule,
     AgentsModule,
     AuthorizationModule,
