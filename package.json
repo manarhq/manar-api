@@ -7,7 +7,7 @@
   "license": "UNLICENSED",
   "packageManager": "pnpm@11.20.0",
   "scripts": {
-    "build": "nest build && pnpm --filter @manar/sdk-node build",
+    "build": "nest build && pnpm --filter @manar/sdk-node build && pnpm --filter @manar-ai/grpc-client build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
@@ -17,7 +17,7 @@
     "worker:dev": "nest start --watch --entryFile worker.main",
     "worker:prod": "node dist/worker.main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "typecheck": "tsc --noEmit && pnpm --filter @manar/sdk-node typecheck",
+    "typecheck": "tsc --noEmit && pnpm --filter @manar/sdk-node typecheck && pnpm --filter @manar-ai/grpc-client typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
@@ -36,6 +36,8 @@
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.10.0",
+    "@grpc/grpc-js": "^1.13.4",
+    "@manar-ai/grpc-client": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",

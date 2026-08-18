@@ -75,6 +75,11 @@ function fakeConfigService(
     OPENSEARCH_AUDIT_INDEX:
       process.env.OPENSEARCH_AUDIT_INDEX ?? 'manar-audit-events',
     REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
+    AI_ADVISORY_GRPC_TARGET:
+      process.env.AI_ADVISORY_GRPC_TARGET ?? 'localhost:50051',
+    AI_ADVISORY_TIMEOUT_MS: 2000,
+    AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
+    AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
     ...overrides,
   };
   return {

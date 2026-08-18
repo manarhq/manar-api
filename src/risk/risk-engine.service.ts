@@ -3,22 +3,26 @@ import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-cli
 import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import type { PolicyRule } from '../policy/policy-content.schema';
 import { ToolRegistryService } from '../tools/tool-registry.service';
+import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
 
 export interface RiskScoreInput {
   toolId: string;
   actionId: string;
   resource: string;
   task: TaskRecord;
+  /** The requesting agent — Phase 10b needs this for the `AgentRiskFlag` lookup and to give `AiAdvisoryClient.analyzeRisk` a stable correlation subject; earlier phases only ever threaded `task.assignedAgentId` implicitly via `task` itself. */
+  agentId: string;
   /** The rule `PolicyEngine.evaluate` matched for this same request, if any — reused here rather than re-evaluated (see docs/policy-model.md). */
   policyMatch?: Pick<PolicyRule, 'riskWeight' | 'riskFloor'>;
 }
 
 export interface RiskScoreResult {
   deterministicRiskScore: number;
-  /** Phase 10 (AI advisory risk scoring) — always `null` this phase. */
-  aiAdvisoryScore: null;
-  /** Equals `deterministicRiskScore` this phase (there is no AI advisory score yet to combine it with). */
+  /** Phase 10b: `AiAdvisoryClient.analyzeRisk`'s score (0-100) when a real advisory signal was available, `null` when it was not (unreachable/timed out/circuit open/zero-confidence fail-secure marker — see that class's doc comment). */
+  aiAdvisoryScore: number | null;
+  /** `max(deterministicRiskScore, aiAdvisoryScore ?? 0)` — see class doc comment for why this is the mechanism that lets AI only ever add restriction, never remove it. */
   finalRiskScore: number;
+  /** Deterministic and AI-attributed contributors, in the order applied. AI-derived codes are always prefixed `ai_advisory_*`, kept clearly distinct from deterministic ones — never blended into one anonymous list. */
   reasonCodes: string[];
 }
 
@@ -31,6 +35,22 @@ const DELEGATION_DEPTH_CAP = 30;
 const MUTATING_POINTS = 15;
 /** Additive contribution when the resolved `ToolAction.destructive` flag is `true` — on top of, not instead of, `MUTATING_POINTS` (every destructive action is mutating too, but the two flags are independent booleans on the schema, so both contribute independently). */
 const DESTRUCTIVE_POINTS = 25;
+/**
+ * Phase 10b: fixed additive contribution applied to `deterministicRiskScore`
+ * (not `aiAdvisoryScore`) when the requesting agent has an active,
+ * unexpired `AgentRiskFlag` row (set by `CredentialBrokerService` on a
+ * detected prompt-injection attempt — see docs/ai-security-model.md). A
+ * plain DB lookup, deliberately not another AI call — this is what makes a
+ * flagged agent's *subsequent* requests measurably higher-risk without
+ * ever trusting or re-running anything from the injected content itself
+ * (Section 72 — the actual security boundary stays deterministic task
+ * scope). Chosen to be large enough to visibly move a request from ALLOW
+ * toward `REQUIRE_APPROVAL` territory on its own for a moderately-risky
+ * action, without alone guaranteeing it for every action (it is not the
+ * full 100-point range) — see docs/ai-security-model.md for the worked
+ * example.
+ */
+const AGENT_RISK_FLAG_BUMP = 20;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -40,32 +60,41 @@ function clamp(value: number, min: number, max: number): number {
  * Sections 21-26's numeric (0-100) risk engine. `AuthorizationService`
  * calls `score` after `PolicyEngine.evaluate` (same request), immediately
  * before deciding `ALLOW` vs. `REQUIRE_APPROVAL` against `task.riskCeiling`
- * (Phase 5's field, unused until this phase). This phase's inputs are
- * necessarily limited this phase — since Phase 7b, `ToolRegistryService`
- * resolves `{ toolId, actionId }` against a real registered `ToolAction`
- * when one exists (`riskBaseScore`/`mutating`/`destructive` — real,
- * operator-declared per-action risk metadata, replacing the placeholder
- * keyword heuristic Phase 6 shipped and explicitly documented as
- * temporary — see git history for that deleted code). When no such
- * `ToolAction` is registered (an opaque `toolId`/`actionId` pair that
- * predates this phase's registry, or simply hasn't been registered yet —
- * still the overwhelming majority of Phase 5/6's own pre-existing tests),
- * this contributes nothing at all, rather than guessing — exactly like
- * `PolicyEngine`'s "no rule matched" case, "not registered" is a normal
- * outcome, never conflated with a failure. `finalRiskScore` equals
- * `deterministicRiskScore` this phase — `aiAdvisoryScore` (Phase 10) stays
- * `null`.
+ * (Phase 5's field). Since Phase 7b, `ToolRegistryService` resolves
+ * `{ toolId, actionId }` against a real registered `ToolAction` when one
+ * exists (`riskBaseScore`/`mutating`/`destructive`); when none is
+ * registered, this contributes nothing at all, rather than guessing —
+ * exactly like `PolicyEngine`'s "no rule matched" case, "not registered" is
+ * a normal outcome, never conflated with a failure.
+ *
+ * Since Phase 10b, two additional deterministic contributors feed
+ * `deterministicRiskScore` before it's clamped/floored: `AgentRiskFlag`
+ * (see `AGENT_RISK_FLAG_BUMP`'s doc comment), and — layered strictly on
+ * top, never blended into the deterministic sum itself —
+ * `AiAdvisoryClient.analyzeRisk`'s advisory `aiAdvisoryScore`.
+ * `finalRiskScore = max(deterministicRiskScore, aiAdvisoryScore ?? 0)`:
+ * this is the concrete mechanism satisfying the non-negotiable "AI can only
+ * ever add restriction, never remove it" invariant (Section 26) — AI can
+ * push a request's final score *up* past what the deterministic rules
+ * alone produced (e.g. into `REQUIRE_APPROVAL` territory), but can never
+ * pull it down below the deterministic floor, and a `manar-ai` outage
+ * (`aiAdvisoryScore` stays `null`) leaves `finalRiskScore` exactly equal to
+ * `deterministicRiskScore` — identical to this engine's behavior before
+ * Phase 10 existed (Section 80's mandatory "AI outage does not create
+ * fail-open authorization" invariant, extended to risk scoring).
  *
  * Every contributor is recorded in `reasonCodes`, in the order applied, so
  * a score is always explainable from the response alone — see
- * docs/policy-model.md for the full list of contributors and their exact
- * point values.
+ * docs/policy-model.md for the deterministic contributors and
+ * docs/ai-security-model.md for the AI-advisory combination rule and the
+ * `AgentRiskFlag` mechanism.
  */
 @Injectable()
 export class RiskEngine {
   constructor(
     private readonly tasksService: TasksService,
     private readonly toolRegistry: ToolRegistryService,
+    private readonly aiAdvisoryClient: AiAdvisoryClient,
   ) {}
 
   async score(
@@ -114,6 +143,19 @@ export class RiskEngine {
       }
     }
 
+    // Phase 10b: a simple DB lookup, never another AI call — see
+    // AGENT_RISK_FLAG_BUMP's doc comment.
+    const activeFlag = await tenantClient.agentRiskFlag.findFirst({
+      where: { agentId: input.agentId, expiresAt: { gt: new Date() } },
+      orderBy: { expiresAt: 'desc' },
+    });
+    if (activeFlag) {
+      sum += AGENT_RISK_FLAG_BUMP;
+      reasonCodes.push(
+        `agent_risk_flag:${activeFlag.reason}:${AGENT_RISK_FLAG_BUMP}`,
+      );
+    }
+
     if (input.policyMatch?.riskWeight != null) {
       sum += input.policyMatch.riskWeight;
       reasonCodes.push(`policy_risk_weight:${input.policyMatch.riskWeight}`);
@@ -132,10 +174,37 @@ export class RiskEngine {
       deterministicRiskScore = clamp(floored, MIN_SCORE, MAX_SCORE);
     }
 
+    // Phase 10b: AI advisory risk scoring — strictly additive, see class
+    // doc comment. Never re-derives anything steps above already decided;
+    // `null` (no advisory available, for any reason) leaves
+    // `finalRiskScore` untouched.
+    const advisory = await this.aiAdvisoryClient.analyzeRisk({
+      actionDescription: `Agent action: ${input.toolId}.${input.actionId} on resource "${input.resource}"`,
+      context: `taskId=${input.task.id} riskCeiling=${input.task.riskCeiling} delegationDepth=${ancestors.length} deterministicRiskScore=${deterministicRiskScore}`,
+    });
+
+    let aiAdvisoryScore: number | null = null;
+    if (advisory) {
+      aiAdvisoryScore = clamp(advisory.score, MIN_SCORE, MAX_SCORE);
+      reasonCodes.push(`ai_advisory_score:${aiAdvisoryScore}`);
+      reasonCodes.push(
+        `ai_advisory_recommended_action:${advisory.recommendedAction}`,
+      );
+      for (const signal of advisory.signals) {
+        reasonCodes.push(`ai_advisory_signal:${signal}`);
+      }
+    }
+
+    const finalRiskScore = clamp(
+      Math.max(deterministicRiskScore, aiAdvisoryScore ?? MIN_SCORE),
+      MIN_SCORE,
+      MAX_SCORE,
+    );
+
     return {
       deterministicRiskScore,
-      aiAdvisoryScore: null,
-      finalRiskScore: deterministicRiskScore,
+      aiAdvisoryScore,
+      finalRiskScore,
       reasonCodes,
     };
   }

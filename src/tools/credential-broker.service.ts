@@ -4,7 +4,11 @@ import { SECRET_PROVIDER } from '../database/secret-provider';
 import type { SecretProvider } from '../database/secret-provider';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
+import type { DlpAdvisory } from '../ai-advisory/ai-advisory-client.service';
+import { redactedToolResultPlaceholder } from './dlp-redaction.util';
 import {
+  DlpBlockedError,
   ToolActionNotFoundError,
   ToolDisabledError,
   ToolNotFoundError,
@@ -13,6 +17,30 @@ import { HttpToolAdapter } from './http-tool.adapter';
 import { McpToolAdapter } from './mcp-tool.adapter';
 import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
 import { ToolRegistryService } from './tool-registry.service';
+
+/**
+ * Phase 10b DLP-before-call checkpoint threshold (see docs/ai-security-model.md).
+ * `SEVERITY_HIGH`/`SEVERITY_CRITICAL` block; `SEVERITY_MEDIUM` and below do
+ * not. Chosen deliberately above `SEVERITY_MEDIUM` because manar-ai's own
+ * documented fail-secure behavior (see manar-ai's docs/ai-security-model.md,
+ * "Fail loudly, never fail open or fail silent") escalates *any* DLP result
+ * to at least `SEVERITY_MEDIUM` whenever its own internal AI classifier is
+ * unavailable — a `source: "system"` marker finding, not a real detection.
+ * Blocking on `MEDIUM` would mean manar-ai's own AI-backend outage (a
+ * separate concern from `AiAdvisoryClient`'s own reachability to manar-ai
+ * itself, which fails to `null` and never blocks at all — see that class's
+ * doc comment) could block clean, non-sensitive tool calls purely because
+ * its LLM backend was unreachable — the same "AI unavailability must not
+ * add restriction beyond the deterministic floor" principle this phase
+ * applies everywhere else. `HIGH`/`CRITICAL` are only ever reached by a
+ * genuine deterministic pattern match (manar-ai's regex layer, always-on,
+ * confidence-independent of its own AI backend) or a real, confident AI
+ * finding — never by the AI-unavailable marker alone.
+ */
+const DLP_BLOCKING_SEVERITIES = new Set(['SEVERITY_HIGH', 'SEVERITY_CRITICAL']);
+
+/** How long a detected prompt-injection attempt keeps the requesting agent's `AgentRiskFlag` active — see that model's doc comment and `RiskEngine`'s `AGENT_RISK_FLAG_BUMP`. Short and fixed: long enough to matter for an agent's next few requests, short enough that a stale flag doesn't linger indefinitely. */
+const PROMPT_INJECTION_RISK_FLAG_TTL_MS = 15 * 60 * 1000;
 
 export interface CredentialBrokerInvokeInput {
   /** Phase 9a: needed only to attribute audit events to the right tenant chain — `CredentialBrokerService` never used a raw tenant id before this (tenant isolation already comes from `tenantClient` itself). */
@@ -71,6 +99,7 @@ export class CredentialBrokerService {
     private readonly httpAdapter: HttpToolAdapter,
     private readonly mcpAdapter: McpToolAdapter,
     private readonly auditService: AuditService,
+    private readonly aiAdvisoryClient: AiAdvisoryClient,
   ) {}
 
   async invoke(
@@ -143,6 +172,41 @@ export class CredentialBrokerService {
       throw new ToolDisabledError(input.toolId);
     }
 
+    // Phase 10b DLP before-call checkpoint: scan outbound `params` before
+    // any tool contact is attempted. A severe finding blocks the call
+    // outright (never creates a ToolInvocation row -- mirrors
+    // AuthorizationService's own DENY, which the design spec explicitly
+    // asks this to mirror, not the "tool disabled" operational-failure
+    // shape above). `null` (AiAdvisoryClient unreachable/timed out/circuit
+    // open) never blocks -- see DLP_BLOCKING_SEVERITIES's doc comment and
+    // AiAdvisoryClient's own "never fail open, never fail closed toward
+    // the caller" contract.
+    const dlpBefore = await this.aiAdvisoryClient.analyzeDlp({
+      content: JSON.stringify(input.params ?? null),
+    });
+    if (dlpBefore && DLP_BLOCKING_SEVERITIES.has(dlpBefore.overallSeverity)) {
+      await this.auditService.recordSafely(tenantClient, input.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.DLP_BLOCKED,
+        actor: { type: 'agent', id: input.agentId },
+        data: {
+          taskId: input.taskId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          overallSeverity: dlpBefore.overallSeverity,
+          // Redacted metadata only -- never the raw matched value (Section
+          // 73, same rule Phase 9a's credential-secrecy test established
+          // for tool credentials).
+          findings: dlpBefore.findings.map((f) => ({
+            type: f.type,
+            source: f.source,
+            redactedPreview: f.redactedPreview,
+          })),
+        },
+      });
+      throw new DlpBlockedError();
+    }
+
     const startedAt = new Date();
     let result: ToolInvocationResult;
     try {
@@ -207,7 +271,119 @@ export class CredentialBrokerService {
       },
     });
 
+    if (result.success) {
+      result = await this.applyPostCallAdvisories(tenantClient, input, result);
+    }
+
     return result;
+  }
+
+  /**
+   * Phase 10b post-call advisories, run only for a *successful* tool call
+   * (see docs/ai-security-model.md). Two independent checks, both against
+   * the tool's own returned result, both advisory-only in the sense that
+   * neither can undo the already-completed call itself:
+   *
+   *   1. DLP after-call: any *real* finding on `result.data` (excluding
+   *      manar-ai's own `source: "system"` AI-unavailable status marker,
+   *      which is never a real match) -> the returned `data` is replaced
+   *      with `redactedToolResultPlaceholder(...)`
+   *      (whole-value redaction -- see that function's doc comment for why
+   *      precise substring splicing isn't possible from this contract) and
+   *      the full finding metadata (never the raw matched value) is
+   *      recorded via `AuditService.recordSafely`.
+   *   2. Prompt-injection advisory: only when `result.data` is itself a
+   *      string (a genuine text-ish result -- a structured object result
+   *      is DLP's concern, not this one). On detection, records a
+   *      `prompt_injection.detected` audit event and sets a short-lived
+   *      `AgentRiskFlag` for this agent (`RiskEngine` folds an active flag
+   *      into `deterministicRiskScore` for this agent's *subsequent*
+   *      requests -- see that class's `AGENT_RISK_FLAG_BUMP` doc comment).
+   *      Runs against the *original*, pre-redaction text -- detection is
+   *      analysis-only and never itself returned to any caller, so there
+   *      is no leak risk in analyzing the unredacted value here.
+   *
+   *   `null` from either `AiAdvisoryClient` call (unreachable/timed
+   *   out/circuit open) is a no-op for that check -- the result is
+   *   returned exactly as `CredentialBrokerService` returned it before
+   *   Phase 10b existed (Section 80's "AI outage does not create fail-open
+   *   authorization" invariant, applied here as "AI outage does not change
+   *   what's returned").
+   */
+  private async applyPostCallAdvisories(
+    tenantClient: TenantPrismaClient,
+    input: CredentialBrokerInvokeInput,
+    result: ToolInvocationResult,
+  ): Promise<ToolInvocationResult> {
+    const originalData = result.data;
+    let outcome = result;
+
+    const dlpAfter: DlpAdvisory | null = await this.aiAdvisoryClient.analyzeDlp(
+      { content: JSON.stringify(originalData ?? null) },
+    );
+    // `source: "system"` is manar-ai's own AI-backend-unavailable status
+    // marker, never a real match (see that field's doc comment on
+    // DlpFinding) -- redacting on that alone would mean manar-ai's own LLM
+    // outage redacts every clean tool result, the same "AI unavailability
+    // must not add restriction beyond the deterministic floor" bug the
+    // before-call SEVERITY_MEDIUM threshold decision (see
+    // DLP_BLOCKING_SEVERITIES) already had to account for.
+    const realFindings =
+      dlpAfter?.findings.filter((f) => f.source !== 'system') ?? [];
+    if (realFindings.length > 0) {
+      outcome = {
+        ...outcome,
+        data: redactedToolResultPlaceholder(realFindings),
+      };
+      await this.auditService.recordSafely(tenantClient, input.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.DLP_RESULT_REDACTED,
+        actor: { type: 'agent', id: input.agentId },
+        data: {
+          taskId: input.taskId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          overallSeverity: dlpAfter?.overallSeverity,
+          findings: realFindings.map((f) => ({
+            type: f.type,
+            source: f.source,
+            redactedPreview: f.redactedPreview,
+          })),
+        },
+      });
+    }
+
+    if (typeof originalData === 'string') {
+      const injection = await this.aiAdvisoryClient.analyzePromptInjection({
+        content: originalData,
+        source: 'tool_output',
+      });
+      if (injection && injection.detected) {
+        const reason = `prompt_injection_detected:${input.toolId}/${input.actionId}`;
+        await this.auditService.recordSafely(tenantClient, input.tenantId, {
+          eventType: AUDIT_EVENT_TYPES.PROMPT_INJECTION_DETECTED,
+          actor: { type: 'agent', id: input.agentId },
+          data: {
+            taskId: input.taskId,
+            toolId: input.toolId,
+            actionId: input.actionId,
+            resource: input.resource,
+            confidence: injection.confidence,
+            indicators: injection.indicators,
+            explanation: injection.explanation,
+          },
+        });
+        await tenantClient.agentRiskFlag.create({
+          data: {
+            agentId: input.agentId,
+            reason,
+            expiresAt: new Date(Date.now() + PROMPT_INJECTION_RISK_FLAG_TTL_MS),
+          },
+        });
+      }
+    }
+
+    return outcome;
   }
 
   private async recordInvocation(

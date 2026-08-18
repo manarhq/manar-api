@@ -32,6 +32,7 @@ import type { AuditService } from '../src/audit/audit.service';
 import { PolicyEngine } from '../src/policy/policy-engine.service';
 import { RiskEngine } from '../src/risk/risk-engine.service';
 import { ToolRegistryService } from '../src/tools/tool-registry.service';
+import type { AiAdvisoryClient } from '../src/ai-advisory/ai-advisory-client.service';
 import {
   assignRealmRole,
   createRealmUser,
@@ -650,14 +651,19 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     // scenario -- OpenFGA denies first (step 5), well before either would
     // run -- but AuthorizationService's constructor still needs real
     // instances, same as tasksServiceForBrokenClient above. RiskEngine's
-    // ToolRegistryService dependency (Phase 7b) is likewise never actually
-    // queried here for the same reason -- a real instance with no tenant
-    // client ever passed to it is enough to satisfy the constructor.
+    // ToolRegistryService/AiAdvisoryClient dependencies (Phase 7b/10b) are
+    // likewise never actually queried here for the same reason -- a real
+    // ToolRegistryService with no tenant client ever passed to it, and an
+    // unused AiAdvisoryClient stub, are enough to satisfy the constructor.
     const brokenAuthorizationService = new AuthorizationService(
       tasksServiceForBrokenClient,
       brokenOpenFga,
       new PolicyEngine(),
-      new RiskEngine(tasksServiceForBrokenClient, new ToolRegistryService()),
+      new RiskEngine(
+        tasksServiceForBrokenClient,
+        new ToolRegistryService(),
+        {} as unknown as AiAdvisoryClient,
+      ),
       {
         recordSafely: () => Promise.resolve(undefined),
       } as unknown as AuditService,

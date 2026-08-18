@@ -9,6 +9,7 @@ import { ApprovalsConfigSchema } from '../approvals/approvals.config';
 import { KafkaConfigSchema } from '../audit/kafka.config';
 import { OpenSearchConfigSchema } from '../audit/opensearch/opensearch.config';
 import { RedisConfigSchema } from '../audit/live/redis.config';
+import { AiAdvisoryConfigSchema } from '../ai-advisory/ai-advisory.config';
 
 /**
  * Application-level environment schema.
@@ -42,7 +43,8 @@ export const AppConfigSchema = z
   .extend(ApprovalsConfigSchema.shape)
   .extend(KafkaConfigSchema.shape)
   .extend(OpenSearchConfigSchema.shape)
-  .extend(RedisConfigSchema.shape);
+  .extend(RedisConfigSchema.shape)
+  .extend(AiAdvisoryConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 
