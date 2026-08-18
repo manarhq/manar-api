@@ -153,6 +153,11 @@ model Agent {
   /// phase too). See docs/authorization-model.md.
   assignedTasks Task[]
 
+  /// Phase 7b: every tool call this agent has actually made (or attempted)
+  /// through `CredentialBrokerService` — see `ToolInvocation`'s own doc
+  /// comment.
+  toolInvocations ToolInvocation[]
+
   @@map("agents")
 }
 
@@ -364,6 +369,10 @@ model Task {
   delegationsAsParent TaskDelegation[] @relation("DelegationParent")
   delegationAsChild   TaskDelegation?  @relation("DelegationChild")
 
+  /// Phase 7b: every tool call actually attempted under this task — see
+  /// `ToolInvocation`'s own doc comment.
+  toolInvocations ToolInvocation[]
+
   @@map("tasks")
 }
 
@@ -508,4 +517,185 @@ model PolicyVersion {
 
   @@unique([policyId, version])
   @@map("policy_versions")
+}
+
+/// Which wire protocol `ToolProtocolAdapter` implementation
+/// `CredentialBrokerService` dispatches a `Tool`'s invocations to (Phase
+/// 7b, Sections 33-35). `HTTP` -> `HttpToolAdapter` (a real outbound HTTP
+/// call to `Tool.baseEndpoint`). `MCP` -> `McpToolAdapter` (a real Model
+/// Context Protocol client, connecting to `Tool.baseEndpoint` as an MCP
+/// server URL) — both protocols go through the *identical*
+/// `CredentialBrokerService`/`AuthorizationService` pipeline; there is no
+/// separate, weaker path for MCP. See docs/tool-gateway.md and
+/// docs/mcp.md.
+enum ToolProtocol {
+  HTTP
+  MCP
+}
+
+/// A registered tool a task's grants may authorize an agent to call —
+/// Sections 33-35's first-class tool registry (there was none before this
+/// phase; `toolId`/`actionId` were opaque, caller-supplied strings
+/// throughout Phase 5/6 — see docs/authorization-model.md's "out of scope"
+/// note). `name` is unique per tenant database (Phase 2's per-tenant
+/// isolation model — see docs/tenant-isolation.md), and is what a Task's
+/// `allowedToolActions[].toolId`/`AuthorizeRequest.toolId` are expected to
+/// match against once resolved by `CredentialBrokerService` — OpenFGA/the
+/// policy engine still treat `toolId` as an opaque string for their own
+/// checks (unchanged this phase, see docs/authorization-model.md), this
+/// registry is what `POST /agent/v1/tools/invoke` resolves it against
+/// *after* that authorization decision already came back ALLOW.
+model Tool {
+  id          String  @id @default(uuid())
+  name        String  @unique
+  /// Free text (e.g. `SIEM`/`EDR`/`IAM`/`FIREWALL`) -- a category label
+  /// for human/audit readability only, never matched against by any
+  /// authorization or risk logic.
+  type        String
+  vendor      String?
+  description String?
+
+  /// Base URL (`HTTP` protocol) or MCP server URL (`MCP` protocol) this
+  /// tool's adapter connects to.
+  baseEndpoint String
+  protocol     ToolProtocol
+
+  /// A `SecretReferenceDescriptor` (`{ provider, reference }` -- reuses
+  /// Phase 2's `SecretProvider` interface, see
+  /// `src/database/secret-provider.ts`) naming where this tool's
+  /// credential actually lives. `CredentialBrokerService` resolves this
+  /// through whichever provider it names (`ENV` or `OPENBAO` this phase)
+  /// at invocation time -- the resolved credential value is never itself
+  /// stored here, logged, or returned to any caller.
+  credentialReference Json
+
+  /// A disabled tool fails every invocation attempt cleanly (Section
+  /// 35's explicit "disabled tool -> invocation fails even if
+  /// authorization would otherwise allow it" requirement) --
+  /// `CredentialBrokerService` checks this *after* `AuthorizationService`
+  /// has already ALLOWed, since tool enablement is an operational
+  /// concern, not an authorization decision.
+  enabled Boolean @default(true)
+
+  /// Free-form operator metadata (e.g. environment, owning team) -- never
+  /// interpreted by any code this phase.
+  metadata Json @default("{}")
+
+  createdAt DateTime @default(now())
+
+  actions      ToolAction[]
+  invocations  ToolInvocation[]
+
+  @@map("tools")
+}
+
+/// One invocable action on a `Tool` -- what `AuthorizeRequest.actionId`
+/// and `POST /agent/v1/tools/invoke`'s `actionId` both resolve against.
+/// `riskBaseScore`/`mutating`/`destructive` are the *real* per-action risk
+/// signal `RiskEngine.score` looks up starting this phase, replacing
+/// Phase 6's placeholder `actionId` keyword heuristic entirely (see
+/// docs/policy-model.md's now-superseded "destructive-keyword heuristic"
+/// section and `src/risk/risk-engine.service.ts`).
+model ToolAction {
+  id          String  @id @default(uuid())
+  toolId      String
+  tool        Tool    @relation(fields: [toolId], references: [id])
+  name        String
+  description String?
+
+  /// 0-100 -- this action's baseline risk contribution, looked up by
+  /// `RiskEngine.score` and added to its deterministic sum (see
+  /// docs/policy-model.md).
+  riskBaseScore Int
+
+  /// JSON Schema (plain, not a serialized Zod schema -- Zod schemas
+  /// aren't JSON-serializable; JSON Schema is the interoperable, storable
+  /// choice, and is what `HttpToolAdapter` validates
+  /// `params` against via `ajv` before ever dispatching a request -- see
+  /// docs/tool-gateway.md). Optional: a tool action with no meaningful
+  /// input (e.g. a zero-argument read) may omit it, in which case no
+  /// input validation is performed.
+  inputSchema  Json?
+  /// JSON Schema describing this action's expected result shape --
+  /// documentation/contract only this phase, never validated against
+  /// (there is no output-validation requirement in the design spec).
+  outputSchema Json?
+
+  /// Whether this action changes state on the target tool -- a real
+  /// `RiskEngine`/policy-authoring signal (unlike Phase 6's deleted
+  /// keyword heuristic, this is operator-declared truth, not guessed from
+  /// the action's name).
+  mutating Boolean @default(false)
+  /// Whether this action is hard/impossible to reverse (e.g.
+  /// `isolate_host`, `delete_user`) -- a stronger signal than `mutating`
+  /// alone; both feed `RiskEngine.score` independently (see that
+  /// service's doc comment for the exact point values).
+  destructive Boolean @default(false)
+  /// This action's own default stance on requiring human approval,
+  /// independent of anything `PolicyEngine`/`RiskEngine` decide --
+  /// carried in the schema for a future phase's policy-authoring
+  /// ergonomics (e.g. "pre-fill a new policy rule's effect from this");
+  /// not read by `RiskEngine`/`AuthorizationService` this phase (Phase
+  /// 6's `REQUIRE_APPROVAL` routing already comes from the policy/risk
+  /// pipeline, which stays the single source of truth for that decision
+  /// -- see docs/policy-model.md).
+  approvalDefault Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  invocations ToolInvocation[]
+
+  @@unique([toolId, name])
+  @@map("tool_actions")
+}
+
+/// Operational record of one attempted tool call (Section 35) --
+/// deliberately *not* the tamper-evident audit hash chain (that's Phase
+/// 9's scope, see `docs/tool-gateway.md`): just enough to show a call
+/// happened, what it targeted, and whether it succeeded, for operational
+/// visibility and debugging. Never stores the resolved credential, the
+/// raw request body, or the raw response body (any of which might carry
+/// secret material) -- `resource`/`status`/timestamps/`errorMessage` are
+/// shape/summary only, by construction (`CredentialBrokerService` never
+/// has a code path that writes anything else into this table -- see that
+/// service's own doc comment and the "credential never leaks" test).
+model ToolInvocation {
+  id String @id @default(uuid())
+
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id])
+
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id])
+
+  toolId String
+  tool   Tool   @relation(fields: [toolId], references: [id])
+
+  actionId String
+  action   ToolAction @relation(fields: [actionId], references: [id])
+
+  /// The resource string the invocation targeted (the same `resource`
+  /// value passed to `AuthorizationService.authorize`) -- an identifier,
+  /// never a full request/response payload.
+  resource String
+
+  status ToolInvocationStatus
+
+  startedAt   DateTime
+  completedAt DateTime?
+  /// Set only on `FAILURE` -- the adapter/broker's own error message
+  /// (e.g. "HTTP 503", "tool disabled"), never a raw response body that
+  /// might carry secret material.
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+
+  @@map("tool_invocations")
+}
+
+/// `ToolInvocation.status` -- Section 35 explicitly asks for exactly these
+/// two outcomes (an operational record, not a state machine).
+enum ToolInvocationStatus {
+  SUCCESS
+  FAILURE
 }

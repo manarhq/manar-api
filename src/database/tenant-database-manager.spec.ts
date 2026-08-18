@@ -44,6 +44,7 @@ function fakeConfigService(
     OPENBAO_PKI_INTERMEDIATE_PATH:
       process.env.OPENBAO_PKI_INTERMEDIATE_PATH ?? 'pki_int',
     OPENBAO_PKI_AGENT_ROLE: process.env.OPENBAO_PKI_AGENT_ROLE ?? 'manar-agent',
+    OPENBAO_KV_MOUNT_PATH: process.env.OPENBAO_KV_MOUNT_PATH ?? 'secret',
     AGENT_MTLS_PORT: 3443,
     AGENT_MTLS_SERVER_CERT_PATH:
       process.env.AGENT_MTLS_SERVER_CERT_PATH ??

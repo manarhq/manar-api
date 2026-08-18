@@ -147,14 +147,16 @@ deterministic contributors available now, each recorded as a
   length (reusing `TasksService.getAncestorChain` — Phase 5's own
   chain-walking logic, not re-derived), contributing `min(depth * 5, 30)`
   — deeper delegation, marginally higher baseline risk.
-- **Destructive-keyword heuristic** (`destructive_keyword:<match>`): a
-  crude, **explicitly temporary** regex over `actionId` for words like
-  `delete`, `disable`, `isolate`, `block`, `revoke`, `terminate`, `kill`,
-  `remove`, `destroy` — contributing 25 when matched. This is a
-  placeholder mutating/destructive signal standing in for Phase 7's real
-  `ToolAction.mutating`/`destructive` flags; it is deliberately crude
-  (string matching on an opaque, caller-supplied `actionId`, nothing
-  more) and is meant to be _deleted_, not extended, once Phase 7 ships.
+- **Real per-action risk metadata** (`tool_action_risk_base:<n>`,
+  `tool_action_mutating:<n>`, `tool_action_destructive:<n>`): **superseded
+  by Phase 7b** — the crude, explicitly-temporary destructive-keyword
+  heuristic this phase originally shipped (a regex over `actionId` for
+  words like `delete`/`isolate`/`terminate`/...) has been deleted
+  entirely, replaced by real lookups against a registered
+  `ToolAction.riskBaseScore`/`mutating`/`destructive` (Phase 7b's Tool
+  Registry — see docs/tool-gateway.md). When `{ toolId, actionId }` has no
+  registered `ToolAction` at all, this contributes nothing (never a
+  guess) — see `RiskEngine`'s own doc comment.
 - **Matched policy rule's own `riskWeight`/`riskFloor`**
   (`policy_risk_weight:<n>` / `policy_risk_floor:<n>`): if the request
   matched a policy rule carrying either, `riskWeight` is added to the sum
