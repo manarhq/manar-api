@@ -7,9 +7,10 @@ import { LoggingModule } from './logging/logging.module';
 import { CorrelationIdMiddleware } from './logging/correlation-id.middleware';
 import { LoggingInterceptor } from './logging/logging.interceptor';
 import { HealthModule } from './health/health.module';
+import { DatabaseModule } from './database/database.module';
 
 @Module({
-  imports: [AppConfigModule, LoggingModule, HealthModule],
+  imports: [AppConfigModule, LoggingModule, HealthModule, DatabaseModule],
   controllers: [AppController],
   providers: [
     AppService,
