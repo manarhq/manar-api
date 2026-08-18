@@ -6,9 +6,10 @@ import { AppConfigModule } from './config/config.module';
 import { LoggingModule } from './logging/logging.module';
 import { CorrelationIdMiddleware } from './logging/correlation-id.middleware';
 import { LoggingInterceptor } from './logging/logging.interceptor';
+import { HealthModule } from './health/health.module';
 
 @Module({
-  imports: [AppConfigModule, LoggingModule],
+  imports: [AppConfigModule, LoggingModule, HealthModule],
   controllers: [AppController],
   providers: [
     AppService,
