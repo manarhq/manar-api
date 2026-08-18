@@ -168,6 +168,11 @@ model Agent {
   approvalRequests    ApprovalRequest[]
   authorizationGrants AuthorizationGrant[]
 
+  /// Phase 10b: every short-lived elevated-risk flag set for this agent by
+  /// a detected prompt-injection attempt — see `AgentRiskFlag`'s own doc
+  /// comment.
+  riskFlags AgentRiskFlag[]
+
   @@map("agents")
 }
 
@@ -1068,4 +1073,47 @@ model AuditChainState {
   updatedAt DateTime @updatedAt
 
   @@map("audit_chain_state")
+}
+
+/// Phase 10b (AI Advisory Pipeline Integration): a short-lived,
+/// time-boxed elevated-risk flag for one agent, set by
+/// `CredentialBrokerService` when `AiAdvisoryClient.analyzePromptInjection`
+/// detects a prompt-injection attempt in a tool's returned result (see
+/// docs/ai-security-model.md). Deliberately minimal — `agentId`/`reason`/
+/// `expiresAt` only, NOT the full `BehaviorBaseline`/`BehaviorObservation`
+/// modeling system (a larger, later concern, out of scope this phase) — a
+/// row here means nothing more than "treat this agent's *subsequent*
+/// requests as somewhat riskier for a while," never a decision of its own:
+/// `RiskEngine.score` looks up whether an active (unexpired) row exists for
+/// the requesting agent via a plain DB query (never another AI call) and
+/// folds a small, fixed, documented bump into `deterministicRiskScore` when
+/// one does — see that class's own doc comment for the exact point value.
+/// The injected content itself is never trusted or executed by anything in
+/// this codebase regardless of this flag (Section 72 — the actual security
+/// boundary stays deterministic task scope; this is a secondary,
+/// defense-in-depth signal only).
+///
+/// Rows are never updated — a new detection always inserts a new row,
+/// never extends an existing one's `expiresAt` — and are never deleted by
+/// application code (an expired row is simply ignored by the `expiresAt`
+/// filter every reader uses; retention/cleanup of old rows, like
+/// `AuditEvent`'s, is out of scope this phase).
+model AgentRiskFlag {
+  id String @id @default(uuid())
+
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id])
+
+  /// Short, machine-readable summary of what triggered this flag (e.g.
+  /// `prompt_injection_detected:<toolId>/<actionId>`) — human/audit
+  /// readability only, never parsed by `RiskEngine`.
+  reason String
+
+  createdAt DateTime @default(now())
+  /// This flag stops contributing to `RiskEngine.score` once passed — see
+  /// model doc comment for the lookup semantics.
+  expiresAt DateTime
+
+  @@index([agentId, expiresAt])
+  @@map("agent_risk_flags")
 }

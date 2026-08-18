@@ -424,6 +424,7 @@ export class GrantService {
       actionId: approvalRequest.actionId,
       resource: approvalRequest.resource,
       task,
+      agentId: approvalRequest.agentId,
       policyMatch: policyResult.matchedRule,
     });
 

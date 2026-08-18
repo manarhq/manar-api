@@ -72,6 +72,11 @@ function fakeConfigService(
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:29092',
     KAFKA_CLIENT_ID: 'audit-chain-e2e-test',
     KAFKA_AUDIT_TOPIC: process.env.KAFKA_AUDIT_TOPIC ?? 'manar.audit-events',
+    AI_ADVISORY_GRPC_TARGET:
+      process.env.AI_ADVISORY_GRPC_TARGET ?? 'localhost:50051',
+    AI_ADVISORY_TIMEOUT_MS: 2000,
+    AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
+    AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
     ...overrides,
   };
   return {

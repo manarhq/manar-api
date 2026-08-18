@@ -264,6 +264,7 @@ export class AuthorizationService {
       actionId: request.actionId,
       resource: request.resource,
       task,
+      agentId: authenticatedAgentId,
       policyMatch: policyResult.matchedRule,
     });
 
