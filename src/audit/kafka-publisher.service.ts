@@ -40,8 +40,25 @@ export class KafkaPublisherService implements OnModuleInit, OnModuleDestroy {
     this.topic = this.configService.get('KAFKA_AUDIT_TOPIC', { infer: true });
   }
 
+  /**
+   * Best-effort connect at boot — deliberately never lets a Kafka outage
+   * fail the whole Nest application's startup (`NestFactory.create`/
+   * `createApplicationContext` would otherwise reject if any provider's
+   * `onModuleInit` throws). If this fails, `producer` simply stays
+   * unset and every subsequent `publish()` call retries connecting via
+   * `ensureConnected()` on its own — consistent with this class's overall
+   * posture that Kafka is a downstream notification channel, never
+   * something the rest of the application's ability to even start depends
+   * on.
+   */
   async onModuleInit(): Promise<void> {
-    await this.ensureConnected();
+    try {
+      await this.ensureConnected();
+    } catch (error) {
+      this.logger.warn(
+        `Could not connect to Kafka at startup (will retry lazily on first publish): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
