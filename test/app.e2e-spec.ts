@@ -5,9 +5,9 @@ import {
 } from '@nestjs/platform-fastify';
 import request from 'supertest';
 import { App } from 'supertest/types';
-import { AppModule } from './../src/app.module';
+import { AppModule } from '../src/app.module';
 
-describe('AppController (e2e)', () => {
+describe('AppModule (e2e)', () => {
   let app: NestFastifyApplication;
 
   beforeEach(async () => {
@@ -22,6 +22,10 @@ describe('AppController (e2e)', () => {
     await app.getHttpAdapter().getInstance().ready();
   });
 
+  afterEach(async () => {
+    await app.close();
+  });
+
   it('/ (GET)', () => {
     return request(app.getHttpServer() as App)
       .get('/')
@@ -29,7 +33,8 @@ describe('AppController (e2e)', () => {
       .expect('Hello World!');
   });
 
-  afterEach(async () => {
-    await app.close();
+  it('echoes a generated x-correlation-id header on every response', async () => {
+    const response = await request(app.getHttpServer()).get('/');
+    expect(response.headers['x-correlation-id']).toBeTruthy();
   });
 });
