@@ -325,6 +325,70 @@ deploy` — which loads `prisma/tenant.config.ts`, which imports
   hand-wire `ConfigService`/`ControlPrismaService`/`TenantDatabaseManager`
   construction, duplicating what `CliModule` already gives for free).
 
+## Phase 3: Human Authentication
+
+### keycloak (Docker image)
+
+- **Purpose**: Local dev human identity provider
+  (`deploy/docker-compose.yml`) — one realm per tenant, JWKS-based JWT
+  issuance for `JwtAuthGuard` to validate.
+- **Selected version**: `quay.io/keycloak/keycloak:26.7.1`
+- **License**: Apache-2.0
+- **Official docs consulted**: <https://www.keycloak.org/server/containers>
+  (current `start-dev` invocation and `KC_BOOTSTRAP_ADMIN_USERNAME`/
+  `KC_BOOTSTRAP_ADMIN_PASSWORD` env vars — Keycloak renamed these from the
+  older `KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD` in a prior major),
+  <https://www.keycloak.org/observability/health> (health endpoints moved
+  to a separate management port, 9000 by default, since Keycloak 26; must
+  be explicitly enabled via `KC_HEALTH_ENABLED=true`), and Quay.io's tags
+  API (`quay.io/api/v1/repository/keycloak/keycloak/tag/`) queried directly
+  to confirm the current stable release (26.7.1) rather than trusting a
+  possibly-stale web search summary, matching the Postgres image's own
+  Phase 2 precedent.
+- **Installation method**: `docker compose -f deploy/docker-compose.yml up`
+- **Why selected**: Explicitly named by the Phase 3 design spec (the
+  project's decided IdP, Section 12/67 of the master prompt). A pinned
+  patch version, not `latest`, for the same reproducibility reason Phase 2
+  pinned Postgres.
+- **Alternatives considered**: None — Keycloak was already the decided
+  identity provider; this phase only had to determine its current
+  container invocation.
+
+### jose
+
+- **Purpose**: Dynamic, per-issuer JWT verification against a realm's
+  JWKS endpoint (`src/auth/jwt-auth.guard.ts`,
+  `src/auth/jwks-cache.service.ts`) — `decodeJwt` (unverified `iss` read),
+  `createRemoteJWKSet` (cached remote key-set resolver), `jwtVerify`
+  (signature + expiry + issuer verification), and test-only token forging
+  (`SignJWT`, `generateKeyPair`) for the two scenarios that can't be
+  produced against a real Keycloak (`test/auth.e2e-spec.ts`).
+- **Selected version**: `^6.2.9`
+- **License**: MIT
+- **Official docs consulted**: <https://github.com/panva/jose> (`jwt/verify`,
+  `jwks/remote`, `jwt/decode` docs) — confirmed `createRemoteJWKSet`
+  supports exactly the "dynamic key resolution per issuer" shape this
+  guard needs (an allow-listed issuer resolved first, then a JWKS URL
+  built from server-side config, never from the token itself).
+- **Installation method**: `pnpm add jose`
+- **Why selected**: The standard, actively-maintained JWT/JOSE library for
+  Node with first-class remote-JWKS support; no framework lock-in (unlike
+  `passport-jwt` + `passport-jwt`'s static `jwksUri`-per-strategy model,
+  which assumes a single, fixed issuer — incompatible with this project's
+  realm-per-tenant, dynamic-issuer requirement).
+- **Alternatives considered**: `passport-jwt` + `jwks-rsa` (rejected — both
+  are built around a single statically-configured issuer/JWKS URI per
+  Passport strategy; making the issuer dynamic per-request would mean
+  fighting the library's own model rather than using it as intended);
+  `jsonwebtoken` + a hand-rolled JWKS fetcher (rejected — `jose` already
+  provides a well-tested, caching `createRemoteJWKSet` for exactly this).
+  Empirically confirmed `jose@6` (ESM-only per its `package.json`) loads
+  correctly via a plain CommonJS `require('jose')` under this project's
+  Node 24 runtime before adding it as a dependency — Node's `require(esm)`
+  support is stable as of Node 22.12+/23, so no build-time interop shim
+  was needed (unlike the `moduleFormat = "cjs"` workaround Phase 2 needed
+  for Prisma's generated client).
+
 ## Removed this phase
 
 - `@nestjs/platform-express`, `@types/express` — superseded by the

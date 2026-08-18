@@ -3,6 +3,10 @@
 This is `manar-api`'s implementation of the control-plane/tenant database
 split from Section 10 of the master prompt (Phase 2:
 `docs/superpowers/specs/2026-08-18-phase2-persistence-tenancy-design.md`).
+Phase 3 (Human Authentication, `docs/human-auth.md`) builds directly on top
+of this split — a tenant's Keycloak realm is provisioned alongside its
+database, and its issuer URL is the allow-list key `JwtAuthGuard` resolves
+a request's tenant identity from.
 
 ## The split
 
