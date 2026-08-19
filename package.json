@@ -16,8 +16,8 @@
     "worker": "nest start --entryFile worker.main",
     "worker:dev": "nest start --watch --entryFile worker.main",
     "worker:prod": "node dist/worker.main",
-    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "typecheck": "tsc --noEmit && pnpm --filter @manar/sdk-node typecheck && pnpm --filter @manar-ai/grpc-client typecheck",
+    "lint": "eslint \"{src,apps,libs,test,scripts}/**/*.ts\" --fix",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json && pnpm --filter @manar/sdk-node typecheck && pnpm --filter @manar-ai/grpc-client typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
@@ -32,7 +32,8 @@
     "db:generate": "prisma generate --schema prisma/control.prisma --config prisma/control.config.ts && prisma generate --schema prisma/tenant.prisma --config prisma/tenant.config.ts",
     "db:migrate:control": "prisma migrate dev --schema prisma/control.prisma --config prisma/control.config.ts",
     "db:migrate:control:deploy": "prisma migrate deploy --schema prisma/control.prisma --config prisma/control.config.ts",
-    "manar": "nest build && node dist/cli.js"
+    "manar": "nest build && node dist/cli.js",
+    "demo:agent": "ts-node --project scripts/tsconfig.json -r dotenv/config scripts/demo-agent.ts"
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.10.0",

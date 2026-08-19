@@ -26,5 +26,10 @@
   // package.json/tsconfig/dependencies (see that directory) — excluded here
   // so the root `tsc` program doesn't merge two independently-versioned
   // packages into one compilation. `pnpm typecheck` (package.json) runs both.
-  "exclude": ["node_modules", "packages"]
+  //
+  // scripts/ (Phase 13's `demo-agent.ts`) is a standalone CommonJS script
+  // run via `ts-node` against its own `scripts/tsconfig.json` (plain
+  // Node module resolution, no Nest decorators) — excluded here for the
+  // same reason; `pnpm typecheck` runs that one too.
+  "exclude": ["node_modules", "packages", "scripts"]
 }
