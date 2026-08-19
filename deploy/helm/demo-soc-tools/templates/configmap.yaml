@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "demo-soc-tools.fullname" . }}-config
+  labels:
+    {{- include "demo-soc-tools.labels" . | nindent 4 }}
+data:
+  PORT: {{ .Values.service.port | quote }}
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

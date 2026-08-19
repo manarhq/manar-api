@@ -1,0 +1,16 @@
+manar-api ({{ .Chart.Name }} {{ .Chart.Version }}) has been rendered/installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Human-facing REST API:
+  {{ include "manar-api.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.httpPort }}
+
+Agent-facing mTLS listener (client cert required):
+  {{ include "manar-api.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.agentMtlsPort }}
+
+Before this chart is actually deployed anywhere (out of scope for this
+phase — see docs/kubernetes.md):
+  1. Populate the "{{ include "manar-api.secretName" . }}" and
+     "{{ include "manar-api.agentMtlsCertsSecretName" . }}" Secrets with
+     real values (never via a committed values file).
+  2. Point image.repository/image.tag at a real built+scanned image.
+  3. Confirm every Service name in networkPolicy.egressTargets
+     (values.yaml) resolves in the target namespace.

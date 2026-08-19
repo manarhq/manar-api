@@ -1,0 +1,21 @@
+apiVersion: v2
+name: manar-api-worker
+description: >-
+  Manar's Temporal worker process (src/worker.main.ts) — runs
+  ApprovalWorkflow and its Activities. Same build artifact as the
+  manar-api HTTP app (../../../Dockerfile's `worker` stage, a `CMD`-only
+  variant of `runtime`), deployed as its own Deployment so it scales,
+  restarts, and fails independently of the HTTP app (Section 28). See
+  ../../../docs/approvals.md and ../../../docs/kubernetes.md.
+type: application
+version: 0.1.0
+appVersion: '0.0.1'
+keywords:
+  - manar
+  - temporal
+  - worker
+home: https://github.com/manar/manar-api
+sources:
+  - https://github.com/manar/manar-api
+maintainers:
+  - name: Manar Platform Team

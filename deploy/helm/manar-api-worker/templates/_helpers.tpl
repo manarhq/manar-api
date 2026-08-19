@@ -1,0 +1,76 @@
+{{/*
+Expand the name of the chart.
+*/}}
+{{- define "manar-api-worker.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create a default fully qualified app name.
+We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
+If release name contains chart name it will be used as a full name.
+*/}}
+{{- define "manar-api-worker.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Create chart name and version as used by the chart label.
+*/}}
+{{- define "manar-api-worker.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Common labels
+*/}}
+{{- define "manar-api-worker.labels" -}}
+helm.sh/chart: {{ include "manar-api-worker.chart" . }}
+{{ include "manar-api-worker.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+Selector labels
+*/}}
+{{- define "manar-api-worker.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "manar-api-worker.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "manar-api-worker.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "manar-api-worker.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Name of the credentials Secret.
+*/}}
+{{- define "manar-api-worker.secretName" -}}
+{{- default (printf "%s-secrets" (include "manar-api-worker.fullname" .)) .Values.secrets.name }}
+{{- end }}
+
+{{/*
+Name of the (unused-by-worker, structurally-required) agent-mTLS Secret.
+*/}}
+{{- define "manar-api-worker.agentMtlsCertsSecretName" -}}
+{{- default (printf "%s-agent-mtls-certs" (include "manar-api-worker.fullname" .)) .Values.agentMtls.certs.name }}
+{{- end }}
