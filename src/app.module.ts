@@ -23,6 +23,10 @@ import { AuditIndexerModule } from './audit/opensearch/audit-indexer.module';
 import { LiveEventsHttpModule } from './audit/live/live-events-http.module';
 import { EvidenceHttpModule } from './evidence/evidence-http.module';
 import { KillSwitchesHttpModule } from './kill-switches/kill-switches-http.module';
+import { RateLimitModule } from './rate-limit/rate-limit.module';
+import { WebhooksHttpModule } from './webhooks/webhooks-http.module';
+import { WebhookDeliveryConsumerModule } from './webhooks/webhook-delivery-consumer.module';
+import { IdempotencyModule } from './idempotency/idempotency.module';
 
 @Module({
   imports: [
@@ -45,6 +49,10 @@ import { KillSwitchesHttpModule } from './kill-switches/kill-switches-http.modul
     LiveEventsHttpModule,
     EvidenceHttpModule,
     KillSwitchesHttpModule,
+    RateLimitModule,
+    WebhooksHttpModule,
+    WebhookDeliveryConsumerModule,
+    IdempotencyModule,
   ],
   controllers: [AppController],
   providers: [

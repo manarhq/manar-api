@@ -13,6 +13,8 @@ import {
 } from '@manar-ai/grpc-client';
 import type { AppConfig } from '../config/env.validation';
 import { getCorrelationId } from '../logging/correlation-id.store';
+import { ControlPrismaService } from '../database/control-prisma.service';
+import { isExternalAiProvider } from './ai-advisory.config';
 
 export interface RiskAdvisory {
   score: number;
@@ -93,11 +95,15 @@ export class AiAdvisoryClient implements OnModuleDestroy {
   private readonly timeoutMs: number;
   private readonly circuitThreshold: number;
   private readonly circuitCooldownMs: number;
+  private readonly provider: 'anthropic' | 'ollama' | 'vllm';
 
   private consecutiveFailures = 0;
   private circuitOpenUntil: number | null = null;
 
-  constructor(configService: ConfigService<AppConfig, true>) {
+  constructor(
+    configService: ConfigService<AppConfig, true>,
+    private readonly control: ControlPrismaService,
+  ) {
     const target = configService.get('AI_ADVISORY_GRPC_TARGET', {
       infer: true,
     });
@@ -112,6 +118,9 @@ export class AiAdvisoryClient implements OnModuleDestroy {
       'AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS',
       { infer: true },
     );
+    this.provider = configService.get('AI_ADVISORY_PROVIDER', {
+      infer: true,
+    });
     // Plaintext, matching manar-ai's own deliberate Phase 10a scope call
     // (see docs/ai-security-model.md's "mTLS status" section) — both sides
     // of this contract agree mTLS is required before any real cross-network
@@ -130,7 +139,12 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     actionDescription: string;
     context: string;
     correlationId?: string;
+    /** Phase 12a (Section 54): the requesting tenant — required so the data-residency gate below can consult its `allowExternalAi` flag before this call is allowed to reach an external provider. */
+    tenantId: string;
   }): Promise<RiskAdvisory | null> {
+    if (!(await this.residencyAllows(input.tenantId, 'AnalyzeRisk'))) {
+      return null;
+    }
     const result = await this.call('AnalyzeRisk', () =>
       this.promisify<RiskAnalysisResult>((deadline, callback) =>
         this.client.analyzeRisk(
@@ -164,7 +178,14 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     content: string;
     source: string;
     correlationId?: string;
+    /** Phase 12a (Section 54) — see `analyzeRisk`'s identical parameter doc comment. */
+    tenantId: string;
   }): Promise<PromptInjectionAdvisory | null> {
+    if (
+      !(await this.residencyAllows(input.tenantId, 'AnalyzePromptInjection'))
+    ) {
+      return null;
+    }
     const result = await this.call('AnalyzePromptInjection', () =>
       this.promisify<PromptInjectionAnalysisResult>((deadline, callback) =>
         this.client.analyzePromptInjection(
@@ -192,7 +213,12 @@ export class AiAdvisoryClient implements OnModuleDestroy {
   async analyzeDlp(input: {
     content: string;
     correlationId?: string;
+    /** Phase 12a (Section 54) — see `analyzeRisk`'s identical parameter doc comment. */
+    tenantId: string;
   }): Promise<DlpAdvisory | null> {
+    if (!(await this.residencyAllows(input.tenantId, 'AnalyzeDlp'))) {
+      return null;
+    }
     const result = await this.call('AnalyzeDlp', () =>
       this.promisify<DlpAnalysisResult>((deadline, callback) =>
         this.client.analyzeDlp(
@@ -220,6 +246,65 @@ export class AiAdvisoryClient implements OnModuleDestroy {
 
   private resolveCorrelationId(): string {
     return getCorrelationId() ?? randomUUID();
+  }
+
+  /**
+   * Phase 12a (Section 54, data residency enforcement) — the fix for a
+   * real, previously-unenforced gap: Phase 2 gave every `Tenant` an
+   * `allowExternalAi` flag (default `false`, the safe default) but nothing
+   * ever checked it before this phase. Runs *before* the circuit-breaker
+   * gate in `call()` (and before any RPC is even attempted) so a
+   * residency block never counts as a "failure" toward the circuit
+   * breaker's consecutive-failure count — this is a policy decision, not
+   * an outage.
+   *
+   * `AI_ADVISORY_PROVIDER` (this side's own declaration of which provider
+   * `manar-ai` is currently configured to use — see that config field's
+   * doc comment for why `manar-api` can't ask `manar-ai` this over gRPC)
+   * short-circuits to "allowed" for any self-hosted provider
+   * (`ollama`/`vllm`) without even reading the tenant row — residency
+   * only matters once a call could actually leave this deployment's own
+   * infrastructure.
+   *
+   * Fails **closed**: a tenant lookup failure (unexpected control-DB
+   * error, unknown tenant id) is treated as "not allowed," never as
+   * "allowed by default" — this is a data-residency *restriction*, and an
+   * inability to confirm a tenant opted in must never silently fall back
+   * to permissive behavior.
+   *
+   * On a block, this returns `false` and every caller (`analyzeRisk`/
+   * `analyzePromptInjection`/`analyzeDlp`) returns `null` immediately —
+   * the *exact same* "no AI signal available" outcome Phase 10b already
+   * established for a `manar-ai` outage (see class doc comment's
+   * "Never throws" section). This is a deliberate reuse, not a new
+   * response shape: every existing caller (`RiskEngine.score`,
+   * `CredentialBrokerService`'s DLP/prompt-injection checkpoints) already
+   * treats `null` as "proceed using only the deterministic pipeline,"
+   * which is exactly the correct behavior here too.
+   */
+  private async residencyAllows(
+    tenantId: string,
+    rpcName: string,
+  ): Promise<boolean> {
+    if (!isExternalAiProvider(this.provider)) return true;
+
+    try {
+      const tenant = await this.control.tenant.findUnique({
+        where: { id: tenantId },
+        select: { allowExternalAi: true },
+      });
+      if (tenant?.allowExternalAi === true) return true;
+
+      this.logger.log(
+        `Skipping manar-ai ${rpcName} for tenant "${tenantId}": provider "${this.provider}" is external and this tenant's allowExternalAi is not true — no RPC attempted (Section 54 data residency enforcement).`,
+      );
+      return false;
+    } catch (error) {
+      this.logger.warn(
+        `Could not resolve tenant "${tenantId}"'s allowExternalAi flag before an external-provider AI call — failing closed (treating as disallowed): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
   }
 
   /**

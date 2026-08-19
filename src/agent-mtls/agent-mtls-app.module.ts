@@ -16,6 +16,7 @@ import { TemporalModule } from '../temporal/temporal.module';
 import { AgentApprovalsModule } from '../approvals/agent-approvals.module';
 import { AuditModule } from '../audit/audit.module';
 import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
+import { AgentRateLimitModule } from '../rate-limit/agent-rate-limit.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
@@ -59,6 +60,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     OpenBaoModule,
     AuditModule,
     KillSwitchesModule,
+    AgentRateLimitModule,
     AgentMtlsGuardModule,
     AgentsModule,
     AuthorizationModule,

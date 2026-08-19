@@ -444,6 +444,7 @@ export class GrantService {
     }
 
     const riskResult = await this.riskEngine.score(tenantClient, {
+      tenantId,
       toolId: approvalRequest.toolId,
       actionId: approvalRequest.actionId,
       resource: approvalRequest.resource,

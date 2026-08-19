@@ -11,6 +11,7 @@ import { AgentMtlsAppModule } from './agent-mtls/agent-mtls-app.module';
 import { validate } from './config/env.validation';
 import type { AppConfig } from './config/env.validation';
 import { setupOpenApiDocs } from './openapi/setup-openapi-docs';
+import { setupCors, setupHelmet } from './security/setup-security';
 
 async function bootstrap(): Promise<void> {
   // Validated once, directly against process.env, before either Nest
@@ -30,6 +31,8 @@ async function bootstrap(): Promise<void> {
 
   const configService = app.get(ConfigService<AppConfig, true>);
   const port = configService.get('PORT', { infer: true });
+  setupHelmet(app);
+  setupCors(app, configService);
   setupOpenApiDocs(app, configService);
   await app.listen(port, '0.0.0.0');
 
@@ -53,6 +56,7 @@ async function bootstrap(): Promise<void> {
     { bufferLogs: true },
   );
   agentMtlsApp.useLogger(agentMtlsApp.get(WINSTON_MODULE_NEST_PROVIDER));
+  setupHelmet(agentMtlsApp);
   await agentMtlsApp.listen(bootstrapConfig.AGENT_MTLS_PORT, '0.0.0.0');
 }
 

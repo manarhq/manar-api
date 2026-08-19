@@ -86,6 +86,9 @@ model UserProfile {
   killSwitchActivations   KillSwitch[] @relation("KillSwitchActivations")
   killSwitchDeactivations KillSwitch[] @relation("KillSwitchDeactivations")
 
+  /// Phase 12a: `WebhookEndpoint`s this user registered — see that model's doc comment.
+  createdWebhookEndpoints WebhookEndpoint[] @relation("WebhookEndpointCreations")
+
   @@map("user_profiles")
 }
 
@@ -1226,4 +1229,91 @@ model KillSwitch {
   /// for this exact scope+target right now."
   @@index([scope, targetId, active])
   @@map("kill_switches")
+}
+
+/// Phase 12a (Webhooks, Section 51). One registered subscriber URL per row
+/// — an admin-managed configuration object, not itself part of the audit
+/// hash chain (Phase 9a's `AuditEvent` remains the tamper-evident record;
+/// this is a delivery *subscription*). See docs/security.md's webhook
+/// section for the HMAC signing scheme every delivery uses.
+model WebhookEndpoint {
+  id String @id @default(uuid())
+
+  /// The receiver URL. Validated by the shared SSRF guard
+  /// (`assertSafeOutboundUrl`, `src/common/ssrf/url-safety.ts`) both at
+  /// registration time (`WebhookRegistryService.create`) AND re-validated
+  /// at delivery time (`WebhookDeliveryService`) — the same
+  /// registration-time-is-not-enough posture `HttpToolAdapter`/
+  /// `McpToolAdapter` now also apply to `Tool.baseEndpoint`.
+  url String
+
+  /// A `SecretReferenceDescriptor` (`{ provider, reference }` — the exact
+  /// same shape `Tool.credentialReference` already uses, see
+  /// `src/database/secret-provider.ts`) naming where this endpoint's HMAC
+  /// signing secret actually lives — never plaintext in this column.
+  /// `WebhookRegistryService.create` generates a random secret and writes
+  /// it via `OpenBaoKvClient.writeSecret` itself (there's no external
+  /// system to pre-provision this the way a `Tool`'s credential is —
+  /// registering a webhook is what *creates* the secret in the first
+  /// place), then stores only this pointer.
+  secretReference Json
+
+  /// Values from Phase 9a's real event-type catalog
+  /// (`AUDIT_EVENT_TYPES`, `src/audit/audit-event-types.ts`) — this
+  /// endpoint's `WebhookDeliveryConsumerService` only ever POSTs an event
+  /// whose `eventType` is present here.
+  subscribedEventTypes String[]
+
+  enabled Boolean @default(true)
+
+  createdBy String
+  creator   UserProfile @relation("WebhookEndpointCreations", fields: [createdBy], references: [id])
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@map("webhook_endpoints")
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+/// One row per (endpoint, event) delivery attempt history —
+/// `WebhookDeliveryConsumerService` creates it (status `PENDING`) the
+/// moment a subscribed event is consumed off Kafka, then
+/// `WebhookDeliveryWorkflow`'s Activities update it in place as attempts
+/// happen, ending in `SUCCESS` or (once Temporal's own retry policy is
+/// exhausted) `FAILED`. `@@unique([webhookEndpointId, eventId])` is this
+/// model's own idempotency: Kafka's at-least-once delivery redelivering the
+/// same event must never create a second delivery row/second Temporal
+/// workflow for it (mirrors `AuditIndexerService`'s "upsert by eventId,
+/// never blindly append" contract for the same underlying reason).
+model WebhookDelivery {
+  id String @id @default(uuid())
+
+  webhookEndpointId String
+  webhookEndpoint   WebhookEndpoint @relation(fields: [webhookEndpointId], references: [id])
+
+  /// The `AuditEvent.id` (== the Kafka envelope's `eventId`) being
+  /// delivered.
+  eventId   String
+  eventType String
+
+  status         WebhookDeliveryStatus @default(PENDING)
+  attempts       Int                   @default(0)
+  lastAttemptAt  DateTime?
+  /// The receiver's last HTTP response status code, or `null` before the
+  /// first attempt or when an attempt never reached the receiver at all
+  /// (DNS/connection/timeout failure).
+  responseStatus Int?
+
+  createdAt DateTime @default(now())
+
+  @@unique([webhookEndpointId, eventId])
+  @@index([webhookEndpointId])
+  @@map("webhook_deliveries")
 }

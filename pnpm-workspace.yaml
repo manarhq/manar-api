@@ -12,6 +12,17 @@
 packages:
   - 'packages/*'
 
+# Phase 12a (App Hardening & Webhooks): @fastify/helmet's own fastify
+# peer dependency would otherwise resolve to a separate, slightly older
+# fastify version than this repo's own pin (^5.12.0), creating two
+# structurally-incompatible `FastifyInstance` types in the dependency tree
+# and breaking `app.register(helmet, ...)`'s type-check even though both
+# versions are semver-compatible at runtime. Pinning the whole tree to one
+# fastify resolution is the standard fix for this class of pnpm duplicate-
+# peer-version issue.
+overrides:
+  fastify: ^5.12.0
+
 allowBuilds:
   '@confluentinc/kafka-javascript': true
   '@prisma/engines': true

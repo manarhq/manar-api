@@ -292,6 +292,7 @@ export class AuthorizationService {
     // the matched policy rule itself asking for approval routes this
     // request to REQUIRE_APPROVAL instead of ALLOW.
     const riskResult = await this.riskEngine.score(tenantClient, {
+      tenantId,
       toolId: request.toolId,
       actionId: request.actionId,
       resource: request.resource,

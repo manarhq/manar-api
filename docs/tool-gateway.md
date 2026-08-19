@@ -345,3 +345,20 @@ call sites that construct it directly were updated to pass one).
 - Rate limiting / retry-with-backoff frameworks beyond the simple policy
   described above.
 - A human-facing `Tool`/`ToolAction` registration API.
+
+## Phase 12a follow-up: SSRF protection on `Tool.baseEndpoint`
+
+**Done**: `HttpToolAdapter`/`McpToolAdapter` now call the shared
+`assertSafeOutboundUrl` validator (`src/common/ssrf/url-safety.ts`)
+immediately before every real outbound call, rejecting private/loopback/
+link-local/metadata-service addresses, re-validated fresh on every
+invocation (never cached, so DNS rebinding after a tool was first
+registered is still caught). Since this phase, there is still no
+human-facing `Tool` registration API (the "out of scope" note above is
+unchanged), so this is necessarily a call-time-only check for tools — a
+future registration API must call the same validator at creation time
+too, mirroring what `WebhookRegistryService.create` already does for
+webhooks. See `docs/security.md`'s SSRF section (including
+`SSRF_ALLOWED_HOSTS`, the operator-controlled exception this product's
+real on-prem-tool-integration purpose requires) and
+`docs/threat-model.md`'s T1/T2 for the full reasoning.

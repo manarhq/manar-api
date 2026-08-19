@@ -162,6 +162,7 @@ describe('RiskEngine', () => {
         resource: 'anything',
         task,
         agentId: 'agent-1',
+        tenantId: 'tenant-1',
       },
     );
     expect(result.deterministicRiskScore).toBe(10);
@@ -185,6 +186,7 @@ describe('RiskEngine', () => {
       resource: 'anything',
       task: grandchild,
       agentId: 'agent-1',
+      tenantId: 'tenant-1',
     });
     // baseline 10 + depth(2 ancestors * 5) = 20
     expect(result.deterministicRiskScore).toBe(20);
@@ -202,6 +204,7 @@ describe('RiskEngine', () => {
         resource: 'host-1',
         task,
         agentId: 'agent-1',
+        tenantId: 'tenant-1',
       },
     );
     expect(result.deterministicRiskScore).toBe(10);
@@ -224,6 +227,7 @@ describe('RiskEngine', () => {
       resource: 'host-1',
       task,
       agentId: 'agent-1',
+      tenantId: 'tenant-1',
     });
     // baseline 10 + riskBaseScore 30 = 40
     expect(result.deterministicRiskScore).toBe(40);
@@ -252,6 +256,7 @@ describe('RiskEngine', () => {
       resource: 'host-1',
       task,
       agentId: 'agent-1',
+      tenantId: 'tenant-1',
     });
     // baseline 10 + riskBaseScore 20 + mutating 15 + destructive 25 = 70
     expect(result.deterministicRiskScore).toBe(70);
@@ -271,6 +276,7 @@ describe('RiskEngine', () => {
         resource: 'role-1',
         task,
         agentId: 'agent-1',
+        tenantId: 'tenant-1',
         policyMatch: { riskWeight: 40 },
       },
     );
@@ -289,6 +295,7 @@ describe('RiskEngine', () => {
         resource: 'host-1',
         task,
         agentId: 'agent-1',
+        tenantId: 'tenant-1',
         policyMatch: { riskFloor: 90 },
       },
     );
@@ -308,6 +315,7 @@ describe('RiskEngine', () => {
         resource: '*',
         task: deep,
         agentId: 'agent-1',
+        tenantId: 'tenant-1',
         policyMatch: { riskWeight: 100 },
       },
     );
@@ -333,6 +341,7 @@ describe('RiskEngine', () => {
       resource: 'anything',
       task,
       agentId: 'agent-1',
+      tenantId: 'tenant-1',
     });
     // baseline 10 + agent risk flag bump 20 = 30
     expect(result.deterministicRiskScore).toBe(30);
@@ -362,6 +371,7 @@ describe('RiskEngine', () => {
       resource: 'anything',
       task,
       agentId: 'agent-1',
+      tenantId: 'tenant-1',
     });
     expect(result.deterministicRiskScore).toBe(10);
   });
@@ -385,6 +395,7 @@ describe('RiskEngine', () => {
       resource: 'anything',
       task,
       agentId: 'agent-1',
+      tenantId: 'tenant-1',
     });
     expect(result.deterministicRiskScore).toBe(10);
   });
@@ -407,6 +418,7 @@ describe('RiskEngine', () => {
         resource: 'anything',
         task,
         agentId: 'agent-1',
+        tenantId: 'tenant-1',
       },
     );
     expect(result.deterministicRiskScore).toBe(10);
@@ -447,6 +459,7 @@ describe('RiskEngine', () => {
       resource: 'host-1',
       task,
       agentId: 'agent-1',
+      tenantId: 'tenant-1',
     });
     // baseline 10 + riskBaseScore 20 + mutating 15 + destructive 25 = 70
     expect(result.deterministicRiskScore).toBe(70);

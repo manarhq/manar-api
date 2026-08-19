@@ -9,8 +9,10 @@ import { ApprovalsModule } from '../approvals/approvals.module';
 import { AuditModule } from '../audit/audit.module';
 import { AuditRetentionModule } from '../audit/retention/audit-retention.module';
 import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
 import { ApprovalActivitiesFactory } from './activities/approval.activities';
 import { AuditRetentionActivitiesFactory } from './activities/audit-retention.activities';
+import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.activities';
 
 /**
  * Root module for the separate Temporal worker process
@@ -40,8 +42,17 @@ import { AuditRetentionActivitiesFactory } from './activities/audit-retention.ac
     RiskModule,
     ApprovalsModule,
     AuditRetentionModule,
+    WebhooksModule,
   ],
-  providers: [ApprovalActivitiesFactory, AuditRetentionActivitiesFactory],
-  exports: [ApprovalActivitiesFactory, AuditRetentionActivitiesFactory],
+  providers: [
+    ApprovalActivitiesFactory,
+    AuditRetentionActivitiesFactory,
+    WebhookDeliveryActivitiesFactory,
+  ],
+  exports: [
+    ApprovalActivitiesFactory,
+    AuditRetentionActivitiesFactory,
+    WebhookDeliveryActivitiesFactory,
+  ],
 })
 export class WorkerAppModule {}

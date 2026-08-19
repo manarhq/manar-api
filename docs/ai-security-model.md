@@ -238,3 +238,18 @@ model output the same way manar-ai's own `tests/grpc/test_analysis_service.py`
 uses a `FakeProvider` to keep its gRPC-transport tests deterministic and
 fast. See `test/ai-advisory.e2e-spec.ts` for exactly which scenarios use
 the real `manar-ai` container versus this fake server, and why.
+
+## Phase 12a follow-up: data residency enforcement (Section 54)
+
+**Done**: this document's own architecture never checked `Tenant.allowExternalAi`
+before this phase — a real, previously-open gap. `AiAdvisoryClient` now
+consults it (`residencyAllows`, gated on `AI_ADVISORY_PROVIDER` actually
+being external) before every RPC, reusing the exact same `null`
+"no AI signal" fail-safe outcome this document already establishes for a
+`manar-ai` outage — a residency block is just a different _reason_ for the
+same outcome every existing caller already handles correctly. See
+`docs/security.md`'s data residency section for the full mechanism and
+`docs/threat-model.md`'s T10 for the threat this closes (and what it
+deliberately still leaves open: `allowOutboundTelemetry`/`allowCloudStorage`
+remain unenforced, since no telemetry-emitting or cloud-storage-writing
+code path exists yet to enforce them against).

@@ -340,7 +340,13 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
     const configService = {
       get: (key: string) => (values as Record<string, unknown>)[key],
     } as unknown as ConfigService<AppConfig, true>;
-    return new AiAdvisoryClient(configService);
+    // Phase 12a: `AI_ADVISORY_PROVIDER` is left `undefined` above (never
+    // 'anthropic'), so `AiAdvisoryClient`'s data-residency gate always
+    // short-circuits to "allowed" without ever dereferencing `control` --
+    // the real, shared `ControlPrismaService` is passed here anyway since
+    // it's already available in this file's outer scope by the time any
+    // caller of this helper runs.
+    return new AiAdvisoryClient(configService, control);
   }
 
   /**

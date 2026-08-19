@@ -1,6 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { AppConfig } from '../config/env.validation';
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+} from '../common/ssrf/url-safety';
+import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
 import { validateAgainstSchema } from './json-schema-validator.util';
 import type {
   ToolInvocationResult,
@@ -46,6 +53,13 @@ const MCP_REQUEST_TIMEOUT_MS = 10_000;
 @Injectable()
 export class McpToolAdapter implements ToolProtocolAdapter {
   private readonly logger = new Logger(McpToolAdapter.name);
+  private readonly ssrfAllowedHosts: Set<string>;
+
+  constructor(configService: ConfigService<AppConfig, true>) {
+    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
+      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
+    );
+  }
 
   async invoke(
     tool: ToolRecord,
@@ -60,6 +74,26 @@ export class McpToolAdapter implements ToolProtocolAdapter {
         success: false,
         errorMessage: `Invalid params for action "${action.name}": ${validation.errors}`,
       };
+    }
+
+    // Phase 12a (SSRF protection) -- see HttpToolAdapter's identical
+    // call-time check for why this is re-validated on every invocation
+    // rather than trusted from registration time.
+    try {
+      await assertSafeOutboundUrl(tool.baseEndpoint, {
+        allowedHosts: this.ssrfAllowedHosts,
+      });
+    } catch (error) {
+      if (error instanceof UnsafeOutboundUrlError) {
+        this.logger.warn(
+          `Blocked MCP tool call to "${tool.name}/${action.name}": ${error.reasonCode}`,
+        );
+        return {
+          success: false,
+          errorMessage: 'blocked_by_outbound_url_policy',
+        };
+      }
+      throw error;
     }
 
     const client = new Client({ name: 'manar-tool-gateway', version: '1.0.0' });

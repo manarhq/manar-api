@@ -183,6 +183,7 @@ export class CredentialBrokerService {
     // the caller" contract.
     const dlpBefore = await this.aiAdvisoryClient.analyzeDlp({
       content: JSON.stringify(input.params ?? null),
+      tenantId: input.tenantId,
     });
     if (dlpBefore && DLP_BLOCKING_SEVERITIES.has(dlpBefore.overallSeverity)) {
       await this.auditService.recordSafely(tenantClient, input.tenantId, {
@@ -319,7 +320,10 @@ export class CredentialBrokerService {
     let outcome = result;
 
     const dlpAfter: DlpAdvisory | null = await this.aiAdvisoryClient.analyzeDlp(
-      { content: JSON.stringify(originalData ?? null) },
+      {
+        content: JSON.stringify(originalData ?? null),
+        tenantId: input.tenantId,
+      },
     );
     // `source: "system"` is manar-ai's own AI-backend-unavailable status
     // marker, never a real match (see that field's doc comment on
@@ -357,6 +361,7 @@ export class CredentialBrokerService {
       const injection = await this.aiAdvisoryClient.analyzePromptInjection({
         content: originalData,
         source: 'tool_output',
+        tenantId: input.tenantId,
       });
       if (injection && injection.detected) {
         const reason = `prompt_injection_detected:${input.toolId}/${input.actionId}`;
