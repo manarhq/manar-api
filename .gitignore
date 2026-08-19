@@ -57,6 +57,12 @@ lerna-debug.log*
 # never something to commit (the server cert's private key lives here).
 /deploy/openbao/
 
+# Local demo agent identities written by `pnpm manar demo:seed`
+# (src/cli/commands/demo-seed.command.ts) and `scripts/demo-agent.ts`
+# (Phase 13) — encrypted private key material, regenerable by re-running
+# either against a fresh demo tenant.
+/.manar-demo/
+
 # Runtime data
 pids
 *.pid

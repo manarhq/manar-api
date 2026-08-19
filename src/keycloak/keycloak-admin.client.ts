@@ -53,6 +53,91 @@ export class KeycloakAdminClient {
   }
 
   /**
+   * Finds a realm user by exact username, or `undefined` if none exists
+   * (Phase 13's `demo:seed` idempotency check — see
+   * `src/cli/commands/demo-seed.command.ts`; this method has no other
+   * caller, since `TenantProvisioningService` never needs to look up a
+   * user by name).
+   */
+  async findUserByUsername(
+    realmName: string,
+    username: string,
+  ): Promise<{ id: string } | undefined> {
+    const response = await this.adminRequest(
+      'GET',
+      `/admin/realms/${encodeURIComponent(realmName)}/users?username=${encodeURIComponent(username)}&exact=true`,
+    );
+    const users = (response.body ?? []) as Array<{ id: string }>;
+    return users[0];
+  }
+
+  /**
+   * Creates a realm user with a permanent password and returns its
+   * generated id. Sets `firstName`/`lastName` (see
+   * `test/support/keycloak-test-helpers.ts`'s identical comment: recent
+   * Keycloak versions otherwise reject a direct-grant token request with
+   * "Account is not fully set up" for a user with no name at all).
+   */
+  async createUser(
+    realmName: string,
+    input: {
+      username: string;
+      email: string;
+      password: string;
+      firstName: string;
+      lastName: string;
+    },
+  ): Promise<string> {
+    const createResponse = await this.adminRequest(
+      'POST',
+      `/admin/realms/${encodeURIComponent(realmName)}/users`,
+      {
+        username: input.username,
+        email: input.email,
+        firstName: input.firstName,
+        lastName: input.lastName,
+        enabled: true,
+        emailVerified: true,
+        requiredActions: [],
+      },
+      { returnLocation: true },
+    );
+    const userId = createResponse.location?.split('/').pop();
+    if (!userId) {
+      throw new Error(
+        `Keycloak did not return a user id for "${input.username}" in realm "${realmName}"`,
+      );
+    }
+
+    await this.adminRequest(
+      'PUT',
+      `/admin/realms/${encodeURIComponent(realmName)}/users/${userId}/reset-password`,
+      { type: 'password', value: input.password, temporary: false },
+    );
+
+    return userId;
+  }
+
+  /** Idempotent: assigning a role a user already holds is a harmless no-op against Keycloak's own API. */
+  async assignRealmRole(
+    realmName: string,
+    userId: string,
+    roleName: string,
+  ): Promise<void> {
+    const roleResponse = await this.adminRequest(
+      'GET',
+      `/admin/realms/${encodeURIComponent(realmName)}/roles/${encodeURIComponent(roleName)}`,
+    );
+    const role = roleResponse.body as { id: string; name: string };
+
+    await this.adminRequest(
+      'POST',
+      `/admin/realms/${encodeURIComponent(realmName)}/users/${userId}/role-mappings/realm`,
+      [{ id: role.id, name: role.name }],
+    );
+  }
+
+  /**
    * Creates a confidential client and returns its generated secret.
    * `directAccessGrantsEnabled: true` is set so this client also supports
    * the Resource Owner Password Credentials grant — used by this phase's
@@ -149,7 +234,7 @@ export class KeycloakAdminClient {
   }
 
   private async adminRequest(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'PUT',
     path: string,
     body?: unknown,
     options?: { returnLocation?: boolean },
