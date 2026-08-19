@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AiAdvisoryModule } from '../ai-advisory/ai-advisory.module';
 import { ToolsModule } from '../tools/tools.module';
 import { PolicyEngine } from './policy-engine.service';
 import { PolicyService } from './policy.service';
@@ -18,9 +19,12 @@ import { PolicyService } from './policy.service';
  * needs it to resolve a request's `ToolAction.classification` for
  * `resourceClassification` rule matching (Section 53). Mirrors
  * `RiskModule`'s identical import of `ToolsModule` for the same service.
+ *
+ * Phase 10c: imports `AiAdvisoryModule` — `PolicyService.suggestPolicy`
+ * needs `AiAdvisoryClient` for `POST /policies/suggest`.
  */
 @Module({
-  imports: [ToolsModule],
+  imports: [ToolsModule, AiAdvisoryModule],
   providers: [PolicyEngine, PolicyService],
   exports: [PolicyEngine, PolicyService],
 })

@@ -228,3 +228,67 @@ export class PolicyListResponseDto {
   @ApiProperty({ nullable: true })
   nextCursor!: string | null;
 }
+
+/** Mirrors `SuggestPolicyRequestSchema` (Phase 10c). */
+export class SuggestPolicyRequestDto {
+  @ApiProperty({
+    minLength: 1,
+    maxLength: 5000,
+    example:
+      'SOC agents may query SIEM events but endpoint isolation requires human approval',
+  })
+  naturalLanguageDescription!: string;
+
+  @ApiProperty({
+    required: false,
+    format: 'uuid',
+    description:
+      'An existing policy — the draft becomes its next DRAFT version. Mutually exclusive with policyName.',
+  })
+  policyId?: string;
+
+  @ApiProperty({
+    required: false,
+    minLength: 1,
+    maxLength: 200,
+    description:
+      'Create a brand-new policy with this name, alongside its first DRAFT version. Mutually exclusive with policyId.',
+  })
+  policyName?: string;
+
+  @ApiProperty({ required: false, maxLength: 2000 })
+  policyDescription?: string;
+
+  @ApiProperty({ required: false, minLength: 1, maxLength: 500 })
+  reason?: string;
+}
+
+/**
+ * `POST /policies/suggest`'s response. `available: false` (with
+ * `version: null`) means manar-ai was unreachable/timed out/circuit-open,
+ * or returned no usable draft (its own zero-confidence "suggestion
+ * failed" marker, or a confident-but-empty rule set) — **no `Policy`/
+ * `PolicyVersion` row is created in that case**. When `available: true`,
+ * `version.status` is always `DRAFT` — this endpoint never publishes; see
+ * `PolicyController.suggestPolicy`'s doc comment.
+ */
+export class SuggestPolicyResponseDto {
+  @ApiProperty()
+  available!: boolean;
+
+  @ApiProperty({ nullable: true, format: 'uuid' })
+  policyId!: string | null;
+
+  @ApiProperty({
+    nullable: true,
+    type: () => PolicyVersionResponseDto,
+    description: 'Always status DRAFT when present — never auto-published.',
+  })
+  version!: PolicyVersionResponseDto | null;
+
+  @ApiProperty({ nullable: true, type: String })
+  explanation!: string | null;
+
+  @ApiProperty({ nullable: true, minimum: 0, maximum: 1, type: Number })
+  confidence!: number | null;
+}

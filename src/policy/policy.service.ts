@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import {
@@ -9,12 +10,13 @@ import {
   toCursorPage,
 } from '../common/pagination/cursor-pagination';
 import { computeContentHash } from './policy-content-codec';
-import { PolicyContent } from './policy-content.schema';
+import { PolicyContent, PolicyContentSchema } from './policy-content.schema';
 import {
   PolicyNotFoundError,
   PolicyVersionNotDraftError,
   PolicyVersionNotFoundError,
 } from './policy.errors';
+import type { SuggestPolicyRequest } from './policy.validation';
 
 export interface ListPoliciesInput {
   limit: number;
@@ -65,7 +67,10 @@ export interface CreatePolicyVersionInput {
 export class PolicyService {
   private readonly logger = new Logger(PolicyService.name);
 
-  constructor(private readonly auditService: AuditService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly aiAdvisoryClient: AiAdvisoryClient,
+  ) {}
 
   /** Creates a `Policy` + its first (`version` 1) `DRAFT` `PolicyVersion`. */
   async createPolicy(
@@ -266,5 +271,121 @@ export class PolicyService {
       throw new PolicyVersionNotFoundError(policyId, versionId);
     }
     return version;
+  }
+
+  /**
+   * `POST /policies/suggest` (Phase 10c) — calls
+   * `AiAdvisoryClient.suggestPolicy`, then persists the result as a new
+   * `DRAFT` `PolicyVersion` (via `createVersion`/`createPolicy`, the exact
+   * same write paths every other draft goes through) under either an
+   * existing policy (`policyId`) or a brand-new one (`policyName`).
+   * **Never publishes** — the caller must separately call `POST
+   * /policies/:id/versions/:versionId/publish`, exactly like any other
+   * draft; nothing in this method (or `AiAdvisoryClient.suggestPolicy`
+   * itself — see that method's own doc comment) ever sets `status:
+   * 'PUBLISHED'`.
+   *
+   * Returns `{ available: false, ... }` — creating nothing at all — when
+   * `AiAdvisoryClient.suggestPolicy` returns `null` (manar-ai unreachable/
+   * timed out/circuit-open/its own zero-confidence "suggestion failed"
+   * marker) or a confident-but-empty rule set (nothing to persist), or
+   * when the drafted rules fail `PolicyContentSchema` validation (a
+   * malformed AI draft is treated the same as "no usable draft", never
+   * persisted as a broken `PolicyVersion`) — this method never lets
+   * anything but a schema-valid `PolicyContent` reach `createPolicy`/
+   * `createVersion`, the same fail-closed posture `PolicyEngine` already
+   * establishes for policy content elsewhere in this codebase.
+   *
+   * No `classification` is passed to `AiAdvisoryClient.suggestPolicy`: a
+   * natural-language *policy description* doesn't reference any specific
+   * `ToolAction`, so there is nothing here to derive one from (unlike
+   * `IncidentsService.summarizeIncident`/`AuditController.investigateAudit`,
+   * both of which operate over concrete `AuditEvent`s with resolvable
+   * `ToolAction.classification`) — this call falls through to the
+   * ordinary tenant `allowExternalAi` gate only.
+   */
+  async suggestPolicy(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    input: SuggestPolicyRequest & { authorId: string },
+  ): Promise<{
+    available: boolean;
+    policyId: string | null;
+    version: Awaited<ReturnType<PolicyService['createVersion']>> | null;
+    explanation: string | null;
+    confidence: number | null;
+  }> {
+    const advisory = await this.aiAdvisoryClient.suggestPolicy({
+      naturalLanguageDescription: input.naturalLanguageDescription,
+      tenantId,
+    });
+
+    if (!advisory || advisory.rules.length === 0) {
+      return {
+        available: false,
+        policyId: null,
+        version: null,
+        explanation: advisory?.explanation ?? null,
+        confidence: advisory?.confidence ?? null,
+      };
+    }
+
+    const parsed = PolicyContentSchema.safeParse({
+      rules: advisory.rules.map((rule) => ({
+        name: rule.name || undefined,
+        toolId: rule.toolId,
+        actionId: rule.actionId,
+        resourcePattern: rule.resourcePattern || '*',
+        effect: rule.effect,
+        riskWeight: rule.riskWeight || undefined,
+        riskFloor: rule.riskFloor || undefined,
+        description: rule.description || undefined,
+      })),
+    });
+    if (!parsed.success) {
+      this.logger.warn(
+        `manar-ai's SuggestPolicy draft failed PolicyContentSchema validation, discarding: ${parsed.error.message}`,
+      );
+      return {
+        available: false,
+        policyId: null,
+        version: null,
+        explanation: advisory.explanation,
+        confidence: advisory.confidence,
+      };
+    }
+    const content = parsed.data;
+    const reason =
+      input.reason ?? `AI-suggested draft: ${advisory.explanation}`;
+
+    if (input.policyId !== undefined) {
+      const version = await this.createVersion(tenantClient, input.policyId, {
+        content,
+        authorId: input.authorId,
+        reason,
+      });
+      return {
+        available: true,
+        policyId: input.policyId,
+        version,
+        explanation: advisory.explanation,
+        confidence: advisory.confidence,
+      };
+    }
+
+    const { policy, version } = await this.createPolicy(tenantClient, {
+      name: input.policyName!,
+      description: input.policyDescription ?? null,
+      content,
+      authorId: input.authorId,
+      reason,
+    });
+    return {
+      available: true,
+      policyId: policy.id,
+      version,
+      explanation: advisory.explanation,
+      confidence: advisory.confidence,
+    };
   }
 }

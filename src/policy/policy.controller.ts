@@ -49,6 +49,7 @@ import { PolicyService } from './policy.service';
 import {
   CreatePolicyRequestSchema,
   CreatePolicyVersionRequestSchema,
+  SuggestPolicyRequestSchema,
 } from './policy.validation';
 import {
   CreatePolicyRequestDto,
@@ -57,6 +58,8 @@ import {
   GetPolicyResponseDto,
   PolicyListResponseDto,
   PolicyVersionResponseDto,
+  SuggestPolicyRequestDto,
+  SuggestPolicyResponseDto,
 } from './policy.dto';
 
 /** Translates the service layer's typed domain errors into HTTP responses — same pattern `AgentsController`'s `mapAgentNotFound` establishes. */
@@ -220,6 +223,44 @@ export class PolicyController {
       );
       return shapeVersion(version);
     });
+  }
+
+  @Post('suggest')
+  @ApiOperation({
+    summary: 'AI-assisted policy draft (Phase 10c)',
+    description:
+      "Calls manar-ai's SuggestPolicy RPC and, when it returns a usable draft, persists it as a new DRAFT PolicyVersion under an existing policy (policyId) or a brand-new one (policyName) -- exactly one of the two must be provided. Never auto-published: the normal POST /policies/:id/versions/:versionId/publish call is still required. `available: false` means manar-ai was unreachable/returned no usable draft -- nothing is created in that case.",
+  })
+  @ApiBody({ type: SuggestPolicyRequestDto })
+  @ApiResponse({ status: 201, type: SuggestPolicyResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'policyId was provided but not found.',
+  })
+  async suggestPolicy(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
+    const input = parseBodyOrThrow(SuggestPolicyRequestSchema, body);
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+
+    const result = await mapPolicyErrors(() =>
+      this.policyService.suggestPolicy(tenantClient, auth.tenant.id, {
+        ...input,
+        authorId: auth.user.id,
+      }),
+    );
+
+    return {
+      available: result.available,
+      policyId: result.policyId,
+      version: result.version ? shapeVersion(result.version) : null,
+      explanation: result.explanation,
+      confidence: result.confidence,
+    };
   }
 
   @Post(':id/versions/:versionId/publish')

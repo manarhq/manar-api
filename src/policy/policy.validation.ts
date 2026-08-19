@@ -51,3 +51,27 @@ export const CreatePolicyVersionRequestSchema = z
 export type CreatePolicyVersionRequest = z.infer<
   typeof CreatePolicyVersionRequestSchema
 >;
+
+/**
+ * `POST /policies/suggest`'s request body (Phase 10c). Exactly one of
+ * `policyId` (an existing policy — the draft becomes its next version) or
+ * `policyName` (a brand-new policy, created alongside its first draft
+ * version) must be provided — same "exactly one" shape
+ * `CreatePolicyRequestSchema`/`CreatePolicyVersionRequestSchema` already
+ * establish for their own mutually-exclusive content fields.
+ */
+export const SuggestPolicyRequestSchema = z
+  .object({
+    naturalLanguageDescription: z.string().min(1).max(5000),
+    policyId: z.string().min(1).optional(),
+    policyName: z.string().min(1).max(200).optional(),
+    policyDescription: z.string().max(2000).optional(),
+    reason: z.string().min(1).max(500).optional(),
+  })
+  .refine(
+    (body) => (body.policyId !== undefined) !== (body.policyName !== undefined),
+    {
+      message: 'Exactly one of "policyId" or "policyName" must be provided',
+    },
+  );
+export type SuggestPolicyRequest = z.infer<typeof SuggestPolicyRequestSchema>;

@@ -43,3 +43,34 @@ export const UpdateIncidentSchema = z
     message: 'At least one field must be provided',
   });
 export type UpdateIncidentRequest = z.infer<typeof UpdateIncidentSchema>;
+
+/**
+ * `POST /incidents/summarize`'s request body (Phase 10c). `incidentId` and
+ * `description` may both be provided (combined: the incident's own title/
+ * description plus this extra free-text context), but at least one of the
+ * three ways to supply context (`incidentId`, `description`,
+ * `auditEventIds`) must be present — an empty body would just be a no-op
+ * call to `AiAdvisoryClient.summarizeIncident` with nothing to summarize.
+ * `auditEventIds` are always resolved against the *caller's own* tenant
+ * database (`TenantDatabaseManager.getClient(auth.tenant.id)` — one
+ * physically separate database per tenant, see docs/tenant-isolation.md) —
+ * an id belonging to another tenant simply doesn't exist in this query and
+ * is silently omitted, never fetched.
+ */
+export const SummarizeIncidentSchema = z
+  .object({
+    incidentId: z.string().min(1).optional(),
+    description: z.string().min(1).max(5000).optional(),
+    auditEventIds: z.array(z.string().min(1)).max(50).optional(),
+  })
+  .refine(
+    (body) =>
+      body.incidentId !== undefined ||
+      body.description !== undefined ||
+      (body.auditEventIds !== undefined && body.auditEventIds.length > 0),
+    {
+      message:
+        'Provide at least one of "incidentId", "description", or a non-empty "auditEventIds"',
+    },
+  );
+export type SummarizeIncidentRequest = z.infer<typeof SummarizeIncidentSchema>;

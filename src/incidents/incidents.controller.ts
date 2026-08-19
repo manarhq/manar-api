@@ -32,12 +32,15 @@ import { IncidentNotFoundError } from './incidents.errors';
 import { IncidentsService } from './incidents.service';
 import {
   CreateIncidentSchema,
+  SummarizeIncidentSchema,
   UpdateIncidentSchema,
 } from './incidents.validation';
 import {
   CreateIncidentRequestDto,
   IncidentListResponseDto,
   IncidentSummaryDto,
+  SummarizeIncidentRequestDto,
+  SummarizeIncidentResponseDto,
   UpdateIncidentRequestDto,
 } from './incidents.dto';
 
@@ -55,13 +58,15 @@ async function mapIncidentErrors<T>(operation: () => Promise<T>): Promise<T> {
 
 /**
  * Phase 15a (Section 70) — `/incidents`. Plain CRUD linked to existing
- * audit data via `relatedCorrelationIds`, no AI-generated summarization
- * (Phase 10c). Any authenticated tenant user may create/view/update an
- * incident this phase — mirrors `UsersController`'s posture (no
- * `RequireRole` gate): incident response is a cross-functional activity
- * (SOC operators, security admins, approvers) this phase doesn't attempt
- * to finely role-gate, and every create/status-change is audited
- * regardless of who performed it.
+ * audit data via `relatedCorrelationIds`. Phase 10c adds `POST
+ * /incidents/summarize`, an AI-advisory read-only operation (see
+ * `IncidentsService.summarizeIncident`'s own doc comment). Any
+ * authenticated tenant user may create/view/update/summarize an incident
+ * this phase — mirrors `UsersController`'s posture (no `RequireRole`
+ * gate): incident response is a cross-functional activity (SOC operators,
+ * security admins, approvers) this phase doesn't attempt to finely
+ * role-gate, and every create/status-change is audited regardless of who
+ * performed it.
  */
 @ApiTags('incidents')
 @ApiBearerAuth('jwt')
@@ -164,6 +169,37 @@ export class IncidentsController {
     );
     return mapIncidentErrors(() =>
       this.incidentsService.getIncidentOrThrow(tenantClient, id),
+    );
+  }
+
+  @Post('summarize')
+  @ApiOperation({
+    summary: 'AI-advisory incident summary (Phase 10c)',
+    description:
+      "Gathers caller-specified context (an existing incidentId and/or explicit auditEventIds and/or free-text description -- all resolved against the caller's own tenant only) and calls manar-ai's SummarizeIncident RPC. Read-only: never persisted onto the Incident model. `available: false` means manar-ai was unreachable/timed out/circuit-open -- never a crash, never a fabricated summary.",
+  })
+  @ApiBody({ type: SummarizeIncidentRequestDto })
+  @ApiResponse({ status: 201, type: SummarizeIncidentResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'incidentId was provided but not found in this tenant.',
+  })
+  async summarize(
+    @CurrentAuth() auth: AuthContext,
+    @Body() body: unknown,
+  ): Promise<SummarizeIncidentResponseDto> {
+    const input = parseBodyOrThrow(SummarizeIncidentSchema, body);
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    return mapIncidentErrors(() =>
+      this.incidentsService.summarizeIncident(tenantClient, {
+        ...input,
+        tenantId: auth.tenant.id,
+      }),
     );
   }
 

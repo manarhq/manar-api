@@ -91,3 +91,76 @@ export class IncidentListResponseDto {
   @ApiProperty({ nullable: true })
   nextCursor!: string | null;
 }
+
+/** Mirrors `SummarizeIncidentSchema` (Phase 10c). */
+export class SummarizeIncidentRequestDto {
+  @ApiProperty({
+    required: false,
+    format: 'uuid',
+    description:
+      "An existing Incident (must belong to the caller's own tenant). Its title/description and the AuditEvents matching its relatedCorrelationIds are included as context.",
+  })
+  incidentId?: string;
+
+  @ApiProperty({
+    required: false,
+    maxLength: 5000,
+    description:
+      "Additional free-text context, combined with incidentId's own title/description when both are provided.",
+  })
+  description?: string;
+
+  @ApiProperty({
+    required: false,
+    type: String,
+    isArray: true,
+    description:
+      "Explicit AuditEvent IDs to include as context, in addition to any resolved from incidentId. Always resolved against the caller's own tenant database — an id belonging to another tenant is silently omitted, never fetched.",
+  })
+  auditEventIds?: string[];
+}
+
+/** Mirrors `IncidentSummaryAdvisory` (`ai-advisory-client.service.ts`). */
+export class IncidentSummaryAdvisoryDto {
+  @ApiProperty()
+  summary!: string;
+
+  @ApiProperty({ type: String, isArray: true })
+  keyEvents!: string[];
+
+  @ApiProperty({
+    description: 'Best-effort, advisory-only hypothesis — never confirmed.',
+  })
+  probableRootCause!: string;
+
+  @ApiProperty({ type: String, isArray: true })
+  recommendedNextSteps!: string[];
+
+  @ApiProperty({ minimum: 0, maximum: 1 })
+  confidence!: number;
+
+  @ApiProperty()
+  explanation!: string;
+}
+
+/**
+ * `POST /incidents/summarize`'s response. `available: false` (with
+ * `result: null`) means manar-ai was unreachable, timed out, circuit-open,
+ * or returned its own documented zero-confidence "analysis failed" marker
+ * — never a crash, and never a fabricated-looking summary presented as
+ * real (Section 80's fail-secure invariant, applied to this advisory-only
+ * endpoint the same way Phase 10b already applies it to the authorization
+ * pipeline).
+ */
+export class SummarizeIncidentResponseDto {
+  @ApiProperty()
+  available!: boolean;
+
+  @ApiProperty({ nullable: true, type: () => IncidentSummaryAdvisoryDto })
+  result!: IncidentSummaryAdvisoryDto | null;
+
+  @ApiProperty({
+    description: 'How many AuditEvents were included as context.',
+  })
+  contextEventCount!: number;
+}
