@@ -54,6 +54,12 @@ export const AUDIT_EVENT_TYPES = {
   USER_ROLE_REVOKED: 'user.role_revoked',
   /** `PATCH /tenant/settings` updated one or more residency/AI-governance flags — see `TenantSettingsService.updateSettings`. */
   TENANT_SETTINGS_UPDATED: 'tenant.settings_updated',
+
+  // Phase 15a (Incidents, Section 70) — see src/incidents/.
+  /** `POST /incidents` created a new incident — see `IncidentsService.createIncident`. */
+  INCIDENT_CREATED: 'incident.created',
+  /** `PATCH /incidents/:id` changed `status` — see `IncidentsService.updateIncident`. Not recorded for a PATCH that changes only title/description/severity/relatedCorrelationIds without a status change. */
+  INCIDENT_STATUS_CHANGED: 'incident.status_changed',
 } as const;
 
 export type AuditEventType =
