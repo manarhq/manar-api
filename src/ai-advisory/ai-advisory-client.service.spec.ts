@@ -13,6 +13,9 @@ function fakeConfigService(
     AI_ADVISORY_TIMEOUT_MS: 300,
     AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
     AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 200,
+    AI_ADVISORY_LONGFORM_TIMEOUT_MS: 500,
+    AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD: 3,
+    AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS: 200,
     AI_ADVISORY_PROVIDER: 'ollama',
     ...overrides,
   };
@@ -276,6 +279,179 @@ describe('AiAdvisoryClient', () => {
     const elapsedMs = Date.now() - before;
     expect(elapsedMs).toBeGreaterThanOrEqual(50); // this call actually attempted the RPC (paid the timeout), proving the circuit was closed going in
   }, 10_000);
+
+  /**
+   * The headline regression this task exists to fix, plus the independence
+   * the two lanes' timeouts/breakers must have from each other. Before this
+   * task, every RPC (including the three long-form generation ones) shared
+   * `AiAdvisoryClient`'s single `timeoutMs`/circuit-breaker state, so a
+   * long-form call slower than the hot lane's ~2s budget always timed out,
+   * and three such timeouts opened one shared breaker that also took
+   * `analyzeRisk`/`analyzeDlp`/`analyzePromptInjection` dark for the
+   * cooldown period.
+   */
+  describe('lane isolation (hot vs longform)', () => {
+    it("1. a long-form RPC delayed past the hot lane's budget, but inside the long-form deadline, succeeds (today it fails without lanes)", async () => {
+      fakeServer.responseDelayMs = 2500; // longer than the hot lane's timeout below, shorter than the long-form one
+      fakeServer.incidentSummaryResult = {
+        summary: 'A suspicious login pattern was observed.',
+        keyEvents: ['login_failure', 'login_success'],
+        probableRootCause: 'credential stuffing',
+        recommendedNextSteps: ['rotate credentials'],
+        confidence: 0.7,
+        explanation: 'e',
+      };
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_TIMEOUT_MS: 300, // hot lane -- would time out at this delay
+          AI_ADVISORY_LONGFORM_TIMEOUT_MS: 5000, // long-form lane -- comfortably survives this delay
+        }),
+        permissiveControl,
+      );
+      const result = await client.summarizeIncident({
+        description: 'x',
+        relatedEvents: [],
+        tenantId: 'tenant-1',
+      });
+      expect(result).not.toBeNull();
+      expect(result?.summary).toBe('A suspicious login pattern was observed.');
+    }, 10_000);
+
+    it('2. tripping the long-form breaker leaves the hot lane fully functional -- after N long-form failures, analyzeRisk still returns a real score', async () => {
+      fakeServer.responseDelayMs = 300; // exceeds the long-form timeout below on every call
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_TIMEOUT_MS: 2000,
+          AI_ADVISORY_LONGFORM_TIMEOUT_MS: 100,
+          AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD: 2,
+          AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS: 10_000,
+        }),
+        permissiveControl,
+      );
+
+      // Trip the long-form breaker.
+      await client.summarizeIncident({
+        description: 'x',
+        relatedEvents: [],
+        tenantId: 't',
+      });
+      await client.summarizeIncident({
+        description: 'x',
+        relatedEvents: [],
+        tenantId: 't',
+      });
+      // A third call would be skipped entirely if the long-form circuit is
+      // now open -- confirms the trip actually happened, not just that two
+      // calls failed.
+      const skipped = await client.summarizeIncident({
+        description: 'x',
+        relatedEvents: [],
+        tenantId: 't',
+      });
+      expect(skipped).toBeNull();
+      expect(fakeServer.callCounts.summarizeIncident).toBe(2); // the third call never reached the server
+
+      // The hot lane must be entirely unaffected -- a fast, successful
+      // analyzeRisk call still goes through and returns a real score.
+      fakeServer.responseDelayMs = 0;
+      fakeServer.riskResult = {
+        score: 55,
+        confidence: 0.9,
+        signals: ['s'],
+        explanation: 'e',
+        recommendedAction: 1,
+      };
+      const riskResult = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      expect(riskResult).not.toBeNull();
+      expect(riskResult?.score).toBe(55);
+      expect(fakeServer.callCounts.analyzeRisk).toBe(1); // reached the server -- the hot circuit was never open
+    }, 10_000);
+
+    it('3. tripping the hot breaker does not open the long-form breaker', async () => {
+      fakeServer.responseDelayMs = 300; // exceeds the hot timeout below on every call
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_TIMEOUT_MS: 100,
+          AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 2,
+          AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 10_000,
+          AI_ADVISORY_LONGFORM_TIMEOUT_MS: 5000,
+        }),
+        permissiveControl,
+      );
+
+      // Trip the hot breaker.
+      await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      const skipped = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      expect(skipped).toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(2); // the third call never reached the server -- hot circuit open
+
+      // The long-form lane must be entirely unaffected -- a fast,
+      // successful summarizeIncident call still reaches the server.
+      fakeServer.responseDelayMs = 0;
+      fakeServer.incidentSummaryResult = {
+        summary: 's',
+        keyEvents: [],
+        probableRootCause: '',
+        recommendedNextSteps: [],
+        confidence: 0.6,
+        explanation: '',
+      };
+      const summaryResult = await client.summarizeIncident({
+        description: 'x',
+        relatedEvents: [],
+        tenantId: 't',
+      });
+      expect(summaryResult).not.toBeNull();
+      expect(fakeServer.callCounts.summarizeIncident).toBe(1); // reached the server -- the long-form circuit was never open
+    }, 10_000);
+
+    it('4. both lanes return null rather than throwing on a timeout', async () => {
+      fakeServer.responseDelayMs = 5000;
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_TIMEOUT_MS: 100,
+          AI_ADVISORY_LONGFORM_TIMEOUT_MS: 200,
+        }),
+        permissiveControl,
+      );
+
+      await expect(
+        client.analyzeRisk({
+          actionDescription: 'x',
+          context: '',
+          tenantId: 't',
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        client.summarizeIncident({
+          description: 'x',
+          relatedEvents: [],
+          tenantId: 't',
+        }),
+      ).resolves.toBeNull();
+    }, 10_000);
+  });
 
   /**
    * Phase 12a (Section 54, data residency enforcement). These assert at

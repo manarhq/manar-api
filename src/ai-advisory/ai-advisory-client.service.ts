@@ -86,6 +86,24 @@ export interface AuditInvestigationAdvisory {
 }
 
 /**
+ * The two independent latency/failure lanes `AiAdvisoryClient` maintains —
+ * see the class doc comment's "Two resilience mechanisms" section for why
+ * these must never share timeout or circuit-breaker state.
+ *
+ *   - `hot`: `AnalyzeRisk`/`AnalyzePromptInjection`/`AnalyzeDlp` — inline on
+ *     the authorization/tool-invocation path.
+ *   - `longform`: `SummarizeIncident`/`SuggestPolicy`/`InvestigateAudit` —
+ *     explicit, user-initiated LLM generation, off the authorization path.
+ */
+export type AiRpcLane = 'hot' | 'longform';
+
+/** Per-lane circuit-breaker state — see `call<T>()`'s doc comment. */
+interface CircuitBreakerState {
+  consecutiveFailures: number;
+  circuitOpenUntil: number | null;
+}
+
+/**
  * The only place in this codebase that ever calls manar-ai's gRPC
  * `AnalysisService` (Phase 10b — see docs/ai-security-model.md; Phase 10c
  * adds `summarizeIncident`/`suggestPolicy`/`investigateAudit`, which follow
@@ -102,25 +120,54 @@ export interface AuditInvestigationAdvisory {
  * must behave identically whether this class returns real signals or
  * `null` throughout).
  *
- * Two resilience mechanisms, both configured via `AiAdvisoryConfigSchema`:
+ * Two resilience mechanisms, both configured via `AiAdvisoryConfigSchema`,
+ * and both split into two independent **lanes** (`AiRpcLane`: `'hot'` |
+ * `'longform'`) — this split is deliberate, and the reasoning below is why
+ * a future change must not collapse it back into shared state:
  *
- *   - **Per-RPC deadline** (`AI_ADVISORY_TIMEOUT_MS`, default 2000ms):
- *     `RiskEngine.score`/`CredentialBrokerService.invoke` are on hot,
- *     synchronous request paths — an unreachable or slow manar-ai must add
- *     bounded, small, predictable latency, never hang the pipeline. 2s is
- *     chosen as generous enough for a healthy same-network gRPC call under
- *     load, but short enough that even a fully-blocked authorize/invoke
- *     call stays well inside normal HTTP client timeouts.
- *   - **Circuit breaker** (`AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD`/
- *     `_COOLDOWN_MS`, defaults 3 consecutive failures / 30s cooldown): once
- *     manar-ai has failed `threshold` calls in a row, every subsequent call
- *     for `cooldownMs` returns `null` immediately, with no RPC attempted at
- *     all — avoids paying the full timeout on every single request while
- *     manar-ai is known to be down (a real outage is far more likely to
- *     last seconds-to-minutes than to resolve between two consecutive
- *     requests). After the cooldown elapses, the next call is let through
- *     as a trial: success closes the circuit (resets the failure count),
- *     failure re-opens it for another full cooldown.
+ *   - **hot** — `AnalyzeRisk`/`AnalyzePromptInjection`/`AnalyzeDlp`.
+ *     `RiskEngine.score`/`CredentialBrokerService.invoke` call these
+ *     inline, synchronously, on the authorization/tool-invocation path.
+ *     Latency here is a security property: an unreachable or slow manar-ai
+ *     must add bounded, small, predictable latency, never hang the
+ *     pipeline.
+ *   - **longform** — `SummarizeIncident`/`SuggestPolicy`/`InvestigateAudit`
+ *     (Phase 10c). These are explicit, user-initiated LLM-generation calls,
+ *     off the authorization path — nothing blocks on them, and no model
+ *     completes an incident summary in the hot lane's ~2s budget.
+ *
+ *   The two lanes fail for structurally different reasons: the hot lane
+ *   fails when manar-ai itself is unreachable or overloaded; the long-form
+ *   lane fails when a model is merely slow to generate. A user clicking
+ *   "Summarize" a few times and tripping the long-form breaker must never
+ *   take risk scoring, prompt-injection detection, or DLP dark as
+ *   collateral damage — that coupling previously disabled the entire AI
+ *   layer platform-wide off of nothing but slow generation, which is
+ *   exactly what a shared breaker would reintroduce. Each lane therefore
+ *   gets its own deadline, its own consecutive-failure count, and its own
+ *   circuit-open-until timestamp; `promisify`/`call`/`onSuccess`/
+ *   `onFailure` all take a lane and only ever read/write that lane's own
+ *   state.
+ *
+ *   - **Per-RPC deadline**: `AI_ADVISORY_TIMEOUT_MS` (default 2000ms) for
+ *     the hot lane, `AI_ADVISORY_LONGFORM_TIMEOUT_MS` (default 30000ms) for
+ *     the long-form lane. 2s is chosen as generous enough for a healthy
+ *     same-network gRPC call under load, but short enough that even a
+ *     fully-blocked authorize/invoke call stays well inside normal HTTP
+ *     client timeouts; 30s is generous enough for a real LLM generation.
+ *   - **Circuit breaker**: `AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD`/
+ *     `_COOLDOWN_MS` (defaults 3 consecutive failures / 30s cooldown) for
+ *     the hot lane, `AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD`/
+ *     `_COOLDOWN_MS` (same defaults) for the long-form lane. Once a lane
+ *     has failed `threshold` calls in a row, every subsequent call on
+ *     *that lane* for `cooldownMs` returns `null` immediately, with no RPC
+ *     attempted at all — avoids paying the full timeout on every single
+ *     request while manar-ai is known to be down on that lane (a real
+ *     outage is far more likely to last seconds-to-minutes than to resolve
+ *     between two consecutive requests). After the cooldown elapses, the
+ *     next call on that lane is let through as a trial: success closes the
+ *     circuit (resets the failure count), failure re-opens it for another
+ *     full cooldown.
  *
  * `confidence == 0.0` on `RiskAnalysisResult`/`PromptInjectionAnalysisResult`
  * is manar-ai's own documented fail-secure marker for "the AI layer didn't
@@ -138,13 +185,19 @@ export interface AuditInvestigationAdvisory {
 export class AiAdvisoryClient implements OnModuleDestroy {
   private readonly logger = new Logger(AiAdvisoryClient.name);
   private readonly client: AnalysisServiceClient;
-  private readonly timeoutMs: number;
-  private readonly circuitThreshold: number;
-  private readonly circuitCooldownMs: number;
   private readonly provider: 'anthropic' | 'ollama' | 'vllm';
 
-  private consecutiveFailures = 0;
-  private circuitOpenUntil: number | null = null;
+  /** Per-lane timeout/circuit-breaker config — see `AiRpcLane`'s doc comment. */
+  private readonly timeoutMsByLane: Record<AiRpcLane, number>;
+  private readonly circuitThresholdByLane: Record<AiRpcLane, number>;
+  private readonly circuitCooldownMsByLane: Record<AiRpcLane, number>;
+
+  /** Per-lane circuit-breaker state, mutated only by `onSuccess`/`onFailure` for that same lane — see `call<T>()`'s doc comment. */
+  private readonly circuitStateByLane: Record<AiRpcLane, CircuitBreakerState> =
+    {
+      hot: { consecutiveFailures: 0, circuitOpenUntil: null },
+      longform: { consecutiveFailures: 0, circuitOpenUntil: null },
+    };
 
   constructor(
     configService: ConfigService<AppConfig, true>,
@@ -153,17 +206,30 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     const target = configService.get('AI_ADVISORY_GRPC_TARGET', {
       infer: true,
     });
-    this.timeoutMs = configService.get('AI_ADVISORY_TIMEOUT_MS', {
-      infer: true,
-    });
-    this.circuitThreshold = configService.get(
-      'AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD',
-      { infer: true },
-    );
-    this.circuitCooldownMs = configService.get(
-      'AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS',
-      { infer: true },
-    );
+    this.timeoutMsByLane = {
+      hot: configService.get('AI_ADVISORY_TIMEOUT_MS', { infer: true }),
+      longform: configService.get('AI_ADVISORY_LONGFORM_TIMEOUT_MS', {
+        infer: true,
+      }),
+    };
+    this.circuitThresholdByLane = {
+      hot: configService.get('AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD', {
+        infer: true,
+      }),
+      longform: configService.get(
+        'AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD',
+        { infer: true },
+      ),
+    };
+    this.circuitCooldownMsByLane = {
+      hot: configService.get('AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS', {
+        infer: true,
+      }),
+      longform: configService.get(
+        'AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS',
+        { infer: true },
+      ),
+    };
     this.provider = configService.get('AI_ADVISORY_PROVIDER', {
       infer: true,
     });
@@ -199,8 +265,8 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('AnalyzeRisk', () =>
-      this.promisify<RiskAnalysisResult>((deadline, callback) =>
+    const result = await this.call('hot', 'AnalyzeRisk', () =>
+      this.promisify<RiskAnalysisResult>('hot', (deadline, callback) =>
         this.client.analyzeRisk(
           {
             actionDescription: input.actionDescription,
@@ -246,18 +312,20 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('AnalyzePromptInjection', () =>
-      this.promisify<PromptInjectionAnalysisResult>((deadline, callback) =>
-        this.client.analyzePromptInjection(
-          {
-            content: input.content,
-            source: input.source,
-            correlationId: input.correlationId ?? this.resolveCorrelationId(),
-          },
-          new grpc.Metadata(),
-          { deadline },
-          callback,
-        ),
+    const result = await this.call('hot', 'AnalyzePromptInjection', () =>
+      this.promisify<PromptInjectionAnalysisResult>(
+        'hot',
+        (deadline, callback) =>
+          this.client.analyzePromptInjection(
+            {
+              content: input.content,
+              source: input.source,
+              correlationId: input.correlationId ?? this.resolveCorrelationId(),
+            },
+            new grpc.Metadata(),
+            { deadline },
+            callback,
+          ),
       ),
     );
     if (!result) return null;
@@ -287,8 +355,8 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('AnalyzeDlp', () =>
-      this.promisify<DlpAnalysisResult>((deadline, callback) =>
+    const result = await this.call('hot', 'AnalyzeDlp', () =>
+      this.promisify<DlpAnalysisResult>('hot', (deadline, callback) =>
         this.client.analyzeDlp(
           {
             content: input.content,
@@ -341,8 +409,8 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('SummarizeIncident', () =>
-      this.promisify<IncidentSummaryResult>((deadline, callback) =>
+    const result = await this.call('longform', 'SummarizeIncident', () =>
+      this.promisify<IncidentSummaryResult>('longform', (deadline, callback) =>
         this.client.summarizeIncident(
           {
             description: input.description,
@@ -399,8 +467,8 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('SuggestPolicy', () =>
-      this.promisify<PolicyDraftResult>((deadline, callback) =>
+    const result = await this.call('longform', 'SuggestPolicy', () =>
+      this.promisify<PolicyDraftResult>('longform', (deadline, callback) =>
         this.client.suggestPolicy(
           {
             naturalLanguageDescription: input.naturalLanguageDescription,
@@ -462,18 +530,20 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('InvestigateAudit', () =>
-      this.promisify<AuditInvestigationResult>((deadline, callback) =>
-        this.client.investigateAudit(
-          {
-            question: input.question,
-            retrievedContext: input.retrievedContext,
-            correlationId: input.correlationId ?? this.resolveCorrelationId(),
-          },
-          new grpc.Metadata(),
-          { deadline },
-          callback,
-        ),
+    const result = await this.call('longform', 'InvestigateAudit', () =>
+      this.promisify<AuditInvestigationResult>(
+        'longform',
+        (deadline, callback) =>
+          this.client.investigateAudit(
+            {
+              question: input.question,
+              retrievedContext: input.retrievedContext,
+              correlationId: input.correlationId ?? this.resolveCorrelationId(),
+            },
+            new grpc.Metadata(),
+            { deadline },
+            callback,
+          ),
       ),
     );
     if (!result) return null;
@@ -575,15 +645,20 @@ export class AiAdvisoryClient implements OnModuleDestroy {
   /**
    * The single choke point every RPC goes through: circuit-breaker
    * gate, timeout/error handling, and failure-count bookkeeping — see
-   * class doc comment for the full state machine. Never throws; `null`
-   * is the uniform "no signal" outcome for every caller.
+   * class doc comment for the full state machine. Reads and writes only
+   * `lane`'s own `CircuitBreakerState` (`this.circuitStateByLane[lane]`) —
+   * a hot-lane call must never observe or affect the long-form breaker's
+   * state, and vice versa. Never throws; `null` is the uniform "no signal"
+   * outcome for every caller.
    */
   private async call<T>(
+    lane: AiRpcLane,
     rpcName: string,
     fn: () => Promise<T>,
   ): Promise<T | null> {
-    if (this.circuitOpenUntil !== null) {
-      if (Date.now() < this.circuitOpenUntil) {
+    const state = this.circuitStateByLane[lane];
+    if (state.circuitOpenUntil !== null) {
+      if (Date.now() < state.circuitOpenUntil) {
         // Circuit open — skip the call entirely rather than paying the
         // full timeout on a backend already known to be failing.
         return null;
@@ -595,48 +670,53 @@ export class AiAdvisoryClient implements OnModuleDestroy {
 
     try {
       const result = await fn();
-      this.onSuccess();
+      this.onSuccess(lane);
       return result;
     } catch (error) {
-      this.onFailure(rpcName, error);
+      this.onFailure(lane, rpcName, error);
       return null;
     }
   }
 
-  private onSuccess(): void {
-    if (this.consecutiveFailures > 0 || this.circuitOpenUntil !== null) {
+  private onSuccess(lane: AiRpcLane): void {
+    const state = this.circuitStateByLane[lane];
+    if (state.consecutiveFailures > 0 || state.circuitOpenUntil !== null) {
       this.logger.log(
-        `manar-ai AnalysisService call succeeded — circuit breaker reset`,
+        `manar-ai AnalysisService call succeeded on the "${lane}" lane — circuit breaker reset`,
       );
     }
-    this.consecutiveFailures = 0;
-    this.circuitOpenUntil = null;
+    state.consecutiveFailures = 0;
+    state.circuitOpenUntil = null;
   }
 
-  private onFailure(rpcName: string, error: unknown): void {
-    this.consecutiveFailures += 1;
+  private onFailure(lane: AiRpcLane, rpcName: string, error: unknown): void {
+    const state = this.circuitStateByLane[lane];
+    state.consecutiveFailures += 1;
     this.logger.warn(
-      `manar-ai AnalysisService.${rpcName} failed (consecutive failures: ${this.consecutiveFailures}): ${error instanceof Error ? error.message : String(error)}`,
+      `manar-ai AnalysisService.${rpcName} failed on the "${lane}" lane (consecutive failures: ${state.consecutiveFailures}): ${error instanceof Error ? error.message : String(error)}`,
     );
-    if (this.consecutiveFailures >= this.circuitThreshold) {
-      const wasOpen = this.circuitOpenUntil !== null;
-      this.circuitOpenUntil = Date.now() + this.circuitCooldownMs;
+    const threshold = this.circuitThresholdByLane[lane];
+    if (state.consecutiveFailures >= threshold) {
+      const wasOpen = state.circuitOpenUntil !== null;
+      const cooldownMs = this.circuitCooldownMsByLane[lane];
+      state.circuitOpenUntil = Date.now() + cooldownMs;
       if (!wasOpen) {
         this.logger.warn(
-          `manar-ai AnalysisService circuit breaker OPEN for ${this.circuitCooldownMs}ms after ${this.consecutiveFailures} consecutive failures`,
+          `manar-ai AnalysisService circuit breaker OPEN on the "${lane}" lane for ${cooldownMs}ms after ${state.consecutiveFailures} consecutive failures`,
         );
       }
     }
   }
 
-  /** Wraps a grpc-js callback-style unary call in a Promise, applying this client's configured deadline. */
+  /** Wraps a grpc-js callback-style unary call in a Promise, applying `lane`'s configured deadline (`this.timeoutMsFor(lane)`). */
   private promisify<T>(
+    lane: AiRpcLane,
     invoke: (
       deadline: grpc.Deadline,
       callback: (error: grpc.ServiceError | null, response: T) => void,
     ) => grpc.ClientUnaryCall,
   ): Promise<T> {
-    const deadline = Date.now() + this.timeoutMs;
+    const deadline = Date.now() + this.timeoutMsFor(lane);
     return new Promise<T>((resolve, reject) => {
       invoke(deadline, (error, response) => {
         if (error) {
@@ -646,5 +726,9 @@ export class AiAdvisoryClient implements OnModuleDestroy {
         resolve(response);
       });
     });
+  }
+
+  private timeoutMsFor(lane: AiRpcLane): number {
+    return this.timeoutMsByLane[lane];
   }
 }

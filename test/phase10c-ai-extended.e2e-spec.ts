@@ -223,16 +223,29 @@ describe('Phase 10c: AI Extended Capabilities (e2e)', () => {
    * target/timeout/circuit-breaker can vary per scenario via
    * `overrideProvider` rather than an ineffective env-var override (see
    * that file's own doc comment for why env vars don't work for this).
+   *
+   * Every RPC this suite exercises (`summarizeIncident`/`suggestPolicy`/
+   * `investigateAudit`) is on `AiAdvisoryClient`'s **long-form** lane (see
+   * that class's doc comment) -- `overrides.timeoutMs` therefore maps onto
+   * `AI_ADVISORY_LONGFORM_TIMEOUT_MS`, not the hot-lane
+   * `AI_ADVISORY_TIMEOUT_MS`, which this suite never exercises and which is
+   * set to the same value purely so a stray hot-lane call (there are none
+   * today) would fail the same way rather than hang on the long-form
+   * default.
    */
   function buildAiAdvisoryClient(overrides: {
     grpcTarget: string;
     timeoutMs?: number;
   }): AiAdvisoryClient {
+    const timeoutMs = overrides.timeoutMs ?? 1000;
     const values = {
       AI_ADVISORY_GRPC_TARGET: overrides.grpcTarget,
-      AI_ADVISORY_TIMEOUT_MS: overrides.timeoutMs ?? 1000,
+      AI_ADVISORY_TIMEOUT_MS: timeoutMs,
       AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
       AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
+      AI_ADVISORY_LONGFORM_TIMEOUT_MS: timeoutMs,
+      AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD: 3,
+      AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
     };
     const configService = {
       get: (key: string) => (values as Record<string, unknown>)[key],

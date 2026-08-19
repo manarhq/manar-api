@@ -205,6 +205,9 @@ describe('Complete Demo (Phase 13, mandatory e2e acceptance test)', () => {
       AI_ADVISORY_TIMEOUT_MS: 2000,
       AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
       AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
+      AI_ADVISORY_LONGFORM_TIMEOUT_MS: 30_000,
+      AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD: 3,
+      AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
     };
     const configService = {
       get: (key: string) => (values as Record<string, unknown>)[key],
