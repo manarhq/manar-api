@@ -48,6 +48,9 @@ async function bootstrap(): Promise<void> {
   const address = configService.get('TEMPORAL_ADDRESS', { infer: true });
   const namespace = configService.get('TEMPORAL_NAMESPACE', { infer: true });
   const taskQueue = configService.get('TEMPORAL_TASK_QUEUE', { infer: true });
+  const webhookTaskQueue = configService.get('WEBHOOK_DELIVERY_TASK_QUEUE', {
+    infer: true,
+  });
 
   const activities = {
     ...appContext.get(ApprovalActivitiesFactory).build(),
@@ -57,36 +60,50 @@ async function bootstrap(): Promise<void> {
 
   const connection = await NativeConnection.connect({ address });
 
-  const worker = await Worker.create({
+  // Resolves to this same directory's compiled workflow *bundle*
+  // (`dist/temporal/workflows/index.js` in a built image, the tsc-compiled
+  // equivalent under dev — `nest start`/`nest build` both compile via tsc,
+  // never webpack, for this project — see nest-cli.json). Re-exports every
+  // workflow this codebase has (`ApprovalWorkflow`, `AuditRetentionWorkflow`,
+  // `WebhookDeliveryWorkflow`) — see `src/temporal/workflows/index.ts`'s
+  // doc comment.
+  const workflowsPath = require.resolve('./temporal/workflows/index');
+
+  const approvalsWorker = await Worker.create({
     connection,
     namespace,
     taskQueue,
-    // Resolves to this same directory's compiled workflow *bundle*
-    // (`dist/temporal/workflows/index.js` in a built image, the
-    // tsc-compiled equivalent under dev — `nest start`/`nest build` both
-    // compile via tsc, never webpack, for this project — see
-    // nest-cli.json). Re-exports both `ApprovalWorkflow` (Phase 8) and
-    // `AuditRetentionWorkflow` (Phase 9b) — see
-    // `src/temporal/workflows/index.ts`'s doc comment for why one Worker
-    // polling one task queue registers every workflow this codebase has,
-    // rather than a second Worker/task queue per workflow.
-    workflowsPath: require.resolve('./temporal/workflows/index'),
+    workflowsPath,
+    activities,
+  });
+
+  // A second `Worker` on `WEBHOOK_DELIVERY_TASK_QUEUE`, same connection/
+  // activities/bundle as above -- still one process, not a general "a
+  // queue per workflow" pattern (see that config field's own doc comment,
+  // `src/webhooks/webhooks.config.ts`, for exactly why webhook delivery
+  // alone needs a queue separate from `TEMPORAL_TASK_QUEUE`).
+  const webhooksWorker = await Worker.create({
+    connection,
+    namespace,
+    taskQueue: webhookTaskQueue,
+    workflowsPath,
     activities,
   });
 
   logger.log(
-    `Temporal worker starting: address="${address}" namespace="${namespace}" taskQueue="${taskQueue}"`,
+    `Temporal worker starting: address="${address}" namespace="${namespace}" taskQueues=["${taskQueue}", "${webhookTaskQueue}"]`,
   );
 
   const shutdown = (): void => {
     logger.log('Shutting down Temporal worker...');
-    worker.shutdown();
+    approvalsWorker.shutdown();
+    webhooksWorker.shutdown();
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 
   try {
-    await worker.run();
+    await Promise.all([approvalsWorker.run(), webhooksWorker.run()]);
   } finally {
     await connection.close();
     await appContext.close();

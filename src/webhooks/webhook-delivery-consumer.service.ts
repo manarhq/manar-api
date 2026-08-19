@@ -47,13 +47,22 @@ export class WebhookDeliveryConsumerService
 {
   private readonly logger = new Logger(WebhookDeliveryConsumerService.name);
   private readonly groupId = `manar-webhook-delivery-${randomUUID()}`;
+  private readonly webhookTaskQueue: string;
   private consumer: KafkaJS.Consumer | undefined;
 
   constructor(
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly temporalClient: TemporalClientService,
-  ) {}
+  ) {
+    // Its own dedicated queue, deliberately not `temporalClient.taskQueue`
+    // -- see `WEBHOOK_DELIVERY_TASK_QUEUE`'s own doc comment
+    // (`src/webhooks/webhooks.config.ts`) for why.
+    this.webhookTaskQueue = this.configService.get(
+      'WEBHOOK_DELIVERY_TASK_QUEUE',
+      { infer: true },
+    );
+  }
 
   async onModuleInit(): Promise<void> {
     try {
@@ -158,7 +167,7 @@ export class WebhookDeliveryConsumerService
 
         await this.temporalClient.workflow.start(WebhookDeliveryWorkflow, {
           workflowId: `webhook-delivery-${delivery.id}`,
-          taskQueue: this.temporalClient.taskQueue,
+          taskQueue: this.webhookTaskQueue,
           args: [
             { tenantId: envelope.tenantId, webhookDeliveryId: delivery.id },
           ],

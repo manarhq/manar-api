@@ -1,8 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { AppConfig } from '../config/env.validation';
 import {
   assertSafeOutboundUrl,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
+import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
 import { validateAgainstSchema } from './json-schema-validator.util';
 import type {
   ToolInvocationResult,
@@ -49,6 +52,13 @@ function sleep(ms: number): Promise<void> {
 @Injectable()
 export class HttpToolAdapter implements ToolProtocolAdapter {
   private readonly logger = new Logger(HttpToolAdapter.name);
+  private readonly ssrfAllowedHosts: Set<string>;
+
+  constructor(configService: ConfigService<AppConfig, true>) {
+    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
+      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
+    );
+  }
 
   async invoke(
     tool: ToolRecord,
@@ -77,7 +87,9 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
     // then could have been repointed at an internal address since (DNS
     // rebinding). See src/common/ssrf/url-safety.ts's doc comment.
     try {
-      await assertSafeOutboundUrl(url.toString());
+      await assertSafeOutboundUrl(url.toString(), {
+        allowedHosts: this.ssrfAllowedHosts,
+      });
     } catch (error) {
       if (error instanceof UnsafeOutboundUrlError) {
         this.logger.warn(

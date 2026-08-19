@@ -107,11 +107,21 @@ function isPrivateOrReservedIpv6(address: string): boolean {
  * address by the time a real request is made. This function does a fresh
  * lookup on every call for exactly that reason; it has no internal cache
  * for a caller to accidentally rely on stale results from.
+ *
+ * `options.allowedHosts` (see `src/common/ssrf/ssrf.config.ts`'s
+ * `SSRF_ALLOWED_HOSTS`) is an exact-hostname exception list every caller
+ * threads through from config — checked *before* any DNS lookup, so an
+ * allow-listed hostname skips the range check entirely regardless of what
+ * it resolves to. This is a deliberately narrow, operator-controlled
+ * escape hatch for this product's real need to integrate with a tenant's
+ * own internal tools (see that config field's doc comment for why), never
+ * a general bypass.
  */
 export async function assertSafeOutboundUrl(
   rawUrl: string,
-  lookup: DnsLookupFn = defaultLookup,
+  options: { lookup?: DnsLookupFn; allowedHosts?: ReadonlySet<string> } = {},
 ): Promise<void> {
+  const lookup = options.lookup ?? defaultLookup;
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -127,6 +137,10 @@ export async function assertSafeOutboundUrl(
   // includes them in `.hostname`, e.g. `[::1]`) -- `dns.lookup` and the
   // IPv6 range checks above both expect the bare address form.
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+
+  if (options.allowedHosts?.has(hostname)) {
+    return;
+  }
 
   let addresses: ResolvedAddress[];
   try {

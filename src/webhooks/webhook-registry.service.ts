@@ -1,8 +1,11 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import type { AppConfig } from '../config/env.validation';
 import { OpenBaoKvClient } from '../openbao/openbao-kv.client';
 import { assertSafeOutboundUrl } from '../common/ssrf/url-safety';
+import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
 import { WebhookEndpointNotFoundError } from './webhooks.errors';
 import type {
   CreateWebhookEndpointRequest,
@@ -39,7 +42,16 @@ export interface WebhookEndpointSummary {
  */
 @Injectable()
 export class WebhookRegistryService {
-  constructor(private readonly openBaoKvClient: OpenBaoKvClient) {}
+  private readonly ssrfAllowedHosts: Set<string>;
+
+  constructor(
+    private readonly openBaoKvClient: OpenBaoKvClient,
+    configService: ConfigService<AppConfig, true>,
+  ) {
+    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
+      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
+    );
+  }
 
   /**
    * Creates the `WebhookEndpoint` row and generates+stores its signing
@@ -56,7 +68,9 @@ export class WebhookRegistryService {
     // call) AND re-validated at delivery time (`WebhookDeliveryService`) —
     // see src/common/ssrf/url-safety.ts's doc comment for why both checks
     // matter (DNS rebinding).
-    await assertSafeOutboundUrl(input.url);
+    await assertSafeOutboundUrl(input.url, {
+      allowedHosts: this.ssrfAllowedHosts,
+    });
 
     const id = randomUUID();
     const secret = randomBytes(32).toString('hex');
@@ -114,7 +128,9 @@ export class WebhookRegistryService {
     if (input.url !== undefined) {
       // Re-validated here too -- an update is a fresh registration of a
       // URL, not exempt from the same SSRF check `create` applies.
-      await assertSafeOutboundUrl(input.url);
+      await assertSafeOutboundUrl(input.url, {
+        allowedHosts: this.ssrfAllowedHosts,
+      });
     }
 
     const row = await tenantClient.webhookEndpoint.update({

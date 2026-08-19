@@ -14,10 +14,9 @@ function fixedLookup(
 describe('assertSafeOutboundUrl', () => {
   it('accepts a URL resolving to a public address', async () => {
     await expect(
-      assertSafeOutboundUrl(
-        'https://example.com/webhook',
-        fixedLookup({ address: '93.184.216.34', family: 4 }),
-      ),
+      assertSafeOutboundUrl('https://example.com/webhook', {
+        lookup: fixedLookup({ address: '93.184.216.34', family: 4 }),
+      }),
     ).resolves.toBeUndefined();
   });
 
@@ -34,10 +33,9 @@ describe('assertSafeOutboundUrl', () => {
     'rejects a URL resolving to a %s address (%s)',
     async (_label, address) => {
       await expect(
-        assertSafeOutboundUrl(
-          'https://internal.example/',
-          fixedLookup({ address, family: 4 }),
-        ),
+        assertSafeOutboundUrl('https://internal.example/', {
+          lookup: fixedLookup({ address, family: 4 }),
+        }),
       ).rejects.toThrow(UnsafeOutboundUrlError);
     },
   );
@@ -51,48 +49,44 @@ describe('assertSafeOutboundUrl', () => {
     'rejects a URL resolving to an IPv6 %s address (%s)',
     async (_label, address) => {
       await expect(
-        assertSafeOutboundUrl(
-          'https://internal.example/',
-          fixedLookup({ address, family: 6 }),
-        ),
+        assertSafeOutboundUrl('https://internal.example/', {
+          lookup: fixedLookup({ address, family: 6 }),
+        }),
       ).rejects.toThrow(UnsafeOutboundUrlError);
     },
   );
 
   it('rejects a raw private IP literal in the URL itself (no hostname to rebind)', async () => {
     await expect(
-      assertSafeOutboundUrl(
-        'http://169.254.169.254/latest/meta-data/',
-        fixedLookup({ address: '169.254.169.254', family: 4 }),
-      ),
+      assertSafeOutboundUrl('http://169.254.169.254/latest/meta-data/', {
+        lookup: fixedLookup({ address: '169.254.169.254', family: 4 }),
+      }),
     ).rejects.toThrow(UnsafeOutboundUrlError);
   });
 
   it('rejects a non-http(s) protocol', async () => {
     await expect(
-      assertSafeOutboundUrl(
-        'file:///etc/passwd',
-        fixedLookup({ address: '1.2.3.4', family: 4 }),
-      ),
+      assertSafeOutboundUrl('file:///etc/passwd', {
+        lookup: fixedLookup({ address: '1.2.3.4', family: 4 }),
+      }),
     ).rejects.toThrow(UnsafeOutboundUrlError);
   });
 
   it('rejects when even one of several resolved addresses is unsafe', async () => {
     await expect(
-      assertSafeOutboundUrl(
-        'https://multi.example/',
-        fixedLookup(
+      assertSafeOutboundUrl('https://multi.example/', {
+        lookup: fixedLookup(
           { address: '93.184.216.34', family: 4 },
           { address: '127.0.0.1', family: 4 },
         ),
-      ),
+      }),
     ).rejects.toThrow(UnsafeOutboundUrlError);
   });
 
   it('rejects an unresolvable hostname', async () => {
     const lookup: DnsLookupFn = () => Promise.reject(new Error('ENOTFOUND'));
     await expect(
-      assertSafeOutboundUrl('https://nowhere.invalid/', lookup),
+      assertSafeOutboundUrl('https://nowhere.invalid/', { lookup }),
     ).rejects.toThrow(UnsafeOutboundUrlError);
   });
 
@@ -117,12 +111,44 @@ describe('assertSafeOutboundUrl', () => {
 
     // Registration-time check: passes.
     await expect(
-      assertSafeOutboundUrl('https://rebinding.example/', rebindingLookup),
+      assertSafeOutboundUrl('https://rebinding.example/', {
+        lookup: rebindingLookup,
+      }),
     ).resolves.toBeUndefined();
 
     // Call-time re-validation, same URL: now rejected.
     await expect(
-      assertSafeOutboundUrl('https://rebinding.example/', rebindingLookup),
+      assertSafeOutboundUrl('https://rebinding.example/', {
+        lookup: rebindingLookup,
+      }),
     ).rejects.toThrow(UnsafeOutboundUrlError);
+  });
+
+  describe('allowedHosts (SSRF_ALLOWED_HOSTS operator exception list)', () => {
+    it('an allow-listed hostname skips the range check entirely, even though it resolves to a private address', async () => {
+      await expect(
+        assertSafeOutboundUrl('http://127.0.0.1:4000/hook', {
+          lookup: fixedLookup({ address: '127.0.0.1', family: 4 }),
+          allowedHosts: new Set(['127.0.0.1']),
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('a hostname NOT on the allow-list is still rejected as usual', async () => {
+      await expect(
+        assertSafeOutboundUrl('http://127.0.0.1:4000/hook', {
+          lookup: fixedLookup({ address: '127.0.0.1', family: 4 }),
+          allowedHosts: new Set(['some-other-allowed-host']),
+        }),
+      ).rejects.toThrow(UnsafeOutboundUrlError);
+    });
+
+    it('the allow-list still requires an allowed protocol', async () => {
+      await expect(
+        assertSafeOutboundUrl('file:///etc/passwd', {
+          allowedHosts: new Set(['']), // an empty hostname is what file:// URLs parse to
+        }),
+      ).rejects.toThrow(UnsafeOutboundUrlError);
+    });
   });
 });

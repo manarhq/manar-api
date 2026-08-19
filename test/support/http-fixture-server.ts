@@ -7,6 +7,8 @@ export interface RecordedRequest {
   path: string;
   headers: Record<string, string | string[] | undefined>;
   body: unknown;
+  /** Phase 12a: the exact raw request body bytes (as a UTF-8 string), captured alongside the parsed `body` above — webhook signature verification (`verifyWebhookSignature`) must hash the exact bytes the sender signed, not a re-`JSON.stringify`d reconstruction of the parsed value, which could in principle differ (e.g. numeric formatting). */
+  rawBody: string;
 }
 
 export interface HttpFixtureResponse {
@@ -54,6 +56,7 @@ export class HttpFixtureServer {
           path: req.url ?? '/',
           headers: req.headers,
           body: parsedBody,
+          rawBody,
         };
         this.requests.push(recorded);
 

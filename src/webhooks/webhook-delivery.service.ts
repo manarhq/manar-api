@@ -9,6 +9,7 @@ import {
   assertSafeOutboundUrl,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
+import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
 import {
   signWebhookRequest,
   WEBHOOK_DELIVERY_ID_HEADER,
@@ -34,11 +35,16 @@ const SecretReferenceDescriptorSchema = z.object({
 @Injectable()
 export class WebhookDeliveryService {
   private readonly logger = new Logger(WebhookDeliveryService.name);
+  private readonly ssrfAllowedHosts: Set<string>;
 
   constructor(
     @Inject(SECRET_PROVIDER) private readonly secretProvider: SecretProvider,
     private readonly configService: ConfigService<AppConfig, true>,
-  ) {}
+  ) {
+    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
+      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
+    );
+  }
 
   /**
    * One real delivery attempt: loads the `WebhookDelivery` + its
@@ -84,7 +90,9 @@ export class WebhookDeliveryService {
     });
 
     try {
-      await assertSafeOutboundUrl(endpoint.url);
+      await assertSafeOutboundUrl(endpoint.url, {
+        allowedHosts: this.ssrfAllowedHosts,
+      });
     } catch (error) {
       await this.recordAttempt(tenantClient, webhookDeliveryId, {
         responseStatus: null,

@@ -15,6 +15,7 @@ import { RateLimitConfigSchema } from '../rate-limit/rate-limit.config';
 import { SecurityConfigSchema } from '../security/security.config';
 import { WebhooksConfigSchema } from '../webhooks/webhooks.config';
 import { IdempotencyConfigSchema } from '../idempotency/idempotency.config';
+import { SsrfConfigSchema } from '../common/ssrf/ssrf.config';
 
 /**
  * Application-level environment schema.
@@ -54,7 +55,8 @@ export const AppConfigSchema = z
   .extend(RateLimitConfigSchema.shape)
   .extend(SecurityConfigSchema.shape)
   .extend(WebhooksConfigSchema.shape)
-  .extend(IdempotencyConfigSchema.shape);
+  .extend(IdempotencyConfigSchema.shape)
+  .extend(SsrfConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 
