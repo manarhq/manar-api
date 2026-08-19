@@ -267,11 +267,14 @@ to "whatever Phase 12a touched."
 
 ## Out of scope (explicit, per the design spec)
 
-- **Data classification** (`DataClassificationRule`, Section 53) — no
-  classification model exists; nothing in this phase tags data by
-  sensitivity level.
-- **Compliance-framework mapping** (SOC 2 / ISO 27001 / etc. control
-  cross-referencing) — a separate, lower-priority effort.
+- **Data classification** (Section 53) — **done** (Phase 15a): see
+  docs/data-classification.md. Not covered by this document (which
+  predates that phase): the `PolicyEngine`/`RiskEngine`/`AiAdvisoryClient`
+  enforcement points it added.
+- **Compliance-framework mapping** (ISO 27001 / NIST AI RMF control
+  cross-referencing) — **done, partially** (Phase 15a): a representative
+  subset, never a certification claim. SOC 2 / ISO 42001 / EU AI Act
+  mapping remains a documented gap — see docs/compliance-mapping.md.
 - **Network-edge DDoS/volumetric protection** — see T6's residual risk.
 - **Container/Kubernetes/CI security hardening** — Phase 12b's scope, a
   parallel workstream, not duplicated here.

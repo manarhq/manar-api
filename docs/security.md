@@ -339,10 +339,16 @@ that the function happened to return `null` for some unspecified reason.
   configured hostname is exempted for every tenant's `Tool`/`WebhookEndpoint`
   registrations on this deployment. A future phase wanting finer-grained,
   per-tenant internal-target allow-listing would need to extend this.
-- **No data classification model** (`DataClassificationRule`, Section 53)
-  — explicitly out of scope this phase, per the design spec.
-- **No compliance-framework mapping** — explicitly out of scope this
-  phase, per the design spec.
+- **Data classification model** (Section 53) — **done** (Phase 15a):
+  `ToolAction.classification`, a `resourceClassification` `PolicyEngine`
+  match condition, a `RiskEngine` scoring contributor, and an independent
+  `AiAdvisoryClient` residency gate for `RESTRICTED` actions. See
+  docs/data-classification.md.
+- **Compliance-framework mapping** — **done, partially** (Phase 15a): a
+  representative, honestly-assessed subset of ISO/IEC 27001:2022 and
+  NIST AI RMF 1.0 controls, never a certification claim. Not exhaustive
+  coverage of either standard, and no SOC 2/ISO 42001/EU AI Act mapping
+  yet — see docs/compliance-mapping.md for the documented scope and gaps.
 - **Idempotency caching stores the resolved response value only, not the
   original HTTP status code** — a replayed request is served through the
   same route's normal status-code path (its own `@HttpCode`/default
