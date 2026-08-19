@@ -89,6 +89,9 @@ model UserProfile {
   /// Phase 12a: `WebhookEndpoint`s this user registered — see that model's doc comment.
   createdWebhookEndpoints WebhookEndpoint[] @relation("WebhookEndpointCreations")
 
+  /// Phase 15a (Section 70): `Incident`s this user created — see that model's doc comment.
+  createdIncidents Incident[] @relation("IncidentCreations")
+
   @@map("user_profiles")
 }
 
@@ -634,12 +637,46 @@ model Tool {
 /// Phase 6's placeholder `actionId` keyword heuristic entirely (see
 /// docs/policy-model.md's now-superseded "destructive-keyword heuristic"
 /// section and `src/risk/risk-engine.service.ts`).
+/// Phase 15a (Section 53) -- a tool action's data-sensitivity tag, mirrored
+/// as a plain TS/Zod artifact in `src/common/data-classification.ts` (the
+/// two must be kept in sync by hand, the same convention `Role`/`ROLES`
+/// already establishes). Ordered least-to-most sensitive. Threaded through
+/// three independent enforcement points -- none of them hardcoded to
+/// auto-deny on `RESTRICTED`, since that's what `PolicyEngine` rules are
+/// for:
+///
+///   1. `PolicyEngine`'s rule schema gains an optional
+///      `resourceClassification` match condition
+///      (`src/policy/policy-content.schema.ts`) so a policy author *can*
+///      express "deny/require-approval for RESTRICTED actions" -- see
+///      docs/data-classification.md.
+///   2. `RiskEngine.score` adds a classification-based contributor to its
+///      deterministic sum (`src/risk/risk-engine.service.ts`).
+///   3. `AiAdvisoryClient`'s residency gate (Phase 12a's
+///      `allowExternalAi` check) gains a second, independent check: a
+///      `RESTRICTED` action's data is never sent to an external AI
+///      provider, regardless of the tenant's `allowExternalAi` flag (see
+///      that class's `residencyAllows`).
+enum DataClassification {
+  PUBLIC
+  INTERNAL
+  CONFIDENTIAL
+  RESTRICTED
+}
+
 model ToolAction {
   id          String  @id @default(uuid())
   toolId      String
   tool        Tool    @relation(fields: [toolId], references: [id])
   name        String
   description String?
+
+  /// Phase 15a (Section 53) -- see `DataClassification`'s doc comment.
+  /// Defaults to `INTERNAL`, not `PUBLIC` -- the safer default for any
+  /// `ToolAction` row (including ones written before this phase existed,
+  /// backfilled by this migration) that never explicitly declared a
+  /// classification.
+  classification DataClassification @default(INTERNAL)
 
   /// 0-100 -- this action's baseline risk contribution, looked up by
   /// `RiskEngine.score` and added to its deterministic sum (see
@@ -1316,4 +1353,148 @@ model WebhookDelivery {
   @@unique([webhookEndpointId, eventId])
   @@index([webhookEndpointId])
   @@map("webhook_deliveries")
+}
+
+/// Phase 15a (Section 55) -- an honest, non-exhaustive compliance-control
+/// mapping subsystem: real, researched controls from ISO/IEC 27001:2022
+/// Annex A and NIST AI RMF 1.0 (NIST.AI.100-1), each backed by an
+/// evidence-grounded `ComplianceMapping` row describing what this codebase
+/// has *actually* built and tested, citing the relevant `docs/*.md` file --
+/// never a claim of certification (see docs/compliance-mapping.md). Rows
+/// are seeded directly by this model's own migration
+/// (`prisma/tenant/migrations/20260819210000_add_compliance_mapping/migration.sql`)
+/// rather than an app-level seed command: this is reference content
+/// describing the *product's* own capabilities, identical for every
+/// tenant, not tenant-specific configuration -- every tenant (including
+/// ones provisioned in the future) gets it automatically via
+/// `TenantDatabaseManager.provisionTenant`'s `prisma migrate deploy`, the
+/// same mechanism that already applies every other migration.
+model ComplianceFramework {
+  id      String @id @default(uuid())
+  name    String @unique
+  version String
+
+  controls ComplianceControl[]
+
+  @@map("compliance_frameworks")
+}
+
+/// One control from a `ComplianceFramework`, in that framework's own
+/// numbering (`controlId`, e.g. `"A.5.15"` or `"GOVERN 6.1"` -- never
+/// Manar's own invented numbering).
+model ComplianceControl {
+  id          String              @id @default(uuid())
+  frameworkId String
+  framework   ComplianceFramework @relation(fields: [frameworkId], references: [id])
+
+  /// The framework's own control identifier, e.g. `"A.5.15"` (ISO 27001)
+  /// or `"GOVERN 6.1"` (NIST AI RMF) -- unique within one framework, not
+  /// globally.
+  controlId   String
+  title       String
+  description String
+
+  mapping ComplianceMapping?
+
+  @@unique([frameworkId, controlId])
+  @@map("compliance_controls")
+}
+
+/// Section 55's four allowed self-assessment statuses -- deliberately not
+/// a pass/fail boolean, and never a fifth "certified" value (this
+/// subsystem tracks mapping/evidence, never certification -- see
+/// docs/compliance-mapping.md).
+enum ComplianceMappingStatus {
+  MAPPED
+  EVIDENCE_AVAILABLE
+  PARTIALLY_IMPLEMENTED
+  NOT_EVALUATED
+}
+
+/// This codebase's own honest self-assessment against one
+/// `ComplianceControl` -- one mapping per control (`@@unique` below), not a
+/// history; re-running this phase's research and updating the assessment
+/// means editing the seed data via a new migration, not a versioned model
+/// (out of scope this phase -- see docs/compliance-mapping.md).
+model ComplianceMapping {
+  id String @id @default(uuid())
+
+  controlId String            @unique
+  control   ComplianceControl @relation(fields: [controlId], references: [id])
+
+  status ComplianceMappingStatus @default(NOT_EVALUATED)
+
+  /// Free text pointing at real, specific capabilities -- e.g. "Task-scoped
+  /// OpenFGA authorization with deterministic subset-checked delegation,
+  /// see docs/authorization-model.md and docs/task-delegation.md." Never
+  /// fabricated, never a generic restatement of the control's own title.
+  evidenceDescription String
+
+  /// Nullable link/path to more detail (a docs/*.md file, a test file) --
+  /// `evidenceDescription` alone is sometimes sufficient and doesn't
+  /// require a second, more specific pointer.
+  evidenceReference String?
+
+  assessedAt DateTime
+
+  @@map("compliance_mappings")
+}
+
+/// Phase 15a (Section 70) -- a first-class security incident, linked to
+/// existing audit data via `relatedCorrelationIds` rather than a new
+/// relation table: Phase 9a's `AuditEvent.correlationId` (and, downstream,
+/// `GET /audit`'s OpenSearch-backed search and `POST /evidence/export`'s
+/// signed bundle export) is already the connective tissue this product
+/// uses to tie a set of related events together -- an `Incident` simply
+/// names a *curated* subset of correlation IDs a human investigator has
+/// determined are related to one security event, not a fresh audit
+/// mechanism of its own.
+enum IncidentSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum IncidentStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  CLOSED
+}
+
+model Incident {
+  id          String @id @default(uuid())
+  title       String
+  description String
+
+  severity IncidentSeverity
+  status   IncidentStatus   @default(OPEN)
+
+  /// Json array of `AuditEvent.correlationId` strings this incident is
+  /// linked to -- e.g. the correlation ID(s) of the authorization/
+  /// tool-invocation chain that triggered this incident's creation. Never
+  /// a new FK-backed relation table: `AuditEvent.correlationId` is not
+  /// itself a unique/FK-able column (many events legitimately share one
+  /// correlation ID), so this is a plain, human-curated reference list, the
+  /// same posture `docs/audit-chain.md`'s evidence-export filter already
+  /// takes toward `correlationId`.
+  relatedCorrelationIds Json @default("[]")
+
+  createdBy String
+  creator   UserProfile @relation("IncidentCreations", fields: [createdBy], references: [id])
+  createdAt DateTime    @default(now())
+
+  /// Set the moment `status` transitions to `RESOLVED` -- `null` while
+  /// `OPEN`/`INVESTIGATING`, and (deliberately) left untouched by a later
+  /// transition to `CLOSED` from `RESOLVED` (the *first* resolution time is
+  /// what's operationally meaningful -- a resolved-then-reopened-then-
+  /// resolved-again incident's `resolvedAt` still reflects this row's
+  /// current resolution, since `IncidentsService` only ever sets it on a
+  /// transition *into* `RESOLVED`).
+  resolvedAt DateTime?
+
+  @@index([status])
+  @@index([severity])
+  @@map("incidents")
 }

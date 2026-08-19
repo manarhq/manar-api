@@ -14,6 +14,7 @@ import {
 import type { AppConfig } from '../config/env.validation';
 import { getCorrelationId } from '../logging/correlation-id.store';
 import { ControlPrismaService } from '../database/control-prisma.service';
+import type { DataClassification } from '../common/data-classification';
 import { isExternalAiProvider } from './ai-advisory.config';
 
 export interface RiskAdvisory {
@@ -141,8 +142,16 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     correlationId?: string;
     /** Phase 12a (Section 54): the requesting tenant — required so the data-residency gate below can consult its `allowExternalAi` flag before this call is allowed to reach an external provider. */
     tenantId: string;
+    /** Phase 15a (Section 53): the specific tool action's resolved `ToolAction.classification`, when known — see `residencyAllows`'s doc comment for the independent `RESTRICTED` gate this enables. `undefined` (unregistered action, or a caller that hasn't threaded this through yet) is never treated as `RESTRICTED`. */
+    classification?: DataClassification;
   }): Promise<RiskAdvisory | null> {
-    if (!(await this.residencyAllows(input.tenantId, 'AnalyzeRisk'))) {
+    if (
+      !(await this.residencyAllows(
+        input.tenantId,
+        'AnalyzeRisk',
+        input.classification,
+      ))
+    ) {
       return null;
     }
     const result = await this.call('AnalyzeRisk', () =>
@@ -180,9 +189,15 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     correlationId?: string;
     /** Phase 12a (Section 54) — see `analyzeRisk`'s identical parameter doc comment. */
     tenantId: string;
+    /** Phase 15a (Section 53) — see `analyzeRisk`'s identical parameter doc comment. */
+    classification?: DataClassification;
   }): Promise<PromptInjectionAdvisory | null> {
     if (
-      !(await this.residencyAllows(input.tenantId, 'AnalyzePromptInjection'))
+      !(await this.residencyAllows(
+        input.tenantId,
+        'AnalyzePromptInjection',
+        input.classification,
+      ))
     ) {
       return null;
     }
@@ -215,8 +230,16 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     correlationId?: string;
     /** Phase 12a (Section 54) — see `analyzeRisk`'s identical parameter doc comment. */
     tenantId: string;
+    /** Phase 15a (Section 53) — see `analyzeRisk`'s identical parameter doc comment. */
+    classification?: DataClassification;
   }): Promise<DlpAdvisory | null> {
-    if (!(await this.residencyAllows(input.tenantId, 'AnalyzeDlp'))) {
+    if (
+      !(await this.residencyAllows(
+        input.tenantId,
+        'AnalyzeDlp',
+        input.classification,
+      ))
+    ) {
       return null;
     }
     const result = await this.call('AnalyzeDlp', () =>
@@ -281,12 +304,35 @@ export class AiAdvisoryClient implements OnModuleDestroy {
    * `CredentialBrokerService`'s DLP/prompt-injection checkpoints) already
    * treats `null` as "proceed using only the deterministic pipeline,"
    * which is exactly the correct behavior here too.
+   *
+   * **Phase 15a (Section 53) — the classification gate is a second,
+   * independent check, layered on top of (not instead of) the
+   * `allowExternalAi` gate above.** Section 53's own worked example is
+   * literally "RESTRICTED data cannot be sent to an external cloud AI
+   * provider" — a `RESTRICTED`-classified tool action's content is never
+   * sent to an external provider, *regardless* of whether this tenant has
+   * `allowExternalAi = true`. Checked first (before ever touching the
+   * control DB), for two reasons: it needs no tenant lookup at all (a
+   * classification-level restriction doesn't depend on tenant
+   * configuration), and it must never be bypassable by a permissive
+   * tenant flag — a tenant that generally allows external AI still may
+   * never leak a RESTRICTED action's data that way. `undefined`/any
+   * non-`RESTRICTED` classification is unaffected by this check and falls
+   * through to the existing `allowExternalAi` gate unchanged.
    */
   private async residencyAllows(
     tenantId: string,
     rpcName: string,
+    classification?: DataClassification,
   ): Promise<boolean> {
     if (!isExternalAiProvider(this.provider)) return true;
+
+    if (classification === 'RESTRICTED') {
+      this.logger.log(
+        `Skipping manar-ai ${rpcName} for tenant "${tenantId}": the tool action's classification is RESTRICTED — no RPC attempted to external provider "${this.provider}" regardless of this tenant's allowExternalAi flag (Section 53 data classification enforcement).`,
+      );
+      return false;
+    }
 
     try {
       const tenant = await this.control.tenant.findUnique({

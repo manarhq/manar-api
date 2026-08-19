@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DataClassificationSchema } from '../common/data-classification';
 
 /** Same safe slug-like charset `src/authorization/grant-triples.ts`'s `ToolActionSchema` validates `toolId`/`actionId` against — kept as a separate local constant (not imported) since a policy rule's `toolId`/`actionId` additionally allow the wildcard `"*"`, which that schema does not. */
 const TOOL_ACTION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -55,6 +56,22 @@ export const PolicyRuleSchema = z.object({
    * matching this phase). Omitted entirely means the same as `"*"`.
    */
   resourcePattern: z.string().min(1).max(2048).default('*'),
+
+  /**
+   * Phase 15a (Section 53) — an optional additional match condition: when
+   * present, this rule only matches a request whose resolved
+   * `ToolAction.classification` (looked up by `PolicyEngine.evaluate` the
+   * same way it already resolves everything else about the request —
+   * `ToolRegistryService.findToolAction`) equals this value exactly. A
+   * request whose `{toolId, actionId}` doesn't resolve to any registered
+   * `ToolAction` at all has no known classification, so a rule carrying
+   * `resourceClassification` never matches it (the same "not registered is
+   * not a match" posture `RiskEngine` already established for its own
+   * `ToolAction` lookup — see docs/data-classification.md). Omitted means
+   * "match regardless of classification," identical to this field's
+   * absence today.
+   */
+  resourceClassification: DataClassificationSchema.optional(),
 
   effect: PolicyEffectSchema,
 

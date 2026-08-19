@@ -659,7 +659,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     const brokenAuthorizationService = new AuthorizationService(
       tasksServiceForBrokenClient,
       brokenOpenFga,
-      new PolicyEngine(),
+      new PolicyEngine(new ToolRegistryService()),
       new RiskEngine(
         tasksServiceForBrokenClient,
         new ToolRegistryService(),

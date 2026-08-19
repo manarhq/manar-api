@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import { ToolRegistryService } from '../tools/tool-registry.service';
+import type { DataClassification } from '../common/data-classification';
 import {
   PolicyContentSchema,
   PolicyEffect,
@@ -51,6 +53,16 @@ const EFFECT_RANK: Record<PolicyEffect, number> = {
 export class PolicyEngine {
   private readonly logger = new Logger(PolicyEngine.name);
 
+  /**
+   * Phase 15a (Section 53): resolving `resourceClassification` matches
+   * needs `ToolRegistryService` — the exact same dependency `RiskEngine`
+   * already carries for its own `ToolAction` lookup (see that class's doc
+   * comment: "gained a `ToolRegistryService` constructor parameter" is not
+   * a new pattern in this codebase — existing direct-construction test
+   * call sites are updated to pass one, same as that phase).
+   */
+  constructor(private readonly toolRegistry: ToolRegistryService) {}
+
   async evaluate(
     tenantClient: TenantPrismaClient,
     tenantId: string,
@@ -72,6 +84,26 @@ export class PolicyEngine {
       };
     }
 
+    // Phase 15a (Section 53): resolved once per `evaluate` call, not per
+    // rule/policy — `undefined` (no registered `ToolAction` for this
+    // {toolId, actionId} pair) means a rule carrying `resourceClassification`
+    // never matches this request, the same "not registered is not a match"
+    // posture `RiskEngine` already established for the identical lookup.
+    let classification: DataClassification | undefined;
+    try {
+      const registered = await this.toolRegistry.findToolAction(
+        tenantClient,
+        request.toolId,
+        request.actionId,
+      );
+      classification = registered?.action.classification;
+    } catch (error) {
+      this.logger.warn(
+        `Could not resolve ToolAction classification for tenant "${tenantId}" ("${request.toolId}"/"${request.actionId}") — proceeding as if unclassified (no ToolAction-classification rule can match): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      classification = undefined;
+    }
+
     let best: PolicyEvaluationResult = { effect: 'ALLOW' };
 
     for (const version of publishedVersions) {
@@ -86,7 +118,11 @@ export class PolicyEngine {
         };
       }
 
-      const matched = matchFirstRule(parsed.data.rules, request);
+      const matched = matchFirstRule(
+        parsed.data.rules,
+        request,
+        classification,
+      );
       if (!matched) continue;
 
       const candidate: PolicyEvaluationResult = {
@@ -139,18 +175,30 @@ export class PolicyEngine {
 function matchFirstRule(
   rules: readonly PolicyRule[],
   request: PolicyEvaluationRequest,
+  classification: DataClassification | undefined,
 ): PolicyRule | undefined {
-  return rules.find((rule) => ruleMatches(rule, request));
+  return rules.find((rule) => ruleMatches(rule, request, classification));
 }
 
 function ruleMatches(
   rule: PolicyRule,
   request: PolicyEvaluationRequest,
+  classification: DataClassification | undefined,
 ): boolean {
   const toolMatches = rule.toolId === '*' || rule.toolId === request.toolId;
   const actionMatches =
     rule.actionId === '*' || rule.actionId === request.actionId;
   const resourceMatches =
     rule.resourcePattern === '*' || rule.resourcePattern === request.resource;
-  return toolMatches && actionMatches && resourceMatches;
+  // Phase 15a (Section 53): absent means "match regardless of
+  // classification" (identical to before this field existed); present
+  // means an exact match against the resolved ToolAction's classification,
+  // which is `undefined` for an unregistered {toolId, actionId} — see
+  // `PolicyRuleSchema.resourceClassification`'s doc comment.
+  const classificationMatches =
+    rule.resourceClassification === undefined ||
+    rule.resourceClassification === classification;
+  return (
+    toolMatches && actionMatches && resourceMatches && classificationMatches
+  );
 }

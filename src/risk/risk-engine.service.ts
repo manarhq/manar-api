@@ -4,6 +4,7 @@ import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import type { PolicyRule } from '../policy/policy-content.schema';
 import { ToolRegistryService } from '../tools/tool-registry.service';
 import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
+import type { DataClassification } from '../common/data-classification';
 
 export interface RiskScoreInput {
   /** Phase 12a: needed to pass through to `AiAdvisoryClient.analyzeRisk`'s data-residency (`allowExternalAi`) check — see docs/ai-security-model.md's "Data residency enforcement" section. */
@@ -37,6 +38,26 @@ const DELEGATION_DEPTH_CAP = 30;
 const MUTATING_POINTS = 15;
 /** Additive contribution when the resolved `ToolAction.destructive` flag is `true` — on top of, not instead of, `MUTATING_POINTS` (every destructive action is mutating too, but the two flags are independent booleans on the schema, so both contribute independently). */
 const DESTRUCTIVE_POINTS = 25;
+/**
+ * Phase 15a (Section 53): additive contribution keyed by the resolved
+ * `ToolAction.classification` — a higher-sensitivity action is
+ * marginally higher baseline risk, independent of anything `mutating`/
+ * `destructive` already contribute (a read-only action against RESTRICTED
+ * data is still more sensitive than the identical read against PUBLIC
+ * data). `PUBLIC`/`INTERNAL` contribute nothing beyond the flat
+ * `BASELINE_SCORE` every request already gets — `INTERNAL` is the schema
+ * default, so this must not visibly move an unclassified-in-practice
+ * action's score. `CONFIDENTIAL`/`RESTRICTED` step up meaningfully but
+ * deliberately not enough alone to force `REQUIRE_APPROVAL` for every
+ * such action — that's what a `resourceClassification` policy rule
+ * (`docs/policy-model.md`) is for, via its own `riskWeight`/`riskFloor`.
+ */
+const CLASSIFICATION_RISK_POINTS: Record<DataClassification, number> = {
+  PUBLIC: 0,
+  INTERNAL: 0,
+  CONFIDENTIAL: 10,
+  RESTRICTED: 25,
+};
 /**
  * Phase 10b: fixed additive contribution applied to `deterministicRiskScore`
  * (not `aiAdvisoryScore`) when the requesting agent has an active,
@@ -90,6 +111,11 @@ function clamp(value: number, min: number, max: number): number {
  * docs/policy-model.md for the deterministic contributors and
  * docs/ai-security-model.md for the AI-advisory combination rule and the
  * `AgentRiskFlag` mechanism.
+ *
+ * Since Phase 15a (Section 53), the resolved `ToolAction.classification`
+ * (when one is registered) is one more deterministic contributor
+ * (`CLASSIFICATION_RISK_POINTS`, see its own doc comment) — see
+ * docs/data-classification.md.
  */
 @Injectable()
 export class RiskEngine {
@@ -143,6 +169,17 @@ export class RiskEngine {
         sum += DESTRUCTIVE_POINTS;
         reasonCodes.push(`tool_action_destructive:${DESTRUCTIVE_POINTS}`);
       }
+      // Phase 15a (Section 53) — see CLASSIFICATION_RISK_POINTS's doc
+      // comment. Always recorded when a ToolAction is registered (even a
+      // 0-point PUBLIC/INTERNAL contribution), mirroring
+      // tool_action_risk_base's identical "always recorded when
+      // registered, regardless of value" posture.
+      const classificationPoints =
+        CLASSIFICATION_RISK_POINTS[action.classification];
+      sum += classificationPoints;
+      reasonCodes.push(
+        `tool_action_classification:${action.classification}:${classificationPoints}`,
+      );
     }
 
     // Phase 10b: a simple DB lookup, never another AI call — see
@@ -184,6 +221,13 @@ export class RiskEngine {
       actionDescription: `Agent action: ${input.toolId}.${input.actionId} on resource "${input.resource}"`,
       context: `taskId=${input.task.id} riskCeiling=${input.task.riskCeiling} delegationDepth=${ancestors.length} deterministicRiskScore=${deterministicRiskScore}`,
       tenantId: input.tenantId,
+      // Phase 15a (Section 53): lets AiAdvisoryClient's residency gate
+      // independently block this specific call to an external provider
+      // when the action is RESTRICTED, regardless of the tenant's
+      // allowExternalAi flag — see that class's residencyAllows. undefined
+      // (no registered ToolAction) is treated identically to any other
+      // non-RESTRICTED classification there.
+      classification: registered?.action.classification,
     });
 
     let aiAdvisoryScore: number | null = null;

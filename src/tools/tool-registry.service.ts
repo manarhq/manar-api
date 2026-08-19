@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import type { SecretReferenceDescriptor } from '../database/secret-provider';
+import type { DataClassification } from '../common/data-classification';
 import {
   CursorPage,
   DecodedCursor,
@@ -56,6 +57,8 @@ export interface ToolActionRecord {
   mutating: boolean;
   destructive: boolean;
   approvalDefault: boolean;
+  /** Phase 15a (Section 53) — see `DataClassification`'s doc comment (`src/common/data-classification.ts`). Defaults to `INTERNAL` at the schema level; always present on a real row. */
+  classification: DataClassification;
 }
 
 export interface ListToolsInput {
@@ -212,7 +215,8 @@ export class ToolRegistryService {
     mutating: boolean;
     destructive: boolean;
     approvalDefault: boolean;
+    classification: string;
   }): ToolActionRecord {
-    return { ...row };
+    return { ...row, classification: row.classification as DataClassification };
   }
 }

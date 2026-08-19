@@ -6,6 +6,7 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
 import type { DlpAdvisory } from '../ai-advisory/ai-advisory-client.service';
+import type { DataClassification } from '../common/data-classification';
 import { redactedToolResultPlaceholder } from './dlp-redaction.util';
 import {
   DlpBlockedError,
@@ -184,6 +185,11 @@ export class CredentialBrokerService {
     const dlpBefore = await this.aiAdvisoryClient.analyzeDlp({
       content: JSON.stringify(input.params ?? null),
       tenantId: input.tenantId,
+      // Phase 15a (Section 53): lets AiAdvisoryClient's residency gate
+      // independently block this call to an external provider when this
+      // action is RESTRICTED, regardless of the tenant's allowExternalAi
+      // flag.
+      classification: action.classification,
     });
     if (dlpBefore && DLP_BLOCKING_SEVERITIES.has(dlpBefore.overallSeverity)) {
       await this.auditService.recordSafely(tenantClient, input.tenantId, {
@@ -273,7 +279,12 @@ export class CredentialBrokerService {
     });
 
     if (result.success) {
-      result = await this.applyPostCallAdvisories(tenantClient, input, result);
+      result = await this.applyPostCallAdvisories(
+        tenantClient,
+        input,
+        result,
+        action.classification,
+      );
     }
 
     return result;
@@ -315,6 +326,8 @@ export class CredentialBrokerService {
     tenantClient: TenantPrismaClient,
     input: CredentialBrokerInvokeInput,
     result: ToolInvocationResult,
+    /** Phase 15a (Section 53): the invoked action's own resolved `ToolAction.classification` — threaded through to both advisory calls below so `AiAdvisoryClient`'s residency gate can independently block a RESTRICTED action's data from ever reaching an external provider. */
+    classification: DataClassification,
   ): Promise<ToolInvocationResult> {
     const originalData = result.data;
     let outcome = result;
@@ -323,6 +336,7 @@ export class CredentialBrokerService {
       {
         content: JSON.stringify(originalData ?? null),
         tenantId: input.tenantId,
+        classification,
       },
     );
     // `source: "system"` is manar-ai's own AI-backend-unavailable status
@@ -362,6 +376,7 @@ export class CredentialBrokerService {
         content: originalData,
         source: 'tool_output',
         tenantId: input.tenantId,
+        classification,
       });
       if (injection && injection.detected) {
         const reason = `prompt_injection_detected:${input.toolId}/${input.actionId}`;

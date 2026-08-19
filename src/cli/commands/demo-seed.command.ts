@@ -65,6 +65,8 @@ interface ToolActionDef {
   riskBaseScore: number;
   mutating: boolean;
   destructive: boolean;
+  /** Phase 15a (Section 53) — omitted means the schema default (`INTERNAL`) applies; only `iam.disable-user` sets this explicitly (`RESTRICTED`) below, so "Restricted Classification Approval Policy" has a real demo action to match against. */
+  classification?: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED';
 }
 
 interface ToolDef {
@@ -126,6 +128,14 @@ const DEMO_TOOLS: ToolDef[] = [
         riskBaseScore: 40,
         mutating: true,
         destructive: true,
+        // Phase 15a (Section 53) — disabling a user account touches
+        // sensitive identity data; classified RESTRICTED so "Restricted
+        // Classification Approval Policy" below has a real demo action to
+        // match. This task's own grant never includes any `iam` action at
+        // all (see DEMO_POLICIES's own doc comment), so this is
+        // defense-in-depth, exercised directly by this phase's tests
+        // rather than through the demo task itself.
+        classification: 'RESTRICTED',
       },
     ],
   },
@@ -170,6 +180,9 @@ interface PolicyDef {
       riskWeight?: number;
       riskFloor?: number;
       description?: string;
+      /** Phase 15a (Section 53) — see `PolicyRuleSchema.resourceClassification`'s doc comment. */
+      resourceClassification?:
+        'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED';
     }>;
   };
 }
@@ -256,6 +269,35 @@ const DEMO_POLICIES: PolicyDef[] = [
           riskWeight: 80,
           description:
             'Autonomous agents may never mutate IAM state, full stop.',
+        },
+      ],
+    },
+  },
+  {
+    // Phase 15a (Section 53): a real, worked example of `resourceClassification`
+    // matching — demonstrates that a policy CAN express "require approval
+    // for RESTRICTED-classified actions" (nothing is hardcoded to
+    // auto-deny; see docs/data-classification.md). Matches
+    // `iam.disable-user`, the one demo ToolAction seeded with
+    // `classification: 'RESTRICTED'` — this task's own grant never
+    // includes any `iam` action, so this rule is exercised directly by
+    // this phase's own tests rather than through the demo task/agent
+    // flow.
+    name: 'Restricted Classification Approval Policy',
+    description:
+      'Any action against a RESTRICTED-classified resource always requires human approval, regardless of which tool/action it is or what a task was otherwise granted.',
+    content: {
+      rules: [
+        {
+          name: 'Require approval for RESTRICTED-classified actions',
+          toolId: '*',
+          actionId: '*',
+          effect: 'REQUIRE_APPROVAL',
+          resourceClassification: 'RESTRICTED',
+          riskWeight: 50,
+          riskFloor: 65,
+          description:
+            'RESTRICTED data warrants a human in the loop before any agent acts on it, independent of the specific tool/action involved.',
         },
       ],
     },
@@ -732,6 +774,9 @@ export class DemoSeedCommand extends CommandRunner {
             mutating: actionDef.mutating,
             destructive: actionDef.destructive,
             inputSchema: { type: 'object' },
+            ...(actionDef.classification
+              ? { classification: actionDef.classification }
+              : {}),
           },
         });
         this.logger.log(

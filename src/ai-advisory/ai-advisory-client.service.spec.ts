@@ -444,4 +444,182 @@ describe('AiAdvisoryClient', () => {
       expect(fakeServer.callCounts.analyzeRisk).toBe(1);
     });
   });
+
+  /**
+   * Phase 15a (Section 53): a second, independent gate layered on top of
+   * the `allowExternalAi` residency check above. Mirrors that suite's own
+   * "assert at the network level, never just 'the function returned
+   * null'" posture -- every scenario here checks
+   * `fakeServer.callCounts`, which only increments on a real received
+   * wire-protocol call.
+   */
+  describe('data classification enforcement (Section 53)', () => {
+    it('a RESTRICTED classification blocks an external-provider call even when the tenant has allowExternalAi=true', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        // allowExternalAi=true -- the RESTRICTED gate must still block,
+        // independent of this flag.
+        fakeControlPrismaService(true),
+      );
+      const result = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 'tenant-allows-external-ai',
+        classification: 'RESTRICTED',
+      });
+      expect(result).toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(0);
+    });
+
+    it('a RESTRICTED classification does not even consult the tenant\'s allowExternalAi flag (no control-DB lookup needed to decide "no")', async () => {
+      let controlLookups = 0;
+      const countingControl = {
+        tenant: {
+          findUnique: () => {
+            controlLookups += 1;
+            return Promise.resolve({ allowExternalAi: true });
+          },
+        },
+      } as unknown as ControlPrismaService;
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        countingControl,
+      );
+      const result = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+        classification: 'RESTRICTED',
+      });
+      expect(result).toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(0);
+      expect(controlLookups).toBe(0);
+    });
+
+    it('applies identically to analyzeDlp and analyzePromptInjection -- no RPC attempted for either when RESTRICTED', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService(true),
+      );
+      const dlpResult = await client.analyzeDlp({
+        content: 'anything',
+        tenantId: 't',
+        classification: 'RESTRICTED',
+      });
+      const injectionResult = await client.analyzePromptInjection({
+        content: 'anything',
+        source: 'tool_output',
+        tenantId: 't',
+        classification: 'RESTRICTED',
+      });
+      expect(dlpResult).toBeNull();
+      expect(injectionResult).toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(0);
+      expect(fakeServer.callCounts.analyzePromptInjection).toBe(0);
+    });
+
+    it('a non-RESTRICTED classification (or none at all) is unaffected -- falls through to the ordinary allowExternalAi gate', async () => {
+      fakeServer.riskResult = {
+        score: 20,
+        confidence: 0.5,
+        signals: [],
+        explanation: '',
+        recommendedAction: 1,
+      };
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService(true),
+      );
+      const confidentialResult = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+        classification: 'CONFIDENTIAL',
+      });
+      const unclassifiedResult = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      expect(confidentialResult).not.toBeNull();
+      expect(unclassifiedResult).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(2);
+    });
+
+    it('a RESTRICTED classification does not count toward the circuit breaker (a policy decision, not an outage)', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 1,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService(true),
+      );
+      await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+        classification: 'RESTRICTED',
+      });
+      await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+        classification: 'RESTRICTED',
+      });
+      expect(fakeServer.callCounts.analyzeRisk).toBe(0);
+
+      fakeServer.riskResult = {
+        score: 15,
+        confidence: 0.5,
+        signals: [],
+        explanation: '',
+        recommendedAction: 1,
+      };
+      const result = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      expect(result).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(1);
+    });
+
+    it('a self-hosted provider (ollama) is never gated by classification, even RESTRICTED', async () => {
+      fakeServer.riskResult = {
+        score: 20,
+        confidence: 0.5,
+        signals: [],
+        explanation: '',
+        recommendedAction: 1,
+      };
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'ollama',
+        }),
+        fakeControlPrismaService(false),
+      );
+      const result = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+        classification: 'RESTRICTED',
+      });
+      expect(result).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(1);
+    });
+  });
 });

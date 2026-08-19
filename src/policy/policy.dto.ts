@@ -28,6 +28,15 @@ export class PolicyRuleDto {
   })
   resourcePattern!: string;
 
+  @ApiProperty({
+    required: false,
+    enum: ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED'],
+    description:
+      'Phase 15a (Section 53): if present, this rule only matches a request whose resolved ToolAction.classification equals this value exactly. Omitted means "match regardless of classification". See docs/data-classification.md.',
+  })
+  resourceClassification?:
+    'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED';
+
   @ApiProperty({ enum: ['ALLOW', 'DENY', 'REQUIRE_APPROVAL'] })
   effect!: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
 

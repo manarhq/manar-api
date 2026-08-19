@@ -25,6 +25,13 @@ export class ToolActionSummaryDto {
 
   @ApiProperty()
   approvalDefault!: boolean;
+
+  @ApiProperty({
+    enum: ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED'],
+    description:
+      'Phase 15a (Section 53) data-sensitivity tag — see docs/data-classification.md. Defaults to INTERNAL.',
+  })
+  classification!: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED';
 }
 
 /**

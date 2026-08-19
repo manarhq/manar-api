@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ToolsModule } from '../tools/tools.module';
 import { PolicyEngine } from './policy-engine.service';
 import { PolicyService } from './policy.service';
 
@@ -12,8 +13,14 @@ import { PolicyService } from './policy.service';
  * `PolicyHttpModule`. Both are exported from here regardless, so either
  * app can import exactly what it needs without a controller ever being
  * reachable from the wrong listener.
+ *
+ * Phase 15a: imports `ToolsModule` for `ToolRegistryService` — `PolicyEngine`
+ * needs it to resolve a request's `ToolAction.classification` for
+ * `resourceClassification` rule matching (Section 53). Mirrors
+ * `RiskModule`'s identical import of `ToolsModule` for the same service.
  */
 @Module({
+  imports: [ToolsModule],
   providers: [PolicyEngine, PolicyService],
   exports: [PolicyEngine, PolicyService],
 })

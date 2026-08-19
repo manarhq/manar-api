@@ -40,6 +40,8 @@ interface FakeToolActionRow {
   riskBaseScore: number;
   mutating?: boolean;
   destructive?: boolean;
+  /** Phase 15a — defaults to `'INTERNAL'` (the real schema default) when omitted, matching every pre-existing test's implicit expectation of "no classification signal beyond the default." */
+  classification?: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED';
 }
 interface FakeAgentRiskFlagRow {
   agentId: string;
@@ -108,6 +110,7 @@ function fakeTenantClient(options: {
                 mutating: false,
                 destructive: false,
                 approvalDefault: false,
+                classification: 'INTERNAL',
                 ...toolActions.find(
                   (a) =>
                     a.toolId === toolId_name.toolId &&
@@ -468,5 +471,129 @@ describe('RiskEngine', () => {
     expect(result.deterministicRiskScore).toBe(70);
     expect(result.aiAdvisoryScore).toBe(5);
     expect(result.finalRiskScore).toBe(70);
+  });
+
+  describe('data classification contributor (Phase 15a, Section 53)', () => {
+    it('CONFIDENTIAL adds 10 points, recorded in reasonCodes', async () => {
+      const task = makeTask();
+      const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+      const client = fakeTenantClient({
+        tasksById: { [task.id]: task },
+        tools: [{ id: 'tool-1', name: 'fs' }],
+        toolActions: [
+          {
+            toolId: 'tool-1',
+            name: 'read',
+            riskBaseScore: 0,
+            classification: 'CONFIDENTIAL',
+          },
+        ],
+      });
+      const result = await engine.score(client, {
+        toolId: 'fs',
+        actionId: 'read',
+        resource: 'anything',
+        task,
+        agentId: 'agent-1',
+        tenantId: 'tenant-1',
+      });
+      // baseline 10 + riskBaseScore 0 + classification(CONFIDENTIAL) 10 = 20
+      expect(result.deterministicRiskScore).toBe(20);
+      expect(result.reasonCodes).toContain(
+        'tool_action_classification:CONFIDENTIAL:10',
+      );
+    });
+
+    it('RESTRICTED adds 25 points, recorded in reasonCodes', async () => {
+      const task = makeTask();
+      const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+      const client = fakeTenantClient({
+        tasksById: { [task.id]: task },
+        tools: [{ id: 'tool-1', name: 'fs' }],
+        toolActions: [
+          {
+            toolId: 'tool-1',
+            name: 'read',
+            riskBaseScore: 0,
+            classification: 'RESTRICTED',
+          },
+        ],
+      });
+      const result = await engine.score(client, {
+        toolId: 'fs',
+        actionId: 'read',
+        resource: 'anything',
+        task,
+        agentId: 'agent-1',
+        tenantId: 'tenant-1',
+      });
+      // baseline 10 + riskBaseScore 0 + classification(RESTRICTED) 25 = 35
+      expect(result.deterministicRiskScore).toBe(35);
+      expect(result.reasonCodes).toContain(
+        'tool_action_classification:RESTRICTED:25',
+      );
+    });
+
+    it('PUBLIC/INTERNAL contribute 0 points but are still recorded (registered ToolAction is never silently omitted)', async () => {
+      const task = makeTask();
+      const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+      const client = fakeTenantClient({
+        tasksById: { [task.id]: task },
+        tools: [{ id: 'tool-1', name: 'fs' }],
+        toolActions: [
+          {
+            toolId: 'tool-1',
+            name: 'read',
+            riskBaseScore: 0,
+            classification: 'PUBLIC',
+          },
+        ],
+      });
+      const result = await engine.score(client, {
+        toolId: 'fs',
+        actionId: 'read',
+        resource: 'anything',
+        task,
+        agentId: 'agent-1',
+        tenantId: 'tenant-1',
+      });
+      expect(result.deterministicRiskScore).toBe(10);
+      expect(result.reasonCodes).toContain(
+        'tool_action_classification:PUBLIC:0',
+      );
+    });
+
+    it('passes the resolved classification through to AiAdvisoryClient.analyzeRisk', async () => {
+      const task = makeTask();
+      let seenClassification: string | undefined;
+      const aiAdvisory = {
+        analyzeRisk: (input: { classification?: string }) => {
+          seenClassification = input.classification;
+          return Promise.resolve(null);
+        },
+      } as unknown as AiAdvisoryClient;
+      const engine = new RiskEngine(tasksService, toolRegistry, aiAdvisory);
+      const client = fakeTenantClient({
+        tasksById: { [task.id]: task },
+        tools: [{ id: 'tool-1', name: 'fs' }],
+        toolActions: [
+          {
+            toolId: 'tool-1',
+            name: 'read',
+            riskBaseScore: 0,
+            classification: 'RESTRICTED',
+          },
+        ],
+      });
+      await engine.score(client, {
+        toolId: 'fs',
+        actionId: 'read',
+        resource: 'anything',
+        task,
+        agentId: 'agent-1',
+        tenantId: 'tenant-1',
+      });
+      expect(seenClassification).toBe('RESTRICTED');
+    });
   });
 });
