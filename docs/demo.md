@@ -249,17 +249,32 @@ audit event:
      **long-form** lane instead (`POST /incidents/summarize` and friends —
      see "Optional: a real AI backend" above), which isn't part of this
      scenario's own narrative.
-2. **`CredentialBrokerService`'s prompt-injection hook only ever inspects
-   a tool result whose `data` is a plain string** (`typeof result.data
-=== 'string'`) — `demo-soc-tools`' real SIEM responses are structured
-   JSON objects (`{ events: [...] }`), which that hook never inspects at
-   all (a structured object result is DLP's concern, Section 73, not this
-   one). This is a real, confirmed architectural boundary found while
-   assembling this phase, not a bug introduced here — see
-   `test/complete-demo.e2e-spec.ts`'s own doc comment for the full
-   explanation and how that test proves the mechanism is genuinely real
-   anyway (via one additional, string-returning tool call in the same
-   tenant/task).
+2. **`CredentialBrokerService`'s prompt-injection hook now also inspects
+   structured (object/array) tool results, not only a plain string**
+   (`typeof result.data === 'string'`) — `demo-soc-tools`' real SIEM
+   responses are structured JSON objects (`{ events: [...] }`), which used
+   to be entirely invisible to this hook (a real, confirmed architectural
+   boundary found while assembling Phase 13, not a bug introduced there).
+   That gap is closed: the hook now walks a structured result with a
+   bounded traversal (depth capped at 5, concatenated string-leaf content
+   capped at ~4KB — see `collectStructuredInjectionText` in
+   `src/tools/credential-broker.service.ts`), and if it finds any
+   string-valued leaves, passes the bounded, concatenated text to the
+   same single `AnalyzePromptInjection` call the plain-string path already
+   made — never a second RPC call, never one call per event/leaf, so the
+   hot-lane latency budget below is unaffected by this change.
+   **This makes structured results inspectable — it does not, by itself,
+   make a live run against real local inference complete within the hot
+   lane's 2s budget.** Limitation 1 above is unaffected by this fix and
+   still applies exactly as described: even with `pnpm infra:up:ai` and
+   this bounded-traversal fix both in place, a live `pnpm demo:agent` run
+   will most likely still show manar-ai's fail-secure envelope for
+   `AnalyzePromptInjection` on CPU-only hardware, because real inference
+   latency (~13s measured minimum) still blows past `AI_ADVISORY_TIMEOUT_MS`
+   long before this traversal (a fast, in-process, pre-RPC step) becomes
+   relevant. `test/complete-demo.e2e-spec.ts`'s own doc comment has the
+   full explanation of the pre-fix boundary and how the test proves the
+   mechanism is genuinely real via `FakeAnalysisServiceServer`.
 
 Neither limitation affects the deterministic parts of the scenario — the
 `iam.disable-user` denial, the approval flow, the kill switch, the audit

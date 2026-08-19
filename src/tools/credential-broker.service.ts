@@ -43,6 +43,89 @@ const DLP_BLOCKING_SEVERITIES = new Set(['SEVERITY_HIGH', 'SEVERITY_CRITICAL']);
 /** How long a detected prompt-injection attempt keeps the requesting agent's `AgentRiskFlag` active — see that model's doc comment and `RiskEngine`'s `AGENT_RISK_FLAG_BUMP`. Short and fixed: long enough to matter for an agent's next few requests, short enough that a stale flag doesn't linger indefinitely. */
 const PROMPT_INJECTION_RISK_FLAG_TTL_MS = 15 * 60 * 1000;
 
+/**
+ * Task 5 (see docs/superpowers/sdd/plan-mvp-unblock, task-5-brief.md):
+ * bounded-traversal caps for `collectStructuredInjectionText` below. Both
+ * are pure in-process CPU bounds on a synchronous object/array walk, wholly
+ * unrelated to `AI_ADVISORY_TIMEOUT_MS`'s hot-lane RPC budget -- the walk
+ * runs entirely *before* the single, unchanged `analyzePromptInjection`
+ * call in `applyPostCallAdvisories` (never once per leaf, which would
+ * multiply RPC round-trips against that same tight budget), so it must
+ * stay fast regardless of that budget. Depth 5 is deep enough for a
+ * `{ events: [ { description, metadata: {...} } ] }` SIEM-response shape
+ * (root object -> array -> event object -> string/metadata object ->
+ * metadata's own string values) while still bounding pathological nesting.
+ */
+const PROMPT_INJECTION_SCAN_MAX_DEPTH = 5;
+/**
+ * ~4KB of concatenated string-leaf content -- large enough to catch a
+ * realistic multi-event tool payload, small enough that a huge or
+ * adversarial tool response can't blow past it. The cap truncates rather
+ * than drops the call: a truncated-but-still-inspected payload is strictly
+ * better than skipping detection outright once the bound is hit.
+ */
+const PROMPT_INJECTION_SCAN_MAX_CHARS = 4000;
+
+/**
+ * Extracts a bounded, concatenated string of every string-valued leaf out
+ * of a structured (object/array) tool result, for the same
+ * `analyzePromptInjection` advisory check `applyPostCallAdvisories` already
+ * runs against a plain-string `result.data` (see that method's doc
+ * comment). Added by Task 5 to close a real gap: `packages/demo-soc-tools`'
+ * SIEM responses are `{ events: [...] }` JSON, never a plain string, so
+ * before this the prompt-injection hook never inspected them at all (see
+ * `docs/ai-security-model.md`'s "Prompt-injection advisory" section and
+ * `test/complete-demo.e2e-spec.ts`'s file-level doc comment).
+ *
+ * Bounded by `PROMPT_INJECTION_SCAN_MAX_DEPTH`/`PROMPT_INJECTION_SCAN_MAX_CHARS`
+ * (see those constants' doc comments) so this synchronous walk can never
+ * itself become meaningful hot-lane latency, and deliberately handles only
+ * plain objects and arrays (`Array.isArray` / `typeof === 'object'`) --
+ * `Map`/`Set`/class instances are out of scope, since every
+ * `ToolProtocolAdapter` returns parsed JSON by construction (see that
+ * interface's doc comment), and non-string leaves (numbers, booleans,
+ * `null`) are skipped outright -- they can't carry injected text.
+ *
+ * Returns `null` when there is nothing string-shaped to inspect at all (a
+ * bare number/boolean/`null` result, or an object/array with zero string
+ * leaves) -- the caller skips the `analyzePromptInjection` RPC entirely in
+ * that case, exactly as it already did for any non-string `result.data`
+ * before this task existed.
+ */
+function collectStructuredInjectionText(value: unknown): string | null {
+  const parts: string[] = [];
+  let remaining = PROMPT_INJECTION_SCAN_MAX_CHARS;
+
+  const visit = (node: unknown, depth: number): void => {
+    if (remaining <= 0 || depth > PROMPT_INJECTION_SCAN_MAX_DEPTH) return;
+    if (typeof node === 'string') {
+      if (node.length === 0) return;
+      const chunk = node.slice(0, remaining);
+      parts.push(chunk);
+      remaining -= chunk.length;
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (remaining <= 0) break;
+        visit(item, depth + 1);
+      }
+      return;
+    }
+    if (node !== null && typeof node === 'object') {
+      for (const key of Object.keys(node)) {
+        if (remaining <= 0) break;
+        visit((node as Record<string, unknown>)[key], depth + 1);
+      }
+      return;
+    }
+    // number/boolean/null/undefined -- can't carry injected text, skip.
+  };
+
+  visit(value, 0);
+  return parts.length > 0 ? parts.join('\n') : null;
+}
+
 export interface CredentialBrokerInvokeInput {
   /** Phase 9a: needed only to attribute audit events to the right tenant chain — `CredentialBrokerService` never used a raw tenant id before this (tenant isolation already comes from `tenantClient` itself). */
   tenantId: string;
@@ -304,16 +387,24 @@ export class CredentialBrokerService {
    *      precise substring splicing isn't possible from this contract) and
    *      the full finding metadata (never the raw matched value) is
    *      recorded via `AuditService.recordSafely`.
-   *   2. Prompt-injection advisory: only when `result.data` is itself a
-   *      string (a genuine text-ish result -- a structured object result
-   *      is DLP's concern, not this one). On detection, records a
-   *      `prompt_injection.detected` audit event and sets a short-lived
-   *      `AgentRiskFlag` for this agent (`RiskEngine` folds an active flag
-   *      into `deterministicRiskScore` for this agent's *subsequent*
-   *      requests -- see that class's `AGENT_RISK_FLAG_BUMP` doc comment).
-   *      Runs against the *original*, pre-redaction text -- detection is
-   *      analysis-only and never itself returned to any caller, so there
-   *      is no leak risk in analyzing the unredacted value here.
+   *   2. Prompt-injection advisory: when `result.data` is a string, runs
+   *      directly against it. When it's a structured object/array (e.g.
+   *      `packages/demo-soc-tools`' `{ events: [...] }` SIEM responses),
+   *      Task 5's `collectStructuredInjectionText` walks it (bounded --
+   *      see that function's doc comment) and, if it finds any string
+   *      leaves, the same single `analyzePromptInjection` call below runs
+   *      against the bounded, concatenated result instead -- still exactly
+   *      one RPC call either way, never one per leaf. A result with
+   *      nothing string-shaped at all (a bare number/boolean/`null`, or an
+   *      object with zero string leaves) skips the call entirely, same as
+   *      before Task 5. On detection, records a `prompt_injection.detected`
+   *      audit event and sets a short-lived `AgentRiskFlag` for this agent
+   *      (`RiskEngine` folds an active flag into `deterministicRiskScore`
+   *      for this agent's *subsequent* requests -- see that class's
+   *      `AGENT_RISK_FLAG_BUMP` doc comment). Runs against the *original*,
+   *      pre-redaction text/structure -- detection is analysis-only and
+   *      never itself returned to any caller, so there is no leak risk in
+   *      analyzing the unredacted value here.
    *
    *   `null` from either `AiAdvisoryClient` call (unreachable/timed
    *   out/circuit open) is a no-op for that check -- the result is
@@ -371,9 +462,20 @@ export class CredentialBrokerService {
       });
     }
 
-    if (typeof originalData === 'string') {
+    // Task 5: the plain-string case is untouched (`originalData` itself,
+    // no truncation, exactly the pre-Task-5 behavior); the structured case
+    // is new -- `collectStructuredInjectionText` returns `null` (skip, no
+    // RPC) when there's nothing string-shaped to inspect.
+    const injectionText: string | null =
+      typeof originalData === 'string'
+        ? originalData
+        : originalData !== null && typeof originalData === 'object'
+          ? collectStructuredInjectionText(originalData)
+          : null;
+
+    if (injectionText !== null) {
       const injection = await this.aiAdvisoryClient.analyzePromptInjection({
-        content: originalData,
+        content: injectionText,
         source: 'tool_output',
         tenantId: input.tenantId,
         classification,
