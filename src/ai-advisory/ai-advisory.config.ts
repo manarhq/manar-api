@@ -19,9 +19,13 @@ export const AiAdvisoryConfigSchema = z.object({
   AI_ADVISORY_GRPC_TARGET: z.string().min(1).default('localhost:50051'),
 
   /**
-   * Per-RPC deadline in milliseconds, applied to every `AnalyzeRisk`/
-   * `AnalyzePromptInjection`/`AnalyzeDlp` call. Short and on the hot
-   * authorization/tool-invocation path (Section 80: an AI outage must add
+   * Per-RPC deadline in milliseconds, applied only to the **hot lane**
+   * (`AnalyzeRisk`/`AnalyzePromptInjection`/`AnalyzeDlp` — inline on the
+   * authorization/tool-invocation path). It does **not** apply to the
+   * three long-form generation RPCs (`SummarizeIncident`/`SuggestPolicy`/
+   * `InvestigateAudit`) — those use `AI_ADVISORY_LONGFORM_TIMEOUT_MS`
+   * instead; see `AiAdvisoryClient`'s doc comment for why the two lanes
+   * are deliberately independent. Short (Section 80: an AI outage must add
    * no more than this configured amount of latency, never hang the
    * pipeline waiting on a slow/unreachable model backend) — see
    * `AiAdvisoryClient`'s doc comment for why 2s is the chosen default.
@@ -30,9 +34,11 @@ export const AiAdvisoryConfigSchema = z.object({
 
   /**
    * Consecutive-failure threshold (timeout, transport error, or gRPC
-   * status != OK) before `AiAdvisoryClient`'s circuit breaker opens and
-   * starts skipping calls entirely for `AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS`
-   * — see that class's doc comment for the full state machine.
+   * status != OK) for the **hot lane** only, before `AiAdvisoryClient`'s
+   * hot-lane circuit breaker opens and starts skipping hot-lane calls
+   * entirely for `AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS` — see that
+   * class's doc comment for the full state machine and why the long-form
+   * lane has its own, independent breaker (`AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD`).
    */
   AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: z.coerce
     .number()
@@ -40,8 +46,43 @@ export const AiAdvisoryConfigSchema = z.object({
     .positive()
     .default(3),
 
-  /** How long the circuit stays open (skipping calls, returning null immediately) before the next call is allowed through as a trial. */
+  /** How long the **hot lane**'s circuit stays open (skipping calls, returning null immediately) before the next hot-lane call is allowed through as a trial. */
   AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30_000),
+
+  /**
+   * Per-RPC deadline in milliseconds for the **long-form lane**
+   * (`SummarizeIncident`/`SuggestPolicy`/`InvestigateAudit` — explicit,
+   * user-initiated, off the authorization path; nothing blocks on them).
+   * These invoke a real LLM generation and routinely take several seconds,
+   * so this is deliberately much longer than `AI_ADVISORY_TIMEOUT_MS` — see
+   * `AiAdvisoryClient`'s doc comment for why this lane must never share the
+   * hot lane's short deadline.
+   */
+  AI_ADVISORY_LONGFORM_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30_000),
+
+  /**
+   * Consecutive-failure threshold for the **long-form lane** only, before
+   * `AiAdvisoryClient`'s long-form circuit breaker opens — independent of
+   * the hot lane's breaker above, so a run of slow/failed generations never
+   * suppresses inline risk/DLP/prompt-injection signals. See that class's
+   * doc comment.
+   */
+  AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(3),
+
+  /** How long the **long-form lane**'s circuit stays open before the next long-form call is allowed through as a trial — independent of the hot lane's cooldown above. */
+  AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS: z.coerce
     .number()
     .int()
     .positive()

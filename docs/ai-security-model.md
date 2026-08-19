@@ -181,14 +181,23 @@ the signal the contract legitimately provides.
 
 ## Prompt-injection advisory
 
-After a _successful_ tool call, if `result.data` is itself a string (a
-genuine text-ish result — a structured object result is DLP's concern, not
-this one), `AiAdvisoryClient.analyzePromptInjection({ content:
-result.data, source: 'tool_output' })` runs against the **original**,
-pre-redaction text (detection is analysis-only and never itself returned
-to any caller, so there is no leak risk in analyzing the unredacted
-value). On `detected === true` (with `confidence > 0` — see the
-confidence==0 convention above):
+After a _successful_ tool call, if `result.data` is a string,
+`AiAdvisoryClient.analyzePromptInjection({ content: result.data, source:
+'tool_output' })` runs against it directly. If `result.data` is instead a
+structured object/array (e.g. a real SIEM `{ events: [...] }` response),
+`collectStructuredInjectionText` (`src/tools/credential-broker.service.ts`,
+added closing a real gap found while building Phase 13's demo) walks it —
+depth capped at 5, concatenated string-leaf content capped at ~4KB, a
+pure in-process scan that runs before the RPC call and adds no second
+round-trip — and if it finds any string-valued leaves, the identical
+single `analyzePromptInjection` call runs against that bounded,
+concatenated text instead. Either way it's exactly one RPC call; a result
+with nothing string-shaped at all (a bare number/boolean/`null`, or an
+object with zero string leaves) skips the call entirely. Both paths run
+against the **original**, pre-redaction text/structure (detection is
+analysis-only and never itself returned to any caller, so there is no
+leak risk in analyzing the unredacted value). On `detected === true`
+(with `confidence > 0` — see the confidence==0 convention above):
 
 1. Records `prompt_injection.detected` via `AuditService.recordSafely`
    (`confidence`/`indicators`/`explanation` — never the raw tool-output

@@ -304,12 +304,22 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
 
   /**
    * A real `AiAdvisoryClient`, constructed directly (not through DI) with a
-   * minimal fake `ConfigService` naming only the four keys its constructor
+   * minimal fake `ConfigService` naming only the keys its constructor
    * reads — same pattern
    * `src/ai-advisory/ai-advisory-client.service.spec.ts` uses. Every gRPC
    * call it makes is entirely real (real `@grpc/grpc-js` client, real wire
    * protocol); only its target/timeout/circuit-breaker config is
    * test-controlled.
+   *
+   * Every scenario in this file exercises only the **hot** lane (this
+   * suite's authorize/invoke calls only ever reach `AnalyzeRisk`/
+   * `AnalyzeDlp`/`AnalyzePromptInjection` — see `AiAdvisoryClient`'s doc
+   * comment for the lane split); `longformTimeoutMs`/
+   * `longformCircuitBreakerThreshold`/`longformCircuitBreakerCooldownMs`
+   * default to sane values purely so the long-form lane is never left
+   * `undefined`, and are only actually varied by the lane-isolation
+   * scenario below (which calls `summarizeIncident` directly, off the
+   * HTTP authorize/invoke surface, to trip it).
    *
    * `AI_ADVISORY_GRPC_TARGET`/`_TIMEOUT_MS`/etc. environment-variable
    * overrides deliberately are **not** used to vary this per test: this
@@ -328,6 +338,9 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
     timeoutMs?: number;
     circuitBreakerThreshold?: number;
     circuitBreakerCooldownMs?: number;
+    longformTimeoutMs?: number;
+    longformCircuitBreakerThreshold?: number;
+    longformCircuitBreakerCooldownMs?: number;
   }): AiAdvisoryClient {
     const values = {
       AI_ADVISORY_GRPC_TARGET: overrides.grpcTarget,
@@ -336,6 +349,11 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         overrides.circuitBreakerThreshold ?? 3,
       AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS:
         overrides.circuitBreakerCooldownMs ?? 30_000,
+      AI_ADVISORY_LONGFORM_TIMEOUT_MS: overrides.longformTimeoutMs ?? 30_000,
+      AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD:
+        overrides.longformCircuitBreakerThreshold ?? 3,
+      AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS:
+        overrides.longformCircuitBreakerCooldownMs ?? 30_000,
     };
     const configService = {
       get: (key: string) => (values as Record<string, unknown>)[key],
@@ -950,6 +968,82 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
     } finally {
       await fixture.stop();
       await alt.app.close();
+      await fakeServer.stop();
+    }
+  }, 30_000);
+
+  it("7. lane isolation: a tripped long-form circuit breaker never affects the hot lane's authorize path", async () => {
+    const fakeServer = new FakeAnalysisServiceServer();
+    const target = await fakeServer.start();
+    fakeServer.riskResult = {
+      score: 85,
+      confidence: 0.9,
+      signals: ['ai_flagged'],
+      explanation: 'elevated risk per the AI advisory',
+      recommendedAction: 2,
+    };
+    const client = buildAiAdvisoryClient({
+      grpcTarget: target,
+      longformTimeoutMs: 100,
+      longformCircuitBreakerThreshold: 1,
+      longformCircuitBreakerCooldownMs: 60_000,
+    });
+    try {
+      // Trip the long-form breaker directly (this suite's authorize/invoke
+      // surface never reaches the long-form lane, so it has to be
+      // triggered out-of-band, exactly like a user repeatedly clicking
+      // "Summarize" would in the real product).
+      fakeServer.responseDelayMs = 300; // exceeds the 100ms long-form timeout above
+      const summary = await client.summarizeIncident({
+        description: 'x',
+        relatedEvents: [],
+        tenantId: 'irrelevant-for-this-lane',
+      });
+      expect(summary).toBeNull(); // timed out
+      fakeServer.responseDelayMs = 0; // manar-ai "recovers" -- irrelevant, the long-form circuit is now open regardless
+      const stillOpen = await client.summarizeIncident({
+        description: 'x',
+        relatedEvents: [],
+        tenantId: 'irrelevant-for-this-lane',
+      });
+      expect(stillOpen).toBeNull();
+      expect(fakeServer.callCounts.summarizeIncident).toBe(1); // the second call never reached the server -- long-form circuit confirmed open
+
+      // Now exercise the real authorize path through this exact same
+      // client (wired in via DI override, same as every other scenario in
+      // this file) -- the hot lane must be completely unaffected by the
+      // long-form breaker being open.
+      const alt = await bootAltAgentMtlsApp(client);
+      try {
+        const agent = await createEnrolledAgent('lane-isolation');
+        const task = await createTask({
+          assignedAgentId: agent.agentId,
+          allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+          allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+          riskCeiling: 50,
+        });
+
+        const response = await authorizeOverMtls(agent.identity, alt.port, {
+          taskId: task.id,
+          toolId: 'fs',
+          actionId: 'read',
+          resource: 'anything',
+        });
+        const decision = response.body as {
+          decision: string;
+          riskScore: number;
+        };
+        // The hot lane reached the server and got a real, high-confidence
+        // score (85) -- if the breakers were still shared, this call would
+        // have been skipped entirely by the long-form trip above and
+        // fallen back to the deterministic-only score instead.
+        expect(decision.decision).toBe('REQUIRE_APPROVAL');
+        expect(decision.riskScore).toBe(85);
+        expect(fakeServer.callCounts.analyzeRisk).toBe(1);
+      } finally {
+        await alt.app.close();
+      }
+    } finally {
       await fakeServer.stop();
     }
   }, 30_000);

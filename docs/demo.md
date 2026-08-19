@@ -48,6 +48,89 @@ pnpm start:dev    # human-facing HTTP (port 3000) + agent-facing mTLS (port 3443
 pnpm worker:dev    # Temporal worker — required for the approval flow (Phase 8)
 ```
 
+## Optional: a real AI backend (`pnpm infra:up:ai`)
+
+Plain `pnpm infra:up` points `manar-ai` at a deliberately unreachable
+Ollama host, so every AI-advisory call gets manar-ai's own genuine
+fail-secure envelope, never a real model response (see "A known,
+documented limitation of a live run" below). To see a genuine model
+response instead — e.g. for Phase 10c's `POST /incidents/summarize`
+endpoint, backed by `AiAdvisoryClient`'s long-form lane
+(`src/ai-advisory/ai-advisory-client.service.ts`) — bring up the optional
+`ai` compose profile instead of plain `infra:up`:
+
+```bash
+pnpm infra:up:ai
+```
+
+This brings up the same stack as `pnpm infra:up`, plus a containerized
+`ollama` service (`deploy/docker-compose.yml`), points `manar-ai` at it
+via `MANAR_API_OLLAMA_HOST=http://ollama:11434` (overriding the
+`.invalid` default), and pulls the two tags manar-ai uses: `qwen3:8b`
+(chat/structured-output) and `qwen3-embedding:0.6b` (embeddings — always
+Ollama-backed regardless of `AI_PROVIDER`, Section 44). Safe to re-run:
+`ollama pull` is a no-op once a tag is already present (confirmed: a
+second run completed in ~19s, entirely reconciliation, no re-download).
+
+Deliberately namespaced as `MANAR_API_OLLAMA_HOST`/
+`MANAR_API_OLLAMA_TIMEOUT_SECONDS`, not the bare `OLLAMA_HOST`/
+`OLLAMA_TIMEOUT_SECONDS` names — this repo's compose substitution reads
+whatever's in the invoking shell/`.env`, and both the native `ollama`
+CLI _and_ manar-ai's own `.env.example` use the bare `OLLAMA_HOST` name.
+If manar-api's compose substitution reused it, an operator who has
+either of those set for unrelated reasons would silently leak that value
+in and defeat the fail-secure default. Both vars are independently
+overridable (`MANAR_API_OLLAMA_HOST=... pnpm infra:up:ai`) if you're
+running Ollama somewhere other than the bundled container.
+
+**First run**: the model pull is the slow part, not the container start.
+On this machine, pulling both tags (~5.9GB total) over a fast connection
+took under 2 minutes; a slower connection will take proportionally
+longer (budget up to 20-30 minutes on typical home broadband). The
+`manar-ollama-data` named volume held ~5.9GB after both pulls completed.
+
+**CPU-only inference is slow — this is expected, not a bug.** This
+host's Docker daemon has no GPU passthrough configured (`docker run
+--gpus all ...` fails with "no known GPU vendor found" — see the
+`ollama` service's own doc comment in `deploy/docker-compose.yml`), so
+the containerized Ollama runs `qwen3:8b` on CPU. Measured on this
+machine: a trivial two-word reply took ~13s once the model was already
+warm in memory; a full `SummarizeIncident` call (real structured-output
+generation, called directly against manar-ai's actual gRPC service, not
+just raw Ollama) took **~127s**. Both numbers are well past
+`AI_ADVISORY_LONGFORM_TIMEOUT_MS`'s 30s default (`.env.example`) — on
+CPU-only hardware like this, a live longform call will still come back
+as `available: false` (fail-secure, not broken) unless you raise that
+budget. Before a live demo of a longform endpoint, set a more generous
+value in your own `.env` (or shell environment before `pnpm start:dev`):
+
+```bash
+AI_ADVISORY_LONGFORM_TIMEOUT_MS=180000   # 3 minutes — generous for CPU-only qwen3:8b
+```
+
+Hardware with GPU passthrough into Docker (not configured here) would be
+dramatically faster and likely need no override at all. The **hot lane**
+(`AnalyzeRisk`/`AnalyzePromptInjection`/`AnalyzeDlp`, `AI_ADVISORY_TIMEOUT_MS`'s
+2s budget) is a different story — see the note below, it stays
+fail-secure against a real backend on hardware like this regardless.
+
+**Warm the model before a live demo**: the first inference against a
+freshly pulled model pays a one-time cold-load cost on top of normal
+generation latency. Warm it once, shortly before the live portion of a
+demo (Ollama unloads an idle model from memory after a few minutes, so
+don't warm hours ahead):
+
+```bash
+docker exec manar-ollama ollama run qwen3:8b "hi"
+```
+
+**If you skip this step** (or run plain `pnpm infra:up`), everything
+else in this walkthrough still works exactly as documented — none of
+the deterministic parts of the scenario (task scope denial, approvals,
+kill switches, the audit chain, evidence export) ever depended on a real
+AI backend. You'll just continue to see manar-ai's fail-secure envelopes
+in place of genuine model output.
+
 ## 1. Seed the demo tenant
 
 ```bash
@@ -140,26 +223,58 @@ when the agent encounters the injected SIEM content. Two things are worth
 knowing if you watch this run and don't see a `prompt_injection.detected`
 audit event:
 
-1. **The real `manar-ai` container in local infra never produces a
-   genuine positive detection.** `deploy/docker-compose.yml` deliberately
-   configures it with an unresolvable AI backend (see
-   docs/ai-security-model.md) — fast, real fail-secure envelopes, never a
-   slow-but-real LLM call. Only `test/ai-advisory.e2e-spec.ts` and
-   `test/complete-demo.e2e-spec.ts` exercise a genuine detection, via a
-   real gRPC test double (`FakeAnalysisServiceServer`) standing in for
-   `manar-ai`'s AI backend — not something a live `pnpm demo:agent` run
-   against unmodified local infra can show.
-2. **`CredentialBrokerService`'s prompt-injection hook only ever inspects
-   a tool result whose `data` is a plain string** (`typeof result.data
-=== 'string'`) — `demo-soc-tools`' real SIEM responses are structured
-   JSON objects (`{ events: [...] }`), which that hook never inspects at
-   all (a structured object result is DLP's concern, Section 73, not this
-   one). This is a real, confirmed architectural boundary found while
-   assembling this phase, not a bug introduced here — see
-   `test/complete-demo.e2e-spec.ts`'s own doc comment for the full
-   explanation and how that test proves the mechanism is genuinely real
-   anyway (via one additional, string-returning tool call in the same
-   tenant/task).
+1. **Even with a genuine local AI backend up (`pnpm infra:up:ai` — see
+   "Optional: a real AI backend" above), a live `pnpm demo:agent` run
+   still won't show a genuine positive detection here.** Two independent
+   reasons, not one:
+   - Plain `pnpm infra:up` (no profile) still points `manar-ai` at a
+     deliberately unresolvable AI backend by default (see
+     docs/ai-security-model.md) — fast, real fail-secure envelopes,
+     never an LLM call, unless you opt into `pnpm infra:up:ai`.
+   - Even opted in, `AnalyzePromptInjection` (what this scenario
+     actually exercises) is a **hot-lane** call —
+     `AI_ADVISORY_TIMEOUT_MS`'s 2s budget
+     (`src/ai-advisory/ai-advisory-client.service.ts`). Real qwen3:8b
+     inference on hardware without GPU passthrough into Docker took
+     ~13s for a trivial reply in testing — nowhere close to 2s — so the
+     hot lane still returns manar-ai's fail-secure envelope against a
+     real backend on hardware like this, by the same design tradeoff
+     `AI_ADVISORY_TIMEOUT_MS`'s own doc comment describes (Section 80:
+     an AI outage/slowness must add no more than a short, bounded
+     amount of latency to the hot authorization path, never block it).
+     Only `test/ai-advisory.e2e-spec.ts` and `test/complete-demo.e2e-spec.ts`
+     exercise a genuine detection, via a real gRPC test double
+     (`FakeAnalysisServiceServer`) standing in for `manar-ai`'s AI backend.
+     What `pnpm infra:up:ai` _does_ make observable live is the
+     **long-form** lane instead (`POST /incidents/summarize` and friends —
+     see "Optional: a real AI backend" above), which isn't part of this
+     scenario's own narrative.
+2. **`CredentialBrokerService`'s prompt-injection hook now also inspects
+   structured (object/array) tool results, not only a plain string**
+   (`typeof result.data === 'string'`) — `demo-soc-tools`' real SIEM
+   responses are structured JSON objects (`{ events: [...] }`), which used
+   to be entirely invisible to this hook (a real, confirmed architectural
+   boundary found while assembling Phase 13, not a bug introduced there).
+   That gap is closed: the hook now walks a structured result with a
+   bounded traversal (depth capped at 5, concatenated string-leaf content
+   capped at ~4KB — see `collectStructuredInjectionText` in
+   `src/tools/credential-broker.service.ts`), and if it finds any
+   string-valued leaves, passes the bounded, concatenated text to the
+   same single `AnalyzePromptInjection` call the plain-string path already
+   made — never a second RPC call, never one call per event/leaf, so the
+   hot-lane latency budget below is unaffected by this change.
+   **This makes structured results inspectable — it does not, by itself,
+   make a live run against real local inference complete within the hot
+   lane's 2s budget.** Limitation 1 above is unaffected by this fix and
+   still applies exactly as described: even with `pnpm infra:up:ai` and
+   this bounded-traversal fix both in place, a live `pnpm demo:agent` run
+   will most likely still show manar-ai's fail-secure envelope for
+   `AnalyzePromptInjection` on CPU-only hardware, because real inference
+   latency (~13s measured minimum) still blows past `AI_ADVISORY_TIMEOUT_MS`
+   long before this traversal (a fast, in-process, pre-RPC step) becomes
+   relevant. `test/complete-demo.e2e-spec.ts`'s own doc comment has the
+   full explanation of the pre-fix boundary and how the test proves the
+   mechanism is genuinely real via `FakeAnalysisServiceServer`.
 
 Neither limitation affects the deterministic parts of the scenario — the
 `iam.disable-user` denial, the approval flow, the kill switch, the audit
