@@ -1,0 +1,983 @@
+import 'dotenv/config';
+import * as https from 'node:https';
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { AddressInfo } from 'node:net';
+import { Client as PgClient } from 'pg';
+import { Test, TestingModule } from '@nestjs/testing';
+import {
+  FastifyAdapter,
+  NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import request from 'supertest';
+import { App } from 'supertest/types';
+import { NativeConnection, Worker } from '@temporalio/worker';
+import { FileIdentityStore, ManarAgent } from '@manar/sdk-node';
+import type { AgentIdentity, AuthorizeDecision } from '@manar/sdk-node';
+import { AppModule } from '../src/app.module';
+import { AgentMtlsAppModule } from '../src/agent-mtls/agent-mtls-app.module';
+import { WorkerAppModule } from '../src/temporal/worker-app.module';
+import { ApprovalActivitiesFactory } from '../src/temporal/activities/approval.activities';
+import { ControlPrismaService } from '../src/database/control-prisma.service';
+import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
+import { KeycloakModule } from '../src/keycloak/keycloak.module';
+import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
+import {
+  assignRealmRole,
+  createRealmUser,
+  deleteRealm,
+  getUserToken,
+} from './support/keycloak-test-helpers';
+import { HttpFixtureServer } from './support/http-fixture-server';
+
+/**
+ * Kill Switches (all five scopes) — every mandatory scenario from the
+ * design spec's "Testing" section
+ * (docs/superpowers/specs/2026-08-19-phase-killswitch-design.md), run
+ * against real Postgres/Keycloak/OpenBao/OpenFGA/Temporal/Kafka
+ * (`pnpm infra:up`). See docs/kill-switches.md.
+ *
+ * Reuses the real SDK (`ManarAgent.enroll`/`.authorize`) for every
+ * ALLOW/DENY check this suite drives (tests 1-4, 6), and the same raw-mTLS
+ * `/agent/v1/tools/invoke` + `/agent/v1/approvals/:id` + in-process
+ * Temporal worker pattern `test/approvals.e2e-spec.ts` already established
+ * for the one scenario that needs a real grant (test 5) — no direct DB
+ * manipulation anywhere a real API path exists. The one deliberate
+ * exception: creating an `AgentGroup` + membership directly via
+ * `tenantClient` (test 3) — this phase's spec only asks for the
+ * kill-switch endpoint on that scope, not a full AgentGroup CRUD API, so
+ * there is no real API path to create one through.
+ *
+ * Test 7 (platform scope) activates the one genuinely cross-tenant,
+ * process-wide switch against the real, shared control DB — every other
+ * concurrently-running e2e file's `/agent/v1/authorize` calls would also
+ * see DENY for as long as it stays active. The window between activation
+ * and deactivation is kept as small as possible (a `try`/`finally`
+ * wrapping only the two DENY assertions) to minimize cross-file
+ * interference risk under Vitest's default parallel file execution; a
+ * `beforeAll` safety net also force-deactivates it up front in case a
+ * previous crashed run left it on.
+ */
+describe('Kill Switches (e2e)', () => {
+  let humanApp: NestFastifyApplication;
+  let agentMtlsApp: NestFastifyApplication;
+  let humanEndpoint: string;
+  let agentMtlsEndpoint: string;
+  let agentMtlsPort: number;
+  let fullCaChainPem: string;
+
+  let temporalConnection: NativeConnection;
+  let temporalWorker: Worker;
+  let temporalWorkerRunPromise: Promise<void>;
+  let workerModuleFixture: TestingModule;
+
+  let control: ControlPrismaService;
+  let tenantDatabaseManager: TenantDatabaseManager;
+  let provisioning: TenantProvisioningService;
+
+  type ProvisionedTenant = Awaited<
+    ReturnType<TenantProvisioningService['provisionTenant']>
+  >;
+  let tenant: ProvisionedTenant;
+  let adminToken: string;
+  let tenant2: ProvisionedTenant;
+  let adminToken2: string;
+
+  const PLATFORM_OPERATOR_TOKEN =
+    process.env.PLATFORM_KILL_SWITCH_OPERATOR_TOKEN ??
+    'dev-only-platform-kill-switch-operator-token-change-me';
+
+  const ADMIN_USERNAME = `ks-admin-${randomUUID().slice(0, 8)}`;
+  const ADMIN_USERNAME_2 = `ks-admin2-${randomUUID().slice(0, 8)}`;
+  const USER_PASSWORD = 'Passw0rd!Test';
+
+  function uniqueSlug(label: string): string {
+    return `ks-${label}-${randomUUID().slice(0, 8)}`;
+  }
+
+  /** Short form for tenant/agent slugs — Agent.identifier is a CSR SAN, empirically rejected by OpenBao's PKI signing once it exceeds 63 chars (see test/approvals.e2e-spec.ts's identical helper). */
+  function shortSlug(label: string): string {
+    return `ks-${label}-${randomUUID().slice(0, 8)}`;
+  }
+
+  async function dropRealDatabase(databaseName: string): Promise<void> {
+    const admin = new PgClient({
+      connectionString: process.env.CONTROL_DATABASE_URL,
+    });
+    await admin.connect();
+    try {
+      await admin.query(
+        `DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`,
+      );
+    } finally {
+      await admin.end();
+    }
+  }
+
+  async function cleanupTenant(t: ProvisionedTenant): Promise<void> {
+    if (t.keycloakRealm) await deleteRealm(t.keycloakRealm);
+    if (t.databaseBinding?.databaseName) {
+      await dropRealDatabase(t.databaseBinding.databaseName);
+    }
+    await control.tenantDatabaseBinding.deleteMany({
+      where: { tenantId: t.id },
+    });
+    await control.secretReference.deleteMany({ where: { tenantId: t.id } });
+    await control.tenant.deleteMany({ where: { id: t.id } });
+  }
+
+  async function provisionTestTenant(
+    slugLabel: string,
+    username: string,
+  ): Promise<{ tenant: ProvisionedTenant; token: string }> {
+    const provisioned = await provisioning.provisionTenant({
+      slug: shortSlug(slugLabel),
+      name: `Kill Switch Test Tenant ${slugLabel}`,
+    });
+    if (!provisioned.keycloakRealm) {
+      throw new Error('Expected provisioned tenant to have a Keycloak realm');
+    }
+    const clientSecretRef = await control.secretReference.findFirstOrThrow({
+      where: { tenantId: provisioned.id, kind: 'KEYCLOAK_CLIENT_SECRET' },
+    });
+    const userId = await createRealmUser(provisioned.keycloakRealm, {
+      username,
+      email: `${username}@example.test`,
+      password: USER_PASSWORD,
+    });
+    await assignRealmRole(provisioned.keycloakRealm, userId, 'SECURITY_ADMIN');
+    const token = await getUserToken({
+      realm: provisioned.keycloakRealm,
+      clientId: provisioned.keycloakClientId!,
+      clientSecret: clientSecretRef.reference,
+      username,
+      password: USER_PASSWORD,
+    });
+    return { tenant: provisioned, token };
+  }
+
+  /** Creates a PENDING_ENROLLMENT agent + enrollment token via the real human HTTP API, then enrolls it via the real SDK — same pattern as test/task-delegation.e2e-spec.ts. */
+  async function createEnrolledAgent(
+    slugLabel: string,
+    token: string = adminToken,
+  ): Promise<{
+    agentId: string;
+    slug: string;
+    identity: AgentIdentity;
+    manar: ManarAgent;
+  }> {
+    const slug = shortSlug(slugLabel);
+    const createResponse = await request(humanApp.getHttpServer() as App)
+      .post('/agents')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ slug, displayName: `Test agent ${slug}` })
+      .expect(201);
+    const agentId = (createResponse.body as { id: string }).id;
+
+    const tokenResponse = await request(humanApp.getHttpServer() as App)
+      .post(`/agents/${agentId}/enrollment-tokens`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+    const rawToken = (tokenResponse.body as { token: string }).token;
+
+    const identityStore = new FileIdentityStore(
+      `/tmp/manar-sdk-test-${randomUUID()}.identity`,
+      'test-passphrase-not-for-production',
+    );
+    const manar = new ManarAgent({
+      endpoint: humanEndpoint,
+      mtlsEndpoint: agentMtlsEndpoint,
+      identityStore,
+    });
+    const identity = await manar.enroll(rawToken);
+
+    return { agentId, slug, identity, manar };
+  }
+
+  interface GrantInput {
+    toolId: string;
+    actionId: string;
+  }
+  interface ResourceInput {
+    toolId: string;
+    pattern: string;
+  }
+
+  async function createTask(
+    input: {
+      assignedAgentId: string;
+      allowedToolActions: GrantInput[];
+      allowedResourceSelectors: ResourceInput[];
+      riskCeiling?: number;
+    },
+    token: string = adminToken,
+  ): Promise<{ id: string; status: string; expiresAt: string }> {
+    const response = await request(humanApp.getHttpServer() as App)
+      .post('/tasks')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: `Kill switch test task ${randomUUID().slice(0, 8)}`,
+        assignedAgentId: input.assignedAgentId,
+        allowedToolActions: input.allowedToolActions,
+        allowedResourceSelectors: input.allowedResourceSelectors,
+        forbiddenActions: [],
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        riskCeiling: input.riskCeiling,
+      })
+      .expect(201);
+    return response.body as { id: string; status: string; expiresAt: string };
+  }
+
+  async function registerTool(
+    tenantId: string,
+    input: { name: string; baseEndpoint: string },
+  ): Promise<{ id: string; name: string }> {
+    const tenantClient = await tenantDatabaseManager.getClient(tenantId);
+    return tenantClient.tool.create({
+      data: {
+        name: input.name,
+        type: 'TEST',
+        baseEndpoint: input.baseEndpoint,
+        protocol: 'HTTP',
+        credentialReference: { provider: 'ENV', reference: 'PATH' },
+        enabled: true,
+      },
+    });
+  }
+
+  async function registerToolAction(
+    tenantId: string,
+    input: { toolId: string; name: string; riskBaseScore?: number },
+  ): Promise<{ id: string }> {
+    const tenantClient = await tenantDatabaseManager.getClient(tenantId);
+    return tenantClient.toolAction.create({
+      data: {
+        toolId: input.toolId,
+        name: input.name,
+        riskBaseScore: input.riskBaseScore ?? 90,
+        inputSchema: { type: 'object' },
+      },
+    });
+  }
+
+  /** No AgentGroup CRUD API exists this phase (only its kill-switch endpoint does — see design spec's "out of scope") — this is the one deliberate direct-DB-write in this suite. */
+  async function createAgentGroupWithMember(
+    tenantId: string,
+    agentId: string,
+    name: string,
+  ): Promise<{ id: string }> {
+    const tenantClient = await tenantDatabaseManager.getClient(tenantId);
+    const group = await tenantClient.agentGroup.create({ data: { name } });
+    await tenantClient.agentGroupMembership.create({
+      data: { agentId, groupId: group.id },
+    });
+    return group;
+  }
+
+  interface KillSwitchStatusBody {
+    id: string;
+    scope: string;
+    targetId: string | null;
+    active: boolean;
+    reason: string | null;
+    activatedAt: string;
+  }
+  interface PlatformKillSwitchStatusBody {
+    active: boolean;
+    reason: string | null;
+    activatedAt: string | null;
+  }
+
+  async function activateTenantKillSwitch(
+    token: string,
+    reason?: string,
+  ): Promise<KillSwitchStatusBody> {
+    const res = await request(humanApp.getHttpServer() as App)
+      .post('/tenants/kill-switch')
+      .set('Authorization', `Bearer ${token}`)
+      .send(reason ? { reason } : {})
+      .expect(201);
+    return res.body as KillSwitchStatusBody;
+  }
+  async function deactivateTenantKillSwitch(token: string): Promise<void> {
+    await request(humanApp.getHttpServer() as App)
+      .post('/tenants/kill-switch/deactivate')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+  }
+
+  async function activateAgentKillSwitch(
+    token: string,
+    agentId: string,
+    reason?: string,
+  ): Promise<KillSwitchStatusBody> {
+    const res = await request(humanApp.getHttpServer() as App)
+      .post(`/agents/${agentId}/kill-switch`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(reason ? { reason } : {})
+      .expect(201);
+    return res.body as KillSwitchStatusBody;
+  }
+  async function deactivateAgentKillSwitch(
+    token: string,
+    agentId: string,
+  ): Promise<void> {
+    await request(humanApp.getHttpServer() as App)
+      .post(`/agents/${agentId}/kill-switch/deactivate`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+  }
+
+  async function activateAgentGroupKillSwitch(
+    token: string,
+    groupId: string,
+    reason?: string,
+  ): Promise<KillSwitchStatusBody> {
+    const res = await request(humanApp.getHttpServer() as App)
+      .post(`/agent-groups/${groupId}/kill-switch`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(reason ? { reason } : {})
+      .expect(201);
+    return res.body as KillSwitchStatusBody;
+  }
+  async function deactivateAgentGroupKillSwitch(
+    token: string,
+    groupId: string,
+  ): Promise<void> {
+    await request(humanApp.getHttpServer() as App)
+      .post(`/agent-groups/${groupId}/kill-switch/deactivate`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+  }
+
+  async function activateToolKillSwitch(
+    token: string,
+    toolId: string,
+    reason?: string,
+  ): Promise<KillSwitchStatusBody> {
+    const res = await request(humanApp.getHttpServer() as App)
+      .post(`/tools/${toolId}/kill-switch`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(reason ? { reason } : {})
+      .expect(201);
+    return res.body as KillSwitchStatusBody;
+  }
+  async function deactivateToolKillSwitch(
+    token: string,
+    toolId: string,
+  ): Promise<void> {
+    await request(humanApp.getHttpServer() as App)
+      .post(`/tools/${toolId}/kill-switch/deactivate`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+  }
+
+  async function activatePlatformKillSwitch(
+    token: string,
+    reason?: string,
+  ): Promise<PlatformKillSwitchStatusBody> {
+    const res = await request(humanApp.getHttpServer() as App)
+      .post('/kill-switches/platform')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Platform-Operator-Token', PLATFORM_OPERATOR_TOKEN)
+      .send(reason ? { reason } : {})
+      .expect(201);
+    return res.body as PlatformKillSwitchStatusBody;
+  }
+  async function deactivatePlatformKillSwitch(token: string): Promise<void> {
+    await request(humanApp.getHttpServer() as App)
+      .post('/kill-switches/platform/deactivate')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Platform-Operator-Token', PLATFORM_OPERATOR_TOKEN)
+      .expect(201);
+  }
+
+  interface RawResponse {
+    status: number;
+    body: unknown;
+  }
+
+  function mtlsRequest(
+    identity: Pick<
+      AgentIdentity,
+      'certificatePem' | 'caChainPem' | 'privateKeyPem'
+    >,
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+  ): Promise<RawResponse> {
+    const bodyText = body !== undefined ? JSON.stringify(body) : undefined;
+    return new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          host: '127.0.0.1',
+          port: agentMtlsPort,
+          path,
+          method,
+          cert: identity.certificatePem,
+          key: identity.privateKeyPem,
+          ca: fullCaChainPem,
+          rejectUnauthorized: true,
+          timeout: 15_000,
+          headers: bodyText
+            ? {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(bodyText),
+              }
+            : undefined,
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk: Buffer) => (data += chunk.toString('utf8')));
+          res.on('end', () => {
+            resolve({
+              status: res.statusCode ?? 0,
+              body: data ? (JSON.parse(data) as unknown) : undefined,
+            });
+          });
+        },
+      );
+      req.on('error', reject);
+      if (bodyText) req.write(bodyText);
+      req.end();
+    });
+  }
+
+  function invokeToolOverMtls(
+    identity: Pick<
+      AgentIdentity,
+      'certificatePem' | 'caChainPem' | 'privateKeyPem'
+    >,
+    body: unknown,
+  ): Promise<RawResponse> {
+    return mtlsRequest(identity, 'POST', '/agent/v1/tools/invoke', body);
+  }
+
+  function pollApprovalOverMtls(
+    identity: Pick<
+      AgentIdentity,
+      'certificatePem' | 'caChainPem' | 'privateKeyPem'
+    >,
+    approvalId: string,
+  ): Promise<RawResponse> {
+    return mtlsRequest(identity, 'GET', `/agent/v1/approvals/${approvalId}`);
+  }
+
+  async function decideApproval(
+    approvalId: string,
+    decision: 'APPROVE' | 'DENY',
+    token: string = adminToken,
+  ): Promise<RawResponse> {
+    const res = await request(humanApp.getHttpServer() as App)
+      .post(`/approvals/${approvalId}/decide`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ decision });
+    return { status: res.status, body: res.body as unknown };
+  }
+
+  interface ApprovalPollBody {
+    id: string;
+    status: string;
+    grantToken?: string;
+    grantExpiresAt?: string;
+  }
+
+  async function waitForApprovalStatus(
+    identity: Pick<
+      AgentIdentity,
+      'certificatePem' | 'caChainPem' | 'privateKeyPem'
+    >,
+    approvalId: string,
+    timeoutMs = 15_000,
+  ): Promise<ApprovalPollBody> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const res = await pollApprovalOverMtls(identity, approvalId);
+      const body = res.body as ApprovalPollBody;
+      if (body.status !== 'PENDING' || Date.now() > deadline) {
+        return body;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  beforeAll(async () => {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule, KeycloakModule],
+    }).compile();
+    humanApp = moduleFixture.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter(),
+    );
+    await humanApp.init();
+    await humanApp.getHttpAdapter().getInstance().ready();
+    await humanApp.listen(0, '127.0.0.1');
+    const humanAddress = humanApp.getHttpServer().address() as AddressInfo;
+    humanEndpoint = `http://127.0.0.1:${humanAddress.port}`;
+
+    const intermediateCaPath =
+      process.env.AGENT_MTLS_CLIENT_CA_PATH ?? 'deploy/openbao/ca-chain.pem';
+    fullCaChainPem = readFileSync(intermediateCaPath, 'utf8');
+
+    const agentMtlsFixture: TestingModule = await Test.createTestingModule({
+      imports: [AgentMtlsAppModule],
+    }).compile();
+    agentMtlsApp =
+      agentMtlsFixture.createNestApplication<NestFastifyApplication>(
+        new FastifyAdapter({
+          https: {
+            cert: readFileSync(
+              process.env.AGENT_MTLS_SERVER_CERT_PATH ??
+                'deploy/openbao/server-cert.pem',
+            ),
+            key: readFileSync(
+              process.env.AGENT_MTLS_SERVER_KEY_PATH ??
+                'deploy/openbao/server-key.pem',
+            ),
+            ca: readFileSync(intermediateCaPath),
+            requestCert: true,
+            rejectUnauthorized: true,
+          },
+        }),
+      );
+    await agentMtlsApp.init();
+    await agentMtlsApp.getHttpAdapter().getInstance().ready();
+    await agentMtlsApp.listen(0, '127.0.0.1');
+    const mtlsAddress = agentMtlsApp.getHttpServer().address() as AddressInfo;
+    agentMtlsPort = mtlsAddress.port;
+    agentMtlsEndpoint = `https://127.0.0.1:${agentMtlsPort}`;
+
+    control = humanApp.get(ControlPrismaService);
+    tenantDatabaseManager = humanApp.get(TenantDatabaseManager);
+    provisioning = moduleFixture.get(TenantProvisioningService);
+
+    // Real Temporal worker, in-process — see class doc comment and
+    // test/approvals.e2e-spec.ts's identical setup. Only test 5 (grant
+    // redemption) needs this, but it's cheap to bootstrap once here.
+    workerModuleFixture = await Test.createTestingModule({
+      imports: [WorkerAppModule],
+    }).compile();
+    const activities = workerModuleFixture
+      .get(ApprovalActivitiesFactory)
+      .build();
+    const temporalAddress = process.env.TEMPORAL_ADDRESS ?? 'localhost:7233';
+    temporalConnection = await NativeConnection.connect({
+      address: temporalAddress,
+    });
+    temporalWorker = await Worker.create({
+      connection: temporalConnection,
+      namespace: process.env.TEMPORAL_NAMESPACE ?? 'default',
+      taskQueue: process.env.TEMPORAL_TASK_QUEUE ?? 'manar-approvals',
+      workflowsPath: join(
+        process.cwd(),
+        'src/temporal/workflows/approval.workflow.ts',
+      ),
+      activities,
+    });
+    temporalWorkerRunPromise = temporalWorker.run();
+
+    const first = await provisionTestTenant('t1', ADMIN_USERNAME);
+    tenant = first.tenant;
+    adminToken = first.token;
+
+    const second = await provisionTestTenant('t2', ADMIN_USERNAME_2);
+    tenant2 = second.tenant;
+    adminToken2 = second.token;
+
+    // Safety net: force the process-wide platform switch off in case a
+    // previously crashed run left it active — see class doc comment.
+    await deactivatePlatformKillSwitch(adminToken);
+  }, 180_000);
+
+  afterAll(async () => {
+    // Belt-and-suspenders: never leave the shared, cross-tenant platform
+    // switch active for any other concurrently/subsequently running suite.
+    await deactivatePlatformKillSwitch(adminToken).catch(() => undefined);
+
+    temporalWorker?.shutdown();
+    await temporalWorkerRunPromise;
+    await temporalConnection?.close();
+    await workerModuleFixture?.close();
+
+    await humanApp.close();
+    await agentMtlsApp.close();
+    if (tenant) await cleanupTenant(tenant);
+    if (tenant2) await cleanupTenant(tenant2);
+    await control.$disconnect();
+  }, 60_000);
+
+  it('1. TENANT kill switch denies a previously-ALLOWed action immediately; deactivating restores it', async () => {
+    const agent = await createEnrolledAgent('tenant-scope');
+    const task = await createTask({
+      assignedAgentId: agent.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    });
+    const authorizeRequest = {
+      taskId: task.id,
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
+    };
+
+    const before = await agent.manar.authorize(authorizeRequest);
+    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+
+    const activated = await activateTenantKillSwitch(
+      adminToken,
+      'e2e tenant kill switch test',
+    );
+    expect(activated.active).toBe(true);
+    expect(activated.scope).toBe('TENANT');
+
+    try {
+      const during = await agent.manar.authorize(authorizeRequest);
+      expect(during.decision).toBe('DENY');
+      expect((during as { reason: string }).reason).toBe(
+        'tenant_kill_switch_active',
+      );
+    } finally {
+      await deactivateTenantKillSwitch(adminToken);
+    }
+
+    const after = await agent.manar.authorize(authorizeRequest);
+    expect(after).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+  }, 30_000);
+
+  it('2. AGENT kill switch denies a previously-ALLOWed action immediately; deactivating restores it', async () => {
+    const agent = await createEnrolledAgent('agent-scope');
+    const task = await createTask({
+      assignedAgentId: agent.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    });
+    const authorizeRequest = {
+      taskId: task.id,
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
+    };
+
+    const before = await agent.manar.authorize(authorizeRequest);
+    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+
+    const activated = await activateAgentKillSwitch(adminToken, agent.agentId);
+    expect(activated.scope).toBe('AGENT');
+    expect(activated.targetId).toBe(agent.agentId);
+
+    const during = await agent.manar.authorize(authorizeRequest);
+    expect(during.decision).toBe('DENY');
+    expect((during as { reason: string }).reason).toBe(
+      'agent_kill_switch_active',
+    );
+
+    await deactivateAgentKillSwitch(adminToken, agent.agentId);
+
+    const after = await agent.manar.authorize(authorizeRequest);
+    expect(after).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+  }, 30_000);
+
+  it('3. AGENT_GROUP kill switch denies a previously-ALLOWed action immediately; deactivating restores it', async () => {
+    const agent = await createEnrolledAgent('group-scope');
+    const group = await createAgentGroupWithMember(
+      tenant.id,
+      agent.agentId,
+      uniqueSlug('group'),
+    );
+    const task = await createTask({
+      assignedAgentId: agent.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    });
+    const authorizeRequest = {
+      taskId: task.id,
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
+    };
+
+    const before = await agent.manar.authorize(authorizeRequest);
+    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+
+    const activated = await activateAgentGroupKillSwitch(adminToken, group.id);
+    expect(activated.scope).toBe('AGENT_GROUP');
+    expect(activated.targetId).toBe(group.id);
+
+    const during = await agent.manar.authorize(authorizeRequest);
+    expect(during.decision).toBe('DENY');
+    expect((during as { reason: string }).reason).toBe(
+      'agent_group_kill_switch_active',
+    );
+
+    await deactivateAgentGroupKillSwitch(adminToken, group.id);
+
+    const after = await agent.manar.authorize(authorizeRequest);
+    expect(after).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+  }, 30_000);
+
+  it('4. TOOL kill switch denies a previously-ALLOWed action immediately; deactivating restores it', async () => {
+    const tool = await registerTool(tenant.id, {
+      name: uniqueSlug('tool-scope-tool'),
+      baseEndpoint: 'http://127.0.0.1:1/unused',
+    });
+    const agent = await createEnrolledAgent('tool-scope');
+    const task = await createTask({
+      assignedAgentId: agent.agentId,
+      allowedToolActions: [{ toolId: tool.name, actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: tool.name, pattern: '*' }],
+    });
+    const authorizeRequest = {
+      taskId: task.id,
+      toolId: tool.name,
+      actionId: 'read',
+      resource: 'anything',
+    };
+
+    const before = await agent.manar.authorize(authorizeRequest);
+    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+
+    const activated = await activateToolKillSwitch(adminToken, tool.id);
+    expect(activated.scope).toBe('TOOL');
+    expect(activated.targetId).toBe(tool.id);
+
+    const during = await agent.manar.authorize(authorizeRequest);
+    expect(during.decision).toBe('DENY');
+    expect((during as { reason: string }).reason).toBe(
+      'tool_kill_switch_active',
+    );
+
+    await deactivateToolKillSwitch(adminToken, tool.id);
+
+    const after = await agent.manar.authorize(authorizeRequest);
+    expect(after).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+  }, 30_000);
+
+  it('5. grant redemption: an already-issued, still-valid AuthorizationGrant becomes unusable the moment a kill switch activates', async () => {
+    const fixture = new HttpFixtureServer();
+    const baseEndpoint = await fixture.start();
+    try {
+      const tool = await registerTool(tenant.id, {
+        name: uniqueSlug('grant-redemption-tool'),
+        baseEndpoint,
+      });
+      await registerToolAction(tenant.id, { toolId: tool.id, name: 'lookup' });
+
+      const agent = await createEnrolledAgent('grant-redemption');
+      const task = await createTask({
+        assignedAgentId: agent.agentId,
+        allowedToolActions: [{ toolId: tool.name, actionId: 'lookup' }],
+        allowedResourceSelectors: [{ toolId: tool.name, pattern: '*' }],
+        riskCeiling: 5,
+      });
+
+      // First grant: request -> approve -> poll -> USE successfully. "Agent
+      // receives usable authority ... successful action."
+      const firstInvoke = await invokeToolOverMtls(agent.identity, {
+        taskId: task.id,
+        toolId: tool.name,
+        actionId: 'lookup',
+        resource: 'grant-redemption-1',
+        params: {},
+      });
+      expect(firstInvoke.status).toBe(202);
+      const { approvalId: firstApprovalId } = firstInvoke.body as {
+        approvalId: string;
+      };
+      await decideApproval(firstApprovalId, 'APPROVE');
+      const firstPolled = await waitForApprovalStatus(
+        agent.identity,
+        firstApprovalId,
+      );
+      expect(firstPolled.status).toBe('APPROVED');
+      const firstUse = await invokeToolOverMtls(agent.identity, {
+        taskId: task.id,
+        toolId: tool.name,
+        actionId: 'lookup',
+        resource: 'grant-redemption-1',
+        params: {},
+        grantToken: firstPolled.grantToken,
+      });
+      expect(firstUse.status).toBe(200);
+      expect(fixture.requests).toHaveLength(1);
+
+      // Second grant: a *separate* request/approval/grant for the same
+      // agent — issued, approved, but deliberately NOT used yet. This is
+      // the "still-unexpired, still-unconsumed grant it already has in
+      // hand" the design spec's mandatory test names.
+      const secondInvoke = await invokeToolOverMtls(agent.identity, {
+        taskId: task.id,
+        toolId: tool.name,
+        actionId: 'lookup',
+        resource: 'grant-redemption-2',
+        params: {},
+      });
+      expect(secondInvoke.status).toBe(202);
+      const { approvalId: secondApprovalId } = secondInvoke.body as {
+        approvalId: string;
+      };
+      await decideApproval(secondApprovalId, 'APPROVE');
+      const secondPolled = await waitForApprovalStatus(
+        agent.identity,
+        secondApprovalId,
+      );
+      expect(secondPolled.status).toBe('APPROVED');
+      const secondGrantToken = secondPolled.grantToken!;
+
+      // Kill switch activated *after* the second grant was already issued.
+      await activateAgentKillSwitch(
+        adminToken,
+        agent.agentId,
+        'e2e grant redemption test',
+      );
+
+      let deactivated = false;
+      try {
+        // Retrying with the still-unexpired, still-unconsumed second grant
+        // -> denied by the kill switch, never reaches the tool.
+        const deniedRetry = await invokeToolOverMtls(agent.identity, {
+          taskId: task.id,
+          toolId: tool.name,
+          actionId: 'lookup',
+          resource: 'grant-redemption-2',
+          params: {},
+          grantToken: secondGrantToken,
+        });
+        expect(deniedRetry.status).toBe(403);
+        expect((deniedRetry.body as { reason: string }).reason).toBe(
+          'agent_kill_switch_active',
+        );
+        expect(fixture.requests).toHaveLength(1); // still just the first, successful call
+
+        // Deactivating restores it — the grant was never consumed (the
+        // kill-switch check runs before the atomic consume), so it's
+        // usable again once the switch itself is off, proving the switch
+        // (and nothing else — not an accidental consume) was the blocker.
+        await deactivateAgentKillSwitch(adminToken, agent.agentId);
+        deactivated = true;
+
+        const restoredUse = await invokeToolOverMtls(agent.identity, {
+          taskId: task.id,
+          toolId: tool.name,
+          actionId: 'lookup',
+          resource: 'grant-redemption-2',
+          params: {},
+          grantToken: secondGrantToken,
+        });
+        expect(restoredUse.status).toBe(200);
+        expect(fixture.requests).toHaveLength(2);
+      } finally {
+        if (!deactivated) {
+          await deactivateAgentKillSwitch(adminToken, agent.agentId);
+        }
+      }
+    } finally {
+      await fixture.stop();
+    }
+  }, 45_000);
+
+  it('6. scope precision: a kill switch on Agent A does not deny Agent B', async () => {
+    const agentA = await createEnrolledAgent('scope-precision-a');
+    const agentB = await createEnrolledAgent('scope-precision-b');
+    const taskA = await createTask({
+      assignedAgentId: agentA.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    });
+    const taskB = await createTask({
+      assignedAgentId: agentB.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    });
+
+    await activateAgentKillSwitch(adminToken, agentA.agentId);
+    try {
+      const deniedA = await agentA.manar.authorize({
+        taskId: taskA.id,
+        toolId: 'fs',
+        actionId: 'read',
+        resource: 'anything',
+      });
+      expect(deniedA.decision).toBe('DENY');
+      expect((deniedA as { reason: string }).reason).toBe(
+        'agent_kill_switch_active',
+      );
+
+      // Agent B, same tenant, unrelated task -- entirely unaffected.
+      const allowedB = await agentB.manar.authorize({
+        taskId: taskB.id,
+        toolId: 'fs',
+        actionId: 'read',
+        resource: 'anything',
+      });
+      expect(allowedB).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    } finally {
+      await deactivateAgentKillSwitch(adminToken, agentA.agentId);
+    }
+  }, 30_000);
+
+  it('7. platform kill switch denies across every tenant', async () => {
+    const agent1 = await createEnrolledAgent('platform-t1', adminToken);
+    const task1 = await createTask(
+      {
+        assignedAgentId: agent1.agentId,
+        allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+        allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+      },
+      adminToken,
+    );
+    const agent2 = await createEnrolledAgent('platform-t2', adminToken2);
+    const task2 = await createTask(
+      {
+        assignedAgentId: agent2.agentId,
+        allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+        allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+      },
+      adminToken2,
+    );
+
+    const request1 = {
+      taskId: task1.id,
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
+    };
+    const request2 = {
+      taskId: task2.id,
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
+    };
+
+    const before1 = await agent1.manar.authorize(request1);
+    expect(before1).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    const before2 = await agent2.manar.authorize(request2);
+    expect(before2).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+
+    const activated = await activatePlatformKillSwitch(
+      adminToken,
+      'e2e platform kill switch test',
+    );
+    expect(activated.active).toBe(true);
+
+    try {
+      const denied1 = await agent1.manar.authorize(request1);
+      expect(denied1.decision).toBe('DENY');
+      expect((denied1 as { reason: string }).reason).toBe(
+        'platform_kill_switch_active',
+      );
+
+      const denied2 = await agent2.manar.authorize(request2);
+      expect(denied2.decision).toBe('DENY');
+      expect((denied2 as { reason: string }).reason).toBe(
+        'platform_kill_switch_active',
+      );
+    } finally {
+      await deactivatePlatformKillSwitch(adminToken);
+    }
+
+    const after1 = await agent1.manar.authorize(request1);
+    expect(after1).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    const after2 = await agent2.manar.authorize(request2);
+    expect(after2).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+  }, 30_000);
+});
