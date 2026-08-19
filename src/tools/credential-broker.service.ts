@@ -46,23 +46,42 @@ const PROMPT_INJECTION_RISK_FLAG_TTL_MS = 15 * 60 * 1000;
 /**
  * Task 5 (see docs/superpowers/sdd/plan-mvp-unblock, task-5-brief.md):
  * bounded-traversal caps for `collectStructuredInjectionText` below. Both
- * are pure in-process CPU bounds on a synchronous object/array walk, wholly
- * unrelated to `AI_ADVISORY_TIMEOUT_MS`'s hot-lane RPC budget -- the walk
- * runs entirely *before* the single, unchanged `analyzePromptInjection`
- * call in `applyPostCallAdvisories` (never once per leaf, which would
- * multiply RPC round-trips against that same tight budget), so it must
- * stay fast regardless of that budget. Depth 5 is deep enough for a
+ * are pure in-process CPU bounds on a synchronous object/array walk. The
+ * traversal itself adds no RPC of its own and the per-call
+ * `AI_ADVISORY_TIMEOUT_MS` hot-lane deadline is unchanged -- the walk runs
+ * entirely *before* the single, unchanged `analyzePromptInjection` call in
+ * `applyPostCallAdvisories` (never once per leaf, which would multiply RPC
+ * round-trips against that same tight budget), so it must stay fast
+ * regardless of that budget. What *does* change: a structured result that
+ * has any string-shaped leaf now reaches that `analyzePromptInjection` call
+ * at all, where before Task 5 it was skipped outright -- so a
+ * structured-result invocation now makes 3 sequential hot-lane RPC calls
+ * (`analyzeDlp` before-call, `analyzeDlp` after-call, `analyzePromptInjection`)
+ * instead of 2, matching what a string-result invocation already made.
+ * Depth 5 is deep enough for a
  * `{ events: [ { description, metadata: {...} } ] }` SIEM-response shape
  * (root object -> array -> event object -> string/metadata object ->
  * metadata's own string values) while still bounding pathological nesting.
  */
 const PROMPT_INJECTION_SCAN_MAX_DEPTH = 5;
 /**
- * ~4KB of concatenated string-leaf content -- large enough to catch a
- * realistic multi-event tool payload, small enough that a huge or
- * adversarial tool response can't blow past it. The cap truncates rather
- * than drops the call: a truncated-but-still-inspected payload is strictly
- * better than skipping detection outright once the bound is hit.
+ * ~4KB cap on collected leaf-string content walked out of the structured
+ * result, not an exact byte-size cap on the final joined RPC payload --
+ * `collectStructuredInjectionText` joins collected leaves with `'\n'`,
+ * which can add up to (leaf count - 1) extra characters beyond this cap
+ * (e.g. ~4000 single-char leaves could join to ~8000 chars). Harmless
+ * either way since the result is still bounded, just not exactly 4KB.
+ * Large enough to catch a realistic multi-event tool payload, small enough
+ * that a huge or adversarial tool response can't blow past it. The cap
+ * truncates rather than drops the call: a truncated-but-still-inspected
+ * payload is strictly better than skipping detection outright once the
+ * bound is hit. Note also that `remaining` only decrements on non-empty
+ * string leaves, so this traversal has no independent node-count bound --
+ * a large array of numbers/empty strings within the depth cap is walked in
+ * full. That's fine in practice: the same request already does an
+ * unbounded `JSON.stringify(originalData)` for the DLP call earlier in
+ * `applyPostCallAdvisories`, so this traversal is strictly cheaper than
+ * pre-existing work on the same payload.
  */
 const PROMPT_INJECTION_SCAN_MAX_CHARS = 4000;
 

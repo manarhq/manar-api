@@ -250,8 +250,9 @@ audit event:
      see "Optional: a real AI backend" above), which isn't part of this
      scenario's own narrative.
 2. **`CredentialBrokerService`'s prompt-injection hook now also inspects
-   structured (object/array) tool results, not only a plain string**
-   (`typeof result.data === 'string'`) — `demo-soc-tools`' real SIEM
+   structured (object/array) tool results, not only a plain string.**
+   Before this fix, the hook only ran `AnalyzePromptInjection` when a tool
+   result's `data` was a plain string — `demo-soc-tools`' real SIEM
    responses are structured JSON objects (`{ events: [...] }`), which used
    to be entirely invisible to this hook (a real, confirmed architectural
    boundary found while assembling Phase 13, not a bug introduced there).
@@ -261,8 +262,13 @@ audit event:
    `src/tools/credential-broker.service.ts`), and if it finds any
    string-valued leaves, passes the bounded, concatenated text to the
    same single `AnalyzePromptInjection` call the plain-string path already
-   made — never a second RPC call, never one call per event/leaf, so the
-   hot-lane latency budget below is unaffected by this change.
+   made — never a second RPC call, never one call per event/leaf. The
+   traversal itself adds no RPC of its own and the per-call
+   `AI_ADVISORY_TIMEOUT_MS` deadline described in limitation 1 above is
+   unchanged — but a structured-result invocation now reaches that
+   `AnalyzePromptInjection` call at all (it used to be skipped outright),
+   so it now makes 3 sequential hot-lane RPC calls per invocation instead
+   of 2, matching what a string-result invocation already made.
    **This makes structured results inspectable — it does not, by itself,
    make a live run against real local inference complete within the hot
    lane's 2s budget.** Limitation 1 above is unaffected by this fix and

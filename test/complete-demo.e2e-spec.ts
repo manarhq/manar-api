@@ -59,29 +59,39 @@ import { FakeAnalysisServiceServer } from './support/fake-analysis-service-serve
  *   SIEM query now DENIED -> audit chain verifies -> evidence export
  *   succeeds.
  *
- * **A real, confirmed architectural boundary this test works around
- * honestly rather than papering over** (found while assembling this
- * phase — see the final report): `CredentialBrokerService`'s
- * prompt-injection advisory hook (`src/tools/credential-broker.service.ts`)
- * only ever analyzes a tool result whose `data` is a plain **string**
- * (`typeof originalData === 'string'`) — a structured JSON object result
- * (which is what `packages/demo-soc-tools`' real
- * `POST /v1/siem/search-events` always returns, `{ events: [...] }`) is
- * never inspected for prompt injection at all; that shape is DLP's
- * concern (Section 73), not this hook's (see docs/ai-security-model.md's
- * "Prompt-injection advisory" section, and the identical `typeof
- * result.data === 'string'` gate `test/ai-advisory.e2e-spec.ts` scenario
- * 6 already relies on). So this test drives the SIEM/EDR/IAM part of the
- * scenario through the real, unmodified `demo-soc-tools` service exactly
- * as built (proving the payload is present in real data the agent
- * legitimately receives, and that the injected instruction is never
- * trusted or executed regardless), and separately proves the advisory
- * mechanism itself is real and fires in this same tenant/task via one
- * additional tool call whose result is string-shaped (a local
- * `HttpFixtureServer`, the exact same established pattern
- * `test/ai-advisory.e2e-spec.ts` already uses for this specific hook) —
- * rather than changing `CredentialBrokerService`'s own detection-trigger
- * scope inside what is supposed to be an integration/assembly phase.
+ * **An architectural boundary this test originally worked around
+ * honestly rather than papering over, since closed by the follow-up
+ * `fix/mvp-ai-unblock` session's Task 5** (found while assembling this
+ * phase — see the final report; fixed later — see
+ * `docs/superpowers/sdd/plan-mvp-unblock`, task-5-brief.md):
+ * `CredentialBrokerService`'s prompt-injection advisory hook
+ * (`src/tools/credential-broker.service.ts`) used to analyze only a tool
+ * result whose `data` was a plain **string** (`typeof originalData ===
+ * 'string'`) — a structured JSON object result (which is what
+ * `packages/demo-soc-tools`' real `POST /v1/siem/search-events` and
+ * `fetch-incident` always return, `{ events: [...] }` / `{ id, hostId,
+ * ... }`) was never inspected for prompt injection at all. Task 5 closed
+ * that gap: the hook now also walks a structured result via a bounded,
+ * depth/length-capped traversal (`collectStructuredInjectionText`) and
+ * runs the same single `analyzePromptInjection` call against any
+ * string-valued leaves it finds. As a result, this test's own
+ * `search-events` and `fetch-incident` checkpoints below — which return
+ * the same injected fixture text as part of their real structured
+ * `demo-soc-tools` responses — now legitimately also produce
+ * `PROMPT_INJECTION_DETECTED` audit events, in addition to the syslog
+ * `tail` checkpoint this comment already describes below (which remains
+ * the one this test's assertions key off of, since its result is a
+ * plain string and was always in scope even before Task 5). This test's
+ * own assertions were deliberately left unchanged by Task 5 — it drives
+ * the SIEM/EDR/IAM part of the scenario through the real, unmodified
+ * `demo-soc-tools` service exactly as built (proving the payload is
+ * present in real data the agent legitimately receives, and that the
+ * injected instruction is never trusted or executed regardless), and
+ * separately proves the advisory mechanism itself is real and fires in
+ * this same tenant/task via one additional tool call whose result is
+ * string-shaped (a local `HttpFixtureServer`, the exact same established
+ * pattern `test/ai-advisory.e2e-spec.ts` already uses for this specific
+ * hook).
  *
  * Also reuses (per `docs/ai-security-model.md`) `FakeAnalysisServiceServer`
  * for a *content-controlled* AI signal: the real `manar-ai` container in
