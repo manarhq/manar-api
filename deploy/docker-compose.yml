@@ -498,23 +498,33 @@ services:
   # contract-conformant test double instead — see
   # test/ai-advisory.e2e-spec.ts's own doc comment for the full rationale.
   #
-  # `OLLAMA_HOST`/`OLLAMA_TIMEOUT_SECONDS` are read from this shell's own
-  # environment (docker compose variable substitution, not the container's
-  # runtime env), defaulting to the values above when unset — so plain
+  # `MANAR_API_OLLAMA_HOST`/`MANAR_API_OLLAMA_TIMEOUT_SECONDS` are read
+  # from this shell's own environment (docker compose variable
+  # substitution, not the container's runtime env — the container itself
+  # only ever sees the un-prefixed `OLLAMA_HOST`/`OLLAMA_TIMEOUT_SECONDS`
+  # below), defaulting to the values above when unset — so plain
   # `pnpm infra:up` is byte-for-byte identical to before this comment was
   # written: a DNS-unresolvable host and a short 5s per-call timeout,
   # neither of which the fail-secure path even depends on (DNS resolution
-  # fails immediately regardless of the timeout value). `pnpm infra:up:ai`
-  # (below) overrides both to point at the real `ollama` service defined
-  # below it, with a timeout long enough for a real qwen3:8b generation
-  # call. `OLLAMA_MODEL`/`EMBEDDING_MODEL` are pinned explicitly rather
-  # than left to manar-ai's own Python-side defaults (which currently
-  # happen to match) so this file stays the single source of truth for
-  # exactly which tags `infra:up:ai` pulls below — manar-ai's chat model
-  # comes from `OLLAMA_MODEL`; embeddings always come from `EMBEDDING_MODEL`
-  # and are always Ollama-backed regardless of `AI_PROVIDER` (Section 44:
-  # "local embeddings by default"). Both must be reachable at the same
-  # `OLLAMA_HOST`.
+  # fails immediately regardless of the timeout value). Deliberately
+  # namespaced with a `MANAR_API_` prefix rather than reusing the bare
+  # `OLLAMA_HOST`/`OLLAMA_TIMEOUT_SECONDS` names: this machine's own
+  # native `ollama` CLI reads `OLLAMA_HOST` directly, and manar-ai's own
+  # `.env.example` sets that exact same bare name — a developer working
+  # across both repos plausibly has one of those exported in their shell
+  # profile or manar-api's own `.env` for unrelated reasons, which would
+  # otherwise silently leak into this substitution and defeat the
+  # fail-secure default this task exists to preserve. `pnpm infra:up:ai`
+  # (below) sets the namespaced vars to point at the real `ollama` service
+  # defined below it, with a timeout long enough for a real qwen3:8b
+  # generation call. `OLLAMA_MODEL`/`EMBEDDING_MODEL` are pinned
+  # explicitly rather than left to manar-ai's own Python-side defaults
+  # (which currently happen to match) so this file stays the single
+  # source of truth for exactly which tags `infra:up:ai` pulls below —
+  # manar-ai's chat model comes from `OLLAMA_MODEL`; embeddings always
+  # come from `EMBEDDING_MODEL` and are always Ollama-backed regardless of
+  # `AI_PROVIDER` (Section 44: "local embeddings by default"). Both must
+  # be reachable at the same `OLLAMA_HOST`.
   #
   # `AI_ADVISORY_PROVIDER` (manar-api's own side of this — see
   # src/ai-advisory/ai-advisory.config.ts's doc comment, and this repo's
@@ -533,8 +543,8 @@ services:
       LOG_LEVEL: INFO
       GRPC_PORT: 50051
       AI_PROVIDER: ollama
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama-not-configured.invalid:11434}
-      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-5}
+      OLLAMA_HOST: ${MANAR_API_OLLAMA_HOST:-http://ollama-not-configured.invalid:11434}
+      OLLAMA_TIMEOUT_SECONDS: ${MANAR_API_OLLAMA_TIMEOUT_SECONDS:-5}
       OLLAMA_MODEL: qwen3:8b
       EMBEDDING_MODEL: qwen3-embedding:0.6b
     ports:
@@ -573,8 +583,9 @@ services:
   # `pnpm infra:up:ai` script below, in package.json) brings it up. Not
   # depended on by `manar-ai` (`depends_on` would force `manar-ai` to also
   # require the `ai` profile, breaking the default no-profile stack) — the
-  # two are wired together purely via the `OLLAMA_HOST` environment
-  # substitution on `manar-ai` above, which `pnpm infra:up:ai` sets.
+  # two are wired together purely via the namespaced `MANAR_API_OLLAMA_HOST`
+  # environment substitution on `manar-ai` above, which `pnpm infra:up:ai`
+  # sets.
   #
   # Official `ollama/ollama` image. No GPU passthrough configured for this
   # host's Docker daemon (checked: `docker run --gpus all` fails with "no

@@ -65,12 +65,23 @@ pnpm infra:up:ai
 
 This brings up the same stack as `pnpm infra:up`, plus a containerized
 `ollama` service (`deploy/docker-compose.yml`), points `manar-ai` at it
-(`OLLAMA_HOST=http://ollama:11434`, overriding the `.invalid` default),
-and pulls the two tags manar-ai uses: `qwen3:8b` (chat/structured-output)
-and `qwen3-embedding:0.6b` (embeddings — always Ollama-backed regardless
-of `AI_PROVIDER`, Section 44). Safe to re-run: `ollama pull` is a no-op
-once a tag is already present (confirmed: a second run completed in
-~19s, entirely reconciliation, no re-download).
+via `MANAR_API_OLLAMA_HOST=http://ollama:11434` (overriding the
+`.invalid` default), and pulls the two tags manar-ai uses: `qwen3:8b`
+(chat/structured-output) and `qwen3-embedding:0.6b` (embeddings — always
+Ollama-backed regardless of `AI_PROVIDER`, Section 44). Safe to re-run:
+`ollama pull` is a no-op once a tag is already present (confirmed: a
+second run completed in ~19s, entirely reconciliation, no re-download).
+
+Deliberately namespaced as `MANAR_API_OLLAMA_HOST`/
+`MANAR_API_OLLAMA_TIMEOUT_SECONDS`, not the bare `OLLAMA_HOST`/
+`OLLAMA_TIMEOUT_SECONDS` names — this repo's compose substitution reads
+whatever's in the invoking shell/`.env`, and both the native `ollama`
+CLI _and_ manar-ai's own `.env.example` use the bare `OLLAMA_HOST` name.
+If manar-api's compose substitution reused it, an operator who has
+either of those set for unrelated reasons would silently leak that value
+in and defeat the fail-secure default. Both vars are independently
+overridable (`MANAR_API_OLLAMA_HOST=... pnpm infra:up:ai`) if you're
+running Ollama somewhere other than the bundled container.
 
 **First run**: the model pull is the slow part, not the container start.
 On this machine, pulling both tags (~5.9GB total) over a fast connection
