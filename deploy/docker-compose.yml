@@ -482,19 +482,13 @@ services:
   # manar-ai's separate REST *debug* interface — not what `manar-api`
   # depends on).
   #
-  # AI_PROVIDER=ollama with a deliberately unresolvable OLLAMA_HOST: this
-  # container's own gRPC layer, deterministic DLP pattern-matching layer
-  # (`app/dlp/patterns.py`, unconditional, no LLM dependency — Section 73),
-  # and documented fail-secure envelopes (manar-ai's
-  # docs/ai-security-model.md's "Fail loudly, never fail open or fail
-  # silent") are all real and exercised end-to-end by this service. Wiring
-  # in a genuinely working local LLM (e.g. Ollama) was deliberately not
-  # done here: real inference latency for a model capable of following this
-  # service's structured-output contract is many seconds per call on
-  # typical local hardware — inconsistent with `AiAdvisoryClient`'s
-  # sub-2-second per-request budget on the hot authorization/tool-invoke
-  # path (`AI_ADVISORY_TIMEOUT_MS`), and would make this compose file's
-  # behavior flaky/slow rather than more real. A DNS-unresolvable
+  # AI_PROVIDER=ollama, OLLAMA_HOST defaulting to a deliberately
+  # unresolvable `.invalid` host: this container's own gRPC layer,
+  # deterministic DLP pattern-matching layer (`app/dlp/patterns.py`,
+  # unconditional, no LLM dependency — Section 73), and documented
+  # fail-secure envelopes (manar-ai's docs/ai-security-model.md's "Fail
+  # loudly, never fail open or fail silent") are all real and exercised
+  # end-to-end by this service with zero setup. A DNS-unresolvable
   # `.invalid` hostname (RFC 2606) makes manar-ai's own internal provider
   # calls fail *fast* (immediate resolution failure, not a slow timeout),
   # so `AnalyzeDlp`/`AnalyzeRisk`/`AnalyzePromptInjection` all still return
@@ -503,6 +497,30 @@ services:
   # score, a genuine prompt-injection detection) use a small local
   # contract-conformant test double instead — see
   # test/ai-advisory.e2e-spec.ts's own doc comment for the full rationale.
+  #
+  # `OLLAMA_HOST`/`OLLAMA_TIMEOUT_SECONDS` are read from this shell's own
+  # environment (docker compose variable substitution, not the container's
+  # runtime env), defaulting to the values above when unset — so plain
+  # `pnpm infra:up` is byte-for-byte identical to before this comment was
+  # written: a DNS-unresolvable host and a short 5s per-call timeout,
+  # neither of which the fail-secure path even depends on (DNS resolution
+  # fails immediately regardless of the timeout value). `pnpm infra:up:ai`
+  # (below) overrides both to point at the real `ollama` service defined
+  # below it, with a timeout long enough for a real qwen3:8b generation
+  # call. `OLLAMA_MODEL`/`EMBEDDING_MODEL` are pinned explicitly rather
+  # than left to manar-ai's own Python-side defaults (which currently
+  # happen to match) so this file stays the single source of truth for
+  # exactly which tags `infra:up:ai` pulls below — manar-ai's chat model
+  # comes from `OLLAMA_MODEL`; embeddings always come from `EMBEDDING_MODEL`
+  # and are always Ollama-backed regardless of `AI_PROVIDER` (Section 44:
+  # "local embeddings by default"). Both must be reachable at the same
+  # `OLLAMA_HOST`.
+  #
+  # `AI_ADVISORY_PROVIDER` (manar-api's own side of this — see
+  # src/ai-advisory/ai-advisory.config.ts's doc comment, and this repo's
+  # own .env.example) must be kept in sync with `AI_PROVIDER` here by
+  # hand: there is no RPC for manar-api to introspect manar-ai's actual
+  # provider. Both currently default to `ollama`.
   manar-ai:
     build:
       context: ../../manar-ai
@@ -515,8 +533,10 @@ services:
       LOG_LEVEL: INFO
       GRPC_PORT: 50051
       AI_PROVIDER: ollama
-      OLLAMA_HOST: http://ollama-not-configured.invalid:11434
-      OLLAMA_TIMEOUT_SECONDS: 5
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama-not-configured.invalid:11434}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-5}
+      OLLAMA_MODEL: qwen3:8b
+      EMBEDDING_MODEL: qwen3-embedding:0.6b
     ports:
       # Matches AiAdvisoryConfigSchema's AI_ADVISORY_GRPC_TARGET default
       # (localhost:50051) — every process that reads that config runs on
@@ -542,8 +562,54 @@ services:
       retries: 20
       start_period: 10s
 
+  # Opt-in real model backend for manar-ai, added by Task 2 of
+  # docs/superpowers/sdd/plan-mvp-unblock so Task 1's hot/longform lane
+  # split (src/ai-advisory/ai-advisory-client.service.ts) has something
+  # genuine to observe — without this service, `manar-ai` above always
+  # runs against the unresolvable `.invalid` host and only ever exercises
+  # its fail-secure path (see that service's own doc comment). Behind
+  # `profiles: ['ai']` so it is never started by plain `pnpm infra:up`/
+  # `docker compose up` — only `docker compose --profile ai up` (or the
+  # `pnpm infra:up:ai` script below, in package.json) brings it up. Not
+  # depended on by `manar-ai` (`depends_on` would force `manar-ai` to also
+  # require the `ai` profile, breaking the default no-profile stack) — the
+  # two are wired together purely via the `OLLAMA_HOST` environment
+  # substitution on `manar-ai` above, which `pnpm infra:up:ai` sets.
+  #
+  # Official `ollama/ollama` image. No GPU passthrough configured for this
+  # host's Docker daemon (checked: `docker run --gpus all` fails with "no
+  # known GPU vendor found" — the nvidia-container-toolkit isn't wired up
+  # here, unlike the host's own native `ollama` systemd service, which does
+  # use the GPU) — this container runs CPU inference, which is
+  # considerably slower. See docs/demo.md's AI profile section for
+  # pre-warming guidance before a live demo.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: manar-ollama
+    restart: unless-stopped
+    profiles: ['ai']
+    ports:
+      # Host port 11435, not Ollama's own default 11434: this machine
+      # already runs a native `ollama` systemd service bound to 11434
+      # outside Docker (same "avoid a clash with something already running
+      # locally" reasoning as Postgres/Keycloak's non-default host ports
+      # above). The container's own listener stays on its default 11434;
+      # only the host-side mapping changes. `manar-ai` never uses this
+      # host-mapped port — it reaches this service over the compose
+      # network at `ollama:11434` (see `OLLAMA_HOST` above).
+      - '11435:11434'
+    volumes:
+      - manar-ollama-data:/root/.ollama
+    healthcheck:
+      test: ['CMD-SHELL', 'ollama list >/dev/null 2>&1']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
 volumes:
   manar-postgres-data:
   manar-keycloak-data:
   manar-kafka-data:
   manar-opensearch-data:
+  manar-ollama-data:
