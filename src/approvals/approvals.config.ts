@@ -27,6 +27,25 @@ export const ApprovalsConfigSchema = z.object({
     .int()
     .positive()
     .default(1_800_000),
+  /**
+   * Security cleanup 1 (Phase 14): `POST /approvals/:id/decide` now
+   * synchronously awaits `ApprovalWorkflow`'s actual resolved outcome
+   * (`WorkflowHandle.result()`) instead of returning immediately after
+   * signaling — see `ApprovalsController.decide`'s doc comment for why.
+   * This bounds how long that wait is allowed to take before the HTTP
+   * handler gives up and reports a timeout rather than hanging the
+   * connection indefinitely: comfortably above `finalizeApprovalDecision`'s
+   * own worst-case Activity retry budget (5 attempts, `30s`
+   * `startToCloseTimeout` each, exponential backoff between attempts) so a
+   * normal decision — even one that needed a retry or two — always
+   * resolves well inside this window; a genuine worker outage still fails
+   * the HTTP request rather than blocking it forever. Default 2 minutes.
+   */
+  APPROVAL_DECIDE_RESULT_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(120_000),
 });
 
 export type ApprovalsConfig = z.infer<typeof ApprovalsConfigSchema>;

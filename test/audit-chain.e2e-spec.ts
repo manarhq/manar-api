@@ -39,6 +39,8 @@ function fakeConfigService(
     KEYCLOAK_ADMIN_CLIENT_ID:
       process.env.KEYCLOAK_ADMIN_CLIENT_ID ?? 'admin-cli',
     KEYCLOAK_CLIENT_ID: process.env.KEYCLOAK_CLIENT_ID ?? 'manar-api',
+    MANAR_WEB_BASE_URL:
+      process.env.MANAR_WEB_BASE_URL ?? 'http://localhost:3100',
     OPENBAO_ADDR: process.env.OPENBAO_ADDR ?? 'http://localhost:8200',
     OPENBAO_TOKEN: process.env.OPENBAO_TOKEN ?? 'manar-dev-root-token',
     OPENBAO_PKI_ROOT_PATH: process.env.OPENBAO_PKI_ROOT_PATH ?? 'pki',
@@ -74,6 +76,7 @@ function fakeConfigService(
       process.env.MANAR_BFF_SERVICE_TOKEN ?? 'test-manar-bff-service-token',
     APPROVAL_GRANT_TTL_MS: 300_000,
     APPROVAL_REQUEST_TTL_MS: 1_800_000,
+    APPROVAL_DECIDE_RESULT_TIMEOUT_MS: 120_000,
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:29092',
     KAFKA_CLIENT_ID: 'audit-chain-e2e-test',
     KAFKA_AUDIT_TOPIC: process.env.KAFKA_AUDIT_TOPIC ?? 'manar.audit-events',

@@ -1176,4 +1176,93 @@ describe('Approval Engine (e2e)', () => {
       await fixture.stop();
     }
   }, 30_000);
+
+  it('9. concurrent decide race (Phase 14 security cleanup 1): two genuinely concurrent decide calls on the same request both report the one decision that actually won, never a discarded one', async () => {
+    const fixture = new HttpFixtureServer();
+    const baseEndpoint = await fixture.start();
+    try {
+      const tool = await registerTool({
+        name: uniqueSlug('race-tool'),
+        baseEndpoint,
+      });
+      await registerToolAction({ toolId: tool.id, name: 'lookup' });
+
+      const agent = await createEnrolledAgent('race');
+      const task = await createTask({
+        assignedAgentId: agent.agentId,
+        allowedToolActions: [{ toolId: tool.name, actionId: 'lookup' }],
+        allowedResourceSelectors: [{ toolId: tool.name, pattern: '*' }],
+        riskCeiling: 5,
+      });
+
+      const initialInvoke = await invokeToolOverMtls(agent.identity, {
+        taskId: task.id,
+        toolId: tool.name,
+        actionId: 'lookup',
+        resource: 'host-race',
+        params: {},
+      });
+      const { approvalId } = initialInvoke.body as { approvalId: string };
+
+      // Reproduces Phase 11b Part 2's exact finding: two genuinely
+      // concurrent decide calls for the same ApprovalRequest -- a
+      // double-click, or two different approvers -- both pass the
+      // `status === 'PENDING'` precheck and both successfully signal the
+      // workflow. Before this phase's fix, both would return 201 with
+      // `decision` simply echoing whatever each caller submitted -- even
+      // though ApprovalWorkflow's decide handler is first-signal-wins, so
+      // at most one of "APPROVE" and "DENY" was ever actually recorded.
+      // Firing them via Promise.all is reliable here specifically because
+      // the fix under test makes this handler await the *entire*
+      // finalizeApprovalDecision Activity (real DB writes, a fresh
+      // policy/risk re-evaluation) before responding -- signal delivery
+      // itself is near-instant, so there is a wide, real window in which
+      // both signals land before the workflow ever closes.
+      const [first, second] = await Promise.all([
+        decideApproval(approvalId, 'APPROVE', 'first caller'),
+        decideApproval(approvalId, 'DENY', 'second caller'),
+      ]);
+
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+
+      const firstBody = first.body as { status: string; decision?: string };
+      const secondBody = second.body as {
+        status: string;
+        decision?: string;
+      };
+
+      // Both responses must agree on the one decision that actually took
+      // effect -- neither is allowed to report its own submitted decision
+      // if that decision lost the race.
+      expect(['APPROVED', 'DENIED']).toContain(firstBody.status);
+      expect(secondBody.status).toBe(firstBody.status);
+      expect(secondBody.decision).toBe(firstBody.decision);
+
+      // Only one ApprovalDecision row was ever recorded -- Temporal's
+      // signal handler is first-signal-wins, never both.
+      const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+      const decisions = await tenantClient.approvalDecision.findMany({
+        where: { approvalRequestId: approvalId },
+      });
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0]!.decision).toBe(firstBody.decision);
+
+      const polled = await waitForApprovalStatus(agent.identity, approvalId);
+      expect(polled.status).toBe(firstBody.status);
+      if (firstBody.status === 'APPROVED') {
+        expect(polled.grantToken).toBeTruthy();
+      } else {
+        expect(polled.grantToken).toBeFalsy();
+      }
+
+      // A third decide call, now that the request is genuinely no longer
+      // PENDING, is correctly rejected -- the fix is about response
+      // accuracy for a true race, not about accepting decisions forever.
+      const third = await decideApproval(approvalId, 'APPROVE', 'too late');
+      expect(third.status).toBe(409);
+    } finally {
+      await fixture.stop();
+    }
+  }, 30_000);
 });

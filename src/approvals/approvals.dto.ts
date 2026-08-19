@@ -10,31 +10,37 @@ export class DecideApprovalRequestDto {
 }
 
 /**
- * Mirrors `ApprovalsController.decide`'s actual response. Note: `status`
- * is the `ApprovalRequest.status` read *before* the decision signal was
- * sent, and this handler returns as soon as the signal is delivered (not
- * once the workflow has actually processed it) — so `status` here is
- * always `"PENDING"` in practice, never the eventual `APPROVED`/`DENIED`
- * outcome. Poll `GET /agent/v1/approvals/:id` (agent-facing) or re-fetch
- * via another surface to observe the real outcome. Documented as-is per
- * this phase's "reflect actual behavior" scope.
+ * Mirrors `ApprovalsController.decide`'s actual response (Phase 14
+ * security cleanup 1 — see that method's own doc comment for the full
+ * rationale). `status`/`decision` are the workflow's real, final outcome —
+ * this handler now synchronously awaits `ApprovalWorkflow`'s result before
+ * responding, rather than returning immediately post-signal. For two
+ * genuinely concurrent `decide` calls on the same request, both responses
+ * report the one decision that actually took effect (first-signal-wins),
+ * never a discarded submission. `decision` is only present when `status`
+ * is `APPROVED`/`DENIED`; a workflow that resolved `EXPIRED` (the caller's
+ * signal lost a race against the request's own timeout) has no decision
+ * to report.
  */
 export class DecideApprovalResponseDto {
   @ApiProperty({ format: 'uuid' })
   id!: string;
 
   @ApiProperty({
-    enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED'],
-    example: 'PENDING',
-    description: 'In practice always "PENDING" — see class doc comment.',
+    enum: ['APPROVED', 'DENIED', 'EXPIRED'],
+    example: 'APPROVED',
+    description:
+      "ApprovalWorkflow's real terminal outcome, not the pre-signal PENDING status.",
   })
-  status!: string;
+  status!: 'APPROVED' | 'DENIED' | 'EXPIRED';
 
   @ApiProperty({
     enum: ['APPROVE', 'DENY'],
-    description: 'Echoes the decision just submitted.',
+    required: false,
+    description:
+      'The decision that actually took effect. Absent only when `status` is EXPIRED.',
   })
-  decision!: 'APPROVE' | 'DENY';
+  decision?: 'APPROVE' | 'DENY';
 }
 
 /** One row of `GET /approvals`'s paginated list — see `ApprovalRequestService.listApprovalRequests`. */

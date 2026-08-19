@@ -79,9 +79,23 @@ required by any app code or test.
    (JWT-guarded, role `APPROVER`/`SECURITY_ADMIN`/`TENANT_OWNER`) →
    `ApprovalsController` signals the running workflow's `decide` signal
    with `{ decision, approverId: <the caller's UserProfile.id>, reason }`.
-   The HTTP handler returns as soon as the signal is _sent_ — it never
-   itself writes an `ApprovalDecision` row or flips `ApprovalRequest.status`
-   (see "Workflow code has no I/O" below).
+   The handler itself never writes an `ApprovalDecision` row or flips
+   `ApprovalRequest.status` (see "Workflow code has no I/O" below) — but
+   as of Phase 14 (security cleanup 1, closing a response-accuracy gap
+   Phase 11b Part 2 found), it does not return immediately after sending
+   the signal either. It synchronously awaits the workflow's actual
+   terminal result (`WorkflowHandle.result()`, bounded by
+   `APPROVAL_DECIDE_RESULT_TIMEOUT_MS`) and reports _that_ real outcome.
+   This matters because `ApprovalWorkflow`'s `decide` signal handler is
+   "first signal wins" (step 3 below): for two genuinely concurrent
+   `decide` calls on the same request, both signal successfully and both
+   await the same `result()` promise, so both responses correctly report
+   the one decision that actually won the race — never a decision that
+   was silently discarded. See `ApprovalsController.decide`'s doc comment
+   for why this, not applying Phase 12a's `Idempotency-Key` interceptor,
+   is the correct fix (that interceptor dedupes retries of one identical,
+   caller-keyed request — it doesn't help two different concurrent
+   requests with no shared key, which is exactly this scenario).
 3. `ApprovalWorkflow` (`src/temporal/workflows/approval.workflow.ts`) was
    racing a `condition()` on that signal against its own `expiresAt`
    timeout (`Promise`-style `condition(predicate, timeoutMs)`, the

@@ -274,6 +274,17 @@ different mechanism (the grant token itself is consumed exactly once);
 adding a second idempotency layer on top would be redundant, not
 protective.
 
+**Deliberately NOT applied to `POST /approvals/:id/decide` either**
+(Phase 14 security cleanup 1, considered and rejected — see
+`ApprovalsController.decide`'s own doc comment for the full rationale):
+the race Phase 11b Part 2 found there is two genuinely _different_
+concurrent requests (a UI double-click, or two different approvers), not
+one request retried with a shared caller-supplied key — `Idempotency-Key`
+dedupes the latter, not the former, so it would leave that exact race
+open. Fixed instead by having the handler synchronously await
+`ApprovalWorkflow`'s actual resolved outcome before responding, so every
+concurrent caller's response reports the one true outcome.
+
 **Mechanics**: `claim()` is a Redis `SET NX`. First claim → the real
 handler runs, its resolved value is cached for the TTL window; a replay
 with the same key inside that window returns the cached value **without
