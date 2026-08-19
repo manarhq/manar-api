@@ -144,10 +144,12 @@ and every existing caller already treats `null` correctly. A residency or
 classification block never counts toward the circuit breaker (a policy
 decision, not an outage) — see `docs/ai-security-model.md`.
 
-`test/data-classification.e2e-spec.ts`'s dedicated scenario asserts this
-at the transport level, mirroring Phase 12a's own residency test pattern:
-zero RPC attempts reach the fake gRPC server for a `RESTRICTED` action,
-even when the tenant's `allowExternalAi` is `true`.
+`src/ai-advisory/ai-advisory-client.service.spec.ts`'s "data
+classification enforcement (Section 53)" suite asserts this at the
+transport level, in the exact same file and against the exact same fake
+gRPC server Phase 12a's own residency suite already uses: zero RPC
+attempts reach the fake server for a `RESTRICTED` action, even when the
+tenant's `allowExternalAi` is `true`.
 
 ## Migration
 
