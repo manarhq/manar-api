@@ -226,4 +226,11 @@ tokens via the Resource Owner Password Credentials grant
   structurally; configuring a specific IdP is an operational task).
 - A Manar-side role-management API/UI — role assignment happens in
   Keycloak; `JwtAuthGuard` only reflects it locally (see "Role assignment"
-  above).
+  above). **Superseded by Phase 14**: `POST`/`DELETE /users/:id/role-bindings`
+  (`docs/superpowers/specs/2026-08-19-phase14-users-roles-settings-design.md`)
+  now lets a `TENANT_OWNER`/`SECURITY_ADMIN` grant/revoke a role directly,
+  subject to a privilege-escalation guard (`src/auth/role-privilege.ts`).
+  Keycloak remains the underlying source of truth `JwtAuthGuard.syncRoleBindings`
+  reconciles against on every request — that grant/revoke surface writes to
+  Keycloak first (`KeycloakAdminClient.assignRealmRole`/`removeRealmRole`),
+  precisely so this reconciliation never reverts it. See `src/users/`.

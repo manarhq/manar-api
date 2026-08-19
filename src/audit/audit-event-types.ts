@@ -46,6 +46,14 @@ export const AUDIT_EVENT_TYPES = {
   KILL_SWITCH_ACTIVATED: 'kill_switch.activated',
   /** A kill switch was deactivated. */
   KILL_SWITCH_DEACTIVATED: 'kill_switch.deactivated',
+
+  // Phase 14 (Users/Roles/Settings) — see src/users/, src/tenant-settings/.
+  /** `POST /users/:id/role-bindings` granted a role — see `UsersService.grantRole`. */
+  USER_ROLE_GRANTED: 'user.role_granted',
+  /** `DELETE /users/:id/role-bindings/:role` revoked a role — see `UsersService.revokeRole`. */
+  USER_ROLE_REVOKED: 'user.role_revoked',
+  /** `PATCH /tenant/settings` updated one or more residency/AI-governance flags — see `TenantSettingsService.updateSettings`. */
+  TENANT_SETTINGS_UPDATED: 'tenant.settings_updated',
 } as const;
 
 export type AuditEventType =

@@ -44,6 +44,11 @@ const DOCUMENTED_PATHS = [
   '/tools',
   '/events/live',
   '/evidence/export',
+  '/users',
+  '/users/{id}',
+  '/users/{id}/role-bindings',
+  '/users/{id}/role-bindings/{role}',
+  '/tenant/settings',
 ];
 
 /**
