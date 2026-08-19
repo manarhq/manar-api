@@ -1,0 +1,187 @@
+# Default values for manar-api-worker (the Temporal worker process,
+# dist/worker.main.js). No inbound traffic at all — no Service, no
+# ingress NetworkPolicy rule, no HTTP liveness/readiness probe (see
+# ../../../Dockerfile's `worker` stage doc comment: this process serves no
+# HTTP endpoint to probe).
+#
+# config/secrets below are NOT scoped down to only what WorkerAppModule
+# functionally uses (Postgres/OpenBao/Kafka/OpenSearch/manar-ai/
+# demo-soc-tools/Temporal — see docs/kubernetes.md's dependency-graph
+# table). src/config/env.validation.ts's AppConfigSchema is one merged
+# zod schema shared by every process (`validate()` runs the same way for
+# both `src/main.ts` and `src/worker.main.ts`), so every *required*
+# (non-`.default()`) field must be present in this process's environment
+# too, even fields (e.g. KEYCLOAK_ADMIN_PASSWORD, OPENFGA_STORE_ID) this
+# process never dials over the network — it will crash-loop on startup
+# otherwise. NetworkPolicy egress below is scoped down to what's actually
+# called; ConfigMap/Secret data is not.
+
+replicaCount: 2
+
+image:
+  repository: registry.example.com/manar/manar-api
+  pullPolicy: IfNotPresent
+  # Same image as the manar-api chart (../manar-api) — only the container
+  # command differs (see below). Keep this tag in lockstep with that
+  # chart's image.tag in any real deployment (same build, two rollouts).
+  tag: ''
+
+# The Dockerfile's `worker` stage bakes this CMD in already
+# (["node", "dist/worker.main.js"]) — this override exists only so a
+# deployer pointing image.repository at the `runtime` stage/tag instead of
+# `worker` still gets the right process. Leave unset to use the image's
+# own baked-in CMD.
+command: []
+
+imagePullSecrets: []
+nameOverride: ''
+fullnameOverride: ''
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ''
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 384Mi
+  limits:
+    cpu: '1'
+    memory: 768Mi
+
+# No HTTP server in this process (see chart doc comment above) — liveness
+# is a process-existence check via busybox `ps` (already on PATH in the
+# node:24-alpine runtime image; no extra tooling installed), mirroring the
+# Dockerfile worker stage's own doc comment ("a liveness probe on the
+# process itself"). No readinessProbe: this Deployment has no Service to
+# gate traffic on, and Temporal's own worker-heartbeat visibility (also
+# referenced in that same comment) is the real signal for "is this worker
+# actually polling its task queue," which an in-pod exec probe can't see.
+livenessProbe:
+  exec:
+    command:
+      - sh
+      - -c
+      - "ps aux | grep '[w]orker.main.js'"
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+config:
+  NODE_ENV: production
+  LOG_LEVEL: info
+  # Structurally required by the shared AppConfigSchema but never dialed
+  # by this process (see chart doc comment above).
+  KEYCLOAK_BASE_URL: http://keycloak.manar.svc.cluster.local:8080
+  KEYCLOAK_ADMIN_CLIENT_ID: admin-cli
+  KEYCLOAK_CLIENT_ID: manar-api
+  OPENBAO_ADDR: http://openbao.manar.svc.cluster.local:8200
+  OPENBAO_KV_MOUNT_PATH: secret
+  OPENBAO_PKI_ROOT_PATH: pki-root
+  OPENBAO_PKI_INTERMEDIATE_PATH: pki-int
+  OPENBAO_PKI_AGENT_ROLE: manar-agent
+  AGENT_MTLS_PORT: '3443'
+  AGENT_MTLS_SERVER_CERT_PATH: deploy/openbao/server-cert.pem
+  AGENT_MTLS_SERVER_KEY_PATH: deploy/openbao/server-key.pem
+  AGENT_MTLS_CLIENT_CA_PATH: deploy/openbao/ca-chain.pem
+  OPENFGA_API_URL: http://openfga.manar.svc.cluster.local:8080
+  OPENFGA_STORE_NAME: manar
+  OPENFGA_MODEL_FILE_PATH: authorization/model.fga
+  TEMPORAL_ADDRESS: temporal.manar.svc.cluster.local:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: manar-approvals
+  APPROVAL_REQUEST_TTL_MS: '86400000'
+  APPROVAL_GRANT_TTL_MS: '3600000'
+  KAFKA_BROKERS: kafka.manar.svc.cluster.local:9092
+  KAFKA_AUDIT_TOPIC: manar.audit-events
+  KAFKA_CLIENT_ID: manar-api-worker
+  OPENSEARCH_NODE: http://opensearch.manar.svc.cluster.local:9200
+  OPENSEARCH_AUDIT_INDEX: manar-audit-events
+  REDIS_URL: redis://redis.manar.svc.cluster.local:6379
+  AI_ADVISORY_GRPC_TARGET: manar-ai.manar.svc.cluster.local:50051
+  AI_ADVISORY_TIMEOUT_MS: '2000'
+  AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: '5'
+  AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'
+  TENANT_DB_CLIENT_CACHE_MAX: '50'
+  TENANT_DB_CLIENT_IDLE_TTL_MS: '600000'
+
+secrets:
+  create: true
+  name: ''
+  data:
+    CONTROL_DATABASE_URL: ''
+    TENANT_DB_BASE_URL: ''
+    KEYCLOAK_ADMIN_USERNAME: ''
+    KEYCLOAK_ADMIN_PASSWORD: ''
+    OPENBAO_TOKEN: ''
+    APPROVAL_GRANT_SIGNING_SECRET: ''
+    PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ''
+
+# The AgentMtlsConfigSchema paths above are structurally required env vars
+# (see chart doc comment), but this process never starts an HTTPS
+# listener with them (worker.main.ts never constructs a FastifyAdapter),
+# so — unlike the manar-api chart — no real PEM material needs mounting
+# here. A minimal placeholder Secret satisfies the required *paths*
+# resolving to files that exist, without needing real certs the worker
+# never reads.
+agentMtls:
+  certs:
+    create: true
+    name: ''
+    serverCert: 'unused-by-worker'
+    serverKey: 'unused-by-worker'
+    caChain: 'unused-by-worker'
+
+networkPolicy:
+  enabled: true
+  # No ingress rules at all: no Service, nothing ever initiates a
+  # connection to this pod.
+  egressTargets:
+    - name: postgres
+      port: 5432
+    - name: openbao
+      port: 8200
+    - name: temporal
+      port: 7233
+    - name: kafka
+      port: 9092
+    - name: opensearch
+      port: 9200
+    - name: manar-ai
+      port: 50051
+    - name: demo-soc-tools
+      port: 3100
+  dnsNamespaceSelector:
+    labels:
+      kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    labels:
+      k8s-app: kube-dns
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

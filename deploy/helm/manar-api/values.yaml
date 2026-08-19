@@ -1,0 +1,246 @@
+# Default values for manar-api (the HTTP application: human REST API on
+# `httpPort` + the agent-facing mTLS listener on `agentMtlsPort`).
+# This is a YAML-formatted file — declare variables passed into templates.
+#
+# Nothing in here is a real secret. `secrets.data` below is deliberately
+# left empty by default (see templates/secret.yaml + docs/kubernetes.md) —
+# populate it at install time (`--set-string`/`-f` a values file kept out
+# of version control) or, preferably in a real deployment, manage the
+# `manar-api-secrets`/`manar-api-agent-mtls-certs` Secret objects out of
+# band (External Secrets Operator, Sealed Secrets, or an OpenBao ->
+# Kubernetes Secret sync) and set `secrets.create: false` /
+# `agentMtls.certs.create: false` so this chart only *references* them.
+
+replicaCount: 2
+
+image:
+  repository: registry.example.com/manar/manar-api
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  # A real deployment pins this to a CI-built digest/tag — never `latest`.
+  tag: ''
+
+imagePullSecrets: []
+nameOverride: ''
+fullnameOverride: ''
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ''
+
+podAnnotations: {}
+podLabels: {}
+
+# Pod-level security: every container in this chart runs as the same
+# fixed non-root UID/GID the Dockerfile's runtime stage already creates
+# (`manar:nodejs`, 1001:1001 — see ../../../Dockerfile), so the pod's
+# fsGroup matches it for any mounted volume's group ownership.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level security: read-only root filesystem (Node writes
+# nothing to disk at runtime beyond an ephemeral /tmp — see `volumes`/
+# `volumeMounts` below for the writable exception), no privilege
+# escalation, every Linux capability dropped (this process never needs
+# any — it's not binding <1024 without host networking, no raw sockets).
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  # Human-facing REST API — matches the Dockerfile's `EXPOSE 3000` and
+  # PORT's schema default (src/config/env.validation.ts).
+  httpPort: 3000
+  # Agent-facing mTLS HTTPS listener, `/agent/v1/*` — matches
+  # AgentMtlsConfigSchema's AGENT_MTLS_PORT default (src/agent-mtls/
+  # agent-mtls.config.ts) and the Dockerfile's `EXPOSE 3443`. Client-cert
+  # auth (mutual TLS) is this listener's real trust boundary — see
+  # docs/agent-identity.md — so unlike `httpPort` its NetworkPolicy
+  # ingress rule (templates/networkpolicy.yaml) deliberately does not
+  # restrict source pods (it's designed to accept connections from
+  # workload identities anywhere the cluster's ingress/gateway layer
+  # routes agent traffic from).
+  agentMtlsPort: 3443
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 384Mi
+  limits:
+    cpu: '1'
+    memory: 768Mi
+
+# HealthController (src/health/health.controller.ts) exposes `/health/live`
+# (always 200 once the process is up — process liveness only) and
+# `/health/ready` (currently an identical stub — no downstream dependency
+# checks exist yet in this phase; both endpoints are real and unchanged
+# since Phase 1). Both probes target `httpPort`, never `agentMtlsPort`
+# (that listener requires a client certificate — see docs/agent-identity.md
+# — so it cannot serve a plain HTTP kubelet probe).
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Non-secret application configuration — rendered into the
+# `<fullname>-config` ConfigMap and consumed via `envFrom`. Values below
+# assume the in-cluster Service DNS names documented in
+# docs/kubernetes.md's dependency graph (same services
+# deploy/docker-compose.yml runs locally, addressed here by their
+# Kubernetes Service name instead of the compose service name — override
+# per-environment as needed, e.g. a managed Postgres/Kafka's real host).
+config:
+  NODE_ENV: production
+  LOG_LEVEL: info
+  KEYCLOAK_BASE_URL: http://keycloak.manar.svc.cluster.local:8080
+  KEYCLOAK_ADMIN_CLIENT_ID: admin-cli
+  KEYCLOAK_CLIENT_ID: manar-api
+  OPENBAO_ADDR: http://openbao.manar.svc.cluster.local:8200
+  OPENBAO_KV_MOUNT_PATH: secret
+  OPENBAO_PKI_ROOT_PATH: pki-root
+  OPENBAO_PKI_INTERMEDIATE_PATH: pki-int
+  OPENBAO_PKI_AGENT_ROLE: manar-agent
+  AGENT_MTLS_PORT: '3443'
+  AGENT_MTLS_SERVER_CERT_PATH: deploy/openbao/server-cert.pem
+  AGENT_MTLS_SERVER_KEY_PATH: deploy/openbao/server-key.pem
+  AGENT_MTLS_CLIENT_CA_PATH: deploy/openbao/ca-chain.pem
+  OPENFGA_API_URL: http://openfga.manar.svc.cluster.local:8080
+  OPENFGA_STORE_NAME: manar
+  OPENFGA_MODEL_FILE_PATH: authorization/model.fga
+  TEMPORAL_ADDRESS: temporal.manar.svc.cluster.local:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: manar-approvals
+  APPROVAL_REQUEST_TTL_MS: '86400000'
+  APPROVAL_GRANT_TTL_MS: '3600000'
+  KAFKA_BROKERS: kafka.manar.svc.cluster.local:9092
+  KAFKA_AUDIT_TOPIC: manar.audit-events
+  KAFKA_CLIENT_ID: manar-api
+  OPENSEARCH_NODE: http://opensearch.manar.svc.cluster.local:9200
+  OPENSEARCH_AUDIT_INDEX: manar-audit-events
+  REDIS_URL: redis://redis.manar.svc.cluster.local:6379
+  AI_ADVISORY_GRPC_TARGET: manar-ai.manar.svc.cluster.local:50051
+  AI_ADVISORY_TIMEOUT_MS: '2000'
+  AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: '5'
+  AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'
+  TENANT_DB_CLIENT_CACHE_MAX: '50'
+  TENANT_DB_CLIENT_IDLE_TTL_MS: '600000'
+
+# Secret application configuration (credentials, connection strings that
+# embed a password, signing keys, static tokens). templates/secret.yaml
+# only *creates* a Secret object when `secrets.create` is true, and never
+# ships real values in this file — every value here is an empty
+# placeholder. `envFrom.secretRef` always references `secrets.name`
+# (defaults to `<fullname>-secrets`) regardless of who created it, so
+# `secrets.create: false` + an externally managed Secret of the same name
+# (OpenBao -> Kubernetes sync, External Secrets Operator, Sealed Secrets,
+# `kubectl create secret` out of band, ...) works without any template
+# change.
+secrets:
+  create: true
+  name: ''
+  data:
+    CONTROL_DATABASE_URL: ''
+    TENANT_DB_BASE_URL: ''
+    KEYCLOAK_ADMIN_USERNAME: ''
+    KEYCLOAK_ADMIN_PASSWORD: ''
+    OPENBAO_TOKEN: ''
+    APPROVAL_GRANT_SIGNING_SECRET: ''
+    PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ''
+
+# The agent mTLS listener's own TLS server identity + client-CA trust
+# anchor (src/main.ts reads these paths at bootstrap — see
+# AgentMtlsConfigSchema). Real PEM material, so a Secret volume mount,
+# never a ConfigMap — mounted read-only at deploy/openbao/ under the
+# container's WORKDIR (/app), matching AGENT_MTLS_*_PATH's defaults above.
+agentMtls:
+  certs:
+    create: true
+    name: ''
+    serverCert: ''
+    serverKey: ''
+    caChain: ''
+
+networkPolicy:
+  enabled: true
+  # Ingress: from manar-web (the only human-facing client of `httpPort`)
+  # and from anything routing agent traffic to `agentMtlsPort` — see the
+  # service.agentMtlsPort comment above for why that port's ingress rule
+  # is deliberately not source-restricted (mTLS is the real trust
+  # boundary there, not network policy). Also allows the namespace's
+  # ingress-controller/gateway namespace by label — adjust
+  # `ingressNamespaceLabel` to match the real cluster.
+  webNamespaceSelector:
+    labels:
+      kubernetes.io/metadata.name: manar-web
+  webPodSelector:
+    labels:
+      app.kubernetes.io/name: manar-web
+  ingressNamespaceSelector:
+    labels:
+      kubernetes.io/metadata.name: ingress-nginx
+  # Egress: the real dependency graph established across Phases 2-10b —
+  # see deploy/docker-compose.yml (this repo) for the equivalent local-dev
+  # topology and docs/kubernetes.md for the rendered diagram. Every entry
+  # is `app.kubernetes.io/name`-selected within the `manar` namespace,
+  # never a namespace-wide allow — nothing here gets unrestricted egress.
+  # manar-web is deliberately absent: this is an egress list (what
+  # manar-api calls out to), and manar-api never calls manar-web.
+  egressTargets:
+    - name: postgres
+      port: 5432
+    - name: keycloak
+      port: 8080
+    - name: openbao
+      port: 8200
+    - name: openfga
+      port: 8080
+    - name: temporal
+      port: 7233
+    - name: kafka
+      port: 9092
+    - name: redis
+      port: 6379
+    - name: opensearch
+      port: 9200
+    - name: manar-ai
+      port: 50051
+    - name: demo-soc-tools
+      port: 3100
+  # DNS resolution (CoreDNS/kube-dns) — every workload needs this; not a
+  # dependency-graph entry, kept separate from egressTargets above.
+  dnsNamespaceSelector:
+    labels:
+      kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    labels:
+      k8s-app: kube-dns
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

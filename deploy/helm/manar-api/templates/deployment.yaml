@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "manar-api.fullname" . }}
+  labels:
+    {{- include "manar-api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "manar-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Forces a rollout when config/secret content changes even though
+        # neither the image tag nor the Deployment spec itself changed.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "manar-api.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "manar-api.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+              protocol: TCP
+            - name: agent-mtls
+              containerPort: {{ .Values.service.agentMtlsPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "manar-api.fullname" . }}-config
+            - secretRef:
+                name: {{ include "manar-api.secretName" . }}
+          env:
+            - name: PORT
+              value: {{ .Values.service.httpPort | quote }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem: true (values.yaml securityContext) —
+            # the only paths this process ever writes to at runtime are
+            # ephemeral scratch space, mounted explicitly below.
+            - name: tmp
+              mountPath: /tmp
+            - name: agent-mtls-certs
+              mountPath: /app/deploy/openbao
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: agent-mtls-certs
+          secret:
+            secretName: {{ include "manar-api.agentMtlsCertsSecretName" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- if .Values.affinity }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+        {{- else }}
+        # Default: prefer spreading replicas across nodes (kube-linter's
+        # no-anti-affinity check) — soft, not required, so a single-node
+        # dev cluster still schedules successfully.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "manar-api.selectorLabels" . | nindent 20 }}
+        {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,118 @@
+# Default values for demo-soc-tools.
+
+replicaCount: 1
+
+image:
+  repository: registry.example.com/manar/demo-soc-tools
+  pullPolicy: IfNotPresent
+  tag: ''
+
+imagePullSecrets: []
+nameOverride: ''
+fullnameOverride: ''
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ''
+
+podAnnotations: {}
+podLabels: {}
+
+# Matches the Dockerfile runtime stage's fixed non-root user
+# (`demosoc:nodejs`, 1001:1001 — see packages/demo-soc-tools/Dockerfile).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 3100
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# packages/demo-soc-tools/src/routes/health.ts: /health/live + /health/ready,
+# same convention as manar-api's own HealthController — both real, no
+# downstream dependency checks (this service is deliberately
+# dependency-free — deterministic in-memory state only).
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+config:
+  NODE_ENV: production
+  LOG_LEVEL: info
+
+# DEMO_TOOLS_API_KEY: the single static bearer token every /v1/* request
+# must present (src/config/env.ts — required, no default: an unset key
+# would make every write endpoint silently unauthenticated). Real
+# deployments should source this the same way
+# CredentialBrokerService/OpenBao do locally — see values.yaml's doc
+# comment in the manar-api chart for the same create:false + externally
+# managed Secret pattern.
+secrets:
+  create: true
+  name: ''
+  data:
+    DEMO_TOOLS_API_KEY: ''
+
+networkPolicy:
+  enabled: true
+  # Ingress: only manar-api's HTTP app (HttpToolAdapter, on the synchronous
+  # tool-invoke request path) and manar-api-worker (ToolsModule is also
+  # reachable from RiskModule, which the Temporal worker imports — see
+  # deploy/helm/manar-api-worker/values.yaml's networkPolicy.egressTargets)
+  # may reach this service. No other caller — this is a demo/test double,
+  # never exposed outside the cluster.
+  callerPodSelectors:
+    - labels:
+        app.kubernetes.io/name: manar-api
+    - labels:
+        app.kubernetes.io/name: manar-api-worker
+  # No egress rule beyond DNS: this service has no dependency on anything
+  # else in the cluster (see Chart.yaml description) — it only needs to
+  # resolve its own name and answer inbound HTTP.
+  dnsNamespaceSelector:
+    labels:
+      kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    labels:
+      k8s-app: kube-dns
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

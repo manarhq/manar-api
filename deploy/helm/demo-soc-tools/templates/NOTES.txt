@@ -1,0 +1,11 @@
+demo-soc-tools ({{ .Chart.Name }} {{ .Chart.Version }}) has been rendered/installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+  {{ include "demo-soc-tools.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Before this chart is actually deployed anywhere (out of scope for this
+phase — see docs/kubernetes.md):
+  1. Populate the "{{ include "demo-soc-tools.secretName" . }}" Secret's
+     DEMO_TOOLS_API_KEY with a real value (never via a committed values
+     file) — must match what manar-api's CredentialBrokerService fetches
+     from OpenBao for this tool.
+  2. Point image.repository/image.tag at a real built+scanned image.

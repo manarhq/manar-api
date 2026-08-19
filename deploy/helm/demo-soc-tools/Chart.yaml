@@ -1,0 +1,20 @@
+apiVersion: v2
+name: demo-soc-tools
+description: >-
+  Standalone deterministic-state demo SIEM/EDR/IAM/Firewall HTTP API
+  (packages/demo-soc-tools) — what manar-api's tool gateway
+  (HttpToolAdapter) proxies real HTTP calls to. No dependency on and no
+  connection to Postgres/Keycloak/OpenBao/OpenFGA/Temporal/Kafka/Redis/
+  OpenSearch. See docs/superpowers/specs/2026-08-19-phase7a-demo-soc-tools-design.md
+  and ../../../docs/kubernetes.md.
+type: application
+version: 0.1.0
+appVersion: '0.0.1'
+keywords:
+  - manar
+  - demo-soc-tools
+home: https://github.com/manar/manar-api
+sources:
+  - https://github.com/manar/manar-api
+maintainers:
+  - name: Manar Platform Team

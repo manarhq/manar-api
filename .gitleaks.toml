@@ -1,0 +1,30 @@
+# Gitleaks configuration for manar-api (Phase 12b: CI security scanning).
+#
+# Extends gitleaks's own default detection rule set (no rules redefined
+# here — only an allowlist on top of it). See docs/kubernetes.md and
+# .gitlab-ci.yml's `gitleaks` job for how this is wired into CI.
+title = "manar-api gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Triaged false positives — confirmed non-secrets, not redacted history"
+
+# One-time full-history scan run 2026-08-19 (Phase 12b) found exactly one
+# finding: NestJS's own default `nest new` README.md boilerplate — a
+# CircleCI badge URL pointing at the *upstream* nestjs/nest GitHub repo
+# with its own well-known placeholder token ("abc123def456", the literal
+# sample value NestJS ships in every freshly generated project's
+# README.md, not a value ever issued to or usable against this repo or
+# any real CircleCI project). Never edited since Phase 1. Triaged as a
+# confirmed false positive, not a real secret — allowlisted by fingerprint
+# rather than deleted from history (deleting would rewrite published
+# history for a non-issue).
+regexTarget = "match"
+paths = [
+  '''^README\.md$''',
+]
+regexes = [
+  '''nestjs/nest/master\?token=abc123def456''',
+]

@@ -21,7 +21,23 @@ RUN pnpm install --frozen-lockfile --ignore-scripts \
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN pnpm db:generate && pnpm build
+# Phase 12b container-hardening audit finding: the root package.json's own
+# "build" script (`nest build && pnpm --filter @manar/sdk-node build &&
+# pnpm --filter @manar-ai/grpc-client build`) runs `nest build` *before*
+# `@manar-ai/grpc-client` — but src/ai-advisory/ai-advisory-client.service.ts
+# imports that package's compiled dist/ output (see
+# packages/manar-ai-client/package.json's "types" field), so `nest build`'s
+# typecheck fails against a clean install with no stale dist/ from a
+# previous build to fall back on (reproduces on a bare `pnpm build` too,
+# not a Docker-specific issue — pre-existing, not introduced by this
+# Dockerfile). Fixing the script ordering itself is package.json/
+# application-source territory (out of this phase's scope — see
+# docs/kubernetes.md); pre-building the dependency here instead makes this
+# image buildable without touching that file. `pnpm build`'s own script
+# still redundantly rebuilds both workspace packages afterward — harmless,
+# just a few extra idempotent seconds.
+RUN pnpm --filter @manar-ai/grpc-client build \
+  && pnpm db:generate && pnpm build
 
 # ---- prod-deps: install production-only dependencies ----
 FROM base AS prod-deps
@@ -49,7 +65,14 @@ COPY --chown=manar:nodejs prisma ./prisma
 
 USER manar
 
-EXPOSE 3000
+# 3000: human-facing REST API (src/main.ts's primary Fastify listener).
+# 3443: the agent-facing mTLS HTTPS listener src/main.ts also starts
+# (AgentMtlsConfigSchema.AGENT_MTLS_PORT, `/agent/v1/*` — see
+# docs/agent-identity.md) — added here during the Phase 12b container
+# hardening audit; this stage's own bootstrap has opened this second
+# listener since Phase 4, but EXPOSE (documentation only, doesn't gate
+# anything at runtime) had drifted and never listed it.
+EXPOSE 3000 3443
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000)+'/health/live',res=>{process.exit(res.statusCode===200?0:1)}).on('error',()=>process.exit(1))"

@@ -1,0 +1,22 @@
+apiVersion: v2
+name: manar-api
+description: >-
+  Manar's HTTP application — NestJS + Fastify. Serves the human-facing REST
+  API (port 3000) and the agent-facing mTLS listener (port 3443,
+  `/agent/v1/*`). See ../../../docs/kubernetes.md for the full chart layout
+  and NetworkPolicy design, and the root docs/*.md (tenant-isolation.md,
+  human-auth.md, agent-identity.md, authorization-model.md, approvals.md,
+  audit-chain.md, ai-security-model.md, tool-gateway.md) for what each
+  dependency below is for.
+type: application
+version: 0.1.0
+appVersion: '0.0.1'
+keywords:
+  - manar
+  - nestjs
+  - fastify
+home: https://github.com/manar/manar-api
+sources:
+  - https://github.com/manar/manar-api
+maintainers:
+  - name: Manar Platform Team
