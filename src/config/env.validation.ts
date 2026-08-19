@@ -11,6 +11,10 @@ import { OpenSearchConfigSchema } from '../audit/opensearch/opensearch.config';
 import { RedisConfigSchema } from '../audit/live/redis.config';
 import { AiAdvisoryConfigSchema } from '../ai-advisory/ai-advisory.config';
 import { KillSwitchesConfigSchema } from '../kill-switches/kill-switches.config';
+import { RateLimitConfigSchema } from '../rate-limit/rate-limit.config';
+import { SecurityConfigSchema } from '../security/security.config';
+import { WebhooksConfigSchema } from '../webhooks/webhooks.config';
+import { IdempotencyConfigSchema } from '../idempotency/idempotency.config';
 
 /**
  * Application-level environment schema.
@@ -46,7 +50,11 @@ export const AppConfigSchema = z
   .extend(OpenSearchConfigSchema.shape)
   .extend(RedisConfigSchema.shape)
   .extend(AiAdvisoryConfigSchema.shape)
-  .extend(KillSwitchesConfigSchema.shape);
+  .extend(KillSwitchesConfigSchema.shape)
+  .extend(RateLimitConfigSchema.shape)
+  .extend(SecurityConfigSchema.shape)
+  .extend(WebhooksConfigSchema.shape)
+  .extend(IdempotencyConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

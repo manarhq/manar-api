@@ -5,7 +5,9 @@ import {
   Param,
   Post,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -73,10 +75,11 @@ export class AgentsController {
   ) {}
 
   @Post()
+  @UseInterceptors(IdempotencyInterceptor)
   @ApiOperation({
     summary: 'Create an agent record',
     description:
-      'Creates the Agent row in `PENDING_ENROLLMENT` status. Does not itself issue an enrollment token — call `POST /agents/:id/enrollment-tokens` next. Requires SECURITY_ADMIN or TENANT_OWNER.',
+      'Creates the Agent row in `PENDING_ENROLLMENT` status. Does not itself issue an enrollment token — call `POST /agents/:id/enrollment-tokens` next. Requires SECURITY_ADMIN or TENANT_OWNER. Supports an `Idempotency-Key` header (Phase 12a, Section 8) — a replay with the same key returns the original response without creating a second Agent row.',
   })
   @ApiBody({ type: CreateAgentRequestDto })
   @ApiResponse({ status: 201, type: CreateAgentResponseDto })

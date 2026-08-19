@@ -10,7 +10,9 @@ import {
   Query,
   Res,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor';
 import type { FastifyReply } from 'fastify';
 import {
   ApiBearerAuth,
@@ -217,10 +219,11 @@ export class PolicyController {
 
   @Post(':id/versions/:versionId/publish')
   @RequireRole('SECURITY_ADMIN', 'TENANT_OWNER')
+  @UseInterceptors(IdempotencyInterceptor)
   @ApiOperation({
     summary: 'Publish a DRAFT policy version',
     description:
-      'Narrower than the other endpoints on this controller: requires SECURITY_ADMIN or TENANT_OWNER only (no AI_GOVERNANCE_MANAGER). The version must currently be DRAFT.',
+      'Narrower than the other endpoints on this controller: requires SECURITY_ADMIN or TENANT_OWNER only (no AI_GOVERNANCE_MANAGER). The version must currently be DRAFT. Supports an `Idempotency-Key` header (Phase 12a, Section 8) — a replay with the same key returns the original response without re-publishing.',
   })
   @ApiParam({ name: 'id', description: 'Policy ID', format: 'uuid' })
   @ApiParam({

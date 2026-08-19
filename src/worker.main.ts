@@ -6,6 +6,7 @@ import { Logger } from '@nestjs/common';
 import { WorkerAppModule } from './temporal/worker-app.module';
 import { ApprovalActivitiesFactory } from './temporal/activities/approval.activities';
 import { AuditRetentionActivitiesFactory } from './temporal/activities/audit-retention.activities';
+import { WebhookDeliveryActivitiesFactory } from './temporal/activities/webhook-delivery.activities';
 import type { AppConfig } from './config/env.validation';
 
 /**
@@ -51,6 +52,7 @@ async function bootstrap(): Promise<void> {
   const activities = {
     ...appContext.get(ApprovalActivitiesFactory).build(),
     ...appContext.get(AuditRetentionActivitiesFactory).build(),
+    ...appContext.get(WebhookDeliveryActivitiesFactory).build(),
   };
 
   const connection = await NativeConnection.connect({ address });

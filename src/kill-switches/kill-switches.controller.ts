@@ -5,7 +5,9 @@ import {
   Param,
   Post,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -71,6 +73,7 @@ export class KillSwitchesController {
   // ---------------------------------------------------------------------
 
   @Post('kill-switches/platform')
+  @UseInterceptors(IdempotencyInterceptor)
   @UseGuards(PlatformOperatorGuard)
   @ApiOperation({
     summary: 'Activate the platform-wide kill switch',
@@ -123,6 +126,7 @@ export class KillSwitchesController {
   // ---------------------------------------------------------------------
 
   @Post('tenants/kill-switch')
+  @UseInterceptors(IdempotencyInterceptor)
   @ApiOperation({ summary: "Activate this tenant's kill switch" })
   @ApiBody({ type: ActivateKillSwitchRequestDto })
   @ApiResponse({ status: 201, type: KillSwitchStatusResponseDto })
@@ -147,6 +151,7 @@ export class KillSwitchesController {
   // ---------------------------------------------------------------------
 
   @Post('agent-groups/:id/kill-switch')
+  @UseInterceptors(IdempotencyInterceptor)
   @ApiOperation({ summary: "Activate an agent group's kill switch" })
   @ApiParam({ name: 'id', description: 'AgentGroup ID', format: 'uuid' })
   @ApiBody({ type: ActivateKillSwitchRequestDto })
@@ -184,6 +189,7 @@ export class KillSwitchesController {
   // ---------------------------------------------------------------------
 
   @Post('agents/:id/kill-switch')
+  @UseInterceptors(IdempotencyInterceptor)
   @ApiOperation({ summary: "Activate an agent's kill switch" })
   @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
   @ApiBody({ type: ActivateKillSwitchRequestDto })
@@ -221,6 +227,7 @@ export class KillSwitchesController {
   // ---------------------------------------------------------------------
 
   @Post('tools/:id/kill-switch')
+  @UseInterceptors(IdempotencyInterceptor)
   @ApiOperation({ summary: "Activate a tool's kill switch" })
   @ApiParam({ name: 'id', description: 'Tool ID', format: 'uuid' })
   @ApiBody({ type: ActivateKillSwitchRequestDto })
