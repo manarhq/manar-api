@@ -32,6 +32,7 @@ import { TenantsModule } from './tenants/tenants.module';
 import { UsersModule } from './users/users.module';
 import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
+import { ComplianceModule } from './compliance/compliance.module';
 
 @Module({
   imports: [
@@ -67,6 +68,8 @@ import { KeycloakModule } from './keycloak/keycloak.module';
     KeycloakModule,
     UsersModule,
     TenantSettingsModule,
+    // Phase 15a: Data Classification, Compliance Mapping & Incidents.
+    ComplianceModule,
   ],
   controllers: [AppController],
   providers: [
