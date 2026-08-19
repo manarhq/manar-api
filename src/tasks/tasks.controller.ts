@@ -2,9 +2,11 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   NotFoundException,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -12,6 +14,7 @@ import {
   ApiBody,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -23,6 +26,10 @@ import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import {
+  parseCursor,
+  parseLimit,
+} from '../common/pagination/cursor-pagination';
 import { RevokeStatusResponseDto } from '../agents/agents.dto';
 import { TaskNotFoundError } from './tasks.errors';
 import { TasksService } from './tasks.service';
@@ -34,6 +41,7 @@ import {
   CreateTaskRequestDto,
   CreateTaskResponseDto,
   RevokeTaskRequestDto,
+  TaskListResponseDto,
 } from './tasks.dto';
 
 /**
@@ -121,7 +129,70 @@ export class TasksController {
       status: task.status,
       assignedAgentId: task.assignedAgentId,
       expiresAt: task.expiresAt,
-      createdAt: task.startsAt,
+      // Phase 11b Part 1 bug fix: this used to read `task.startsAt` — see
+      // `CreateTaskResponseDto`'s doc comment.
+      createdAt: task.createdAt,
+    };
+  }
+
+  @Get()
+  @ApiOperation({
+    summary: 'List tasks',
+    description:
+      'Cursor-paginated, newest first. Optional `status` and `assignedAgentId` filters.',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['PENDING', 'ACTIVE', 'EXPIRED', 'REVOKED', 'COMPLETED'],
+  })
+  @ApiQuery({ name: 'assignedAgentId', required: false, type: String })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Max 100, default 20.',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Opaque `nextCursor` from a previous page.',
+  })
+  @ApiResponse({ status: 200, type: TaskListResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async listTasks(
+    @CurrentAuth() auth: AuthContext,
+    @Query('status')
+    status?: 'PENDING' | 'ACTIVE' | 'EXPIRED' | 'REVOKED' | 'COMPLETED',
+    @Query('assignedAgentId') assignedAgentId?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ): Promise<TaskListResponseDto> {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const page = await this.tasksService.listTasks(tenantClient, {
+      status,
+      assignedAgentId,
+      limit: parseLimit(limit),
+      cursor: parseCursor(cursor),
+    });
+    return {
+      items: page.items.map((task) => ({
+        id: task.id,
+        name: task.name,
+        description: task.description ?? null,
+        status: task.status,
+        assignedAgentId: task.assignedAgentId,
+        requesterId: task.requesterId,
+        parentTaskId: task.parentTaskId,
+        startsAt: task.startsAt,
+        expiresAt: task.expiresAt,
+        riskCeiling: task.riskCeiling,
+        createdAt: task.createdAt,
+      })),
+      nextCursor: page.nextCursor,
     };
   }
 

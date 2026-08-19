@@ -10,6 +10,8 @@ import { RiskEngine } from './risk-engine.service';
 function makeTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
     id: 'task-1',
+    name: 'Test task',
+    description: null,
     parentTaskId: null,
     requesterId: 'user-1',
     assignedAgentId: 'agent-1',
@@ -22,6 +24,7 @@ function makeTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
     allowedResourceSelectors: [],
     forbiddenActions: [],
     riskCeiling: 20,
+    createdAt: new Date(),
     ...overrides,
   };
 }

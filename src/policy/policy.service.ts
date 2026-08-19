@@ -2,6 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import {
+  CursorPage,
+  DecodedCursor,
+  cursorWhereClause,
+  toCursorPage,
+} from '../common/pagination/cursor-pagination';
 import { computeContentHash } from './policy-content-codec';
 import { PolicyContent } from './policy-content.schema';
 import {
@@ -9,6 +15,31 @@ import {
   PolicyVersionNotDraftError,
   PolicyVersionNotFoundError,
 } from './policy.errors';
+
+export interface ListPoliciesInput {
+  limit: number;
+  cursor?: DecodedCursor;
+}
+
+export interface PolicyListRow {
+  id: string;
+  name: string;
+  description: string | null;
+  createdAt: Date;
+  currentVersion: {
+    id: string;
+    policyId: string;
+    version: number;
+    status: string;
+    content: unknown;
+    contentHash: string;
+    authorId: string;
+    reason: string | null;
+    previousVersionId: string | null;
+    publishedAt: Date | null;
+    createdAt: Date;
+  } | null;
+}
 
 export interface CreatePolicyInput {
   name: string;
@@ -137,6 +168,60 @@ export class PolicyService {
     });
 
     return published;
+  }
+
+  /**
+   * `GET /policies` (Phase 11b Part 1) — cursor-paginated, newest first,
+   * each row carrying its own "current published version" the same shape
+   * `GET /policies/:id` already returns (Section 65's policy list needs
+   * the current version's status/hash at a glance, not just the bare
+   * `Policy` row). No filters: unlike task/approval/agent status, a
+   * policy's own fields don't carry anything Section 65/66 asks to filter
+   * list-page-side.
+   *
+   * Fetches the page of `Policy` rows first, then a single batched
+   * `PolicyVersion` query for all of them (`status: PUBLISHED`, highest
+   * `version` per `policyId` picked in application code) — one extra
+   * round trip per page, not one per policy (N+1).
+   */
+  async listPolicies(
+    tenantClient: TenantPrismaClient,
+    input: ListPoliciesInput,
+  ): Promise<CursorPage<PolicyListRow>> {
+    const where = { ...cursorWhereClause('createdAt', input.cursor) };
+    const policies = await tenantClient.policy.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: input.limit + 1,
+    });
+
+    const policyIds = policies.map((p) => p.id);
+    const publishedVersions =
+      policyIds.length === 0
+        ? []
+        : await tenantClient.policyVersion.findMany({
+            where: { policyId: { in: policyIds }, status: 'PUBLISHED' },
+            orderBy: { version: 'desc' },
+          });
+    const currentByPolicyId = new Map<
+      string,
+      (typeof publishedVersions)[number]
+    >();
+    for (const version of publishedVersions) {
+      if (!currentByPolicyId.has(version.policyId)) {
+        currentByPolicyId.set(version.policyId, version);
+      }
+    }
+
+    const rows: PolicyListRow[] = policies.map((policy) => ({
+      id: policy.id,
+      name: policy.name,
+      description: policy.description,
+      createdAt: policy.createdAt,
+      currentVersion: currentByPolicyId.get(policy.id) ?? null,
+    }));
+
+    return toCursorPage(rows, input.limit, (row) => row.createdAt);
   }
 
   async getPolicyOrThrow(tenantClient: TenantPrismaClient, policyId: string) {

@@ -27,6 +27,7 @@ import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { WebhooksHttpModule } from './webhooks/webhooks-http.module';
 import { WebhookDeliveryConsumerModule } from './webhooks/webhook-delivery-consumer.module';
 import { IdempotencyModule } from './idempotency/idempotency.module';
+import { ToolsHttpModule } from './tools/tools-http.module';
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { IdempotencyModule } from './idempotency/idempotency.module';
     WebhooksHttpModule,
     WebhookDeliveryConsumerModule,
     IdempotencyModule,
+    ToolsHttpModule,
   ],
   controllers: [AppController],
   providers: [

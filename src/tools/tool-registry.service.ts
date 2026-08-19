@@ -2,6 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import type { SecretReferenceDescriptor } from '../database/secret-provider';
+import {
+  CursorPage,
+  DecodedCursor,
+  cursorWhereClause,
+  toCursorPage,
+} from '../common/pagination/cursor-pagination';
 
 /**
  * Validates a `Tool.credentialReference` JSONB column back into a typed
@@ -50,6 +56,21 @@ export interface ToolActionRecord {
   mutating: boolean;
   destructive: boolean;
   approvalDefault: boolean;
+}
+
+export interface ListToolsInput {
+  /** Section 65's tools list filter — a tool's operational health/enabled status. */
+  enabled?: boolean;
+  limit: number;
+  cursor?: DecodedCursor;
+}
+
+export interface ToolWithActions extends Omit<
+  ToolRecord,
+  'credentialReference'
+> {
+  createdAt: Date;
+  actions: ToolActionRecord[];
 }
 
 /**
@@ -105,6 +126,51 @@ export class ToolRegistryService {
     if (!actionRow) return null;
 
     return { tool, action: this.toToolActionRecord(actionRow) };
+  }
+
+  /**
+   * `GET /tools` (Phase 11b Part 1) — cursor-paginated, newest first, with
+   * its `ToolAction` rows embedded (Section 65's spec for this resource is
+   * literally "Tool (+ToolAction)" — a tool's actions are what a policy
+   * author/operator actually needs alongside it, and the per-tool action
+   * count is small enough that embedding the full array beats a second,
+   * separately-paginated endpoint). Deliberately never includes
+   * `credentialReference` — even though it's only a *pointer* (never the
+   * resolved credential value), this mirrors `WebhookEndpointResponseDto`'s
+   * identical "never expose secret-adjacent fields over this HTTP surface"
+   * posture (see that DTO's own doc comment).
+   */
+  async list(
+    tenantClient: TenantPrismaClient,
+    input: ListToolsInput,
+  ): Promise<CursorPage<ToolWithActions>> {
+    const where = {
+      ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+      ...cursorWhereClause('createdAt', input.cursor),
+    };
+    const rows = await tenantClient.tool.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: input.limit + 1,
+      include: { actions: { orderBy: { name: 'asc' } } },
+    });
+    const withActions: ToolWithActions[] = rows.map((row) => {
+      const record = this.toToolRecord(row);
+      return {
+        id: record.id,
+        name: record.name,
+        type: record.type,
+        vendor: record.vendor,
+        description: record.description,
+        baseEndpoint: record.baseEndpoint,
+        protocol: record.protocol,
+        enabled: record.enabled,
+        metadata: record.metadata,
+        createdAt: row.createdAt,
+        actions: row.actions.map((action) => this.toToolActionRecord(action)),
+      };
+    });
+    return toCursorPage(withActions, input.limit, (row) => row.createdAt);
   }
 
   private toToolRecord(row: {

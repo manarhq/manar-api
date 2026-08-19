@@ -32,6 +32,10 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
 import {
+  parseCursor,
+  parseLimit,
+} from '../common/pagination/cursor-pagination';
+import {
   dumpPolicyContentYaml,
   resolveSubmittedContent,
 } from './policy-content-codec';
@@ -51,6 +55,7 @@ import {
   CreatePolicyResponseDto,
   CreatePolicyVersionRequestDto,
   GetPolicyResponseDto,
+  PolicyListResponseDto,
   PolicyVersionResponseDto,
 } from './policy.dto';
 
@@ -263,6 +268,52 @@ export class PolicyController {
       ),
     );
     return shapeVersion(published);
+  }
+
+  @Get()
+  @ApiOperation({
+    summary: 'List policies',
+    description:
+      'Cursor-paginated, newest first. Each row includes its current PUBLISHED version, exactly like GET /policies/:id.',
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Max 100, default 20.',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Opaque `nextCursor` from a previous page.',
+  })
+  @ApiResponse({ status: 200, type: PolicyListResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async listPolicies(
+    @CurrentAuth() auth: AuthContext,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const page = await this.policyService.listPolicies(tenantClient, {
+      limit: parseLimit(limit),
+      cursor: parseCursor(cursor),
+    });
+    return {
+      items: page.items.map((policy) => ({
+        id: policy.id,
+        name: policy.name,
+        description: policy.description,
+        createdAt: policy.createdAt,
+        currentVersion: policy.currentVersion
+          ? shapeVersion(policy.currentVersion)
+          : null,
+      })),
+      nextCursor: page.nextCursor,
+    };
   }
 
   @Get(':id')

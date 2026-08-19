@@ -12,6 +12,12 @@ import { TaskGrantSyncService } from '../authorization/task-grant-sync.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type { AuditActor } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import {
+  CursorPage,
+  DecodedCursor,
+  cursorWhereClause,
+  toCursorPage,
+} from '../common/pagination/cursor-pagination';
 import { AncestorChainTooDeepError, TaskNotFoundError } from './tasks.errors';
 
 /**
@@ -25,6 +31,9 @@ import { AncestorChainTooDeepError, TaskNotFoundError } from './tasks.errors';
  */
 export interface TaskRecord {
   id: string;
+  /** Phase 11b Part 1: added so `listTasks`/`GET /tasks` (and the real `createTask` bug fix — see `CreateTaskResponseDto`'s doc comment) can be typed against this shape without a second, parallel interface. */
+  name: string;
+  description: string | null;
   parentTaskId: string | null;
   requesterId: string;
   assignedAgentId: string;
@@ -38,6 +47,7 @@ export interface TaskRecord {
   forbiddenActions: unknown;
   /** 0-100 — activated by `RiskEngine`/`AuthorizationService` starting Phase 6 (see docs/policy-model.md); Phase 5 defined this field but nothing consulted it yet. */
   riskCeiling: number;
+  createdAt: Date;
 }
 
 export interface CreateTaskInput {
@@ -62,6 +72,14 @@ export interface CreateTaskInput {
    * `Task.requesterId`'s schema doc comment), not the actual actor.
    */
   actor?: AuditActor;
+}
+
+export interface ListTasksInput {
+  /** Section 65's task list filters — status and/or the assigned agent. */
+  status?: 'PENDING' | 'ACTIVE' | 'EXPIRED' | 'REVOKED' | 'COMPLETED';
+  assignedAgentId?: string;
+  limit: number;
+  cursor?: DecodedCursor;
 }
 
 export interface LivenessResult {
@@ -159,6 +177,31 @@ export class TasksService {
     });
 
     return task;
+  }
+
+  /**
+   * `GET /tasks` (Phase 11b Part 1) — cursor-paginated, newest first, with
+   * the two filters Section 65's task list page actually needs (status,
+   * assigned agent). Tenant-scoped by construction (see
+   * `AgentsService.listAgents`'s identical note on `tenantClient`).
+   */
+  async listTasks(
+    tenantClient: TenantPrismaClient,
+    input: ListTasksInput,
+  ): Promise<CursorPage<TaskRecord>> {
+    const where = {
+      ...(input.status ? { status: input.status } : {}),
+      ...(input.assignedAgentId
+        ? { assignedAgentId: input.assignedAgentId }
+        : {}),
+      ...cursorWhereClause('createdAt', input.cursor),
+    };
+    const rows = await tenantClient.task.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: input.limit + 1,
+    });
+    return toCursorPage(rows, input.limit, (row) => row.createdAt);
   }
 
   async getTaskOrThrow(

@@ -205,3 +205,17 @@ export class GetPolicyResponseDto {
   })
   currentVersion!: PolicyVersionResponseDto | null;
 }
+
+/**
+ * `GET /policies`'s response envelope. Each item has the exact same shape
+ * `GET /policies/:id` returns (`GetPolicyResponseDto`) — a policy plus its
+ * current published version — so list and detail views share one type on
+ * the frontend.
+ */
+export class PolicyListResponseDto {
+  @ApiProperty({ type: () => GetPolicyResponseDto, isArray: true })
+  items!: GetPolicyResponseDto[];
+
+  @ApiProperty({ nullable: true })
+  nextCursor!: string | null;
+}
