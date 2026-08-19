@@ -23,17 +23,54 @@ export interface AuditEventDocument {
   data: unknown;
   previousHash: string | null;
   eventHash: string;
+  /**
+   * Phase 11b Part 1 (`GET /audit`, Section 66's filter set) — real,
+   * indexed (`keyword`/`long`) top-level fields derived from `actor`/`data`
+   * by `extractAuditSearchFields` (`audit-search-fields.ts`), added
+   * *alongside* the unindexed `actor`/`data` blobs above (never replacing
+   * them — those two remain the verbatim, tamper-evident-chain-hashed
+   * record). Optional: not every `eventType`'s `data` carries every
+   * dimension — see that module's own doc comment.
+   */
+  agentId?: string;
+  taskId?: string;
+  toolId?: string;
+  actionId?: string;
+  decision?: string;
+  riskScore?: number;
 }
+
+/**
+ * The Phase 11b Part 1 search-field mapping — split out from the base
+ * mapping in `ensureIndexExists` so it can also be `putMapping`'d onto an
+ * index that already existed before this phase (OpenSearch's PUT mapping
+ * API only ever *adds* new fields to an existing mapping, never redefines
+ * one already present — safe to call unconditionally, every time, whether
+ * the index was just created or already existed with the pre-Phase-11b
+ * mapping).
+ */
+const SEARCH_FIELD_PROPERTIES = {
+  agentId: { type: 'keyword' },
+  taskId: { type: 'keyword' },
+  toolId: { type: 'keyword' },
+  actionId: { type: 'keyword' },
+  decision: { type: 'keyword' },
+  riskScore: { type: 'long' },
+} as const;
 
 /**
  * Phase 9b (OpenSearch Indexing, Section 45). Thin wrapper around a single
  * `@opensearch-project/opensearch` client connection — the one place this
- * codebase talks to OpenSearch. Deliberately minimal: no query/search
- * surface is exposed this phase (nothing in the design spec asks for a
- * `GET /audit/search` endpoint yet) — this service exists purely to make
- * `AuditEvent` rows *indexed and idempotently upsertable*, the
- * disaster-recovery/reindex story, and the redelivery-doesn't-double-index
- * invariant, all real and testable.
+ * codebase talks to OpenSearch. Through Phase 11b Part 1, deliberately
+ * minimal: no query/search surface was exposed (nothing in the design
+ * spec asked for a `GET /audit` endpoint yet) — this service existed
+ * purely to make `AuditEvent` rows *indexed and idempotently upsertable*,
+ * the disaster-recovery/reindex story, and the redelivery-doesn't-double-
+ * index invariant, all real and testable. Phase 11b Part 1 adds exactly
+ * one query method (`search`, below) for `GET /audit` — still the one
+ * place this codebase talks to OpenSearch; `AuditSearchService`
+ * (`src/audit/audit-search.service.ts`) builds the query DSL and owns the
+ * HTTP-facing filter/pagination contract, but never holds its own client.
  *
  * A single, tenant-tagged index (every document carries `tenantId`, see
  * `AuditEventDocument`) rather than one index per tenant — simpler to
@@ -62,6 +99,8 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OpenSearchIndexService.name);
   readonly indexName: string;
   private readonly client: Client;
+  /** Set once `ensureIndexExists` has actually confirmed/created the index and merged in `SEARCH_FIELD_PROPERTIES` — skips the repeat `exists`+`putMapping` round trip on every subsequent call within this process's lifetime (still re-checked from scratch after any failure, and always on a fresh process). */
+  private indexEnsured = false;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.indexName = this.configService.get('OPENSEARCH_AUDIT_INDEX', {
@@ -107,40 +146,56 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
    * the same "resolve-or-create, no separate init job" posture
    * `KafkaPublisherService.ensureTopicExists`/`OpenFgaClientService.onModuleInit`
    * already establish elsewhere in this codebase.
+   *
+   * Phase 11b Part 1: after confirming the index exists (freshly created
+   * here, or already present from before this phase), also `putMapping`s
+   * `SEARCH_FIELD_PROPERTIES` — an additive-only operation (OpenSearch's
+   * PUT mapping API can only add fields, never redefine an existing one),
+   * so this is safe to run on every call, and is what makes the new
+   * `GET /audit` filters work against an index that already existed
+   * before this phase without requiring a manual reindex.
    */
   async ensureIndexExists(): Promise<void> {
+    if (this.indexEnsured) return;
     await this.withRetry('ensureIndexExists', async () => {
       const exists = await this.client.indices.exists({
         index: this.indexName,
       });
-      if (exists.body) return;
-
-      try {
-        await this.client.indices.create({
-          index: this.indexName,
-          body: {
-            mappings: {
-              properties: {
-                eventId: { type: 'keyword' },
-                tenantId: { type: 'keyword' },
-                sequence: { type: 'long' },
-                eventType: { type: 'keyword' },
-                correlationId: { type: 'keyword' },
-                timestamp: { type: 'date' },
-                previousHash: { type: 'keyword' },
-                eventHash: { type: 'keyword' },
-                // See class doc comment for why these two are unindexed.
-                actor: { type: 'object', enabled: false },
-                data: { type: 'object', enabled: false },
+      if (!exists.body) {
+        try {
+          await this.client.indices.create({
+            index: this.indexName,
+            body: {
+              mappings: {
+                properties: {
+                  eventId: { type: 'keyword' },
+                  tenantId: { type: 'keyword' },
+                  sequence: { type: 'long' },
+                  eventType: { type: 'keyword' },
+                  correlationId: { type: 'keyword' },
+                  timestamp: { type: 'date' },
+                  previousHash: { type: 'keyword' },
+                  eventHash: { type: 'keyword' },
+                  // See class doc comment for why these two are unindexed.
+                  actor: { type: 'object', enabled: false },
+                  data: { type: 'object', enabled: false },
+                  ...SEARCH_FIELD_PROPERTIES,
+                },
               },
             },
-          },
-        });
-      } catch (error) {
-        if (isResourceAlreadyExists(error)) return;
-        throw error;
+          });
+          return;
+        } catch (error) {
+          if (!isResourceAlreadyExists(error)) throw error;
+        }
       }
+
+      await this.client.indices.putMapping({
+        index: this.indexName,
+        body: { properties: SEARCH_FIELD_PROPERTIES },
+      });
     });
+    this.indexEnsured = true;
   }
 
   /**
@@ -178,6 +233,44 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  /**
+   * Phase 11b Part 1 — the one query method this service exposes (see
+   * class doc comment). A thin, typed pass-through to OpenSearch's Query
+   * DSL: `AuditSearchService` builds `query`/`sort`/`searchAfter`, this
+   * method just runs it and returns the raw hits (`_source` documents plus
+   * each hit's own `sort` values, needed to compute the next
+   * `search_after` cursor) — no filter/pagination-shape knowledge lives
+   * here, matching this class's existing "index plumbing only" scope.
+   */
+  async search(params: {
+    query: Record<string, unknown>;
+    sort: Record<string, 'asc' | 'desc'>[];
+    size: number;
+    searchAfter?: (string | number)[];
+  }): Promise<{ hits: AuditEventDocument[]; sortValues: unknown[][] }> {
+    await this.ensureIndexExists();
+    const response = await this.withRetry('search', () =>
+      this.client.search({
+        index: this.indexName,
+        body: {
+          query: params.query,
+          sort: params.sort,
+          size: params.size,
+          ...(params.searchAfter ? { search_after: params.searchAfter } : {}),
+        },
+      }),
+    );
+    const hits = (
+      response.body as unknown as {
+        hits: { hits: { _source: AuditEventDocument; sort?: unknown[] }[] };
+      }
+    ).hits.hits;
+    return {
+      hits: hits.map((hit) => hit._source),
+      sortValues: hits.map((hit) => hit.sort ?? []),
+    };
   }
 
   /** Total indexed document count — used by tests (the reindex-reconstructs-everything assertion). */

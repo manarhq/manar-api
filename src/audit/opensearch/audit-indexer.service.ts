@@ -13,6 +13,7 @@ import {
   DomainEventEnvelope,
 } from '../domain-event-envelope';
 import { OpenSearchIndexService } from './opensearch-client.service';
+import { extractAuditSearchFields } from './audit-search-fields';
 import { RedisPubSubService } from '../live/redis-pubsub.service';
 
 /**
@@ -141,6 +142,15 @@ export class AuditIndexerService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
+      // Phase 11b Part 1 (Section 66's GET /audit filters) — real, indexed
+      // search fields derived from this same envelope's actor/data, added
+      // alongside the unindexed actor/data blobs (never replacing them —
+      // see extractAuditSearchFields's own doc comment).
+      const searchFields = extractAuditSearchFields(
+        envelope.eventType,
+        envelope.actor,
+        envelope.data,
+      );
       await this.openSearchIndexService.upsertAuditEvent({
         eventId: envelope.eventId,
         tenantId: envelope.tenantId,
@@ -159,6 +169,7 @@ export class AuditIndexerService implements OnModuleInit, OnModuleDestroy {
         data: envelope.data,
         previousHash: envelope.previousHash ?? null,
         eventHash: envelope.eventHash ?? envelope.eventId,
+        ...searchFields,
       });
     } catch (error) {
       this.logger.error(

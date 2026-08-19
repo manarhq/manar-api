@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../../generated/tenant-client/client';
 import { OpenSearchIndexService } from './opensearch-client.service';
+import { extractAuditSearchFields } from './audit-search-fields';
 
 const PAGE_SIZE = 500;
 
@@ -44,6 +45,15 @@ export class AuditReindexService {
       if (page.length === 0) break;
 
       for (const event of page) {
+        // Phase 11b Part 1 — same derived search fields the live indexer
+        // populates (AuditIndexerService.handleMessage); a from-scratch
+        // reindex must reconstruct GET /audit's filterable fields exactly
+        // as faithfully as everything else.
+        const searchFields = extractAuditSearchFields(
+          event.eventType,
+          event.actor,
+          event.data,
+        );
         await this.openSearchIndexService.upsertAuditEvent({
           eventId: event.id,
           tenantId,
@@ -55,6 +65,7 @@ export class AuditReindexService {
           data: event.data,
           previousHash: event.previousHash,
           eventHash: event.eventHash,
+          ...searchFields,
         });
         count += 1;
       }

@@ -1,7 +1,14 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -12,8 +19,43 @@ import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import { parseLimit } from '../common/pagination/cursor-pagination';
+import { AuditSearchService } from './audit-search.service';
 import { AuditService } from './audit.service';
-import { VerifyAuditChainResponseDto } from './audit.dto';
+import {
+  AuditSearchResponseDto,
+  VerifyAuditChainResponseDto,
+} from './audit.dto';
+
+/** Parses a query-param date/time bound (`from`/`to`); throws 400 for anything unparseable — same "never leak a stack trace" convention `parseBodyOrThrow` uses. */
+function parseDateParam(
+  raw: string | undefined,
+  paramName: string,
+): Date | undefined {
+  if (raw === undefined) return undefined;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new BadRequestException(
+      `Invalid "${paramName}" — must be an ISO-8601 date-time`,
+    );
+  }
+  return parsed;
+}
+
+/** Parses a query-param integer bound (`riskMin`/`riskMax`); throws 400 for anything unparseable/out of range. */
+function parseRiskParam(
+  raw: string | undefined,
+  paramName: string,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    throw new BadRequestException(
+      `Invalid "${paramName}" — must be an integer 0-100`,
+    );
+  }
+  return parsed;
+}
 
 /**
  * `GET /audit/verify` (Section 47) — human-facing only (never exposed on
@@ -31,8 +73,99 @@ import { VerifyAuditChainResponseDto } from './audit.dto';
 export class AuditController {
   constructor(
     private readonly auditService: AuditService,
+    private readonly auditSearchService: AuditSearchService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
   ) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'Search/browse audit events',
+    description:
+      'Queries the OpenSearch-indexed, search-optimized copy of the tamper-evident audit chain (Section 45) — never Postgres directly. Cursor-paginated, newest first. Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER.',
+  })
+  @ApiQuery({
+    name: 'eventType',
+    required: false,
+    description: 'Comma-separated list of exact eventType values (OR).',
+  })
+  @ApiQuery({ name: 'correlationId', required: false })
+  @ApiQuery({ name: 'agentId', required: false })
+  @ApiQuery({ name: 'taskId', required: false })
+  @ApiQuery({ name: 'toolId', required: false })
+  @ApiQuery({ name: 'actionId', required: false })
+  @ApiQuery({
+    name: 'decision',
+    required: false,
+    description:
+      'ALLOW, DENY, REQUIRE_APPROVAL, APPROVE, or DENY (approval decisions).',
+  })
+  @ApiQuery({ name: 'riskMin', required: false, type: Number })
+  @ApiQuery({ name: 'riskMax', required: false, type: Number })
+  @ApiQuery({
+    name: 'from',
+    required: false,
+    description: 'ISO-8601 — inclusive lower bound on timestamp.',
+  })
+  @ApiQuery({
+    name: 'to',
+    required: false,
+    description: 'ISO-8601 — inclusive upper bound on timestamp.',
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Max 100, default 20.',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Opaque `nextCursor` from a previous page.',
+  })
+  @ApiResponse({ status: 200, type: AuditSearchResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async search(
+    @CurrentAuth() auth: AuthContext,
+    @Query('eventType') eventType?: string,
+    @Query('correlationId') correlationId?: string,
+    @Query('agentId') agentId?: string,
+    @Query('taskId') taskId?: string,
+    @Query('toolId') toolId?: string,
+    @Query('actionId') actionId?: string,
+    @Query('decision') decision?: string,
+    @Query('riskMin') riskMin?: string,
+    @Query('riskMax') riskMax?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ): Promise<AuditSearchResponseDto> {
+    return this.auditSearchService.search({
+      tenantId: auth.tenant.id,
+      filters: {
+        eventType: eventType
+          ? eventType
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : undefined,
+        correlationId,
+        agentId,
+        taskId,
+        toolId,
+        actionId,
+        decision,
+        riskMin: parseRiskParam(riskMin, 'riskMin'),
+        riskMax: parseRiskParam(riskMax, 'riskMax'),
+        from: parseDateParam(from, 'from'),
+        to: parseDateParam(to, 'to'),
+      },
+      limit: parseLimit(limit),
+      cursor,
+    });
+  }
 
   @Get('verify')
   @ApiOperation({

@@ -16,3 +16,72 @@ export class VerifyAuditChainResponseDto {
   })
   brokenAt?: string;
 }
+
+/**
+ * One row of `GET /audit`'s search results — mirrors
+ * `AuditEventDocument` (`opensearch/opensearch-client.service.ts`), the
+ * OpenSearch-indexed shape, not the raw Postgres `AuditEvent` row.
+ */
+export class AuditEventSearchResultDto {
+  @ApiProperty({ format: 'uuid' })
+  eventId!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  tenantId!: string;
+
+  @ApiProperty()
+  sequence!: number;
+
+  @ApiProperty({ example: 'tool.invocation.completed' })
+  eventType!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  correlationId!: string;
+
+  @ApiProperty({
+    description: '`{ type: "human"|"agent"|"system", id }` — see `AuditActor`.',
+  })
+  actor!: unknown;
+
+  @ApiProperty({ format: 'date-time' })
+  timestamp!: string;
+
+  @ApiProperty({
+    description:
+      'Event-type-specific payload (Section 46) — shape varies by eventType.',
+  })
+  data!: unknown;
+
+  @ApiProperty({ nullable: true })
+  previousHash!: string | null;
+
+  @ApiProperty()
+  eventHash!: string;
+
+  @ApiProperty({ required: false })
+  agentId?: string;
+
+  @ApiProperty({ required: false })
+  taskId?: string;
+
+  @ApiProperty({ required: false })
+  toolId?: string;
+
+  @ApiProperty({ required: false })
+  actionId?: string;
+
+  @ApiProperty({ required: false })
+  decision?: string;
+
+  @ApiProperty({ required: false, minimum: 0, maximum: 100 })
+  riskScore?: number;
+}
+
+/** `GET /audit`'s response envelope — see `AgentListResponseDto`'s identical shape/doc comment (cursor here is an OpenSearch `search_after` token, not a Prisma one — see `AuditSearchService`'s doc comment). */
+export class AuditSearchResponseDto {
+  @ApiProperty({ type: () => AuditEventSearchResultDto, isArray: true })
+  items!: AuditEventSearchResultDto[];
+
+  @ApiProperty({ nullable: true })
+  nextCursor!: string | null;
+}
