@@ -58,6 +58,9 @@ export class TenantProvisioningService {
     const clientId = this.configService.get('KEYCLOAK_CLIENT_ID', {
       infer: true,
     });
+    const manarWebBaseUrl = this.configService.get('MANAR_WEB_BASE_URL', {
+      infer: true,
+    });
     const realmName = tenant.slug;
 
     try {
@@ -67,10 +70,25 @@ export class TenantProvisioningService {
         await this.keycloakAdminClient.createRealmRole(realmName, role);
       }
 
+      // Phase 14 security cleanup 2: register manar-web's OIDC callback
+      // and origin now, at provisioning time, instead of manar-web's BFF
+      // lazily registering it on the first login attempt against this
+      // realm (the workaround that's why manar-web still held standing
+      // Keycloak admin credentials — see MANAR_WEB_BASE_URL's doc comment
+      // in keycloak.config.ts for the full rationale). The redirect URI
+      // is deployment-wide/static, never per-tenant, so there's nothing
+      // tenant-specific to defer here.
+      const redirectUri = new URL(
+        '/api/auth/callback',
+        manarWebBaseUrl,
+      ).toString();
+      const webOrigin = new URL(manarWebBaseUrl).origin;
+
       const clientSecret =
         await this.keycloakAdminClient.createConfidentialClient(
           realmName,
           clientId,
+          { redirectUris: [redirectUri], webOrigins: [webOrigin] },
         );
 
       const issuerUrl = this.keycloakAdminClient.issuerUrlForRealm(realmName);

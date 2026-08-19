@@ -171,6 +171,36 @@ export async function setRealmAccessTokenLifespan(
   });
 }
 
+/**
+ * Phase 14 security cleanup 2: reads back a realm client's
+ * `redirectUris`/`webOrigins` directly from Keycloak's Admin API — used to
+ * confirm `TenantProvisioningService` actually registered `manar-web`'s
+ * OIDC callback at provisioning time, not just that the request to do so
+ * didn't throw.
+ */
+export async function getClientRedirectConfig(
+  realm: string,
+  clientId: string,
+): Promise<{ redirectUris: string[]; webOrigins: string[] }> {
+  const response = await adminFetch(
+    `/admin/realms/${encodeURIComponent(realm)}/clients?clientId=${encodeURIComponent(clientId)}`,
+  );
+  const clients = (await response.json()) as Array<{
+    redirectUris?: string[];
+    webOrigins?: string[];
+  }>;
+  const client = clients[0];
+  if (!client) {
+    throw new Error(
+      `Keycloak client "${clientId}" not found in realm "${realm}"`,
+    );
+  }
+  return {
+    redirectUris: client.redirectUris ?? [],
+    webOrigins: client.webOrigins ?? [],
+  };
+}
+
 export async function deleteRealm(realm: string): Promise<void> {
   try {
     await adminFetch(`/admin/realms/${encodeURIComponent(realm)}`, {

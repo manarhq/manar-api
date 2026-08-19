@@ -138,6 +138,36 @@ export class KeycloakAdminClient {
   }
 
   /**
+   * Phase 14 — the revoke half of `assignRealmRole`, used by
+   * `UsersService.revokeRole` (`DELETE /users/:id/role-bindings/:role`) so
+   * a Manar-side revoke actually updates Keycloak, the role-assignment
+   * source of truth `JwtAuthGuard.syncRoleBindings` reconciles against on
+   * every request (see `docs/human-auth.md`'s "Role assignment" section) —
+   * without this, a locally-deleted `RoleBinding` row would simply
+   * reappear the next time the affected user authenticates, since the
+   * token's `realm_access.roles` claim would still list it. Idempotent,
+   * same reason as `assignRealmRole`: removing a role mapping a user
+   * doesn't hold is a harmless no-op against Keycloak's own API.
+   */
+  async removeRealmRole(
+    realmName: string,
+    userId: string,
+    roleName: string,
+  ): Promise<void> {
+    const roleResponse = await this.adminRequest(
+      'GET',
+      `/admin/realms/${encodeURIComponent(realmName)}/roles/${encodeURIComponent(roleName)}`,
+    );
+    const role = roleResponse.body as { id: string; name: string };
+
+    await this.adminRequest(
+      'DELETE',
+      `/admin/realms/${encodeURIComponent(realmName)}/users/${userId}/role-mappings/realm`,
+      [{ id: role.id, name: role.name }],
+    );
+  }
+
+  /**
    * Creates a confidential client and returns its generated secret.
    * `directAccessGrantsEnabled: true` is set so this client also supports
    * the Resource Owner Password Credentials grant — used by this phase's
@@ -145,10 +175,19 @@ export class KeycloakAdminClient {
    * without fabricating a JWT. The full interactive login redirect flow
    * (`standardFlowEnabled`) is Phase 11, but enabling it here now avoids a
    * client-config migration later.
+   *
+   * `redirectUris`/`webOrigins` (Phase 14 security cleanup 2) seed the
+   * client's Standard Flow callback allow-list at creation time — see
+   * `MANAR_WEB_BASE_URL`'s doc comment (`keycloak.config.ts`) for why this
+   * value is static/known up front rather than something only a login
+   * attempt can discover. Both default to an empty list (unset) so this
+   * method's existing callers/tests that don't pass them see identical
+   * behavior to before.
    */
   async createConfidentialClient(
     realmName: string,
     clientId: string,
+    options?: { redirectUris?: string[]; webOrigins?: string[] },
   ): Promise<string> {
     const createResponse = await this.adminRequest(
       'POST',
@@ -161,6 +200,8 @@ export class KeycloakAdminClient {
         directAccessGrantsEnabled: true,
         serviceAccountsEnabled: false,
         enabled: true,
+        redirectUris: options?.redirectUris ?? [],
+        webOrigins: options?.webOrigins ?? [],
       },
       { returnLocation: true },
     );
@@ -234,7 +275,7 @@ export class KeycloakAdminClient {
   }
 
   private async adminRequest(
-    method: 'GET' | 'POST' | 'PUT',
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
     path: string,
     body?: unknown,
     options?: { returnLocation?: boolean },

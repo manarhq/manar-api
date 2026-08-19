@@ -20,6 +20,7 @@ import {
   assignRealmRole,
   createRealmUser,
   deleteRealm,
+  getClientRedirectConfig,
   getUserToken,
   setRealmAccessTokenLifespan,
 } from './support/keycloak-test-helpers';
@@ -97,10 +98,14 @@ describe('Auth (e2e) — JwtAuthGuard / RolesGuard', () => {
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
-      // KeycloakModule isn't part of AppModule (the running HTTP app never
-      // provisions tenants — see src/keycloak/keycloak.module.ts's doc
-      // comment); this test imports it directly, the same way the CLI's
-      // CliModule does, purely to provision real tenant fixtures.
+      // AppModule imports KeycloakModule itself since Phase 14 (UsersService
+      // needs KeycloakAdminClient at runtime -- see keycloak.module.ts's doc
+      // comment), but TenantProvisioningService remains something only the
+      // CLI and tests actually call; this test still imports KeycloakModule
+      // explicitly (redundant with AppModule's own import, but harmless --
+      // Nest dedupes module imports) to make that dependency obvious at this
+      // call site, the same way the CLI's CliModule does, purely to
+      // provision real tenant fixtures.
       imports: [AppModule, KeycloakModule, ProtectedTestModule],
     }).compile();
 
@@ -324,5 +329,30 @@ describe('Auth (e2e) — JwtAuthGuard / RolesGuard', () => {
       .get('/__test-protected/security-admin-only')
       .set('Authorization', `Bearer ${token}`)
       .expect(403);
+  }, 20_000);
+
+  it("7. Phase 14 security cleanup 2: provisioning registers manar-web's OIDC redirect URI/web origin on the confidential client", async () => {
+    // TenantProvisioningService.provisionTenant already ran for tenantA in
+    // beforeAll -- this confirms it actually registered manar-web's static
+    // callback URL on the confidential client at creation time (Phase 14
+    // security cleanup 2), not just that client creation itself succeeded.
+    // Closes the gap manar-web/lib/auth/keycloak-admin.ts's
+    // `ensureRedirectUriRegistered` used to fill in lazily, on the first
+    // login attempt, using standing Keycloak admin credentials manar-web
+    // no longer needs to hold as a result.
+    const manarWebBaseUrl =
+      process.env.MANAR_WEB_BASE_URL ?? 'http://localhost:3100';
+    const expectedRedirectUri = new URL(
+      '/api/auth/callback',
+      manarWebBaseUrl,
+    ).toString();
+    const expectedWebOrigin = new URL(manarWebBaseUrl).origin;
+
+    const clientConfig = await getClientRedirectConfig(
+      tenantA.keycloakRealm!,
+      tenantA.keycloakClientId!,
+    );
+    expect(clientConfig.redirectUris).toContain(expectedRedirectUri);
+    expect(clientConfig.webOrigins).toContain(expectedWebOrigin);
   }, 20_000);
 });

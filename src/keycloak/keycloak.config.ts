@@ -40,6 +40,36 @@ export const KeycloakConfigSchema = z.object({
    * to authenticate against / validate tokens for.
    */
   KEYCLOAK_CLIENT_ID: z.string().min(1).default('manar-api'),
+
+  /**
+   * Phase 14 security cleanup 2: `manar-web`'s own base URL, used to
+   * register its OIDC callback (`<MANAR_WEB_BASE_URL>/api/auth/callback`)
+   * and origin as the confidential client's `redirectUris`/`webOrigins`
+   * at tenant-provisioning time (`TenantProvisioningService`), instead of
+   * `manar-web`'s BFF registering it itself, lazily, on the first login
+   * attempt against a given realm.
+   *
+   * That lazy registration (`manar-web/lib/auth/keycloak-admin.ts`'s
+   * `ensureRedirectUriRegistered`, called from `/api/auth/login`) is why
+   * `manar-web` still held standing `KEYCLOAK_ADMIN_USERNAME`/`PASSWORD`
+   * credentials after Phase 11b Part 1 closed the sibling client-*secret*
+   * workaround — reading that code confirmed the redirect URI it registers
+   * is always the *same*, deployment-wide value
+   * (`new URL("/api/auth/callback", env.APP_BASE_URL)`, `APP_BASE_URL`
+   * being a fixed env var, never derived per-tenant or per-login), so
+   * there is no reason it needs to be discovered lazily by a
+   * browser-facing process at all — it's exactly the kind of static,
+   * known-at-provisioning-time value `TenantProvisioningService` already
+   * seeds every other one-time realm/role/client setting for. Registering
+   * it here removes `manar-web`'s need for Keycloak admin credentials
+   * entirely (Part 2, `manar-web`, removes the now-dead
+   * `ensureRedirectUriRegistered`/`KEYCLOAK_ADMIN_*` code — out of scope
+   * for `manar-api`).
+   *
+   * No trailing slash. Matches `manar-web`'s own `APP_BASE_URL` default
+   * for local dev.
+   */
+  MANAR_WEB_BASE_URL: z.string().min(1).default('http://localhost:3100'),
 });
 
 export type KeycloakConfig = z.infer<typeof KeycloakConfigSchema>;

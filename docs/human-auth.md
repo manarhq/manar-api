@@ -45,7 +45,14 @@ leg around it:
    (`directAccessGrantsEnabled: true`, so this phase's tests can obtain
    real tokens via the Resource Owner Password Credentials grant without
    fabricating a JWT; `standardFlowEnabled: true` for Phase 11's login
-   redirect flow, not used yet).
+   redirect flow). Since Phase 14 (security cleanup 2), this also seeds
+   the client's `redirectUris`/`webOrigins` with `manar-web`'s OIDC
+   callback (`<MANAR_WEB_BASE_URL>/api/auth/callback`) and origin — a
+   static, deployment-wide value, not something that needs discovering
+   per-login — closing the gap that used to require `manar-web`'s BFF to
+   hold standing Keycloak admin credentials just to register its own
+   callback lazily on first login. See `MANAR_WEB_BASE_URL`'s doc comment
+   in `src/keycloak/keycloak.config.ts`.
 5. Records `Tenant.keycloakRealm` / `keycloakIssuerUrl` / `keycloakClientId`
    and stores the generated client secret as a `SecretReference` row
    (`kind: KEYCLOAK_CLIENT_SECRET`, `provider: CONTROL_DB` — see "Storing
