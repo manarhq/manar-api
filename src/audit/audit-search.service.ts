@@ -1,8 +1,19 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import {
+  AiAdvisoryClient,
+  type AuditInvestigationAdvisory,
+} from '../ai-advisory/ai-advisory-client.service';
+import {
+  maxClassification,
+  type DataClassification,
+} from '../common/data-classification';
 import {
   encodeCursor,
   parseCursor,
 } from '../common/pagination/cursor-pagination';
+import { ToolRegistryService } from '../tools/tool-registry.service';
+import { formatAuditEventForAi } from './audit-event-formatting';
 import type { AuditEventDocument } from './opensearch/opensearch-client.service';
 import { OpenSearchIndexService } from './opensearch/opensearch-client.service';
 
@@ -35,6 +46,22 @@ export interface AuditSearchPage {
   nextCursor: string | null;
 }
 
+export interface InvestigateAuditInput {
+  tenantId: string;
+  /** The caller's own tenant database client — needed to resolve each retrieved AuditEvent's `ToolAction.classification` (`ToolRegistryService`). */
+  tenantClient: TenantPrismaClient;
+  question: string;
+  filters: AuditSearchFilters;
+  /** Max AuditEvents to retrieve as context — capped by the controller's own schema (50), defaulted there too. */
+  contextLimit: number;
+}
+
+export interface InvestigateAuditResult {
+  available: boolean;
+  result: AuditInvestigationAdvisory | null;
+  contextEventCount: number;
+}
+
 /**
  * `GET /audit` (Phase 11b Part 1, Section 66) — the real audit search/list
  * endpoint Phase 9a/9b never built (that phase shipped the tamper-evident
@@ -61,8 +88,12 @@ export interface AuditSearchPage {
  */
 @Injectable()
 export class AuditSearchService {
+  private readonly logger = new Logger(AuditSearchService.name);
+
   constructor(
     private readonly openSearchIndexService: OpenSearchIndexService,
+    private readonly aiAdvisoryClient: AiAdvisoryClient,
+    private readonly toolRegistry: ToolRegistryService,
   ) {}
 
   async search(input: AuditSearchInput): Promise<AuditSearchPage> {
@@ -119,5 +150,83 @@ export class AuditSearchService {
         : null;
 
     return { items, nextCursor };
+  }
+
+  /**
+   * `POST /audit/investigate` (Phase 10c) — answers a question like "why
+   * was this action denied?" over the caller's own tenant's audit trail.
+   * **Reuses `search` above verbatim** (`input.tenantId` flows through to
+   * that method's own mandatory `term: { tenantId }` filter, applied
+   * before this method ever sees a single result) rather than forking a
+   * second OpenSearch query path — this is the one hard invariant Section
+   * 45/66 (`search`'s own doc comment) already establishes, and this
+   * method inherits it by construction, not by re-implementing it.
+   * `manar-ai`'s `InvestigateAudit` RPC never runs its own retrieval (see
+   * `AiAdvisoryClient.investigateAudit`'s doc comment) — every string in
+   * `retrievedContext` comes from this already-tenant-scoped `search` call
+   * and nothing else.
+   *
+   * Derives one `classification` to pass into
+   * `AiAdvisoryClient.investigateAudit` — the highest-sensitivity
+   * `ToolAction.classification` among the retrieved events' own
+   * `toolId`/`actionId` (already indexed, top-level fields on
+   * `AuditEventDocument` — no need to parse `data`) — same posture
+   * `IncidentsService.summarizeIncident` establishes for the identical
+   * problem, so a `RESTRICTED` action's audit trail is never investigated
+   * by an external AI provider.
+   */
+  async investigateAudit(
+    input: InvestigateAuditInput,
+  ): Promise<InvestigateAuditResult> {
+    const page = await this.search({
+      tenantId: input.tenantId,
+      filters: input.filters,
+      limit: input.contextLimit,
+    });
+    const events = page.items;
+    const retrievedContext = events.map((event) =>
+      formatAuditEventForAi(event),
+    );
+
+    const classificationCache = new Map<
+      string,
+      DataClassification | undefined
+    >();
+    const resolvedClassifications: DataClassification[] = [];
+    for (const event of events) {
+      if (!event.toolId || !event.actionId) continue;
+      const cacheKey = `${event.toolId}:${event.actionId}`;
+      if (!classificationCache.has(cacheKey)) {
+        try {
+          const resolved = await this.toolRegistry.findToolAction(
+            input.tenantClient,
+            event.toolId,
+            event.actionId,
+          );
+          classificationCache.set(cacheKey, resolved?.action.classification);
+        } catch (error) {
+          this.logger.warn(
+            `Could not resolve ToolAction classification for "${event.toolId}"/"${event.actionId}" while investigating audit history: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          classificationCache.set(cacheKey, undefined);
+        }
+      }
+      const cached = classificationCache.get(cacheKey);
+      if (cached) resolvedClassifications.push(cached);
+    }
+    const classification = maxClassification(resolvedClassifications);
+
+    const advisory = await this.aiAdvisoryClient.investigateAudit({
+      question: input.question,
+      retrievedContext,
+      tenantId: input.tenantId,
+      classification,
+    });
+
+    return {
+      available: advisory !== null,
+      result: advisory,
+      contextEventCount: events.length,
+    };
   }
 }

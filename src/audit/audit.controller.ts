@@ -1,12 +1,15 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
+  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiBody,
   ApiOperation,
   ApiQuery,
   ApiResponse,
@@ -18,14 +21,18 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
 import { parseLimit } from '../common/pagination/cursor-pagination';
 import { AuditSearchService } from './audit-search.service';
 import { AuditService } from './audit.service';
 import {
   AuditSearchResponseDto,
+  InvestigateAuditRequestDto,
+  InvestigateAuditResponseDto,
   VerifyAuditChainResponseDto,
 } from './audit.dto';
+import { InvestigateAuditSchema } from './audit.validation';
 
 /** Parses a query-param date/time bound (`from`/`to`); throws 400 for anything unparseable — same "never leak a stack trace" convention `parseBodyOrThrow` uses. */
 function parseDateParam(
@@ -164,6 +171,51 @@ export class AuditController {
       },
       limit: parseLimit(limit),
       cursor,
+    });
+  }
+
+  @Post('investigate')
+  @ApiOperation({
+    summary: 'AI-advisory audit investigation (Phase 10c)',
+    description:
+      "Performs its own tenant-scoped OpenSearch query (the exact same AuditSearchService.search GET /audit uses -- never a client-suppliable tenant), then passes only those already-authorized results to manar-ai's InvestigateAudit RPC as context. manar-ai never performs its own retrieval. Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER. `available: false` means manar-ai was unreachable -- never a crash, never a fabricated answer.",
+  })
+  @ApiBody({ type: InvestigateAuditRequestDto })
+  @ApiResponse({ status: 201, type: InvestigateAuditResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async investigate(
+    @CurrentAuth() auth: AuthContext,
+    @Body() body: unknown,
+  ): Promise<InvestigateAuditResponseDto> {
+    const input = parseBodyOrThrow(InvestigateAuditSchema, body);
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    return this.auditSearchService.investigateAudit({
+      tenantId: auth.tenant.id,
+      tenantClient,
+      question: input.question,
+      filters: {
+        eventType: input.eventType
+          ? input.eventType
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : undefined,
+        correlationId: input.correlationId,
+        agentId: input.agentId,
+        taskId: input.taskId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        decision: input.decision,
+        riskMin: input.riskMin,
+        riskMax: input.riskMax,
+        from: parseDateParam(input.from, 'from'),
+        to: parseDateParam(input.to, 'to'),
+      },
+      contextLimit: input.contextLimit ?? 10,
     });
   }
 
