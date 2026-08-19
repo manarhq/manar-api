@@ -10,24 +10,33 @@ export interface MtlsRequestOptions {
   identity: AgentIdentity;
 }
 
+export interface MtlsRawResponse {
+  status: number;
+  body: unknown;
+}
+
 /**
- * A minimal mTLS-authenticated JSON request helper, used by
- * `ManarAgent.authorize`/`delegateTask` (Phase 5). Deliberately built on
- * `node:https` directly rather than the global `fetch` — Node's
+ * The raw, non-throwing mTLS-authenticated JSON request primitive both
+ * `mtlsRequestJson` and `ManarAgent.invokeTool` build on. Deliberately
+ * built on `node:https` directly rather than the global `fetch` — Node's
  * WHATWG-`fetch` implementation (undici) doesn't accept a plain
  * `node:https`-style client-certificate option the way `https.request`
  * does, and this SDK has no other reason to depend on a third-party HTTP
  * client just for this. Mirrors the pattern `test/agent-identity.e2e-spec.ts`
  * already uses for its own raw mTLS requests against `/agent/v1/whoami`.
+ * Never rejects on a non-2xx status — every status code this SDK cares
+ * about (200/202/403/...) is a meaningful, structured JSON response the
+ * caller decides how to interpret; only a genuine transport failure
+ * rejects.
  */
-export async function mtlsRequestJson<T>(
+export async function mtlsRequestRaw(
   options: MtlsRequestOptions,
-): Promise<T> {
+): Promise<MtlsRawResponse> {
   const url = new URL(options.path, options.endpoint);
   const bodyText =
     options.body !== undefined ? JSON.stringify(options.body) : undefined;
 
-  return new Promise<T>((resolve, reject) => {
+  return new Promise<MtlsRawResponse>((resolve, reject) => {
     const request = https.request(
       {
         hostname: url.hostname,
@@ -58,19 +67,7 @@ export async function mtlsRequestJson<T>(
           } catch {
             parsed = undefined;
           }
-
-          if (status >= 200 && status < 300) {
-            resolve(parsed as T);
-            return;
-          }
-
-          const message =
-            parsed && typeof parsed === 'object' && 'message' in parsed
-              ? String(parsed.message)
-              : `HTTP ${status}`;
-          reject(
-            new Error(`mTLS request to ${options.path} failed: ${message}`),
-          );
+          resolve({ status, body: parsed });
         });
       },
     );
@@ -79,4 +76,26 @@ export async function mtlsRequestJson<T>(
     if (bodyText) request.write(bodyText);
     request.end();
   });
+}
+
+/**
+ * A minimal mTLS-authenticated JSON request helper, used by
+ * `ManarAgent.authorize`/`delegateTask` (Phase 5) — both endpoints only
+ * ever have one meaningful shape of response, always on a 2xx status, so
+ * this thin wrapper over `mtlsRequestRaw` rejects on anything else.
+ */
+export async function mtlsRequestJson<T>(
+  options: MtlsRequestOptions,
+): Promise<T> {
+  const { status, body } = await mtlsRequestRaw(options);
+
+  if (status >= 200 && status < 300) {
+    return body as T;
+  }
+
+  const message =
+    body && typeof body === 'object' && 'message' in body
+      ? String(body.message)
+      : `HTTP ${status}`;
+  throw new Error(`mTLS request to ${options.path} failed: ${message}`);
 }

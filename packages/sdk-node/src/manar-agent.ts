@@ -4,7 +4,7 @@ import {
   parseEnrollmentTokenParts,
 } from './enrollment-token';
 import type { AgentIdentity, IdentityStore } from './identity-store';
-import { mtlsRequestJson } from './mtls-http';
+import { mtlsRequestJson, mtlsRequestRaw } from './mtls-http';
 
 export interface ManarAgentOptions {
   /** Base URL of manar-api's human-facing HTTP surface (e.g. http://localhost:3000) -- NOT the mTLS listener, which an unenrolled agent has no certificate to reach yet. */
@@ -76,6 +76,56 @@ export interface DelegateTaskResponse {
   childAgent: { id: string; slug: string; identifier: string };
   /** The child agent's one-time enrollment token -- pass this to a *separate* `ManarAgent.enroll()` call for the child, the same as any human-created agent's token (see docs/task-delegation.md). */
   enrollmentToken: { token: string; expiresAt: string };
+}
+
+export interface InvokeToolRequest {
+  taskId: string;
+  toolId: string;
+  actionId: string;
+  resource: string;
+  params?: unknown;
+  /** A grant token from a prior `REQUIRE_APPROVAL` -> approved -> `getApproval()` cycle (Phase 8) -- its presence routes this same request onto the grant-validation path instead of a fresh authorize+risk evaluation. */
+  grantToken?: string;
+}
+
+/**
+ * The three shapes `POST /agent/v1/tools/invoke` can answer with (Phase
+ * 7b/8 -- see docs/tool-gateway.md, docs/approvals.md), discriminated on
+ * `status` so a caller can `switch` exhaustively. Like `authorize()`,
+ * `invokeTool` never throws for any of these -- a DENY or a still-pending
+ * approval is a legitimate, expected answer, not a transport/request
+ * error. Throws only for a genuine transport failure, a malformed
+ * request, an unresolvable tool/action (404), a disabled tool (409), or
+ * if this agent has never enrolled.
+ */
+export type InvokeToolResult =
+  | {
+      status: 'EXECUTED';
+      success: boolean;
+      data?: unknown;
+      errorMessage?: string;
+    }
+  | { status: 'PENDING'; reason: string; riskScore: number; approvalId: string }
+  | { status: 'DENIED'; reason: string };
+
+/**
+ * `GET /agent/v1/approvals/:id`'s response shape (Phase 8). `grantToken`/
+ * `grantExpiresAt` are present only once `status === 'APPROVED'` and the
+ * issued grant is still unconsumed/unexpired -- re-derived fresh on every
+ * poll, never a stored value (see docs/approvals.md's "The grant token").
+ */
+export interface ApprovalStatus {
+  id: string;
+  status: 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED';
+  taskId: string;
+  toolId: string;
+  actionId: string;
+  resource: string;
+  riskScore: number;
+  requestedAt: string;
+  expiresAt: string;
+  grantToken?: string;
+  grantExpiresAt?: string;
 }
 
 /**
@@ -182,6 +232,72 @@ export class ManarAgent {
       path: `/agent/v1/tasks/${encodeURIComponent(taskId)}/delegate`,
       method: 'POST',
       body: request,
+      identity,
+    });
+  }
+
+  /**
+   * `POST /agent/v1/tools/invoke` over mTLS (Phase 7b's real gateway,
+   * Phase 8's approval retry path). Omit `grantToken` for a fresh
+   * attempt (runs the full authorize -> policy -> risk pipeline); pass
+   * one obtained from `getApproval()` to retry a previously
+   * `REQUIRE_APPROVAL`'d request once a human has approved it -- same
+   * `taskId`/`toolId`/`actionId`/`resource`/`params` as the original
+   * request (Section 80's parameter-binding invariant; a mismatch is
+   * rejected as `DENIED`/`grant_mismatch`, not silently accepted).
+   */
+  async invokeTool(request: InvokeToolRequest): Promise<InvokeToolResult> {
+    const identity = await this.requireIdentity();
+    const { status, body } = await mtlsRequestRaw({
+      endpoint: this.requireMtlsEndpoint(),
+      path: '/agent/v1/tools/invoke',
+      method: 'POST',
+      body: request,
+      identity,
+    });
+
+    if (status === 200) {
+      const result = body as {
+        success: boolean;
+        data?: unknown;
+        errorMessage?: string;
+      };
+      return { status: 'EXECUTED', ...result };
+    }
+    if (status === 202) {
+      const result = body as {
+        reason: string;
+        riskScore: number;
+        approvalId: string;
+      };
+      return { status: 'PENDING', ...result };
+    }
+    if (status === 403) {
+      const result = body as { reason: string };
+      return { status: 'DENIED', reason: result.reason };
+    }
+
+    const message =
+      body && typeof body === 'object' && 'message' in body
+        ? String(body.message)
+        : `HTTP ${status}`;
+    throw new Error(`invokeTool failed: ${message}`);
+  }
+
+  /**
+   * `GET /agent/v1/approvals/:id` over mTLS (Phase 8) -- polls the current
+   * state of a `REQUIRE_APPROVAL`'d request created by `invokeTool()`.
+   * Answers 404 (never 403) if this approval request doesn't belong to
+   * this agent, so a grant can never leak across agents even if one
+   * agent somehow learned another's approval id -- surfaces as a thrown
+   * `Error` here, same as any other genuine failure.
+   */
+  async getApproval(approvalId: string): Promise<ApprovalStatus> {
+    const identity = await this.requireIdentity();
+    return mtlsRequestJson<ApprovalStatus>({
+      endpoint: this.requireMtlsEndpoint(),
+      path: `/agent/v1/approvals/${encodeURIComponent(approvalId)}`,
+      method: 'GET',
       identity,
     });
   }

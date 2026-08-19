@@ -7,6 +7,9 @@ export type {
   DelegateTaskResourceSelector,
   DelegateTaskRequest,
   DelegateTaskResponse,
+  InvokeToolRequest,
+  InvokeToolResult,
+  ApprovalStatus,
 } from './manar-agent';
 export { FileIdentityStore } from './file-identity-store';
 export type { AgentIdentity, IdentityStore } from './identity-store';
