@@ -75,10 +75,11 @@ API/`@manar/sdk-node` (never hand-inserted rows):
   Demo Agent."
 - **`Tool`/`ToolAction` rows** for every SIEM/EDR/IAM/Firewall action,
   pointing at the real running `packages/demo-soc-tools` service.
-- **Four real published policies**: "SOC Read Policy," "Endpoint Isolation
-  Approval Policy," "IAM Restriction Policy," "No Secret Exfiltration
-  Policy" (see `src/cli/commands/demo-seed.command.ts`'s own doc comment
-  for exactly what each one's rule content says and why).
+- **Five real published policies**: "SOC Read Policy," "Endpoint Isolation
+  Approval Policy," "Restricted Classification Approval Policy" (Phase
+  15a — see docs/data-classification.md), "IAM Restriction Policy," "No
+  Secret Exfiltration Policy" (see `src/cli/commands/demo-seed.command.ts`'s
+  own doc comment for exactly what each one's rule content says and why).
 - **A task** granting "SOC Response Agent" exactly `siem.search-events`,
   `siem.fetch-incident`, `edr.get-host`, and `edr.isolate-host` (isolation
   itself still requires approval) — deliberately **not** any IAM/firewall
