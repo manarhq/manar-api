@@ -36,8 +36,12 @@ const DOCUMENTED_PATHS = [
   '/policies/{id}/versions',
   '/policies/{id}/versions/{versionId}',
   '/policies/{id}/versions/{versionId}/publish',
+  '/approvals',
   '/approvals/{id}/decide',
+  '/audit',
   '/audit/verify',
+  '/kill-switches',
+  '/tools',
   '/events/live',
   '/evidence/export',
 ];
