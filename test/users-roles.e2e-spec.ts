@@ -365,4 +365,34 @@ describe('Users & Roles (e2e)', () => {
       .set('Authorization', `Bearer ${plainToken}`)
       .expect(403);
   });
+
+  it('9. revoke privilege-escalation guard: a SECURITY_ADMIN cannot revoke TENANT_OWNER from anyone, including the actual owner', async () => {
+    const response = await request(app.getHttpServer() as App)
+      .delete(`/users/${ownerProfileId}/role-bindings/TENANT_OWNER`)
+      .set('Authorization', `Bearer ${secAdminToken}`)
+      .expect(403);
+    expect(JSON.stringify(response.body)).toMatch(/privileged/i);
+
+    // The owner's TENANT_OWNER role was never actually touched -- neither
+    // the local RoleBinding nor the real Keycloak role mapping.
+    const check = await request(app.getHttpServer() as App)
+      .get(`/users/${ownerProfileId}`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200);
+    const checkBody = check.body as { roles: { role: string }[] };
+    expect(checkBody.roles.map((r) => r.role)).toContain('TENANT_OWNER');
+
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    const revokedEvents = await tenantClient.auditEvent.findMany({
+      where: { eventType: AUDIT_EVENT_TYPES.USER_ROLE_REVOKED },
+    });
+    expect(
+      revokedEvents.some(
+        (e) =>
+          (e.data as { targetUserId?: string })?.targetUserId ===
+            ownerProfileId &&
+          (e.data as { role?: string })?.role === 'TENANT_OWNER',
+      ),
+    ).toBe(false);
+  });
 });

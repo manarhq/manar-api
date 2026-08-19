@@ -70,9 +70,9 @@ async function mapUserErrors<T>(operation: () => Promise<T>): Promise<T> {
  * tenant, and `manar-web`'s `/users` page needs this for every viewer, not
  * just admins). `POST`/`DELETE .../role-bindings` — role management — is
  * gated to `TENANT_OWNER`/`SECURITY_ADMIN`, *and* additionally enforces a
- * privilege-escalation guard inside `UsersService.grantRole` (Phase 14's
- * design spec: a caller can never grant a role more privileged than any
- * role they themselves currently hold — see
+ * privilege-escalation guard inside `UsersService.grantRole`/`revokeRole`
+ * alike (Phase 14's design spec: a caller can never grant *or revoke* a
+ * role more privileged than any role they themselves currently hold — see
  * `src/auth/role-privilege.ts`).
  */
 @ApiTags('users')
@@ -192,7 +192,7 @@ export class UsersController {
   @ApiOperation({
     summary: 'Revoke a role from a user',
     description:
-      "Requires TENANT_OWNER or SECURITY_ADMIN. Idempotent -- revoking a role the user doesn't currently hold succeeds as a no-op. Also updates the underlying Keycloak realm role mapping, not just the local RoleBinding row. Audited.",
+      "Requires TENANT_OWNER or SECURITY_ADMIN, AND enforces the same privilege-escalation guard as the grant endpoint, applied to revoke: the caller can never revoke a role more privileged than any role they themselves currently hold (e.g. a SECURITY_ADMIN can never strip TENANT_OWNER from anyone, including the actual owner) -- see src/auth/role-privilege.ts. Idempotent -- revoking a role the user doesn't currently hold succeeds as a no-op. Also updates the underlying Keycloak realm role mapping, not just the local RoleBinding row. Audited.",
   })
   @ApiParam({ name: 'id', description: 'UserProfile ID', format: 'uuid' })
   @ApiParam({ name: 'role', enum: ROLES })
@@ -203,7 +203,12 @@ export class UsersController {
     description: 'Unknown role.',
   })
   @ApiResponse({ status: 401, type: ErrorResponseDto })
-  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 403,
+    type: ErrorResponseDto,
+    description:
+      'Caller lacks TENANT_OWNER/SECURITY_ADMIN, or the privilege-escalation guard rejected this revoke.',
+  })
   @ApiResponse({
     status: 404,
     type: ErrorResponseDto,
@@ -226,6 +231,7 @@ export class UsersController {
         targetUserId: id,
         role,
         revokedByUserId: auth.user.id,
+        revokedByRoles: auth.roles,
       }),
     );
   }

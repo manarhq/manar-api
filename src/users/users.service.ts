@@ -48,6 +48,8 @@ export interface RevokeRoleInput {
   targetUserId: string;
   role: RoleName;
   revokedByUserId: string;
+  /** The authenticated caller's own current roles — what the privilege-escalation guard checks `role` against (see `revokeRole`'s doc comment: applied symmetrically with `grantRole`). */
+  revokedByRoles: RoleName[];
 }
 
 const ROLE_BINDING_INCLUDE = {
@@ -152,7 +154,11 @@ export class UsersService {
     input: GrantRoleInput,
   ): Promise<UserSummary> {
     if (!canGrantRole(input.grantedByRoles, input.role)) {
-      throw new PrivilegeEscalationError(input.role, input.grantedByRoles);
+      throw new PrivilegeEscalationError(
+        'grant',
+        input.role,
+        input.grantedByRoles,
+      );
     }
 
     const targetUser = await tenantClient.userProfile.findUnique({
@@ -196,11 +202,36 @@ export class UsersService {
     return this.getUserOrThrow(tenantClient, input.targetUserId);
   }
 
-  /** `DELETE /users/:id/role-bindings/:role`. Idempotent, same posture as `KeycloakAdminClient.removeRealmRole`: revoking a role the user doesn't hold succeeds as a no-op. */
+  /**
+   * `DELETE /users/:id/role-bindings/:role`. Idempotent, same posture as
+   * `KeycloakAdminClient.removeRealmRole`: revoking a role the target
+   * doesn't currently hold still succeeds as a no-op (the privilege check
+   * below runs regardless of the target's current state, since it's a
+   * property of the *role being acted on*, not of whether this particular
+   * call happens to change anything).
+   *
+   * Enforces the identical privilege-escalation guard `grantRole` does,
+   * applied to revoke rather than grant: a caller can never revoke a role
+   * more privileged than any role they themselves currently hold. Without
+   * this, the endpoint's coarse `@RequireRole('TENANT_OWNER',
+   * 'SECURITY_ADMIN')` gate alone would let any `SECURITY_ADMIN` strip
+   * `TENANT_OWNER` from the actual tenant owner (or remove another
+   * `SECURITY_ADMIN`'s/`AUDITOR`'s role to cover their tracks) — the same
+   * class of bug the grant-side guard exists to prevent, just on the
+   * other verb.
+   */
   async revokeRole(
     tenantClient: TenantPrismaClient,
     input: RevokeRoleInput,
   ): Promise<UserSummary> {
+    if (!canGrantRole(input.revokedByRoles, input.role)) {
+      throw new PrivilegeEscalationError(
+        'revoke',
+        input.role,
+        input.revokedByRoles,
+      );
+    }
+
     const targetUser = await tenantClient.userProfile.findUnique({
       where: { id: input.targetUserId },
     });

@@ -7,22 +7,28 @@ export class UserNotFoundError extends Error {
 }
 
 /**
- * Thrown by `UsersService.grantRole` when the calling user does not
- * themselves hold a role at least as privileged as the one they're trying
- * to grant (`src/auth/role-privilege.ts`'s `canGrantRole`). Distinct from
- * the endpoint's own `@RequireRole('TENANT_OWNER', 'SECURITY_ADMIN')` gate
- * — that only proves the caller holds *one of those two* roles, not that
- * the specific role being granted is one they're actually entitled to
- * hand out (a `SECURITY_ADMIN` granting themselves `TENANT_OWNER` would
- * otherwise be a real privilege-escalation bug).
+ * Thrown by `UsersService.grantRole`/`revokeRole` when the calling user
+ * does not themselves hold a role at least as privileged as the one
+ * they're trying to grant or revoke (`src/auth/role-privilege.ts`'s
+ * `canGrantRole`, applied symmetrically to both verbs — see
+ * `revokeRole`'s doc comment for why). Distinct from the endpoints' own
+ * `@RequireRole('TENANT_OWNER', 'SECURITY_ADMIN')` gate — that only
+ * proves the caller holds *one of those two* roles, not that the
+ * specific role being acted on is one they're actually entitled to touch
+ * (a `SECURITY_ADMIN` granting themselves `TENANT_OWNER`, or stripping
+ * `TENANT_OWNER` from the actual owner, would otherwise both be real
+ * privilege-escalation bugs — the second is arguably worse, since it lets
+ * a less-privileged admin unilaterally demote/lock out a more-privileged
+ * one).
  */
 export class PrivilegeEscalationError extends Error {
   constructor(
+    public readonly action: 'grant' | 'revoke',
     public readonly targetRole: string,
     public readonly actorRoles: readonly string[],
   ) {
     super(
-      `Cannot grant role "${targetRole}": it is more privileged than any role the caller currently holds (${actorRoles.join(', ') || 'none'})`,
+      `Cannot ${action} role "${targetRole}": it is more privileged than any role the caller currently holds (${actorRoles.join(', ') || 'none'})`,
     );
     this.name = 'PrivilegeEscalationError';
   }
