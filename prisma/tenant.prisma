@@ -80,6 +80,12 @@ model UserProfile {
   /// see that model's doc comment.
   approvalDecisions ApprovalDecision[]
 
+  /// Kill-switch phase (Section 32): every tenant/agent-group/agent/tool
+  /// `KillSwitch` this user has activated/deactivated — see that model's
+  /// doc comment.
+  killSwitchActivations   KillSwitch[] @relation("KillSwitchActivations")
+  killSwitchDeactivations KillSwitch[] @relation("KillSwitchDeactivations")
+
   @@map("user_profiles")
 }
 
@@ -1161,4 +1167,63 @@ model AgentRiskFlag {
 
   @@index([agentId, expiresAt])
   @@map("agent_risk_flags")
+}
+
+/// Kill-switch phase (Section 32): the four tenant-scoped kill-switch
+/// levels — TENANT (the entire tenant), AGENT_GROUP, AGENT, TOOL. The
+/// fifth, cross-tenant PLATFORM scope is deliberately NOT here — see
+/// `PlatformKillSwitch` in `prisma/control.prisma` for why. See
+/// docs/kill-switches.md.
+enum KillSwitchScope {
+  TENANT
+  AGENT_GROUP
+  AGENT
+  TOOL
+}
+
+/// One kill switch, checked directly on the hot authorization path
+/// (`AuthorizationService.authorize`) and re-checked at
+/// `AuthorizationGrant` redemption time (`GrantService.validateAndConsumeGrant`)
+/// — Section 32's harder requirement that an already-issued grant must
+/// become unusable the moment a relevant kill switch activates, not just
+/// block new authorization requests. See docs/kill-switches.md.
+///
+/// One row per (scope, targetId) pair, toggled in place by activate/
+/// deactivate rather than appended as history (both the activation and
+/// deactivation fields live on the same row) — a plain DB check on every
+/// request already has zero propagation delay by construction, so there is
+/// no need for a separate propagation/event mechanism on top (out of scope
+/// this phase — see docs/kill-switches.md).
+///
+/// `targetId` is `null` only for `TENANT` scope — the tenant itself is
+/// implicit via the tenant database (Phase 2's per-tenant isolation model,
+/// see docs/tenant-isolation.md), so there is nothing else to name. For
+/// `AGENT_GROUP`/`AGENT`/`TOOL` it is that row's own id (`AgentGroup.id`/
+/// `Agent.id`/`Tool.id`) — not a foreign key, since a `TOOL`-scope switch
+/// must still deny even if the `Tool` row is later deleted, and because a
+/// single column can't be a conditional FK across three different target
+/// tables depending on `scope`.
+model KillSwitch {
+  id String @id @default(uuid())
+
+  scope    KillSwitchScope
+  targetId String?
+
+  active Boolean @default(true)
+  reason String?
+
+  activatedBy String
+  activator   UserProfile @relation("KillSwitchActivations", fields: [activatedBy], references: [id])
+  activatedAt DateTime    @default(now())
+
+  deactivatedBy String?
+  deactivator   UserProfile? @relation("KillSwitchDeactivations", fields: [deactivatedBy], references: [id])
+  deactivatedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  /// The hot-path lookup this model exists for: "is there an active switch
+  /// for this exact scope+target right now."
+  @@index([scope, targetId, active])
+  @@map("kill_switches")
 }

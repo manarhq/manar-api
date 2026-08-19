@@ -156,3 +156,43 @@ model SecretReference {
 
   @@map("secret_references")
 }
+
+/// Kill-switch phase (Section 32): the one, genuinely cross-tenant kill
+/// switch — "platform/deployment" scope. Deliberately NOT tenant data (see
+/// the four tenant-scoped `KillSwitch` rows in `prisma/tenant.prisma`
+/// instead): it must remain checkable even for a tenant whose own
+/// control-DB row or database might itself be compromised, and it belongs
+/// in the control DB precisely because Section 10/11 already established
+/// the control DB as the one place cross-tenant operational metadata like
+/// this lives, distinct from tenant business/security data — see
+/// docs/tenant-isolation.md.
+///
+/// Singleton row (fixed, known `id` — the same `"singleton"` convention
+/// `AuditChainState` in `prisma/tenant.prisma` already uses, since a
+/// deployment only ever has exactly one platform-wide switch), toggled in
+/// place by activate/deactivate rather than appended as history — mirrors
+/// tenant DB's own `KillSwitch` model's activatedAt/deactivatedAt pair
+/// shape. `activatedBy`/`deactivatedBy` are free text (not a FK): the
+/// control DB has no `UserProfile` table at all (that's tenant data — see
+/// `RoleBinding.grantedBy`'s doc comment for the same
+/// free-text-provenance-across-a-trust-boundary precedent) — see
+/// `src/kill-switches/platform-operator.guard.ts` for who is actually
+/// allowed to flip this switch and why that is deliberately NOT gated by
+/// any tenant's own RBAC role.
+model PlatformKillSwitch {
+  /// Always `"singleton"` — see model doc comment.
+  id String @id
+
+  active Boolean @default(false)
+  reason String?
+
+  activatedBy String?
+  activatedAt DateTime?
+
+  deactivatedBy String?
+  deactivatedAt DateTime?
+
+  updatedAt DateTime @updatedAt
+
+  @@map("platform_kill_switches")
+}

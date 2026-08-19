@@ -40,6 +40,12 @@ export const AUDIT_EVENT_TYPES = {
   DLP_RESULT_REDACTED: 'dlp.result_redacted',
   /** `AiAdvisoryClient.analyzePromptInjection` detected a prompt-injection attempt in a tool's returned result. */
   PROMPT_INJECTION_DETECTED: 'prompt_injection.detected',
+
+  // Kill-switch phase (Section 32) — see docs/kill-switches.md.
+  /** A kill switch (any of the five scopes) was activated — see `src/kill-switches/`. */
+  KILL_SWITCH_ACTIVATED: 'kill_switch.activated',
+  /** A kill switch was deactivated. */
+  KILL_SWITCH_DEACTIVATED: 'kill_switch.deactivated',
 } as const;
 
 export type AuditEventType =

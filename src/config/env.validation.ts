@@ -10,6 +10,7 @@ import { KafkaConfigSchema } from '../audit/kafka.config';
 import { OpenSearchConfigSchema } from '../audit/opensearch/opensearch.config';
 import { RedisConfigSchema } from '../audit/live/redis.config';
 import { AiAdvisoryConfigSchema } from '../ai-advisory/ai-advisory.config';
+import { KillSwitchesConfigSchema } from '../kill-switches/kill-switches.config';
 
 /**
  * Application-level environment schema.
@@ -44,7 +45,8 @@ export const AppConfigSchema = z
   .extend(KafkaConfigSchema.shape)
   .extend(OpenSearchConfigSchema.shape)
   .extend(RedisConfigSchema.shape)
-  .extend(AiAdvisoryConfigSchema.shape);
+  .extend(AiAdvisoryConfigSchema.shape)
+  .extend(KillSwitchesConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

@@ -83,6 +83,9 @@ function fakeConfigService(
     APPROVAL_GRANT_SIGNING_SECRET:
       process.env.APPROVAL_GRANT_SIGNING_SECRET ??
       'test-approval-grant-signing-secret',
+    PLATFORM_KILL_SWITCH_OPERATOR_TOKEN:
+      process.env.PLATFORM_KILL_SWITCH_OPERATOR_TOKEN ??
+      'test-platform-kill-switch-operator-token',
     APPROVAL_GRANT_TTL_MS: 300_000,
     APPROVAL_REQUEST_TTL_MS: 1_800_000,
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:29092',
