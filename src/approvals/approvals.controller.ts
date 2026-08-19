@@ -8,6 +8,14 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiOperation,
+  ApiParam,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { CurrentAuth } from '../auth/auth-context';
 import type { AuthContext } from '../auth/auth-context';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -17,9 +25,14 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { TemporalClientService } from '../temporal/temporal-client.service';
 import { decideSignal } from '../temporal/workflows/approval.workflow';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
+import { ErrorResponseDto } from '../common/openapi/error-response.dto';
 import { ApprovalRequestNotFoundError } from './approvals.errors';
 import { ApprovalRequestService } from './approval-request.service';
 import { DecideApprovalRequestSchema } from './approvals.validation';
+import {
+  DecideApprovalRequestDto,
+  DecideApprovalResponseDto,
+} from './approvals.dto';
 
 /**
  * `POST /approvals/:id/decide` — Section 27/28/31's human decision surface
@@ -35,6 +48,8 @@ import { DecideApprovalRequestSchema } from './approvals.validation';
  * or the agent, via `GET /agent/v1/approvals/:id` — observes the eventual
  * outcome by polling, exactly as the design spec's flow describes).
  */
+@ApiTags('approvals')
+@ApiBearerAuth('jwt')
 @Controller('approvals')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @RequireRole('APPROVER', 'SECURITY_ADMIN', 'TENANT_OWNER')
@@ -48,6 +63,27 @@ export class ApprovalsController {
   ) {}
 
   @Post(':id/decide')
+  @ApiOperation({
+    summary: 'Record a human decision on a pending approval request',
+    description:
+      'Signals the already-running ApprovalWorkflow with the decision and returns as soon as the signal is sent — not once fully processed. The eventual outcome (APPROVED/DENIED) is observed later by the agent polling `GET /agent/v1/approvals/:id`. Requires APPROVER, SECURITY_ADMIN, or TENANT_OWNER.',
+  })
+  @ApiParam({ name: 'id', description: 'ApprovalRequest ID', format: 'uuid' })
+  @ApiBody({ type: DecideApprovalRequestDto })
+  @ApiResponse({ status: 201, type: DecideApprovalResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'ApprovalRequest not found.',
+  })
+  @ApiResponse({
+    status: 409,
+    type: ErrorResponseDto,
+    description: 'Request is not PENDING, or could not be signaled.',
+  })
   async decide(
     @CurrentAuth() auth: AuthContext,
     @Param('id') id: string,

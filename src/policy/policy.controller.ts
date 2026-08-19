@@ -12,6 +12,15 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { CurrentAuth } from '../auth/auth-context';
 import type { AuthContext } from '../auth/auth-context';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -19,6 +28,7 @@ import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
+import { ErrorResponseDto } from '../common/openapi/error-response.dto';
 import {
   dumpPolicyContentYaml,
   resolveSubmittedContent,
@@ -34,6 +44,13 @@ import {
   CreatePolicyRequestSchema,
   CreatePolicyVersionRequestSchema,
 } from './policy.validation';
+import {
+  CreatePolicyRequestDto,
+  CreatePolicyResponseDto,
+  CreatePolicyVersionRequestDto,
+  GetPolicyResponseDto,
+  PolicyVersionResponseDto,
+} from './policy.dto';
 
 /** Translates the service layer's typed domain errors into HTTP responses — same pattern `AgentsController`'s `mapAgentNotFound` establishes. */
 async function mapPolicyErrors<T>(operation: () => Promise<T>): Promise<T> {
@@ -87,6 +104,8 @@ function resolveContentOrThrow(body: {
  * docs/policy-model.md). This is not "not built yet"; it will never be
  * built.
  */
+@ApiTags('policies')
+@ApiBearerAuth('jwt')
 @Controller('policies')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @RequireRole('SECURITY_ADMIN', 'TENANT_OWNER', 'AI_GOVERNANCE_MANAGER')
@@ -97,6 +116,20 @@ export class PolicyController {
   ) {}
 
   @Post()
+  @ApiOperation({
+    summary: 'Create a policy (with its first DRAFT version)',
+    description:
+      'Provide exactly one of `content` (JSON) or `contentYaml` (YAML) — both validate against the same PolicyContentSchema.',
+  })
+  @ApiBody({ type: CreatePolicyRequestDto })
+  @ApiResponse({ status: 201, type: CreatePolicyResponseDto })
+  @ApiResponse({
+    status: 400,
+    type: ErrorResponseDto,
+    description: 'Invalid body, or invalid policy content.',
+  })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
   async createPolicy(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const input = parseBodyOrThrow(CreatePolicyRequestSchema, body);
     const content = resolveContentOrThrow(input);
@@ -125,6 +158,22 @@ export class PolicyController {
   }
 
   @Post(':id/versions')
+  @ApiOperation({
+    summary: 'Create a new DRAFT version of a policy',
+    description:
+      'Provide exactly one of `content`, `contentYaml`, or `rollbackToVersionId`. There is no update/delete endpoint for a published version — published versions are immutable; editing always means creating a new DRAFT here.',
+  })
+  @ApiParam({ name: 'id', description: 'Policy ID', format: 'uuid' })
+  @ApiBody({ type: CreatePolicyVersionRequestDto })
+  @ApiResponse({ status: 201, type: PolicyVersionResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'Policy (or rollback target version) not found.',
+  })
   async createVersion(
     @CurrentAuth() auth: AuthContext,
     @Param('id') policyId: string,
@@ -168,6 +217,30 @@ export class PolicyController {
 
   @Post(':id/versions/:versionId/publish')
   @RequireRole('SECURITY_ADMIN', 'TENANT_OWNER')
+  @ApiOperation({
+    summary: 'Publish a DRAFT policy version',
+    description:
+      'Narrower than the other endpoints on this controller: requires SECURITY_ADMIN or TENANT_OWNER only (no AI_GOVERNANCE_MANAGER). The version must currently be DRAFT.',
+  })
+  @ApiParam({ name: 'id', description: 'Policy ID', format: 'uuid' })
+  @ApiParam({
+    name: 'versionId',
+    description: 'PolicyVersion ID',
+    format: 'uuid',
+  })
+  @ApiResponse({ status: 201, type: PolicyVersionResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'Policy or version not found.',
+  })
+  @ApiResponse({
+    status: 409,
+    type: ErrorResponseDto,
+    description: 'Version is not DRAFT.',
+  })
   async publishVersion(
     @CurrentAuth() auth: AuthContext,
     @Param('id') policyId: string,
@@ -190,6 +263,18 @@ export class PolicyController {
   }
 
   @Get(':id')
+  @ApiOperation({
+    summary: 'Get a policy and its current published version',
+  })
+  @ApiParam({ name: 'id', description: 'Policy ID', format: 'uuid' })
+  @ApiResponse({ status: 200, type: GetPolicyResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'Policy not found.',
+  })
   async getPolicy(
     @CurrentAuth() auth: AuthContext,
     @Param('id') policyId: string,
@@ -212,6 +297,16 @@ export class PolicyController {
   }
 
   @Get(':id/versions')
+  @ApiOperation({ summary: 'List every version of a policy' })
+  @ApiParam({ name: 'id', description: 'Policy ID', format: 'uuid' })
+  @ApiResponse({ status: 200, type: PolicyVersionResponseDto, isArray: true })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'Policy not found.',
+  })
   async listVersions(
     @CurrentAuth() auth: AuthContext,
     @Param('id') policyId: string,
@@ -227,6 +322,31 @@ export class PolicyController {
   }
 
   @Get(':id/versions/:versionId')
+  @ApiOperation({
+    summary: 'Get one policy version',
+    description:
+      'With `?format=yaml`, returns the content as a `text/yaml` document instead of the normal JSON envelope.',
+  })
+  @ApiParam({ name: 'id', description: 'Policy ID', format: 'uuid' })
+  @ApiParam({
+    name: 'versionId',
+    description: 'PolicyVersion ID',
+    format: 'uuid',
+  })
+  @ApiQuery({
+    name: 'format',
+    required: false,
+    enum: ['yaml'],
+    description: 'Pass "yaml" to receive text/yaml instead of JSON.',
+  })
+  @ApiResponse({ status: 200, type: PolicyVersionResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'Policy or version not found.',
+  })
   async getVersion(
     @CurrentAuth() auth: AuthContext,
     @Param('id') policyId: string,

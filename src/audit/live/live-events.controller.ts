@@ -1,9 +1,17 @@
 import { Controller, Get, Logger, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiProduces,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { CurrentAuth } from '../../auth/auth-context';
 import type { AuthContext } from '../../auth/auth-context';
 import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
 import { RedisPubSubService } from './redis-pubsub.service';
+import { LiveAuditEventEnvelopeDto } from './live-events.dto';
 
 const HEARTBEAT_INTERVAL_MS = 25_000;
 
@@ -28,6 +36,8 @@ const HEARTBEAT_INTERVAL_MS = 25_000;
  * message as an SSE `audit-event` frame, cleaning up its dedicated Redis
  * connection the moment the client disconnects.
  */
+@ApiTags('events')
+@ApiBearerAuth('jwt')
 @Controller('events')
 @UseGuards(JwtAuthGuard)
 export class LiveEventsController {
@@ -36,6 +46,18 @@ export class LiveEventsController {
   constructor(private readonly redisPubSubService: RedisPubSubService) {}
 
   @Get('live')
+  @ApiOperation({
+    summary: 'Live tenant-scoped audit event feed (Server-Sent Events)',
+    description:
+      'A long-lived text/event-stream connection: an initial `: connected` comment, then one `event: audit-event` frame per new tenant event (`data:` is a JSON-encoded DomainEventEnvelope), plus periodic `: heartbeat` comments. No role restriction beyond authentication — any authenticated tenant user may watch. This describes the stream shape only; standard HTTP client generators typically cannot consume SSE the same way as a normal JSON response.',
+  })
+  @ApiProduces('text/event-stream')
+  @ApiResponse({
+    status: 200,
+    description:
+      "text/event-stream — each `audit-event` frame's data is a LiveAuditEventEnvelopeDto.",
+    type: LiveAuditEventEnvelopeDto,
+  })
   async live(
     @CurrentAuth() auth: AuthContext,
     @Res() reply: FastifyReply,

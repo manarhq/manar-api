@@ -7,6 +7,14 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiOperation,
+  ApiParam,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { CurrentAuth } from '../auth/auth-context';
 import type { AuthContext } from '../auth/auth-context';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -14,12 +22,19 @@ import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
+import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import { RevokeStatusResponseDto } from '../agents/agents.dto';
 import { TaskNotFoundError } from './tasks.errors';
 import { TasksService } from './tasks.service';
 import {
   CreateTaskRequestSchema,
   RevokeTaskRequestSchema,
 } from './tasks.validation';
+import {
+  CreateTaskRequestDto,
+  CreateTaskResponseDto,
+  RevokeTaskRequestDto,
+} from './tasks.dto';
 
 /**
  * Human-facing task management: creating a *root* task (assigning an
@@ -41,6 +56,8 @@ import {
  * `AuthorizationService`'s real-time ancestor walk, with no cascade write
  * to any descendant.
  */
+@ApiTags('tasks')
+@ApiBearerAuth('jwt')
 @Controller('tasks')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @RequireRole('SECURITY_ADMIN', 'TENANT_OWNER', 'AI_GOVERNANCE_MANAGER')
@@ -51,6 +68,21 @@ export class TasksController {
   ) {}
 
   @Post()
+  @ApiOperation({
+    summary: 'Create a root task',
+    description:
+      'Assigns an agent a narrowly-scoped grant of authority. A root task has no parent — every delegation chain starts here (see `POST /agent/v1/tasks/:id/delegate`, out of scope for this human-facing doc). Requires SECURITY_ADMIN, TENANT_OWNER, or AI_GOVERNANCE_MANAGER.',
+  })
+  @ApiBody({ type: CreateTaskRequestDto })
+  @ApiResponse({ status: 201, type: CreateTaskResponseDto })
+  @ApiResponse({
+    status: 400,
+    type: ErrorResponseDto,
+    description:
+      'Invalid body, or assignedAgentId does not resolve to an agent in this tenant.',
+  })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
   async createTask(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const input = parseBodyOrThrow(CreateTaskRequestSchema, body);
     const tenantClient = await this.tenantDatabaseManager.getClient(
@@ -94,6 +126,22 @@ export class TasksController {
   }
 
   @Post(':id/revoke')
+  @ApiOperation({
+    summary: 'Revoke a task',
+    description:
+      "Immediately invalidates this task and every descendant (delegated) task's authorization, enforced by AuthorizationService walking the live ancestor chain on every check — not by a cascading write to descendants.",
+  })
+  @ApiParam({ name: 'id', description: 'Task ID', format: 'uuid' })
+  @ApiBody({ type: RevokeTaskRequestDto })
+  @ApiResponse({ status: 201, type: RevokeStatusResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'Task not found.',
+  })
   async revokeTask(
     @CurrentAuth() auth: AuthContext,
     @Param('id') taskId: string,
