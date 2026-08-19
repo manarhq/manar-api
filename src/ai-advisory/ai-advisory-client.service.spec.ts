@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
+import type { ControlPrismaService } from '../database/control-prisma.service';
 import { FakeAnalysisServiceServer } from '../../test/support/fake-analysis-service-server';
 import { AiAdvisoryClient } from './ai-advisory-client.service';
 
@@ -12,12 +13,31 @@ function fakeConfigService(
     AI_ADVISORY_TIMEOUT_MS: 300,
     AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
     AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 200,
+    AI_ADVISORY_PROVIDER: 'ollama',
     ...overrides,
   };
   return {
     get: (key: keyof AppConfig) => values[key],
   } as unknown as ConfigService<AppConfig, true>;
 }
+
+/** A fake `ControlPrismaService` whose `tenant.findUnique` returns a fixed `allowExternalAi` value (or throws, for the fail-closed-on-error scenario) — never a real control DB connection. */
+function fakeControlPrismaService(
+  allowExternalAi: boolean | 'throw' = true,
+): ControlPrismaService {
+  return {
+    tenant: {
+      findUnique: () => {
+        if (allowExternalAi === 'throw') {
+          throw new Error('control DB unreachable');
+        }
+        return Promise.resolve({ allowExternalAi });
+      },
+    },
+  } as unknown as ControlPrismaService;
+}
+
+const permissiveControl = fakeControlPrismaService(true);
 
 /**
  * Unit-level coverage of `AiAdvisoryClient`'s own resilience mechanisms
@@ -53,10 +73,12 @@ describe('AiAdvisoryClient', () => {
     };
     const client = new AiAdvisoryClient(
       fakeConfigService({ AI_ADVISORY_GRPC_TARGET: target }),
+      permissiveControl,
     );
     const result = await client.analyzeRisk({
       actionDescription: 'do a thing',
       context: '',
+      tenantId: 'tenant-1',
     });
     expect(result).toEqual({
       score: 42,
@@ -83,12 +105,21 @@ describe('AiAdvisoryClient', () => {
     };
     const client = new AiAdvisoryClient(
       fakeConfigService({ AI_ADVISORY_GRPC_TARGET: target }),
+      permissiveControl,
     );
     await expect(
-      client.analyzeRisk({ actionDescription: 'x', context: '' }),
+      client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 'tenant-1',
+      }),
     ).resolves.toBeNull();
     await expect(
-      client.analyzePromptInjection({ content: 'x', source: 'tool_output' }),
+      client.analyzePromptInjection({
+        content: 'x',
+        source: 'tool_output',
+        tenantId: 'tenant-1',
+      }),
     ).resolves.toBeNull();
   });
 
@@ -106,8 +137,12 @@ describe('AiAdvisoryClient', () => {
     };
     const client = new AiAdvisoryClient(
       fakeConfigService({ AI_ADVISORY_GRPC_TARGET: target }),
+      permissiveControl,
     );
-    const result = await client.analyzeDlp({ content: 'anything' });
+    const result = await client.analyzeDlp({
+      content: 'anything',
+      tenantId: 'tenant-1',
+    });
     expect(result).not.toBeNull();
     expect(result?.overallSeverity).toBe('SEVERITY_MEDIUM');
     expect(result?.findings).toHaveLength(1);
@@ -120,10 +155,12 @@ describe('AiAdvisoryClient', () => {
         AI_ADVISORY_GRPC_TARGET: target,
         AI_ADVISORY_TIMEOUT_MS: 100,
       }),
+      permissiveControl,
     );
     const result = await client.analyzeRisk({
       actionDescription: 'x',
       context: '',
+      tenantId: 'tenant-1',
     });
     expect(result).toBeNull();
   }, 10_000);
@@ -134,10 +171,12 @@ describe('AiAdvisoryClient', () => {
         AI_ADVISORY_GRPC_TARGET: '127.0.0.1:1', // nothing listens on port 1
         AI_ADVISORY_TIMEOUT_MS: 300,
       }),
+      permissiveControl,
     );
     const result = await client.analyzeRisk({
       actionDescription: 'x',
       context: '',
+      tenantId: 'tenant-1',
     });
     expect(result).toBeNull();
   });
@@ -151,11 +190,20 @@ describe('AiAdvisoryClient', () => {
         AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 2,
         AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 300,
       }),
+      permissiveControl,
     );
 
     // Two failures open the circuit.
-    await client.analyzeRisk({ actionDescription: 'x', context: '' });
-    await client.analyzeRisk({ actionDescription: 'x', context: '' });
+    await client.analyzeRisk({
+      actionDescription: 'x',
+      context: '',
+      tenantId: 'tenant-1',
+    });
+    await client.analyzeRisk({
+      actionDescription: 'x',
+      context: '',
+      tenantId: 'tenant-1',
+    });
     expect(fakeServer.callCounts.analyzeRisk).toBe(2);
 
     // Circuit now open -- further calls return null immediately without
@@ -164,6 +212,7 @@ describe('AiAdvisoryClient', () => {
     const result = await client.analyzeRisk({
       actionDescription: 'x',
       context: '',
+      tenantId: 'tenant-1',
     });
     const elapsedMs = Date.now() - before;
     expect(result).toBeNull();
@@ -172,7 +221,11 @@ describe('AiAdvisoryClient', () => {
 
     // After the cooldown elapses, the next call is let through as a trial.
     await new Promise((resolve) => setTimeout(resolve, 350));
-    await client.analyzeRisk({ actionDescription: 'x', context: '' });
+    await client.analyzeRisk({
+      actionDescription: 'x',
+      context: '',
+      tenantId: 'tenant-1',
+    });
     expect(fakeServer.callCounts.analyzeRisk).toBe(3); // the trial call did reach the server
   }, 10_000);
 
@@ -185,9 +238,14 @@ describe('AiAdvisoryClient', () => {
         AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 1,
         AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 200,
       }),
+      permissiveControl,
     );
 
-    await client.analyzeRisk({ actionDescription: 'x', context: '' }); // opens circuit
+    await client.analyzeRisk({
+      actionDescription: 'x',
+      context: '',
+      tenantId: 'tenant-1',
+    }); // opens circuit
     await new Promise((resolve) => setTimeout(resolve, 250)); // cooldown elapses
     fakeServer.responseDelayMs = 0; // server recovers
     fakeServer.riskResult = {
@@ -200,6 +258,7 @@ describe('AiAdvisoryClient', () => {
     const trialResult = await client.analyzeRisk({
       actionDescription: 'x',
       context: '',
+      tenantId: 'tenant-1',
     });
     expect(trialResult).not.toBeNull(); // half-open trial succeeded, circuit closed
 
@@ -209,8 +268,180 @@ describe('AiAdvisoryClient', () => {
     // coincidentally still "open but past cooldown".
     fakeServer.responseDelayMs = 500;
     const before = Date.now();
-    await client.analyzeRisk({ actionDescription: 'x', context: '' });
+    await client.analyzeRisk({
+      actionDescription: 'x',
+      context: '',
+      tenantId: 'tenant-1',
+    });
     const elapsedMs = Date.now() - before;
     expect(elapsedMs).toBeGreaterThanOrEqual(50); // this call actually attempted the RPC (paid the timeout), proving the circuit was closed going in
   }, 10_000);
+
+  /**
+   * Phase 12a (Section 54, data residency enforcement). These assert at
+   * the *network* level, not just "the function returned null" -- every
+   * scenario checks `fakeServer.callCounts`, which only increments when
+   * the fake gRPC server actually receives a real wire-protocol call, to
+   * prove the RPC was never attempted at all when the residency gate
+   * blocks it (the exact assertion the design spec's Testing section
+   * requires).
+   */
+  describe('data residency enforcement (Section 54)', () => {
+    it('an external provider + a tenant with allowExternalAi=false never reaches the network', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService(false),
+      );
+      const result = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 'tenant-no-external-ai',
+      });
+      expect(result).toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(0);
+    });
+
+    it('an external provider + a tenant with allowExternalAi=true DOES reach the network', async () => {
+      fakeServer.riskResult = {
+        score: 20,
+        confidence: 0.5,
+        signals: [],
+        explanation: '',
+        recommendedAction: 1,
+      };
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService(true),
+      );
+      const result = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 'tenant-allows-external-ai',
+      });
+      expect(result).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(1);
+    });
+
+    it('a self-hosted provider (ollama) is never gated by allowExternalAi, even when false', async () => {
+      fakeServer.riskResult = {
+        score: 20,
+        confidence: 0.5,
+        signals: [],
+        explanation: '',
+        recommendedAction: 1,
+      };
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'ollama',
+        }),
+        fakeControlPrismaService(false),
+      );
+      const result = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 'tenant-no-external-ai',
+      });
+      expect(result).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(1);
+    });
+
+    it('applies identically to analyzeDlp and analyzePromptInjection -- no RPC attempted for either', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService(false),
+      );
+      const dlpResult = await client.analyzeDlp({
+        content: 'anything',
+        tenantId: 'tenant-no-external-ai',
+      });
+      const injectionResult = await client.analyzePromptInjection({
+        content: 'anything',
+        source: 'tool_output',
+        tenantId: 'tenant-no-external-ai',
+      });
+      expect(dlpResult).toBeNull();
+      expect(injectionResult).toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(0);
+      expect(fakeServer.callCounts.analyzePromptInjection).toBe(0);
+    });
+
+    it('fails CLOSED (treats as disallowed) when the tenant lookup itself errors, for an external provider', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService('throw'),
+      );
+      const result = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 'tenant-unknown',
+      });
+      expect(result).toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(0);
+    });
+
+    it('a residency block does not count toward the circuit breaker (a policy decision, not an outage)', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 1,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService(false),
+      );
+      // Several residency-blocked calls in a row -- if these counted as
+      // circuit-breaker failures, a threshold of 1 would open the circuit
+      // after the first one, but that's an orthogonal mechanism this
+      // policy check must never trip.
+      await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      expect(fakeServer.callCounts.analyzeRisk).toBe(0);
+
+      // Now switch this same tenant to allowed, and confirm the circuit is
+      // still closed (a real call is actually attempted, not
+      // short-circuited by an errantly-opened breaker).
+      fakeServer.riskResult = {
+        score: 15,
+        confidence: 0.5,
+        signals: [],
+        explanation: '',
+        recommendedAction: 1,
+      };
+      const allowedClient = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 1,
+          AI_ADVISORY_PROVIDER: 'anthropic',
+        }),
+        fakeControlPrismaService(true),
+      );
+      const result = await allowedClient.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      expect(result).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeRisk).toBe(1);
+    });
+  });
 });

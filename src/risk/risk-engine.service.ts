@@ -6,6 +6,8 @@ import { ToolRegistryService } from '../tools/tool-registry.service';
 import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
 
 export interface RiskScoreInput {
+  /** Phase 12a: needed to pass through to `AiAdvisoryClient.analyzeRisk`'s data-residency (`allowExternalAi`) check — see docs/ai-security-model.md's "Data residency enforcement" section. */
+  tenantId: string;
   toolId: string;
   actionId: string;
   resource: string;
@@ -181,6 +183,7 @@ export class RiskEngine {
     const advisory = await this.aiAdvisoryClient.analyzeRisk({
       actionDescription: `Agent action: ${input.toolId}.${input.actionId} on resource "${input.resource}"`,
       context: `taskId=${input.task.id} riskCeiling=${input.task.riskCeiling} delegationDepth=${ancestors.length} deterministicRiskScore=${deterministicRiskScore}`,
+      tenantId: input.tenantId,
     });
 
     let aiAdvisoryScore: number | null = null;

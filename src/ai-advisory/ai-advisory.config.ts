@@ -46,6 +46,34 @@ export const AiAdvisoryConfigSchema = z.object({
     .int()
     .positive()
     .default(30_000),
+
+  /**
+   * Phase 12a (Section 54, data residency enforcement): which AI provider
+   * `manar-ai` is *currently configured* to use for this deployment.
+   * `manar-api` has no way to introspect `manar-ai`'s own `AI_PROVIDER`
+   * setting over the gRPC `AnalysisService` contract (there is no
+   * "describe yourself" RPC) — this is this side's own declaration of the
+   * same fact, which an operator must keep in sync with whatever
+   * `manar-ai`'s compose/deployment config actually sets. Only `anthropic`
+   * is "external" for the purpose of `AiAdvisoryClient`'s
+   * `allowExternalAi` gate below — `ollama`/`vllm` are self-hosted model
+   * backends, so a tenant's `allowExternalAi = false` never blocks calls
+   * against them (see docs/ai-security-model.md's "Data residency
+   * enforcement" section and `isExternalAiProvider` below). Defaults to
+   * `ollama`, matching `deploy/docker-compose.yml`'s own `manar-ai`
+   * service configuration (`docs/ai-security-model.md`'s "Local infra"
+   * section).
+   */
+  AI_ADVISORY_PROVIDER: z
+    .enum(['anthropic', 'ollama', 'vllm'])
+    .default('ollama'),
 });
+
+/** The only provider this codebase currently treats as "external" (leaves this deployment's infrastructure) — see `AI_ADVISORY_PROVIDER`'s own doc comment. */
+export function isExternalAiProvider(
+  provider: AiAdvisoryConfig['AI_ADVISORY_PROVIDER'],
+): boolean {
+  return provider === 'anthropic';
+}
 
 export type AiAdvisoryConfig = z.infer<typeof AiAdvisoryConfigSchema>;

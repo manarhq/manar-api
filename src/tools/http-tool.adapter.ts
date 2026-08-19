@@ -1,4 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+} from '../common/ssrf/url-safety';
 import { validateAgainstSchema } from './json-schema-validator.util';
 import type {
   ToolInvocationResult,
@@ -67,6 +71,25 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
         ? tool.baseEndpoint
         : `${tool.baseEndpoint}/`,
     );
+
+    // Phase 12a (SSRF protection): re-validated on *every* call, never just
+    // once when the Tool was registered -- a hostname that resolved safely
+    // then could have been repointed at an internal address since (DNS
+    // rebinding). See src/common/ssrf/url-safety.ts's doc comment.
+    try {
+      await assertSafeOutboundUrl(url.toString());
+    } catch (error) {
+      if (error instanceof UnsafeOutboundUrlError) {
+        this.logger.warn(
+          `Blocked HTTP tool call to "${tool.name}/${action.name}": ${error.reasonCode}`,
+        );
+        return {
+          success: false,
+          errorMessage: 'blocked_by_outbound_url_policy',
+        };
+      }
+      throw error;
+    }
 
     let lastError: string = 'request failed';
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {

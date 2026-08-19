@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+} from '../common/ssrf/url-safety';
 import { validateAgainstSchema } from './json-schema-validator.util';
 import type {
   ToolInvocationResult,
@@ -60,6 +64,24 @@ export class McpToolAdapter implements ToolProtocolAdapter {
         success: false,
         errorMessage: `Invalid params for action "${action.name}": ${validation.errors}`,
       };
+    }
+
+    // Phase 12a (SSRF protection) -- see HttpToolAdapter's identical
+    // call-time check for why this is re-validated on every invocation
+    // rather than trusted from registration time.
+    try {
+      await assertSafeOutboundUrl(tool.baseEndpoint);
+    } catch (error) {
+      if (error instanceof UnsafeOutboundUrlError) {
+        this.logger.warn(
+          `Blocked MCP tool call to "${tool.name}/${action.name}": ${error.reasonCode}`,
+        );
+        return {
+          success: false,
+          errorMessage: 'blocked_by_outbound_url_policy',
+        };
+      }
+      throw error;
     }
 
     const client = new Client({ name: 'manar-tool-gateway', version: '1.0.0' });
