@@ -8,6 +8,7 @@ import { PolicyEngine } from '../policy/policy-engine.service';
 import { RiskEngine } from '../risk/risk-engine.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { ApprovalRequestNotFoundError } from './approvals.errors';
 import { computeParameterHash } from './parameter-hash.util';
 import { signGrantToken, verifyGrantToken } from './grant-token.util';
@@ -68,6 +69,7 @@ export class GrantService {
     private readonly riskEngine: RiskEngine,
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly auditService: AuditService,
+    private readonly killSwitchService: KillSwitchService,
   ) {}
 
   /**
@@ -245,7 +247,13 @@ export class GrantService {
    * `params` matches the grant's own (the parameter-binding invariant).
    * Only then loads the `AuthorizationGrant` row itself and checks
    * unconsumed/unrevoked/unexpired. Re-checks task/agent liveness (the
-   * fail-closed conditions that exist today) but does **not** re-run
+   * fail-closed conditions that exist today) AND every applicable kill
+   * switch (platform/tenant/agent/agent-group/tool, for *this exact grant's*
+   * own agent+tool — `KillSwitchService.checkAll`, Section 32's harder
+   * requirement: an already-issued grant, still unexpired and unconsumed,
+   * must become unusable the moment a relevant kill switch activates, not
+   * only block *new* `/agent/v1/authorize` requests — see
+   * docs/kill-switches.md) but does **not** re-run
    * `PolicyEngine`/`RiskEngine` or increment `executionCount` again —
    * those already happened once, at grant-issuance time
    * (`reevaluateAndIssueGrant`). On success, atomically marks the grant
@@ -336,6 +344,22 @@ export class GrantService {
     });
     if (!agent || agent.status !== 'ACTIVE') {
       return { valid: false, reason: 'agent_not_active' };
+    }
+
+    // Section 32's harder kill-switch requirement: re-check every
+    // applicable scope *right now*, at redemption time — never trust
+    // whatever was true when this grant was originally issued. A kill
+    // switch activated any time between issuance and this exact retry
+    // (including immediately after a previously-successful use of a
+    // *different* grant for the same agent) makes this still-valid,
+    // still-unexpired, still-unconsumed grant unusable.
+    const killSwitchCheck = await this.killSwitchService.checkAll(
+      tenantClient,
+      input.tenantId,
+      { agentId: grant.agentId, toolId: grant.toolId },
+    );
+    if (killSwitchCheck.killed) {
+      return { valid: false, reason: killSwitchCheck.reason as string };
     }
 
     const consumeResult = await tenantClient.authorizationGrant.updateMany({

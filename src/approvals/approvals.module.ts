@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TasksModule } from '../tasks/tasks.module';
 import { PolicyModule } from '../policy/policy.module';
 import { RiskModule } from '../risk/risk.module';
+import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { ApprovalRequestService } from './approval-request.service';
 import { GrantService } from './grant.service';
 
@@ -18,7 +19,7 @@ import { GrantService } from './grant.service';
  * module to build them).
  */
 @Module({
-  imports: [TasksModule, PolicyModule, RiskModule],
+  imports: [TasksModule, PolicyModule, RiskModule, KillSwitchesModule],
   providers: [ApprovalRequestService, GrantService],
   exports: [ApprovalRequestService, GrantService],
 })
