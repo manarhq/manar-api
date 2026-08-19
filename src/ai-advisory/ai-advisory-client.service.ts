@@ -6,8 +6,12 @@ import {
   AnalysisServiceClient,
   dlpAnalysisResult_SeverityToJSON,
   dlpFinding_TypeToJSON,
+  policyRuleDraft_EffectToJSON,
   riskAnalysisResult_RecommendedActionToJSON,
+  type AuditInvestigationResult,
   type DlpAnalysisResult,
+  type IncidentSummaryResult,
+  type PolicyDraftResult,
   type PromptInjectionAnalysisResult,
   type RiskAnalysisResult,
 } from '@manar-ai/grpc-client';
@@ -44,10 +48,51 @@ export interface DlpAdvisory {
   overallSeverity: string;
 }
 
+/** Phase 10c — `AiAdvisoryClient.summarizeIncident`'s advisory result. See `IncidentSummaryResult`'s proto doc comment for the "advisory-only, never presented as confirmed" posture every field here carries. */
+export interface IncidentSummaryAdvisory {
+  summary: string;
+  keyEvents: string[];
+  probableRootCause: string;
+  recommendedNextSteps: string[];
+  confidence: number;
+  explanation: string;
+}
+
+/** Mirrors `PolicyRuleDraft` (the proto message), with `effect` already converted to the same string form `PolicyRuleSchema.effect` uses (`ALLOW`/`DENY`/`REQUIRE_APPROVAL`) — see `suggestPolicy`'s doc comment for why. */
+export interface PolicyRuleDraftAdvisory {
+  name: string;
+  toolId: string;
+  actionId: string;
+  resourcePattern: string;
+  effect: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+  riskWeight: number;
+  riskFloor: number;
+  description: string;
+}
+
+/** Phase 10c — `AiAdvisoryClient.suggestPolicy`'s advisory result. Never auto-published — see that method's doc comment. */
+export interface PolicyDraftAdvisory {
+  rules: PolicyRuleDraftAdvisory[];
+  explanation: string;
+  confidence: number;
+}
+
+/** Phase 10c — `AiAdvisoryClient.investigateAudit`'s advisory result. */
+export interface AuditInvestigationAdvisory {
+  answer: string;
+  citations: string[];
+  confidence: number;
+  explanation: string;
+}
+
 /**
  * The only place in this codebase that ever calls manar-ai's gRPC
- * `AnalysisService` (Phase 10b — see docs/ai-security-model.md). Every
- * public method has the identical contract: on success, a real advisory
+ * `AnalysisService` (Phase 10b — see docs/ai-security-model.md; Phase 10c
+ * adds `summarizeIncident`/`suggestPolicy`/`investigateAudit`, which follow
+ * the identical timeout/circuit-breaker/data-residency/fail-safe contract
+ * documented below, wrapping three additional RPCs rather than any new
+ * resilience logic). Every public method has the identical contract: on
+ * success, a real advisory
  * result; on **any** failure (timeout, transport error, non-OK gRPC
  * status, or the circuit being open) a `null`/absent result — this class
  * never throws out to a caller, and a caller must treat `null` as "no AI
@@ -264,6 +309,180 @@ export class AiAdvisoryClient implements OnModuleDestroy {
         source: f.source,
       })),
       overallSeverity: dlpAnalysisResult_SeverityToJSON(result.overallSeverity),
+    };
+  }
+
+  /**
+   * Phase 10c — advisory summary of caller-supplied incident context (a
+   * free-text description and/or human-readable summaries of related audit
+   * events). `manar-api`'s `IncidentsController` is responsible for
+   * resolving `relatedEvents` from the caller's own tenant before calling
+   * this (this class never fetches anything itself — see
+   * `docs/ai-security-model.md`). `confidence <= 0` (manar-ai's documented
+   * fail-secure marker, same convention as `analyzeRisk`/
+   * `analyzePromptInjection` above) returns `null` — never a fabricated-
+   * looking summary presented as real.
+   */
+  async summarizeIncident(input: {
+    description: string;
+    relatedEvents: string[];
+    correlationId?: string;
+    /** Phase 12a (Section 54) — see `analyzeRisk`'s identical parameter doc comment. */
+    tenantId: string;
+    /** Phase 15a (Section 53) — see `analyzeRisk`'s identical parameter doc comment. */
+    classification?: DataClassification;
+  }): Promise<IncidentSummaryAdvisory | null> {
+    if (
+      !(await this.residencyAllows(
+        input.tenantId,
+        'SummarizeIncident',
+        input.classification,
+      ))
+    ) {
+      return null;
+    }
+    const result = await this.call('SummarizeIncident', () =>
+      this.promisify<IncidentSummaryResult>((deadline, callback) =>
+        this.client.summarizeIncident(
+          {
+            description: input.description,
+            relatedEvents: input.relatedEvents,
+            correlationId: input.correlationId ?? this.resolveCorrelationId(),
+          },
+          new grpc.Metadata(),
+          { deadline },
+          callback,
+        ),
+      ),
+    );
+    if (!result) return null;
+    if (result.confidence <= 0) return null;
+    return {
+      summary: result.summary,
+      keyEvents: result.keyEvents,
+      probableRootCause: result.probableRootCause,
+      recommendedNextSteps: result.recommendedNextSteps,
+      confidence: result.confidence,
+      explanation: result.explanation,
+    };
+  }
+
+  /**
+   * Phase 10c — converts a natural-language policy description into a
+   * **draft** rule set matching Phase 6's `PolicyContentSchema` field-for-
+   * field (`PolicyRuleDraft.effect`'s `EFFECT_*` enum is mapped to the same
+   * bare `ALLOW`/`DENY`/`REQUIRE_APPROVAL` strings `PolicyRuleSchema.effect`
+   * uses, so the caller can hand `rules` straight to that schema without any
+   * further translation). **Never published by this class or anything it
+   * calls** — `PolicyController.suggestPolicy` (the only caller) must
+   * persist the result as a `DRAFT` `PolicyVersion` and require the normal
+   * human `/policies/:id/versions/:versionId/publish` step, exactly like
+   * any other draft. `confidence <= 0` returns `null` (manar-ai's documented
+   * fail-secure marker — `rules` is guaranteed empty in that case per the
+   * proto's own doc comment, but this class returns `null` regardless,
+   * consistent with every other advisory method here).
+   */
+  async suggestPolicy(input: {
+    naturalLanguageDescription: string;
+    correlationId?: string;
+    /** Phase 12a (Section 54) — see `analyzeRisk`'s identical parameter doc comment. */
+    tenantId: string;
+    /** Phase 15a (Section 53) — see `analyzeRisk`'s identical parameter doc comment. */
+    classification?: DataClassification;
+  }): Promise<PolicyDraftAdvisory | null> {
+    if (
+      !(await this.residencyAllows(
+        input.tenantId,
+        'SuggestPolicy',
+        input.classification,
+      ))
+    ) {
+      return null;
+    }
+    const result = await this.call('SuggestPolicy', () =>
+      this.promisify<PolicyDraftResult>((deadline, callback) =>
+        this.client.suggestPolicy(
+          {
+            naturalLanguageDescription: input.naturalLanguageDescription,
+            correlationId: input.correlationId ?? this.resolveCorrelationId(),
+          },
+          new grpc.Metadata(),
+          { deadline },
+          callback,
+        ),
+      ),
+    );
+    if (!result) return null;
+    if (result.confidence <= 0) return null;
+    return {
+      rules: result.rules.map((rule) => ({
+        name: rule.name,
+        toolId: rule.toolId,
+        actionId: rule.actionId,
+        resourcePattern: rule.resourcePattern,
+        effect: policyRuleDraft_EffectToJSON(rule.effect).replace(
+          /^EFFECT_/,
+          '',
+        ) as 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL',
+        riskWeight: rule.riskWeight,
+        riskFloor: rule.riskFloor,
+        description: rule.description,
+      })),
+      explanation: result.explanation,
+      confidence: result.confidence,
+    };
+  }
+
+  /**
+   * Phase 10c — answers a question (e.g. "why was this action denied?")
+   * using only the caller-supplied `retrievedContext`. **This class performs
+   * no retrieval of its own** — `AuditController.investigateAudit` (the only
+   * caller) must have already produced `retrievedContext` via its own
+   * tenant-scoped `AuditSearchService` query before calling this, so that
+   * manar-ai only ever sees already-authorized data for this specific
+   * caller (see `docs/ai-security-model.md`'s RAG/retrieval boundary
+   * section). `confidence <= 0` returns `null` — never a fabricated answer
+   * presented as authoritative.
+   */
+  async investigateAudit(input: {
+    question: string;
+    retrievedContext: string[];
+    correlationId?: string;
+    /** Phase 12a (Section 54) — see `analyzeRisk`'s identical parameter doc comment. */
+    tenantId: string;
+    /** Phase 15a (Section 53) — see `analyzeRisk`'s identical parameter doc comment. */
+    classification?: DataClassification;
+  }): Promise<AuditInvestigationAdvisory | null> {
+    if (
+      !(await this.residencyAllows(
+        input.tenantId,
+        'InvestigateAudit',
+        input.classification,
+      ))
+    ) {
+      return null;
+    }
+    const result = await this.call('InvestigateAudit', () =>
+      this.promisify<AuditInvestigationResult>((deadline, callback) =>
+        this.client.investigateAudit(
+          {
+            question: input.question,
+            retrievedContext: input.retrievedContext,
+            correlationId: input.correlationId ?? this.resolveCorrelationId(),
+          },
+          new grpc.Metadata(),
+          { deadline },
+          callback,
+        ),
+      ),
+    );
+    if (!result) return null;
+    if (result.confidence <= 0) return null;
+    return {
+      answer: result.answer,
+      citations: result.citations,
+      confidence: result.confidence,
+      explanation: result.explanation,
     };
   }
 

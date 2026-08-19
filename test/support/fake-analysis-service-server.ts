@@ -2,7 +2,10 @@ import * as grpc from '@grpc/grpc-js';
 import {
   AnalysisServiceService,
   type AnalysisServiceServer,
+  type AuditInvestigationResult,
   type DlpAnalysisResult,
+  type IncidentSummaryResult,
+  type PolicyDraftResult,
   type PromptInjectionAnalysisResult,
   type RiskAnalysisResult,
 } from '@manar-ai/grpc-client';
@@ -34,6 +37,9 @@ export class FakeAnalysisServiceServer {
     analyzeRisk: 0,
     analyzePromptInjection: 0,
     analyzeDlp: 0,
+    summarizeIncident: 0,
+    suggestPolicy: 0,
+    investigateAudit: 0,
   };
 
   /** Artificial delay (ms) before responding to any RPC — set high to exercise `AiAdvisoryClient`'s timeout path. */
@@ -53,6 +59,35 @@ export class FakeAnalysisServiceServer {
     explanation: '',
   };
   dlpResult: DlpAnalysisResult = { findings: [], overallSeverity: 0 };
+  incidentSummaryResult: IncidentSummaryResult = {
+    summary: '',
+    keyEvents: [],
+    probableRootCause: '',
+    recommendedNextSteps: [],
+    confidence: 0,
+    explanation: '',
+  };
+  policyDraftResult: PolicyDraftResult = {
+    rules: [],
+    explanation: '',
+    confidence: 0,
+  };
+  auditInvestigationResult: AuditInvestigationResult = {
+    answer: '',
+    citations: [],
+    confidence: 0,
+    explanation: '',
+  };
+
+  /**
+   * The exact request payload the fake server most recently received for
+   * `InvestigateAudit` — lets a test assert precisely what `AiAdvisoryClient`
+   * sent over the wire (e.g. `retrievedContext`), the same "assert at the
+   * network level, never just 'it returned something'" posture this repo's
+   * data-residency tests already establish.
+   */
+  lastInvestigateAuditRequest:
+    { question: string; retrievedContext: string[] } | undefined;
 
   async start(): Promise<string> {
     this.server = new grpc.Server();
@@ -68,6 +103,22 @@ export class FakeAnalysisServiceServer {
       analyzeDlp: (_call, callback) => {
         this.callCounts.analyzeDlp += 1;
         this.respond(callback, () => this.dlpResult);
+      },
+      summarizeIncident: (_call, callback) => {
+        this.callCounts.summarizeIncident += 1;
+        this.respond(callback, () => this.incidentSummaryResult);
+      },
+      suggestPolicy: (_call, callback) => {
+        this.callCounts.suggestPolicy += 1;
+        this.respond(callback, () => this.policyDraftResult);
+      },
+      investigateAudit: (call, callback) => {
+        this.callCounts.investigateAudit += 1;
+        this.lastInvestigateAuditRequest = {
+          question: call.request.question,
+          retrievedContext: call.request.retrievedContext,
+        };
+        this.respond(callback, () => this.auditInvestigationResult);
       },
     };
     this.server.addService(AnalysisServiceService, impl);

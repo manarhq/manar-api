@@ -273,6 +273,159 @@ export function dlpAnalysisResult_SeverityToJSON(
   }
 }
 
+export interface IncidentSummaryRequest {
+  /** Free-text description of the incident, if any. */
+  description: string;
+  /**
+   * Human-readable summaries of related audit events/facts, caller-supplied
+   * (no formal Incident model exists yet — this RPC fetches nothing itself).
+   */
+  relatedEvents: string[];
+  correlationId: string;
+}
+
+export interface IncidentSummaryResult {
+  /** Human-readable synthesis of the supplied incident context. */
+  summary: string;
+  /** The most relevant events/facts from the supplied context, in order. */
+  keyEvents: string[];
+  /** Best-effort, advisory-only hypothesis — never presented as confirmed. */
+  probableRootCause: string;
+  /** Advisory suggestions for a human investigator; never auto-executed. */
+  recommendedNextSteps: string[];
+  /**
+   * Model confidence in this summary, 0.0-1.0. 0.0 means "summarization
+   * failed — treat as no advisory input", never a real (if low) summary.
+   */
+  confidence: number;
+  explanation: string;
+}
+
+export interface PolicyDraftRequest {
+  /**
+   * Natural-language description of the desired policy, e.g. "SOC agents
+   * may query SIEM events but endpoint isolation requires human approval".
+   */
+  naturalLanguageDescription: string;
+  correlationId: string;
+}
+
+export interface PolicyRuleDraft {
+  /** Human-readable label, never matched against. */
+  name: string;
+  /** Exact match, or "*" ("any tool"). */
+  toolId: string;
+  /** Exact match, or "*" ("any action"). */
+  actionId: string;
+  /** Exact match, or "*" (default) — "any resource". */
+  resourcePattern: string;
+  effect: PolicyRuleDraft_Effect;
+  /**
+   * 0-100, additive RiskEngine contribution when this rule matches. 0 means
+   * "not set" (a real 0-weight rule is indistinguishable from an unset one,
+   * and functionally equivalent — both contribute no risk).
+   */
+  riskWeight: number;
+  /**
+   * 0-100, RiskEngine score is clamped up to at least this when this rule
+   * matches. 0 means "not set" (see risk_weight).
+   */
+  riskFloor: number;
+  /** Free-text rationale, never evaluated. */
+  description: string;
+}
+
+export enum PolicyRuleDraft_Effect {
+  EFFECT_UNSPECIFIED = 0,
+  EFFECT_ALLOW = 1,
+  EFFECT_DENY = 2,
+  EFFECT_REQUIRE_APPROVAL = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function policyRuleDraft_EffectFromJSON(
+  object: any,
+): PolicyRuleDraft_Effect {
+  switch (object) {
+    case 0:
+    case 'EFFECT_UNSPECIFIED':
+      return PolicyRuleDraft_Effect.EFFECT_UNSPECIFIED;
+    case 1:
+    case 'EFFECT_ALLOW':
+      return PolicyRuleDraft_Effect.EFFECT_ALLOW;
+    case 2:
+    case 'EFFECT_DENY':
+      return PolicyRuleDraft_Effect.EFFECT_DENY;
+    case 3:
+    case 'EFFECT_REQUIRE_APPROVAL':
+      return PolicyRuleDraft_Effect.EFFECT_REQUIRE_APPROVAL;
+    case -1:
+    case 'UNRECOGNIZED':
+    default:
+      return PolicyRuleDraft_Effect.UNRECOGNIZED;
+  }
+}
+
+export function policyRuleDraft_EffectToJSON(
+  object: PolicyRuleDraft_Effect,
+): string {
+  switch (object) {
+    case PolicyRuleDraft_Effect.EFFECT_UNSPECIFIED:
+      return 'EFFECT_UNSPECIFIED';
+    case PolicyRuleDraft_Effect.EFFECT_ALLOW:
+      return 'EFFECT_ALLOW';
+    case PolicyRuleDraft_Effect.EFFECT_DENY:
+      return 'EFFECT_DENY';
+    case PolicyRuleDraft_Effect.EFFECT_REQUIRE_APPROVAL:
+      return 'EFFECT_REQUIRE_APPROVAL';
+    case PolicyRuleDraft_Effect.UNRECOGNIZED:
+    default:
+      return 'UNRECOGNIZED';
+  }
+}
+
+export interface PolicyDraftResult {
+  /**
+   * A DRAFT rule set — never auto-published. manar-api must persist this as
+   * a DRAFT PolicyVersion and require the normal human publish step.
+   */
+  rules: PolicyRuleDraft[];
+  /** Rationale for the drafted rules, or why none were drafted. */
+  explanation: string;
+  /**
+   * Model confidence in this draft, 0.0-1.0. 0.0 means "suggestion failed —
+   * treat as no advisory input"; `rules` is empty in that case, never a
+   * fabricated-looking draft.
+   */
+  confidence: number;
+}
+
+export interface AuditInvestigationRequest {
+  /** A question like "why was this action denied?". */
+  question: string;
+  /**
+   * Already permission-scoped context (e.g. audit-event summaries)
+   * manar-api's own OpenSearch retrieval produced — this RPC performs no
+   * lookup of its own and answers using only what is supplied here.
+   */
+  retrievedContext: string[];
+  correlationId: string;
+}
+
+export interface AuditInvestigationResult {
+  /** Human-readable answer, grounded only in the supplied context. */
+  answer: string;
+  /** Which pieces of the supplied context the answer relied on. */
+  citations: string[];
+  /**
+   * Model confidence in this answer, 0.0-1.0. 0.0 means "investigation
+   * failed — treat as no advisory input", never a fabricated answer
+   * presented as authoritative.
+   */
+  confidence: number;
+  explanation: string;
+}
+
 function createBaseRiskAnalysisRequest(): RiskAnalysisRequest {
   return { actionDescription: '', context: '', correlationId: '' };
 }
@@ -1078,10 +1231,962 @@ export const DlpAnalysisResult: MessageFns<DlpAnalysisResult> = {
   },
 };
 
+function createBaseIncidentSummaryRequest(): IncidentSummaryRequest {
+  return { description: '', relatedEvents: [], correlationId: '' };
+}
+
+export const IncidentSummaryRequest: MessageFns<IncidentSummaryRequest> = {
+  encode(
+    message: IncidentSummaryRequest,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.description !== '') {
+      writer.uint32(10).string(message.description);
+    }
+    for (const v of message.relatedEvents) {
+      writer.uint32(18).string(v!);
+    }
+    if (message.correlationId !== '') {
+      writer.uint32(26).string(message.correlationId);
+    }
+    return writer;
+  },
+
+  decode(
+    input: BinaryReader | Uint8Array,
+    length?: number,
+  ): IncidentSummaryRequest {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseIncidentSummaryRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.description = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.relatedEvents.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.correlationId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): IncidentSummaryRequest {
+    return {
+      description: isSet(object.description)
+        ? globalThis.String(object.description)
+        : '',
+      relatedEvents: globalThis.Array.isArray(object?.relatedEvents)
+        ? object.relatedEvents.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.related_events)
+          ? object.related_events.map((e: any) => globalThis.String(e))
+          : [],
+      correlationId: isSet(object.correlationId)
+        ? globalThis.String(object.correlationId)
+        : isSet(object.correlation_id)
+          ? globalThis.String(object.correlation_id)
+          : '',
+    };
+  },
+
+  toJSON(message: IncidentSummaryRequest): unknown {
+    const obj: any = {};
+    if (message.description !== '') {
+      obj.description = message.description;
+    }
+    if (message.relatedEvents?.length) {
+      obj.relatedEvents = message.relatedEvents;
+    }
+    if (message.correlationId !== '') {
+      obj.correlationId = message.correlationId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<IncidentSummaryRequest>, I>>(
+    base?: I,
+  ): IncidentSummaryRequest {
+    return IncidentSummaryRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<IncidentSummaryRequest>, I>>(
+    object: I,
+  ): IncidentSummaryRequest {
+    const message = createBaseIncidentSummaryRequest();
+    message.description = object.description ?? '';
+    message.relatedEvents = object.relatedEvents?.map((e) => e) || [];
+    message.correlationId = object.correlationId ?? '';
+    return message;
+  },
+};
+
+function createBaseIncidentSummaryResult(): IncidentSummaryResult {
+  return {
+    summary: '',
+    keyEvents: [],
+    probableRootCause: '',
+    recommendedNextSteps: [],
+    confidence: 0,
+    explanation: '',
+  };
+}
+
+export const IncidentSummaryResult: MessageFns<IncidentSummaryResult> = {
+  encode(
+    message: IncidentSummaryResult,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.summary !== '') {
+      writer.uint32(10).string(message.summary);
+    }
+    for (const v of message.keyEvents) {
+      writer.uint32(18).string(v!);
+    }
+    if (message.probableRootCause !== '') {
+      writer.uint32(26).string(message.probableRootCause);
+    }
+    for (const v of message.recommendedNextSteps) {
+      writer.uint32(34).string(v!);
+    }
+    if (message.confidence !== 0) {
+      writer.uint32(41).double(message.confidence);
+    }
+    if (message.explanation !== '') {
+      writer.uint32(50).string(message.explanation);
+    }
+    return writer;
+  },
+
+  decode(
+    input: BinaryReader | Uint8Array,
+    length?: number,
+  ): IncidentSummaryResult {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseIncidentSummaryResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.summary = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.keyEvents.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.probableRootCause = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.recommendedNextSteps.push(reader.string());
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.confidence = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.explanation = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): IncidentSummaryResult {
+    return {
+      summary: isSet(object.summary) ? globalThis.String(object.summary) : '',
+      keyEvents: globalThis.Array.isArray(object?.keyEvents)
+        ? object.keyEvents.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.key_events)
+          ? object.key_events.map((e: any) => globalThis.String(e))
+          : [],
+      probableRootCause: isSet(object.probableRootCause)
+        ? globalThis.String(object.probableRootCause)
+        : isSet(object.probable_root_cause)
+          ? globalThis.String(object.probable_root_cause)
+          : '',
+      recommendedNextSteps: globalThis.Array.isArray(
+        object?.recommendedNextSteps,
+      )
+        ? object.recommendedNextSteps.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.recommended_next_steps)
+          ? object.recommended_next_steps.map((e: any) => globalThis.String(e))
+          : [],
+      confidence: isSet(object.confidence)
+        ? globalThis.Number(object.confidence)
+        : 0,
+      explanation: isSet(object.explanation)
+        ? globalThis.String(object.explanation)
+        : '',
+    };
+  },
+
+  toJSON(message: IncidentSummaryResult): unknown {
+    const obj: any = {};
+    if (message.summary !== '') {
+      obj.summary = message.summary;
+    }
+    if (message.keyEvents?.length) {
+      obj.keyEvents = message.keyEvents;
+    }
+    if (message.probableRootCause !== '') {
+      obj.probableRootCause = message.probableRootCause;
+    }
+    if (message.recommendedNextSteps?.length) {
+      obj.recommendedNextSteps = message.recommendedNextSteps;
+    }
+    if (message.confidence !== 0) {
+      obj.confidence = message.confidence;
+    }
+    if (message.explanation !== '') {
+      obj.explanation = message.explanation;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<IncidentSummaryResult>, I>>(
+    base?: I,
+  ): IncidentSummaryResult {
+    return IncidentSummaryResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<IncidentSummaryResult>, I>>(
+    object: I,
+  ): IncidentSummaryResult {
+    const message = createBaseIncidentSummaryResult();
+    message.summary = object.summary ?? '';
+    message.keyEvents = object.keyEvents?.map((e) => e) || [];
+    message.probableRootCause = object.probableRootCause ?? '';
+    message.recommendedNextSteps =
+      object.recommendedNextSteps?.map((e) => e) || [];
+    message.confidence = object.confidence ?? 0;
+    message.explanation = object.explanation ?? '';
+    return message;
+  },
+};
+
+function createBasePolicyDraftRequest(): PolicyDraftRequest {
+  return { naturalLanguageDescription: '', correlationId: '' };
+}
+
+export const PolicyDraftRequest: MessageFns<PolicyDraftRequest> = {
+  encode(
+    message: PolicyDraftRequest,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.naturalLanguageDescription !== '') {
+      writer.uint32(10).string(message.naturalLanguageDescription);
+    }
+    if (message.correlationId !== '') {
+      writer.uint32(18).string(message.correlationId);
+    }
+    return writer;
+  },
+
+  decode(
+    input: BinaryReader | Uint8Array,
+    length?: number,
+  ): PolicyDraftRequest {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePolicyDraftRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.naturalLanguageDescription = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.correlationId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PolicyDraftRequest {
+    return {
+      naturalLanguageDescription: isSet(object.naturalLanguageDescription)
+        ? globalThis.String(object.naturalLanguageDescription)
+        : isSet(object.natural_language_description)
+          ? globalThis.String(object.natural_language_description)
+          : '',
+      correlationId: isSet(object.correlationId)
+        ? globalThis.String(object.correlationId)
+        : isSet(object.correlation_id)
+          ? globalThis.String(object.correlation_id)
+          : '',
+    };
+  },
+
+  toJSON(message: PolicyDraftRequest): unknown {
+    const obj: any = {};
+    if (message.naturalLanguageDescription !== '') {
+      obj.naturalLanguageDescription = message.naturalLanguageDescription;
+    }
+    if (message.correlationId !== '') {
+      obj.correlationId = message.correlationId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PolicyDraftRequest>, I>>(
+    base?: I,
+  ): PolicyDraftRequest {
+    return PolicyDraftRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PolicyDraftRequest>, I>>(
+    object: I,
+  ): PolicyDraftRequest {
+    const message = createBasePolicyDraftRequest();
+    message.naturalLanguageDescription =
+      object.naturalLanguageDescription ?? '';
+    message.correlationId = object.correlationId ?? '';
+    return message;
+  },
+};
+
+function createBasePolicyRuleDraft(): PolicyRuleDraft {
+  return {
+    name: '',
+    toolId: '',
+    actionId: '',
+    resourcePattern: '',
+    effect: 0,
+    riskWeight: 0,
+    riskFloor: 0,
+    description: '',
+  };
+}
+
+export const PolicyRuleDraft: MessageFns<PolicyRuleDraft> = {
+  encode(
+    message: PolicyRuleDraft,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.name !== '') {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.toolId !== '') {
+      writer.uint32(18).string(message.toolId);
+    }
+    if (message.actionId !== '') {
+      writer.uint32(26).string(message.actionId);
+    }
+    if (message.resourcePattern !== '') {
+      writer.uint32(34).string(message.resourcePattern);
+    }
+    if (message.effect !== 0) {
+      writer.uint32(40).int32(message.effect);
+    }
+    if (message.riskWeight !== 0) {
+      writer.uint32(48).int32(message.riskWeight);
+    }
+    if (message.riskFloor !== 0) {
+      writer.uint32(56).int32(message.riskFloor);
+    }
+    if (message.description !== '') {
+      writer.uint32(66).string(message.description);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PolicyRuleDraft {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePolicyRuleDraft();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.actionId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.resourcePattern = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.effect = reader.int32() as any;
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.riskWeight = reader.int32();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.riskFloor = reader.int32();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.description = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PolicyRuleDraft {
+    return {
+      name: isSet(object.name) ? globalThis.String(object.name) : '',
+      toolId: isSet(object.toolId)
+        ? globalThis.String(object.toolId)
+        : isSet(object.tool_id)
+          ? globalThis.String(object.tool_id)
+          : '',
+      actionId: isSet(object.actionId)
+        ? globalThis.String(object.actionId)
+        : isSet(object.action_id)
+          ? globalThis.String(object.action_id)
+          : '',
+      resourcePattern: isSet(object.resourcePattern)
+        ? globalThis.String(object.resourcePattern)
+        : isSet(object.resource_pattern)
+          ? globalThis.String(object.resource_pattern)
+          : '',
+      effect: isSet(object.effect)
+        ? policyRuleDraft_EffectFromJSON(object.effect)
+        : 0,
+      riskWeight: isSet(object.riskWeight)
+        ? globalThis.Number(object.riskWeight)
+        : isSet(object.risk_weight)
+          ? globalThis.Number(object.risk_weight)
+          : 0,
+      riskFloor: isSet(object.riskFloor)
+        ? globalThis.Number(object.riskFloor)
+        : isSet(object.risk_floor)
+          ? globalThis.Number(object.risk_floor)
+          : 0,
+      description: isSet(object.description)
+        ? globalThis.String(object.description)
+        : '',
+    };
+  },
+
+  toJSON(message: PolicyRuleDraft): unknown {
+    const obj: any = {};
+    if (message.name !== '') {
+      obj.name = message.name;
+    }
+    if (message.toolId !== '') {
+      obj.toolId = message.toolId;
+    }
+    if (message.actionId !== '') {
+      obj.actionId = message.actionId;
+    }
+    if (message.resourcePattern !== '') {
+      obj.resourcePattern = message.resourcePattern;
+    }
+    if (message.effect !== 0) {
+      obj.effect = policyRuleDraft_EffectToJSON(message.effect);
+    }
+    if (message.riskWeight !== 0) {
+      obj.riskWeight = Math.round(message.riskWeight);
+    }
+    if (message.riskFloor !== 0) {
+      obj.riskFloor = Math.round(message.riskFloor);
+    }
+    if (message.description !== '') {
+      obj.description = message.description;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PolicyRuleDraft>, I>>(
+    base?: I,
+  ): PolicyRuleDraft {
+    return PolicyRuleDraft.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PolicyRuleDraft>, I>>(
+    object: I,
+  ): PolicyRuleDraft {
+    const message = createBasePolicyRuleDraft();
+    message.name = object.name ?? '';
+    message.toolId = object.toolId ?? '';
+    message.actionId = object.actionId ?? '';
+    message.resourcePattern = object.resourcePattern ?? '';
+    message.effect = object.effect ?? 0;
+    message.riskWeight = object.riskWeight ?? 0;
+    message.riskFloor = object.riskFloor ?? 0;
+    message.description = object.description ?? '';
+    return message;
+  },
+};
+
+function createBasePolicyDraftResult(): PolicyDraftResult {
+  return { rules: [], explanation: '', confidence: 0 };
+}
+
+export const PolicyDraftResult: MessageFns<PolicyDraftResult> = {
+  encode(
+    message: PolicyDraftResult,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    for (const v of message.rules) {
+      PolicyRuleDraft.encode(v!, writer.uint32(10).fork()).join();
+    }
+    if (message.explanation !== '') {
+      writer.uint32(18).string(message.explanation);
+    }
+    if (message.confidence !== 0) {
+      writer.uint32(25).double(message.confidence);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PolicyDraftResult {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePolicyDraftResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.rules.push(PolicyRuleDraft.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.explanation = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.confidence = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PolicyDraftResult {
+    return {
+      rules: globalThis.Array.isArray(object?.rules)
+        ? object.rules.map((e: any) => PolicyRuleDraft.fromJSON(e))
+        : [],
+      explanation: isSet(object.explanation)
+        ? globalThis.String(object.explanation)
+        : '',
+      confidence: isSet(object.confidence)
+        ? globalThis.Number(object.confidence)
+        : 0,
+    };
+  },
+
+  toJSON(message: PolicyDraftResult): unknown {
+    const obj: any = {};
+    if (message.rules?.length) {
+      obj.rules = message.rules.map((e) => PolicyRuleDraft.toJSON(e));
+    }
+    if (message.explanation !== '') {
+      obj.explanation = message.explanation;
+    }
+    if (message.confidence !== 0) {
+      obj.confidence = message.confidence;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PolicyDraftResult>, I>>(
+    base?: I,
+  ): PolicyDraftResult {
+    return PolicyDraftResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PolicyDraftResult>, I>>(
+    object: I,
+  ): PolicyDraftResult {
+    const message = createBasePolicyDraftResult();
+    message.rules =
+      object.rules?.map((e) => PolicyRuleDraft.fromPartial(e)) || [];
+    message.explanation = object.explanation ?? '';
+    message.confidence = object.confidence ?? 0;
+    return message;
+  },
+};
+
+function createBaseAuditInvestigationRequest(): AuditInvestigationRequest {
+  return { question: '', retrievedContext: [], correlationId: '' };
+}
+
+export const AuditInvestigationRequest: MessageFns<AuditInvestigationRequest> =
+  {
+    encode(
+      message: AuditInvestigationRequest,
+      writer: BinaryWriter = new BinaryWriter(),
+    ): BinaryWriter {
+      if (message.question !== '') {
+        writer.uint32(10).string(message.question);
+      }
+      for (const v of message.retrievedContext) {
+        writer.uint32(18).string(v!);
+      }
+      if (message.correlationId !== '') {
+        writer.uint32(26).string(message.correlationId);
+      }
+      return writer;
+    },
+
+    decode(
+      input: BinaryReader | Uint8Array,
+      length?: number,
+    ): AuditInvestigationRequest {
+      const reader =
+        input instanceof BinaryReader ? input : new BinaryReader(input);
+      const end = length === undefined ? reader.len : reader.pos + length;
+      const message = createBaseAuditInvestigationRequest();
+      while (reader.pos < end) {
+        const tag = reader.uint32();
+        switch (tag >>> 3) {
+          case 1: {
+            if (tag !== 10) {
+              break;
+            }
+
+            message.question = reader.string();
+            continue;
+          }
+          case 2: {
+            if (tag !== 18) {
+              break;
+            }
+
+            message.retrievedContext.push(reader.string());
+            continue;
+          }
+          case 3: {
+            if (tag !== 26) {
+              break;
+            }
+
+            message.correlationId = reader.string();
+            continue;
+          }
+        }
+        if ((tag & 7) === 4 || tag === 0) {
+          break;
+        }
+        reader.skip(tag & 7);
+      }
+      return message;
+    },
+
+    fromJSON(object: any): AuditInvestigationRequest {
+      return {
+        question: isSet(object.question)
+          ? globalThis.String(object.question)
+          : '',
+        retrievedContext: globalThis.Array.isArray(object?.retrievedContext)
+          ? object.retrievedContext.map((e: any) => globalThis.String(e))
+          : globalThis.Array.isArray(object?.retrieved_context)
+            ? object.retrieved_context.map((e: any) => globalThis.String(e))
+            : [],
+        correlationId: isSet(object.correlationId)
+          ? globalThis.String(object.correlationId)
+          : isSet(object.correlation_id)
+            ? globalThis.String(object.correlation_id)
+            : '',
+      };
+    },
+
+    toJSON(message: AuditInvestigationRequest): unknown {
+      const obj: any = {};
+      if (message.question !== '') {
+        obj.question = message.question;
+      }
+      if (message.retrievedContext?.length) {
+        obj.retrievedContext = message.retrievedContext;
+      }
+      if (message.correlationId !== '') {
+        obj.correlationId = message.correlationId;
+      }
+      return obj;
+    },
+
+    create<I extends Exact<DeepPartial<AuditInvestigationRequest>, I>>(
+      base?: I,
+    ): AuditInvestigationRequest {
+      return AuditInvestigationRequest.fromPartial(base ?? ({} as any));
+    },
+    fromPartial<I extends Exact<DeepPartial<AuditInvestigationRequest>, I>>(
+      object: I,
+    ): AuditInvestigationRequest {
+      const message = createBaseAuditInvestigationRequest();
+      message.question = object.question ?? '';
+      message.retrievedContext = object.retrievedContext?.map((e) => e) || [];
+      message.correlationId = object.correlationId ?? '';
+      return message;
+    },
+  };
+
+function createBaseAuditInvestigationResult(): AuditInvestigationResult {
+  return { answer: '', citations: [], confidence: 0, explanation: '' };
+}
+
+export const AuditInvestigationResult: MessageFns<AuditInvestigationResult> = {
+  encode(
+    message: AuditInvestigationResult,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.answer !== '') {
+      writer.uint32(10).string(message.answer);
+    }
+    for (const v of message.citations) {
+      writer.uint32(18).string(v!);
+    }
+    if (message.confidence !== 0) {
+      writer.uint32(25).double(message.confidence);
+    }
+    if (message.explanation !== '') {
+      writer.uint32(34).string(message.explanation);
+    }
+    return writer;
+  },
+
+  decode(
+    input: BinaryReader | Uint8Array,
+    length?: number,
+  ): AuditInvestigationResult {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAuditInvestigationResult();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.answer = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.citations.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.confidence = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.explanation = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AuditInvestigationResult {
+    return {
+      answer: isSet(object.answer) ? globalThis.String(object.answer) : '',
+      citations: globalThis.Array.isArray(object?.citations)
+        ? object.citations.map((e: any) => globalThis.String(e))
+        : [],
+      confidence: isSet(object.confidence)
+        ? globalThis.Number(object.confidence)
+        : 0,
+      explanation: isSet(object.explanation)
+        ? globalThis.String(object.explanation)
+        : '',
+    };
+  },
+
+  toJSON(message: AuditInvestigationResult): unknown {
+    const obj: any = {};
+    if (message.answer !== '') {
+      obj.answer = message.answer;
+    }
+    if (message.citations?.length) {
+      obj.citations = message.citations;
+    }
+    if (message.confidence !== 0) {
+      obj.confidence = message.confidence;
+    }
+    if (message.explanation !== '') {
+      obj.explanation = message.explanation;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AuditInvestigationResult>, I>>(
+    base?: I,
+  ): AuditInvestigationResult {
+    return AuditInvestigationResult.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AuditInvestigationResult>, I>>(
+    object: I,
+  ): AuditInvestigationResult {
+    const message = createBaseAuditInvestigationResult();
+    message.answer = object.answer ?? '';
+    message.citations = object.citations?.map((e) => e) || [];
+    message.confidence = object.confidence ?? 0;
+    message.explanation = object.explanation ?? '';
+    return message;
+  },
+};
+
 /**
  * AnalysisService exposes manar-ai's advisory AI capabilities: risk
- * scoring, prompt-injection detection, and DLP/PII classification. Every
- * RPC here returns a *signal*, never an ALLOW/DENY decision (Section 26).
+ * scoring, prompt-injection detection, DLP/PII classification, incident
+ * summarization, policy-draft suggestion, and audit investigation. Every
+ * RPC here returns a *signal*, never an ALLOW/DENY decision (Section 26) —
+ * see docs/ai-security-model.md, which also covers why SummarizeIncident/
+ * SuggestPolicy/InvestigateAudit (Phase 10c) can never create, modify, or
+ * publish anything: SuggestPolicy produces a draft only (manar-api must
+ * persist it as a DRAFT PolicyVersion, never auto-published), and
+ * SummarizeIncident/InvestigateAudit are read-only advisory text over
+ * caller-supplied context.
  */
 export type AnalysisServiceService = typeof AnalysisServiceService;
 export const AnalysisServiceService = {
@@ -1133,6 +2238,64 @@ export const AnalysisServiceService = {
     responseDeserialize: (value: Buffer): DlpAnalysisResult =>
       DlpAnalysisResult.decode(value),
   },
+  /**
+   * SummarizeIncident produces an advisory summary of caller-supplied
+   * incident context (a free-text description and/or related audit-event
+   * summaries). No formal Incident model exists in manar-api yet (Phase 11,
+   * if pursued) — this RPC persists nothing and fetches nothing itself.
+   */
+  summarizeIncident: {
+    path: '/manar.ai.v1.AnalysisService/SummarizeIncident' as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: IncidentSummaryRequest): Buffer =>
+      Buffer.from(IncidentSummaryRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): IncidentSummaryRequest =>
+      IncidentSummaryRequest.decode(value),
+    responseSerialize: (value: IncidentSummaryResult): Buffer =>
+      Buffer.from(IncidentSummaryResult.encode(value).finish()),
+    responseDeserialize: (value: Buffer): IncidentSummaryResult =>
+      IncidentSummaryResult.decode(value),
+  },
+  /**
+   * SuggestPolicy converts a natural-language policy description into a
+   * DRAFT rule set matching manar-api's Phase 6 policy rule content schema.
+   * Never auto-published — manar-api must persist the result as a DRAFT
+   * PolicyVersion and require the normal human publish step.
+   */
+  suggestPolicy: {
+    path: '/manar.ai.v1.AnalysisService/SuggestPolicy' as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: PolicyDraftRequest): Buffer =>
+      Buffer.from(PolicyDraftRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): PolicyDraftRequest =>
+      PolicyDraftRequest.decode(value),
+    responseSerialize: (value: PolicyDraftResult): Buffer =>
+      Buffer.from(PolicyDraftResult.encode(value).finish()),
+    responseDeserialize: (value: Buffer): PolicyDraftResult =>
+      PolicyDraftResult.decode(value),
+  },
+  /**
+   * InvestigateAudit answers a question (e.g. "why was this action
+   * denied?") using only the caller-supplied retrieved_context, which
+   * manar-api's own permission-scoped OpenSearch retrieval must have
+   * already produced — this RPC performs no lookup of its own and is never
+   * an unscoped side channel around that scoping.
+   */
+  investigateAudit: {
+    path: '/manar.ai.v1.AnalysisService/InvestigateAudit' as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AuditInvestigationRequest): Buffer =>
+      Buffer.from(AuditInvestigationRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AuditInvestigationRequest =>
+      AuditInvestigationRequest.decode(value),
+    responseSerialize: (value: AuditInvestigationResult): Buffer =>
+      Buffer.from(AuditInvestigationResult.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AuditInvestigationResult =>
+      AuditInvestigationResult.decode(value),
+  },
 } as const;
 
 export interface AnalysisServiceServer extends UntypedServiceImplementation {
@@ -1151,6 +2314,34 @@ export interface AnalysisServiceServer extends UntypedServiceImplementation {
    * deterministic pattern matching with optional AI classification.
    */
   analyzeDlp: handleUnaryCall<DlpAnalysisRequest, DlpAnalysisResult>;
+  /**
+   * SummarizeIncident produces an advisory summary of caller-supplied
+   * incident context (a free-text description and/or related audit-event
+   * summaries). No formal Incident model exists in manar-api yet (Phase 11,
+   * if pursued) — this RPC persists nothing and fetches nothing itself.
+   */
+  summarizeIncident: handleUnaryCall<
+    IncidentSummaryRequest,
+    IncidentSummaryResult
+  >;
+  /**
+   * SuggestPolicy converts a natural-language policy description into a
+   * DRAFT rule set matching manar-api's Phase 6 policy rule content schema.
+   * Never auto-published — manar-api must persist the result as a DRAFT
+   * PolicyVersion and require the normal human publish step.
+   */
+  suggestPolicy: handleUnaryCall<PolicyDraftRequest, PolicyDraftResult>;
+  /**
+   * InvestigateAudit answers a question (e.g. "why was this action
+   * denied?") using only the caller-supplied retrieved_context, which
+   * manar-api's own permission-scoped OpenSearch retrieval must have
+   * already produced — this RPC performs no lookup of its own and is never
+   * an unscoped side channel around that scoping.
+   */
+  investigateAudit: handleUnaryCall<
+    AuditInvestigationRequest,
+    AuditInvestigationResult
+  >;
 }
 
 export interface AnalysisServiceClient extends Client {
@@ -1225,6 +2416,88 @@ export interface AnalysisServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: DlpAnalysisResult) => void,
+  ): ClientUnaryCall;
+  /**
+   * SummarizeIncident produces an advisory summary of caller-supplied
+   * incident context (a free-text description and/or related audit-event
+   * summaries). No formal Incident model exists in manar-api yet (Phase 11,
+   * if pursued) — this RPC persists nothing and fetches nothing itself.
+   */
+  summarizeIncident(
+    request: IncidentSummaryRequest,
+    callback: (
+      error: ServiceError | null,
+      response: IncidentSummaryResult,
+    ) => void,
+  ): ClientUnaryCall;
+  summarizeIncident(
+    request: IncidentSummaryRequest,
+    metadata: Metadata,
+    callback: (
+      error: ServiceError | null,
+      response: IncidentSummaryResult,
+    ) => void,
+  ): ClientUnaryCall;
+  summarizeIncident(
+    request: IncidentSummaryRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (
+      error: ServiceError | null,
+      response: IncidentSummaryResult,
+    ) => void,
+  ): ClientUnaryCall;
+  /**
+   * SuggestPolicy converts a natural-language policy description into a
+   * DRAFT rule set matching manar-api's Phase 6 policy rule content schema.
+   * Never auto-published — manar-api must persist the result as a DRAFT
+   * PolicyVersion and require the normal human publish step.
+   */
+  suggestPolicy(
+    request: PolicyDraftRequest,
+    callback: (error: ServiceError | null, response: PolicyDraftResult) => void,
+  ): ClientUnaryCall;
+  suggestPolicy(
+    request: PolicyDraftRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: PolicyDraftResult) => void,
+  ): ClientUnaryCall;
+  suggestPolicy(
+    request: PolicyDraftRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: PolicyDraftResult) => void,
+  ): ClientUnaryCall;
+  /**
+   * InvestigateAudit answers a question (e.g. "why was this action
+   * denied?") using only the caller-supplied retrieved_context, which
+   * manar-api's own permission-scoped OpenSearch retrieval must have
+   * already produced — this RPC performs no lookup of its own and is never
+   * an unscoped side channel around that scoping.
+   */
+  investigateAudit(
+    request: AuditInvestigationRequest,
+    callback: (
+      error: ServiceError | null,
+      response: AuditInvestigationResult,
+    ) => void,
+  ): ClientUnaryCall;
+  investigateAudit(
+    request: AuditInvestigationRequest,
+    metadata: Metadata,
+    callback: (
+      error: ServiceError | null,
+      response: AuditInvestigationResult,
+    ) => void,
+  ): ClientUnaryCall;
+  investigateAudit(
+    request: AuditInvestigationRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (
+      error: ServiceError | null,
+      response: AuditInvestigationResult,
+    ) => void,
   ): ClientUnaryCall;
 }
 
