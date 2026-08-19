@@ -1,9 +1,11 @@
 import {
   Body,
   Controller,
+  Get,
   NotFoundException,
   Param,
   Post,
+  Query,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -13,6 +15,7 @@ import {
   ApiBody,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -26,18 +29,21 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type { AuditEventType } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import {
+  parseCursor,
+  parseLimit,
+} from '../common/pagination/cursor-pagination';
 import { AgentNotFoundError } from '../agents/agents.errors';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
-import {
-  KillSwitchService,
-  TenantKillSwitchScope,
-} from './kill-switch.service';
+import { KillSwitchService } from './kill-switch.service';
+import type { TenantKillSwitchScope } from './kill-switch.service';
 import { PlatformKillSwitchService } from './platform-kill-switch.service';
 import { PlatformOperatorGuard } from './platform-operator.guard';
 import { ActivateKillSwitchRequestSchema } from './kill-switches.validation';
 import {
   ActivateKillSwitchRequestDto,
   KillSwitchDeactivatedResponseDto,
+  KillSwitchListResponseDto,
   KillSwitchStatusResponseDto,
   PlatformKillSwitchStatusResponseDto,
 } from './kill-switches.dto';
@@ -119,6 +125,72 @@ export class KillSwitchesController {
       {},
     );
     return state;
+  }
+
+  // ---------------------------------------------------------------------
+  // Listing (Phase 11b Part 1) — every tenant-scoped KillSwitch row
+  // (TENANT/AGENT_GROUP/AGENT/TOOL), not the separate control-DB
+  // PLATFORM singleton (see KillSwitchService.list's own doc comment).
+  // ---------------------------------------------------------------------
+
+  @Get('kill-switches')
+  @ApiOperation({
+    summary: 'List kill switches',
+    description:
+      'Cursor-paginated, newest first. Optional `scope`/`active` filters. Excludes the platform-wide switch (a control-DB singleton with no id/list semantics of its own).',
+  })
+  @ApiQuery({
+    name: 'scope',
+    required: false,
+    enum: ['TENANT', 'AGENT_GROUP', 'AGENT', 'TOOL'],
+  })
+  @ApiQuery({ name: 'active', required: false, type: Boolean })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Max 100, default 20.',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Opaque `nextCursor` from a previous page.',
+  })
+  @ApiResponse({ status: 200, type: KillSwitchListResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async list(
+    @CurrentAuth() auth: AuthContext,
+    @Query('scope') scope?: TenantKillSwitchScope,
+    @Query('active') active?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ): Promise<KillSwitchListResponseDto> {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const page = await this.killSwitchService.list(tenantClient, {
+      scope,
+      active:
+        active === undefined ? undefined : active === 'true' || active === '1',
+      limit: parseLimit(limit),
+      cursor: parseCursor(cursor),
+    });
+    return {
+      items: page.items.map((row) => ({
+        id: row.id,
+        scope: row.scope,
+        targetId: row.targetId,
+        active: row.active,
+        reason: row.reason,
+        activatedBy: row.activatedBy,
+        activatedAt: row.activatedAt,
+        deactivatedBy: row.deactivatedBy,
+        deactivatedAt: row.deactivatedAt,
+        createdAt: row.createdAt,
+      })),
+      nextCursor: page.nextCursor,
+    };
   }
 
   // ---------------------------------------------------------------------

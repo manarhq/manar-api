@@ -3,7 +3,19 @@ import type {
   Prisma,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
+import {
+  DecodedCursor,
+  cursorWhereClause,
+  toCursorPage,
+} from '../common/pagination/cursor-pagination';
 import { ApprovalRequestNotFoundError } from './approvals.errors';
+
+export interface ListApprovalRequestsInput {
+  /** Section 65's approvals list filter. */
+  status?: 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED';
+  limit: number;
+  cursor?: DecodedCursor;
+}
 
 export interface CreateApprovalRequestInput {
   taskId: string;
@@ -61,5 +73,29 @@ export class ApprovalRequestService {
     });
     if (!row) throw new ApprovalRequestNotFoundError(id);
     return row;
+  }
+
+  /**
+   * `GET /approvals` (Phase 11b Part 1) — cursor-paginated, newest first,
+   * with the one filter Section 65's approval queue actually needs
+   * (`status` — an operator's queue view is "show me PENDING", not a
+   * general browse). Ordered by `requestedAt` (this model's own creation
+   * timestamp field name — see `ApprovalRequest.requestedAt`'s schema doc
+   * comment), not `createdAt`.
+   */
+  async listApprovalRequests(
+    tenantClient: TenantPrismaClient,
+    input: ListApprovalRequestsInput,
+  ) {
+    const where = {
+      ...(input.status ? { status: input.status } : {}),
+      ...cursorWhereClause('requestedAt', input.cursor),
+    };
+    const rows = await tenantClient.approvalRequest.findMany({
+      where,
+      orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
+      take: input.limit + 1,
+    });
+    return toCursorPage(rows, input.limit, (row) => row.requestedAt);
   }
 }

@@ -36,3 +36,48 @@ export class DecideApprovalResponseDto {
   })
   decision!: 'APPROVE' | 'DENY';
 }
+
+/** One row of `GET /approvals`'s paginated list — see `ApprovalRequestService.listApprovalRequests`. */
+export class ApprovalRequestSummaryDto {
+  @ApiProperty({ format: 'uuid' })
+  id!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  taskId!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  agentId!: string;
+
+  @ApiProperty()
+  toolId!: string;
+
+  @ApiProperty()
+  actionId!: string;
+
+  @ApiProperty()
+  resource!: string;
+
+  @ApiProperty({ minimum: 0, maximum: 100 })
+  riskScore!: number;
+
+  @ApiProperty({ nullable: true, format: 'uuid' })
+  policyVersionId!: string | null;
+
+  @ApiProperty({ enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED'] })
+  status!: string;
+
+  @ApiProperty({ format: 'date-time' })
+  requestedAt!: Date;
+
+  @ApiProperty({ format: 'date-time' })
+  expiresAt!: Date;
+}
+
+/** `GET /approvals`'s response envelope — see `AgentListResponseDto`'s identical shape/doc comment. */
+export class ApprovalRequestListResponseDto {
+  @ApiProperty({ type: () => ApprovalRequestSummaryDto, isArray: true })
+  items!: ApprovalRequestSummaryDto[];
+
+  @ApiProperty({ nullable: true })
+  nextCursor!: string | null;
+}

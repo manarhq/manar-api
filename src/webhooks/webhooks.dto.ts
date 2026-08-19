@@ -60,6 +60,15 @@ export class WebhookEndpointCreatedResponseDto extends WebhookEndpointResponseDt
   secret!: string;
 }
 
+/** `GET /webhooks`'s response envelope (Phase 11b Part 1) — see `AgentListResponseDto`'s identical shape/doc comment. */
+export class WebhookEndpointListResponseDto {
+  @ApiProperty({ type: () => WebhookEndpointResponseDto, isArray: true })
+  items!: WebhookEndpointResponseDto[];
+
+  @ApiProperty({ nullable: true })
+  nextCursor!: string | null;
+}
+
 export class WebhookDeliveryResponseDto {
   @ApiProperty({ format: 'uuid' })
   id!: string;

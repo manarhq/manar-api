@@ -2,10 +2,22 @@ import { Injectable } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import {
+  DecodedCursor,
+  cursorWhereClause,
+  toCursorPage,
+} from '../common/pagination/cursor-pagination';
 import { PlatformKillSwitchService } from './platform-kill-switch.service';
 
 /** The four tenant-scoped kill-switch levels — see `KillSwitch` in `prisma/tenant.prisma`. */
 export type TenantKillSwitchScope = 'TENANT' | 'AGENT_GROUP' | 'AGENT' | 'TOOL';
+
+export interface ListKillSwitchesInput {
+  scope?: TenantKillSwitchScope;
+  active?: boolean;
+  limit: number;
+  cursor?: DecodedCursor;
+}
 
 export interface ActivateKillSwitchInput {
   scope: TenantKillSwitchScope;
@@ -234,5 +246,28 @@ export class KillSwitchService {
     }
 
     return { killed: false };
+  }
+
+  /**
+   * `GET /kill-switches` (Phase 11b Part 1) — cursor-paginated, newest
+   * first, with the two filters a kill-switch admin table actually needs
+   * (`scope`, `active` — Section 66's kill-switch surface is "show me
+   * what's currently killed," not a general browse of every row ever
+   * created). Tenant-scoped, platform scope excluded (that's the control-
+   * DB singleton `PlatformKillSwitch` row, with no `id`/list semantics of
+   * its own — see `PlatformKillSwitchStatusResponseDto`).
+   */
+  async list(tenantClient: TenantPrismaClient, input: ListKillSwitchesInput) {
+    const where = {
+      ...(input.scope ? { scope: input.scope } : {}),
+      ...(input.active !== undefined ? { active: input.active } : {}),
+      ...cursorWhereClause('createdAt', input.cursor),
+    };
+    const rows = await tenantClient.killSwitch.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: input.limit + 1,
+    });
+    return toCursorPage(rows, input.limit, (row) => row.createdAt);
   }
 }

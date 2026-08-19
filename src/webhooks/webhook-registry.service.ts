@@ -6,11 +6,23 @@ import type { AppConfig } from '../config/env.validation';
 import { OpenBaoKvClient } from '../openbao/openbao-kv.client';
 import { assertSafeOutboundUrl } from '../common/ssrf/url-safety';
 import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
+import {
+  CursorPage,
+  DecodedCursor,
+  cursorWhereClause,
+  toCursorPage,
+} from '../common/pagination/cursor-pagination';
 import { WebhookEndpointNotFoundError } from './webhooks.errors';
 import type {
   CreateWebhookEndpointRequest,
   UpdateWebhookEndpointRequest,
 } from './webhooks.validation';
+
+export interface ListWebhookEndpointsInput {
+  enabled?: boolean;
+  limit: number;
+  cursor?: DecodedCursor;
+}
 
 /** The KV v2 path (relative to `OPENBAO_KV_MOUNT_PATH`) a given `WebhookEndpoint`'s signing secret is stored at — mirrors `OpenBaoSecretProvider`'s "one opaque string under the fixed key `value`" convention. */
 function webhookSecretKvPath(webhookEndpointId: string): string {
@@ -95,13 +107,31 @@ export class WebhookRegistryService {
     return { endpoint: this.toSummary(row), secret };
   }
 
+  /**
+   * `GET /webhooks` (Phase 12a's original endpoint; Phase 11b Part 1 adds
+   * cursor pagination + an `enabled` filter, matching the convention every
+   * other Phase 11b Part 1 list endpoint uses — see
+   * `src/common/pagination/cursor-pagination.ts`). This changes the
+   * response shape from a bare array to a `{ items, nextCursor }` envelope
+   * — a deliberate, spec-required change for this exact endpoint (see
+   * `WebhooksController.list`'s doc comment), not an accidental behavior
+   * change.
+   */
   async list(
     tenantClient: TenantPrismaClient,
-  ): Promise<WebhookEndpointSummary[]> {
+    input: ListWebhookEndpointsInput,
+  ): Promise<CursorPage<WebhookEndpointSummary>> {
+    const where = {
+      ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+      ...cursorWhereClause('createdAt', input.cursor),
+    };
     const rows = await tenantClient.webhookEndpoint.findMany({
-      orderBy: { createdAt: 'desc' },
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: input.limit + 1,
     });
-    return rows.map((row) => this.toSummary(row));
+    const summaries = rows.map((row) => this.toSummary(row));
+    return toCursorPage(summaries, input.limit, (row) => row.createdAt);
   }
 
   async get(

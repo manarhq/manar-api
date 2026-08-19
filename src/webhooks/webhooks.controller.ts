@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -16,6 +17,7 @@ import {
   ApiBody,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -27,6 +29,10 @@ import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
+import {
+  parseCursor,
+  parseLimit,
+} from '../common/pagination/cursor-pagination';
 import { UnsafeOutboundUrlError } from '../common/ssrf/url-safety';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor';
 import { WebhookRegistryService } from './webhook-registry.service';
@@ -40,6 +46,7 @@ import {
   UpdateWebhookEndpointRequestDto,
   WebhookDeliveryResponseDto,
   WebhookEndpointCreatedResponseDto,
+  WebhookEndpointListResponseDto,
   WebhookEndpointResponseDto,
 } from './webhooks.dto';
 
@@ -89,15 +96,41 @@ export class WebhooksController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List registered webhook endpoints' })
-  @ApiResponse({ status: 200, type: [WebhookEndpointResponseDto] })
+  @ApiOperation({
+    summary: 'List registered webhook endpoints',
+    description:
+      'Cursor-paginated, newest first (Phase 11b Part 1 — see src/common/pagination/cursor-pagination.ts). Optional `enabled` filter. Note: this response envelope changed from a bare array to `{ items, nextCursor }` in Phase 11b Part 1, matching every other list endpoint added that phase.',
+  })
+  @ApiQuery({ name: 'enabled', required: false, type: Boolean })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Max 100, default 20.',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Opaque `nextCursor` from a previous page.',
+  })
+  @ApiResponse({ status: 200, type: WebhookEndpointListResponseDto })
   async list(
     @CurrentAuth() auth: AuthContext,
-  ): Promise<WebhookEndpointResponseDto[]> {
+    @Query('enabled') enabled?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ): Promise<WebhookEndpointListResponseDto> {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    return this.webhookRegistryService.list(tenantClient);
+    return this.webhookRegistryService.list(tenantClient, {
+      enabled:
+        enabled === undefined
+          ? undefined
+          : enabled === 'true' || enabled === '1',
+      limit: parseLimit(limit),
+      cursor: parseCursor(cursor),
+    });
   }
 
   @Get(':id')

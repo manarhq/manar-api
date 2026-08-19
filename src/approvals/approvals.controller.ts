@@ -2,10 +2,12 @@ import {
   Body,
   ConflictException,
   Controller,
+  Get,
   Logger,
   NotFoundException,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -13,6 +15,7 @@ import {
   ApiBody,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -26,10 +29,15 @@ import { TemporalClientService } from '../temporal/temporal-client.service';
 import { decideSignal } from '../temporal/workflows/approval.workflow';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import {
+  parseCursor,
+  parseLimit,
+} from '../common/pagination/cursor-pagination';
 import { ApprovalRequestNotFoundError } from './approvals.errors';
 import { ApprovalRequestService } from './approval-request.service';
 import { DecideApprovalRequestSchema } from './approvals.validation';
 import {
+  ApprovalRequestListResponseDto,
   DecideApprovalRequestDto,
   DecideApprovalResponseDto,
 } from './approvals.dto';
@@ -61,6 +69,66 @@ export class ApprovalsController {
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly temporalClient: TemporalClientService,
   ) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'List approval requests',
+    description:
+      'Cursor-paginated, newest first (by requestedAt). Optional `status` filter — an operator queue view is typically `?status=PENDING`.',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED'],
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Max 100, default 20.',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Opaque `nextCursor` from a previous page.',
+  })
+  @ApiResponse({ status: 200, type: ApprovalRequestListResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async list(
+    @CurrentAuth() auth: AuthContext,
+    @Query('status') status?: 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED',
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ): Promise<ApprovalRequestListResponseDto> {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const page = await this.approvalRequestService.listApprovalRequests(
+      tenantClient,
+      {
+        status,
+        limit: parseLimit(limit),
+        cursor: parseCursor(cursor),
+      },
+    );
+    return {
+      items: page.items.map((request) => ({
+        id: request.id,
+        taskId: request.taskId,
+        agentId: request.agentId,
+        toolId: request.toolId,
+        actionId: request.actionId,
+        resource: request.resource,
+        riskScore: request.riskScore,
+        policyVersionId: request.policyVersionId,
+        status: request.status,
+        requestedAt: request.requestedAt,
+        expiresAt: request.expiresAt,
+      })),
+      nextCursor: page.nextCursor,
+    };
+  }
 
   @Post(':id/decide')
   @ApiOperation({
