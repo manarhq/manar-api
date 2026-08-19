@@ -3,6 +3,7 @@ import { AgentMtlsGuardModule } from '../agent-mtls/agent-mtls-guard.module';
 import { TasksModule } from '../tasks/tasks.module';
 import { PolicyModule } from '../policy/policy.module';
 import { RiskModule } from '../risk/risk.module';
+import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { AuthorizationModule } from './authorization.module';
 import { AuthorizationService } from './authorization.service';
 import { AuthorizeController } from './authorize.controller';
@@ -25,6 +26,7 @@ import { AuthorizeController } from './authorize.controller';
     AuthorizationModule,
     PolicyModule,
     RiskModule,
+    KillSwitchesModule,
   ],
   providers: [AuthorizationService],
   controllers: [AuthorizeController],

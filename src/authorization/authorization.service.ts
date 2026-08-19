@@ -7,6 +7,7 @@ import { RiskEngine } from '../risk/risk-engine.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type { AuditEventType } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { parseToolActions } from './grant-triples';
 import {
   ANY_RESOURCE_PATTERN,
@@ -39,8 +40,19 @@ export type AuthorizeDecision =
 /**
  * `POST /agent/v1/authorize`'s pipeline (Section 22 — fail-closed at every
  * step; if any check can't be evaluated trustworthily, DENY). Implements
- * the design spec's 6 steps exactly:
+ * the design spec's 6 steps exactly, plus the kill-switch phase's own
+ * mandatory step 0 (Section 32 — see docs/kill-switches.md):
  *
+ *   0. Kill switches: platform (control DB, cross-tenant) → tenant →
+ *      requesting agent → any `AgentGroup` it belongs to → the specific
+ *      `Tool` being invoked (only if `request.toolId` resolves against a
+ *      registered `Tool.name` — this endpoint's `toolId` is always known
+ *      by this point, unlike credential-broker registry resolution, which
+ *      happens later on the ALLOW path; see `KillSwitchService.checkAll`).
+ *      Deliberately runs BEFORE the task is even resolved (step 1) — none
+ *      of these five checks need the task at all, and this is the
+ *      cheapest, most fundamental "don't bother evaluating anything else"
+ *      gate in the whole pipeline, exactly as the design spec asks.
  *   1. Resolve the Task, confirm `assignedAgentId` matches the
  *      mTLS-authenticated agent.
  *   2. Walk the FULL ancestor chain, confirm every ancestor is
@@ -91,6 +103,7 @@ export class AuthorizationService {
     private readonly policyEngine: PolicyEngine,
     private readonly riskEngine: RiskEngine,
     private readonly auditService: AuditService,
+    private readonly killSwitchService: KillSwitchService,
   ) {}
 
   async authorize(
@@ -121,6 +134,25 @@ export class AuthorizationService {
           ...data,
         },
       });
+
+    // Step 0 (kill-switch phase, Section 32): platform → tenant → agent →
+    // agent-group(s) → tool. Runs before the task is even resolved — none
+    // of these five checks need it, and this is the cheapest, most
+    // fundamental "don't bother evaluating anything else" gate in the
+    // whole pipeline. See KillSwitchService.checkAll's own doc comment for
+    // the exact per-scope lookup order.
+    const killSwitchCheck = await this.killSwitchService.checkAll(
+      tenantClient,
+      tenantId,
+      { agentId: authenticatedAgentId, toolId: request.toolId },
+    );
+    if (killSwitchCheck.killed) {
+      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
+        reason: killSwitchCheck.reason,
+        killSwitchScope: killSwitchCheck.scope,
+      });
+      return { decision: 'DENY', reason: killSwitchCheck.reason as string };
+    }
 
     let task: TaskRecord;
     try {

@@ -33,6 +33,7 @@ import { PolicyEngine } from '../src/policy/policy-engine.service';
 import { RiskEngine } from '../src/risk/risk-engine.service';
 import { ToolRegistryService } from '../src/tools/tool-registry.service';
 import type { AiAdvisoryClient } from '../src/ai-advisory/ai-advisory-client.service';
+import type { KillSwitchService } from '../src/kill-switches/kill-switch.service';
 import {
   assignRealmRole,
   createRealmUser,
@@ -667,6 +668,9 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       {
         recordSafely: () => Promise.resolve(undefined),
       } as unknown as AuditService,
+      {
+        checkAll: () => Promise.resolve({ killed: false }),
+      } as unknown as KillSwitchService,
     );
 
     const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
