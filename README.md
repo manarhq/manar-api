@@ -23,7 +23,21 @@
 
 ## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+`manar-api` is the control-plane service for **Manar**, a security product
+that governs autonomous AI agents: tenancy, human auth, agent identity
+(mTLS), task delegation/authorization (OpenFGA), policy/risk evaluation,
+a tool gateway with a credential broker, a Temporal-backed approval
+engine, a tamper-evident audit chain, five-scope kill switches, and an
+AI advisory pipeline. See `docs/` for the design/implementation notes for
+each subsystem.
+
+**Want to see it work end to end?** `docs/demo.md` is the full, exact
+walkthrough — seed a demo tenant, run the scripted SOC agent scenario
+(prompt-injection resistance, human-approved endpoint isolation, a kill
+switch, audit verification, evidence export), and the automated acceptance
+test (`test/complete-demo.e2e-spec.ts`) that proves it all.
+
+Built on the [NestJS](https://github.com/nestjs/nest) framework.
 
 ## Project setup
 
