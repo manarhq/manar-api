@@ -1,9 +1,11 @@
 import {
   Body,
   Controller,
+  Get,
   NotFoundException,
   Param,
   Post,
+  Query,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -13,6 +15,7 @@ import {
   ApiBody,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -23,6 +26,10 @@ import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import {
+  parseCursor,
+  parseLimit,
+} from '../common/pagination/cursor-pagination';
 import { AgentNotFoundError } from './agents.errors';
 import { AgentsService } from './agents.service';
 import {
@@ -30,6 +37,7 @@ import {
   RevokeAgentRequestSchema,
 } from './agents.validation';
 import {
+  AgentListResponseDto,
   CreateAgentRequestDto,
   CreateAgentResponseDto,
   CreateEnrollmentTokenResponseDto,
@@ -110,6 +118,59 @@ export class AgentsController {
       displayName: agent.displayName,
       status: agent.status,
       createdAt: agent.createdAt,
+    };
+  }
+
+  @Get()
+  @ApiOperation({
+    summary: 'List agents',
+    description:
+      'Cursor-paginated, newest first. Optional `status` filter. See src/common/pagination/cursor-pagination.ts for the pagination convention.',
+  })
+  @ApiQuery({
+    name: 'status',
+    required: false,
+    enum: ['PENDING_ENROLLMENT', 'ACTIVE', 'REVOKED', 'KILLED'],
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Max 100, default 20.',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Opaque `nextCursor` from a previous page.',
+  })
+  @ApiResponse({ status: 200, type: AgentListResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async listAgents(
+    @CurrentAuth() auth: AuthContext,
+    @Query('status')
+    status?: 'PENDING_ENROLLMENT' | 'ACTIVE' | 'REVOKED' | 'KILLED',
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ): Promise<AgentListResponseDto> {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const page = await this.agentsService.listAgents(tenantClient, {
+      status,
+      limit: parseLimit(limit),
+      cursor: parseCursor(cursor),
+    });
+    return {
+      items: page.items.map((agent) => ({
+        id: agent.id,
+        slug: agent.slug,
+        identifier: agent.identifier,
+        displayName: agent.displayName,
+        status: agent.status,
+        createdAt: agent.createdAt,
+      })),
+      nextCursor: page.nextCursor,
     };
   }
 

@@ -2,6 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import {
+  CursorPage,
+  DecodedCursor,
+  cursorWhereClause,
+  toCursorPage,
+} from '../common/pagination/cursor-pagination';
 import { buildAgentIdentifier } from './agent-identifier';
 import {
   AgentNotFoundError,
@@ -21,6 +27,22 @@ export interface CreateAgentInput {
   displayName: string;
   tenantSlug: string;
   createdBy: string;
+}
+
+export interface ListAgentsInput {
+  /** Section 65's agent list filter — real `AgentStatus` values only. */
+  status?: 'PENDING_ENROLLMENT' | 'ACTIVE' | 'REVOKED' | 'KILLED';
+  limit: number;
+  cursor?: DecodedCursor;
+}
+
+export interface AgentSummary {
+  id: string;
+  slug: string;
+  identifier: string;
+  displayName: string;
+  status: string;
+  createdAt: Date;
 }
 
 export interface CreatedEnrollmentToken {
@@ -64,6 +86,31 @@ export class AgentsService {
         createdBy: input.createdBy,
       },
     });
+  }
+
+  /**
+   * `GET /agents` (Phase 11b Part 1) — cursor-paginated, newest first, the
+   * one filter Section 65's agent list page actually needs (`status`; see
+   * `docs/superpowers/specs/2026-08-19-phase11b-list-endpoints-core-pages-design.md`).
+   * Tenant-scoped by construction: `tenantClient` is already this
+   * request's tenant-isolated Prisma client (Phase 2 — see
+   * docs/tenant-isolation.md), so there is no separate `tenantId` filter
+   * to apply here.
+   */
+  async listAgents(
+    tenantClient: TenantPrismaClient,
+    input: ListAgentsInput,
+  ): Promise<CursorPage<AgentSummary>> {
+    const where = {
+      ...(input.status ? { status: input.status } : {}),
+      ...cursorWhereClause('createdAt', input.cursor),
+    };
+    const rows = await tenantClient.agent.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: input.limit + 1,
+    });
+    return toCursorPage(rows, input.limit, (row) => row.createdAt);
   }
 
   async createEnrollmentToken(

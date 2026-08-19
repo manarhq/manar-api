@@ -77,3 +77,45 @@ export class RevokeStatusResponseDto {
   @ApiProperty({ enum: ['REVOKED'], example: 'REVOKED' })
   status!: 'REVOKED';
 }
+
+/** One row of `GET /agents`'s paginated list — see `AgentsService.listAgents`. */
+export class AgentSummaryDto {
+  @ApiProperty({ format: 'uuid' })
+  id!: string;
+
+  @ApiProperty({ example: 'edr-triage-bot' })
+  slug!: string;
+
+  @ApiProperty({ example: 'agent://acme-corp/edr-triage-bot' })
+  identifier!: string;
+
+  @ApiProperty({ example: 'EDR Triage Bot' })
+  displayName!: string;
+
+  @ApiProperty({
+    enum: ['PENDING_ENROLLMENT', 'ACTIVE', 'REVOKED', 'KILLED'],
+    example: 'ACTIVE',
+  })
+  status!: string;
+
+  @ApiProperty({ format: 'date-time' })
+  createdAt!: Date;
+}
+
+/**
+ * `GET /agents`'s response envelope — the cursor-pagination shape every
+ * new Phase 11b Part 1 list endpoint shares (`items` + `nextCursor`). See
+ * `src/common/pagination/cursor-pagination.ts`'s doc comment for why
+ * cursor, not offset.
+ */
+export class AgentListResponseDto {
+  @ApiProperty({ type: () => AgentSummaryDto, isArray: true })
+  items!: AgentSummaryDto[];
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'Opaque token for the next page, or null when this is the last page. Pass back as `?cursor=`.',
+  })
+  nextCursor!: string | null;
+}
