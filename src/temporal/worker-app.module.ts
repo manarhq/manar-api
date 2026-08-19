@@ -8,6 +8,7 @@ import { RiskModule } from '../risk/risk.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
 import { AuditModule } from '../audit/audit.module';
 import { AuditRetentionModule } from '../audit/retention/audit-retention.module';
+import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { ApprovalActivitiesFactory } from './activities/approval.activities';
 import { AuditRetentionActivitiesFactory } from './activities/audit-retention.activities';
 
@@ -33,6 +34,7 @@ import { AuditRetentionActivitiesFactory } from './activities/audit-retention.ac
     DatabaseModule,
     OpenBaoModule,
     AuditModule,
+    KillSwitchesModule,
     TasksModule,
     PolicyModule,
     RiskModule,

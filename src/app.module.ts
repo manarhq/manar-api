@@ -22,6 +22,7 @@ import { AuditHttpModule } from './audit/audit-http.module';
 import { AuditIndexerModule } from './audit/opensearch/audit-indexer.module';
 import { LiveEventsHttpModule } from './audit/live/live-events-http.module';
 import { EvidenceHttpModule } from './evidence/evidence-http.module';
+import { KillSwitchesHttpModule } from './kill-switches/kill-switches-http.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { EvidenceHttpModule } from './evidence/evidence-http.module';
     AuditIndexerModule,
     LiveEventsHttpModule,
     EvidenceHttpModule,
+    KillSwitchesHttpModule,
   ],
   controllers: [AppController],
   providers: [
