@@ -10,6 +10,7 @@ import { AppModule } from './app.module';
 import { AgentMtlsAppModule } from './agent-mtls/agent-mtls-app.module';
 import { validate } from './config/env.validation';
 import type { AppConfig } from './config/env.validation';
+import { setupOpenApiDocs } from './openapi/setup-openapi-docs';
 
 async function bootstrap(): Promise<void> {
   // Validated once, directly against process.env, before either Nest
@@ -29,6 +30,7 @@ async function bootstrap(): Promise<void> {
 
   const configService = app.get(ConfigService<AppConfig, true>);
   const port = configService.get('PORT', { infer: true });
+  setupOpenApiDocs(app, configService);
   await app.listen(port, '0.0.0.0');
 
   const agentMtlsApp = await NestFactory.create<NestFastifyApplication>(

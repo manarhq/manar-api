@@ -15,6 +15,11 @@ packages:
 allowBuilds:
   '@confluentinc/kafka-javascript': true
   '@prisma/engines': true
+  # Pulled in transitively by swagger-ui-dist (@nestjs/swagger, Phase 11a
+  # Part 1 — see docs/superpowers/specs/2026-08-19-phase11a-soc-ui-foundation-design.md).
+  # Scarf's postinstall is anonymous download-analytics telemetry only, no
+  # functional purpose for this repo — disabled rather than allowed.
+  '@scarf/scarf': false
   '@swc/core': false
   prisma: true
   protobufjs: false
