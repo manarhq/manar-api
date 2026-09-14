@@ -36,7 +36,7 @@ export interface AuditSearchFields {
   taskId?: string;
   toolId?: string;
   actionId?: string;
-  /** `ALLOW`/`DENY`/`REQUIRE_APPROVAL`/`APPROVE`/`DENY` depending on eventType — see `deriveDecision`. */
+  /** `ALLOW`/`DENY`/`APPROVAL_REQUIRED`/`APPROVE`/`DENY` depending on eventType — see `deriveDecision`. */
   decision?: string;
   riskScore?: number;
 }
@@ -69,7 +69,7 @@ function deriveDecision(
     case 'authorization.denied':
       return 'DENY';
     case 'authorization.pending_approval':
-      return 'REQUIRE_APPROVAL';
+      return 'APPROVAL_REQUIRED';
     default:
       return undefined;
   }

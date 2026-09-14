@@ -619,7 +619,7 @@ describe('Tool Gateway (e2e)', () => {
     }
   }, 30_000);
 
-  it('6. REQUIRE_APPROVAL -> no call made, response clearly signals pending (not success or failure)', async () => {
+  it('6. APPROVAL_REQUIRED -> no call made, response clearly signals pending (not success or failure)', async () => {
     const fixture = new HttpFixtureServer();
     const baseEndpoint = await fixture.start();
     try {
@@ -633,7 +633,7 @@ describe('Tool Gateway (e2e)', () => {
         toolId: tool.id,
         name: 'lookup',
         // A high riskBaseScore pushes the deterministic risk score above
-        // this task's own (default) riskCeiling, producing REQUIRE_APPROVAL
+        // this task's own (default) riskCeiling, producing APPROVAL_REQUIRED
         // via the existing, unchanged Phase 6 pipeline -- exactly the same
         // mechanism test/policy-risk.e2e-spec.ts's scenario 3 exercises,
         // just fed by a real registered ToolAction now instead of the

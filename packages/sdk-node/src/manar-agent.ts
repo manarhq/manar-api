@@ -39,7 +39,7 @@ export interface AuthorizeRequest {
 export type AuthorizeDecision =
   | { decision: 'ALLOW' }
   | { decision: 'DENY'; reason: string }
-  | { decision: 'REQUIRE_APPROVAL'; reason: string; riskScore: number };
+  | { decision: 'APPROVAL_REQUIRED'; reason: string; riskScore: number };
 
 export interface DelegateTaskGrant {
   toolId: string;
@@ -84,7 +84,7 @@ export interface InvokeToolRequest {
   actionId: string;
   resource: string;
   params?: unknown;
-  /** A grant token from a prior `REQUIRE_APPROVAL` -> approved -> `getApproval()` cycle (Phase 8) -- its presence routes this same request onto the grant-validation path instead of a fresh authorize+risk evaluation. */
+  /** A grant token from a prior `APPROVAL_REQUIRED` -> approved -> `getApproval()` cycle (Phase 8) -- its presence routes this same request onto the grant-validation path instead of a fresh authorize+risk evaluation. */
   grantToken?: string;
 }
 
@@ -194,12 +194,12 @@ export class ManarAgent {
 
   /**
    * `POST /agent/v1/authorize` over mTLS using this agent's enrolled
-   * identity (Phase 5; `REQUIRE_APPROVAL` added Phase 6). Always resolves
+   * identity (Phase 5; `APPROVAL_REQUIRED` added Phase 6). Always resolves
    * to a `{ decision }` object, never throws for a DENY or a
-   * REQUIRE_APPROVAL -- both are legitimate, expected answers, not a
+   * APPROVAL_REQUIRED -- both are legitimate, expected answers, not a
    * transport/request error (this mirrors `AuthorizeController`'s own
    * "never map a non-ALLOW decision to an HTTP error status" contract).
-   * `REQUIRE_APPROVAL` is a stable decision value from Phase 6 onward but
+   * `APPROVAL_REQUIRED` is a stable decision value from Phase 6 onward but
    * has no path to ever resolve to execution yet (Phase 8) -- it is
    * correctly a dead end for now. Throws only for a genuine transport
    * failure, a malformed request, or if this agent has never enrolled.
@@ -241,7 +241,7 @@ export class ManarAgent {
    * Phase 8's approval retry path). Omit `grantToken` for a fresh
    * attempt (runs the full authorize -> policy -> risk pipeline); pass
    * one obtained from `getApproval()` to retry a previously
-   * `REQUIRE_APPROVAL`'d request once a human has approved it -- same
+   * `APPROVAL_REQUIRED`'d request once a human has approved it -- same
    * `taskId`/`toolId`/`actionId`/`resource`/`params` as the original
    * request (Section 80's parameter-binding invariant; a mismatch is
    * rejected as `DENIED`/`grant_mismatch`, not silently accepted).
@@ -286,7 +286,7 @@ export class ManarAgent {
 
   /**
    * `GET /agent/v1/approvals/:id` over mTLS (Phase 8) -- polls the current
-   * state of a `REQUIRE_APPROVAL`'d request created by `invokeTool()`.
+   * state of a `APPROVAL_REQUIRED`'d request created by `invokeTool()`.
    * Answers 404 (never 403) if this approval request doesn't belong to
    * this agent, so a grant can never leak across agents even if one
    * agent somehow learned another's approval id -- surfaces as a thrown

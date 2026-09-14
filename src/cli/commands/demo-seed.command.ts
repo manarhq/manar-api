@@ -176,7 +176,7 @@ interface PolicyDef {
       toolId: string;
       actionId: string;
       resourcePattern?: string;
-      effect: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+      effect: 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
       riskWeight?: number;
       riskFloor?: number;
       description?: string;
@@ -190,7 +190,7 @@ interface PolicyDef {
 /**
  * Four real, published policies (Phase 6's actual rule schema) shaping
  * this demo's intended allow/deny/approval story: SIEM reads ALLOW, EDR
- * isolation REQUIRE_APPROVAL, IAM mutations DENY (defense in depth on top
+ * isolation APPROVAL_REQUIRED, IAM mutations DENY (defense in depth on top
  * of — not a substitute for — the fact that this task's own grant never
  * includes any `iam`/`firewall` action at all, so those are already
  * denied at the OpenFGA task-scope step before any policy is even
@@ -240,7 +240,7 @@ const DEMO_POLICIES: PolicyDef[] = [
           toolId: 'edr',
           actionId: 'isolate-host',
           resourcePattern: '*',
-          effect: 'REQUIRE_APPROVAL',
+          effect: 'APPROVAL_REQUIRED',
           riskWeight: 55,
           riskFloor: 60,
           description:
@@ -292,7 +292,7 @@ const DEMO_POLICIES: PolicyDef[] = [
           name: 'Require approval for RESTRICTED-classified actions',
           toolId: '*',
           actionId: '*',
-          effect: 'REQUIRE_APPROVAL',
+          effect: 'APPROVAL_REQUIRED',
           resourceClassification: 'RESTRICTED',
           riskWeight: 50,
           riskFloor: 65,

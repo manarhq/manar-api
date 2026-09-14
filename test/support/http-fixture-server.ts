@@ -22,7 +22,7 @@ export interface HttpFixtureResponse {
  * Phase 7a's actual demo SOC tool backends (this workstream doesn't depend
  * on that existing yet — see the design spec's "Runs in parallel with
  * Phase 7a" note). Records every request it receives (for asserting *zero*
- * requests were made on a `DENY`/`REQUIRE_APPROVAL`, and for inspecting
+ * requests were made on a `DENY`/`APPROVAL_REQUIRED`, and for inspecting
  * exactly what `HttpToolAdapter` sent), and answers with a configurable
  * response (defaults to a 200 JSON echo of what it received, standing in
  * for "the tool's real response").

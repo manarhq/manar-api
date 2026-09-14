@@ -31,7 +31,7 @@ export interface CreateApprovalRequestInput {
   /** The exact `params` submitted to `POST /agent/v1/tools/invoke` — see `ApprovalRequest`'s schema doc comment. */
   params: unknown;
   riskScore: number;
-  /** Null when the `REQUIRE_APPROVAL` decision came purely from `RiskEngine`'s score exceeding `task.riskCeiling`, with no policy rule matching at all. */
+  /** Null when the `APPROVAL_REQUIRED` decision came purely from `RiskEngine`'s score exceeding `task.riskCeiling`, with no policy rule matching at all. */
   policyVersionId: string | null;
   /**
    * Release 2026-11-11 (brief §3.4) — the risk breakdown behind
@@ -55,7 +55,7 @@ export interface CreateApprovalRequestInput {
  * `ApprovalRequest` creation + lookup (Phase 8, Sections 27/28/31 — see
  * docs/approvals.md). Used by both the human-facing/agent-facing HTTP
  * processes (`ToolInvokeController` creates one the moment
- * `AuthorizationService` yields `REQUIRE_APPROVAL`;
+ * `AuthorizationService` yields `APPROVAL_REQUIRED`;
  * `AgentApprovalsController`/`ApprovalsController` read one) and — since
  * the worker process bootstraps the exact same Nest providers (see
  * `src/worker.main.ts`) — `GrantService`'s Activities. One implementation

@@ -289,7 +289,7 @@ describe('Approval Engine (e2e)', () => {
     toolId: string;
     actionId: string;
     resourcePattern?: string;
-    effect: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+    effect: 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
   }
 
   async function createPolicy(
@@ -655,7 +655,7 @@ describe('Approval Engine (e2e)', () => {
       toolId: tool.id,
       name: 'isolate-host',
       // baseline 10 + riskBaseScore 15 + mutating 15 = 40 -- above the
-      // riskCeiling below, so this reaches REQUIRE_APPROVAL (same
+      // riskCeiling below, so this reaches APPROVAL_REQUIRED (same
       // deterministic mechanism test/tool-gateway-demo-integration.e2e-spec.ts
       // uses for the ALLOW case, just with a lower riskCeiling here).
       riskBaseScore: 15,
@@ -768,7 +768,7 @@ describe('Approval Engine (e2e)', () => {
       expect(polled.grantToken).toBeUndefined();
 
       // Retrying the exact same request (no grantToken) goes through
-      // AuthorizationService.authorize fresh -- still REQUIRE_APPROVAL
+      // AuthorizationService.authorize fresh -- still APPROVAL_REQUIRED
       // (nothing about the task/policy/risk changed), never ALLOW, and
       // certainly never a tool call.
       const retryInvoke = await invokeToolOverMtls(agent.identity, {
@@ -1063,7 +1063,7 @@ describe('Approval Engine (e2e)', () => {
           {
             toolId: tool.name,
             actionId: 'sensitive-action',
-            effect: 'REQUIRE_APPROVAL',
+            effect: 'APPROVAL_REQUIRED',
           },
         ],
       );
@@ -1076,7 +1076,7 @@ describe('Approval Engine (e2e)', () => {
           { toolId: tool.name, actionId: 'sensitive-action' },
         ],
         allowedResourceSelectors: [{ toolId: tool.name, pattern: '*' }],
-        riskCeiling: 100, // generous -- REQUIRE_APPROVAL here comes from the policy rule, not the risk ceiling
+        riskCeiling: 100, // generous -- APPROVAL_REQUIRED here comes from the policy rule, not the risk ceiling
       });
 
       const initialInvoke = await invokeToolOverMtls(agent.identity, {

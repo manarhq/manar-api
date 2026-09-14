@@ -48,7 +48,7 @@ const DESTRUCTIVE_POINTS = 25;
  * `BASELINE_SCORE` every request already gets — `INTERNAL` is the schema
  * default, so this must not visibly move an unclassified-in-practice
  * action's score. `CONFIDENTIAL`/`RESTRICTED` step up meaningfully but
- * deliberately not enough alone to force `REQUIRE_APPROVAL` for every
+ * deliberately not enough alone to force `APPROVAL_REQUIRED` for every
  * such action — that's what a `resourceClassification` policy rule
  * (`docs/policy-model.md`) is for, via its own `riskWeight`/`riskFloor`.
  */
@@ -68,7 +68,7 @@ const CLASSIFICATION_RISK_POINTS: Record<DataClassification, number> = {
  * ever trusting or re-running anything from the injected content itself
  * (Section 72 — the actual security boundary stays deterministic task
  * scope). Chosen to be large enough to visibly move a request from ALLOW
- * toward `REQUIRE_APPROVAL` territory on its own for a moderately-risky
+ * toward `APPROVAL_REQUIRED` territory on its own for a moderately-risky
  * action, without alone guaranteeing it for every action (it is not the
  * full 100-point range) — see docs/ai-security-model.md for the worked
  * example.
@@ -82,7 +82,7 @@ function clamp(value: number, min: number, max: number): number {
 /**
  * Sections 21-26's numeric (0-100) risk engine. `AuthorizationService`
  * calls `score` after `PolicyEngine.evaluate` (same request), immediately
- * before deciding `ALLOW` vs. `REQUIRE_APPROVAL` against `task.riskCeiling`
+ * before deciding `ALLOW` vs. `APPROVAL_REQUIRED` against `task.riskCeiling`
  * (Phase 5's field). Since Phase 7b, `ToolRegistryService` resolves
  * `{ toolId, actionId }` against a real registered `ToolAction` when one
  * exists (`riskBaseScore`/`mutating`/`destructive`); when none is
@@ -99,7 +99,7 @@ function clamp(value: number, min: number, max: number): number {
  * this is the concrete mechanism satisfying the non-negotiable "AI can only
  * ever add restriction, never remove it" invariant (Section 26) — AI can
  * push a request's final score *up* past what the deterministic rules
- * alone produced (e.g. into `REQUIRE_APPROVAL` territory), but can never
+ * alone produced (e.g. into `APPROVAL_REQUIRED` territory), but can never
  * pull it down below the deterministic floor, and a `manar-ai` outage
  * (`aiAdvisoryScore` stays `null`) leaves `finalRiskScore` exactly equal to
  * `deterministicRiskScore` — identical to this engine's behavior before

@@ -198,7 +198,7 @@ describe('PolicyEngine', () => {
     expect(result.effect).toBe('DENY');
   });
 
-  it('combines ALLOW + REQUIRE_APPROVAL -> REQUIRE_APPROVAL', async () => {
+  it('combines ALLOW + APPROVAL_REQUIRED -> APPROVAL_REQUIRED', async () => {
     const rows = [
       publishedVersion({
         id: 'v1',
@@ -224,7 +224,7 @@ describe('PolicyEngine', () => {
             {
               toolId: 'edr',
               actionId: 'isolate_host',
-              effect: 'REQUIRE_APPROVAL',
+              effect: 'APPROVAL_REQUIRED',
               resourcePattern: '*',
             },
           ],
@@ -237,7 +237,7 @@ describe('PolicyEngine', () => {
       actionId: 'isolate_host',
       resource: 'host-1',
     });
-    expect(result.effect).toBe('REQUIRE_APPROVAL');
+    expect(result.effect).toBe('APPROVAL_REQUIRED');
   });
 
   it('only consults the latest PUBLISHED version per policy, never a lower version', async () => {
@@ -336,7 +336,7 @@ describe('PolicyEngine', () => {
               {
                 toolId: '*',
                 actionId: '*',
-                effect: 'REQUIRE_APPROVAL',
+                effect: 'APPROVAL_REQUIRED',
                 resourcePattern: '*',
                 resourceClassification: 'RESTRICTED',
                 riskFloor: 60,
@@ -351,7 +351,7 @@ describe('PolicyEngine', () => {
         actionId: 'export_users',
         resource: 'anything',
       });
-      expect(result.effect).toBe('REQUIRE_APPROVAL');
+      expect(result.effect).toBe('APPROVAL_REQUIRED');
       expect(result.matchedRule?.resourceClassification).toBe('RESTRICTED');
     });
 

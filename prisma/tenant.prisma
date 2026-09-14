@@ -567,7 +567,7 @@ model PolicyVersion {
 
   /// Phase 8: an ApprovalRequest/AuthorizationGrant may record which
   /// PolicyVersion was published at the moment it was produced — nullable
-  /// on both, since a REQUIRE_APPROVAL decision can also come purely from
+  /// on both, since a APPROVAL_REQUIRED decision can also come purely from
   /// RiskEngine's score exceeding `task.riskCeiling` with no policy rule
   /// having matched at all (see `AuthorizationService`'s
   /// `risk_ceiling_exceeded` reason) — see those models' own doc comments.
@@ -733,7 +733,7 @@ model ToolAction {
   /// carried in the schema for a future phase's policy-authoring
   /// ergonomics (e.g. "pre-fill a new policy rule's effect from this");
   /// not read by `RiskEngine`/`AuthorizationService` this phase (Phase
-  /// 6's `REQUIRE_APPROVAL` routing already comes from the policy/risk
+  /// 6's `APPROVAL_REQUIRED` routing already comes from the policy/risk
   /// pipeline, which stays the single source of truth for that decision
   /// -- see docs/policy-model.md).
   approvalDefault Boolean @default(false)
@@ -825,10 +825,10 @@ enum ApprovalDecisionType {
 }
 
 /// A pending (or resolved) human-approval gate for one specific
-/// `REQUIRE_APPROVAL` decision from `AuthorizationService`'s pipeline
+/// `APPROVAL_REQUIRED` decision from `AuthorizationService`'s pipeline
 /// (Phase 8, Sections 27/28/31 -- see docs/approvals.md). Created by `POST
 /// /agent/v1/tools/invoke` the moment that pipeline yields
-/// `REQUIRE_APPROVAL`, in the same call that starts the `ApprovalWorkflow`
+/// `APPROVAL_REQUIRED`, in the same call that starts the `ApprovalWorkflow`
 /// this row's `temporalWorkflowId` names -- no tool call is ever attempted
 /// at this point (Section 80's "pending action cannot execute before
 /// approval" invariant).
@@ -841,7 +841,7 @@ enum ApprovalDecisionType {
 /// byte (after canonicalization -- see `src/approvals/parameter-hash.util.ts`)
 /// or its grant is rejected (Section 80's parameter-binding invariant).
 ///
-/// `policyVersionId` is nullable: a `REQUIRE_APPROVAL` decision can come
+/// `policyVersionId` is nullable: a `APPROVAL_REQUIRED` decision can come
 /// from a matched policy rule (`policyVersionId` set, to the version whose
 /// rule matched) *or* purely from `RiskEngine`'s score exceeding
 /// `task.riskCeiling` with no policy rule having matched at all -- see
@@ -920,7 +920,7 @@ model ApprovalRequest {
   requiredReason         String?
 
   /// The published `PolicyVersion` whose rule produced this
-  /// `REQUIRE_APPROVAL` decision -- null when the decision came purely
+  /// `APPROVAL_REQUIRED` decision -- null when the decision came purely
   /// from `RiskEngine`'s score exceeding `task.riskCeiling` with no policy
   /// rule matching at all. See model doc comment.
   policyVersionId String?

@@ -53,7 +53,7 @@ import { FakeAnalysisServiceServer } from './support/fake-analysis-service-serve
  *
  *   tenant/owner/login -> agent create/enroll -> tools/policy/task setup
  *   -> SIEM query ALLOW -> IAM disable-user DENY -> EDR isolate
- *   REQUIRE_APPROVAL -> human approves -> EXECUTE -> host confirmed
+ *   APPROVAL_REQUIRED -> human approves -> EXECUTE -> host confirmed
  *   isolated -> injected malicious content in tool output -> unauthorized
  *   attempt still DENIED -> kill switch activated -> previously-allowed
  *   SIEM query now DENIED -> audit chain verifies -> evidence export
@@ -343,7 +343,7 @@ describe('Complete Demo (Phase 13, mandatory e2e acceptance test)', () => {
       toolId: string;
       actionId: string;
       resourcePattern?: string;
-      effect: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+      effect: 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
       riskWeight?: number;
       riskFloor?: number;
     }>;
@@ -454,7 +454,7 @@ describe('Complete Demo (Phase 13, mandatory e2e acceptance test)', () => {
     fakeAnalysisServer = new FakeAnalysisServiceServer();
     const analysisTarget = await fakeAnalysisServer.start();
     // Neutral risk signal so it never pushes an unrelated decision toward
-    // REQUIRE_APPROVAL on its own — only the prompt-injection detector is
+    // APPROVAL_REQUIRED on its own — only the prompt-injection detector is
     // content-controlled here (matching test/ai-advisory.e2e-spec.ts
     // scenario 6's identical setup).
     fakeAnalysisServer.riskResult = {
@@ -777,7 +777,7 @@ describe('Complete Demo (Phase 13, mandatory e2e acceptance test)', () => {
           toolId: 'edr',
           actionId: 'isolate-host',
           resourcePattern: '*',
-          effect: 'REQUIRE_APPROVAL',
+          effect: 'APPROVAL_REQUIRED',
           riskWeight: 55,
           riskFloor: 60,
         },
@@ -915,7 +915,7 @@ describe('Complete Demo (Phase 13, mandatory e2e acceptance test)', () => {
     expect(iamBody.decision).toBe('DENY');
     expect(iamBody.reason).toBe('not_authorized');
 
-    // ---- Checkpoint: EDR isolate REQUIRE_APPROVAL ----
+    // ---- Checkpoint: EDR isolate APPROVAL_REQUIRED ----
     const isolateAttempt = await invokeToolOverMtls(agent.identity, {
       taskId: task.id,
       toolId: 'edr',

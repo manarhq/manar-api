@@ -157,7 +157,7 @@ describe('Data classification (e2e)', () => {
     toolId: string;
     actionId: string;
     resourcePattern?: string;
-    effect: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+    effect: 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
     resourceClassification?:
       'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED';
     riskWeight?: number;
@@ -304,7 +304,7 @@ describe('Data classification (e2e)', () => {
       {
         toolId: toolName,
         actionId: '*',
-        effect: 'REQUIRE_APPROVAL',
+        effect: 'APPROVAL_REQUIRED',
         resourceClassification: 'RESTRICTED',
         riskFloor: 60,
       },
@@ -324,8 +324,8 @@ describe('Data classification (e2e)', () => {
       actionId: 'disable-user',
       resource: 'user-1',
     });
-    expect(decision.decision).toBe('REQUIRE_APPROVAL');
-    if (decision.decision === 'REQUIRE_APPROVAL') {
+    expect(decision.decision).toBe('APPROVAL_REQUIRED');
+    if (decision.decision === 'APPROVAL_REQUIRED') {
       expect(decision.reason).toBe('policy_requires_approval');
       expect(decision.riskScore).toBeGreaterThanOrEqual(60);
     }
@@ -364,7 +364,7 @@ describe('Data classification (e2e)', () => {
     expect(decision.decision).toBe('ALLOW');
   }, 30_000);
 
-  it("RiskEngine's classification contributor alone (no policy at all) can push a request over task.riskCeiling into REQUIRE_APPROVAL -- mirrors test/policy-risk.e2e-spec.ts's identical risk-ceiling scenario, with classification as the contributor instead of a destructive keyword", async () => {
+  it("RiskEngine's classification contributor alone (no policy at all) can push a request over task.riskCeiling into APPROVAL_REQUIRED -- mirrors test/policy-risk.e2e-spec.ts's identical risk-ceiling scenario, with classification as the contributor instead of a destructive keyword", async () => {
     const confidentialTool = uniqueSlug('confidential');
     // Deterministic score: baseline(10) + riskBaseScore(5) +
     // classification(CONFIDENTIAL:10) = 25 -- see docs/data-classification.md.
@@ -380,7 +380,7 @@ describe('Data classification (e2e)', () => {
       assignedAgentId: agent.agentId,
       allowedToolActions: [{ toolId: confidentialTool, actionId: 'read' }],
       allowedResourceSelectors: [{ toolId: confidentialTool, pattern: '*' }],
-      riskCeiling: 20, // below 25 -- AI advisory can only push the final score up further, never down, so this stays REQUIRE_APPROVAL regardless of AI availability
+      riskCeiling: 20, // below 25 -- AI advisory can only push the final score up further, never down, so this stays APPROVAL_REQUIRED regardless of AI availability
     });
 
     const decision = await agent.manar.authorize({
@@ -389,8 +389,8 @@ describe('Data classification (e2e)', () => {
       actionId: 'read',
       resource: 'anything',
     });
-    expect(decision.decision).toBe('REQUIRE_APPROVAL');
-    if (decision.decision === 'REQUIRE_APPROVAL') {
+    expect(decision.decision).toBe('APPROVAL_REQUIRED');
+    if (decision.decision === 'APPROVAL_REQUIRED') {
       expect(decision.reason).toBe('risk_ceiling_exceeded');
       expect(decision.riskScore).toBeGreaterThanOrEqual(25);
     }

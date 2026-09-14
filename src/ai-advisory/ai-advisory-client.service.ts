@@ -63,13 +63,13 @@ export interface IncidentSummaryAdvisory {
   explanation: string;
 }
 
-/** Mirrors `PolicyRuleDraft` (the proto message), with `effect` already converted to the same string form `PolicyRuleSchema.effect` uses (`ALLOW`/`DENY`/`REQUIRE_APPROVAL`) — see `suggestPolicy`'s doc comment for why. */
+/** Mirrors `PolicyRuleDraft` (the proto message), with `effect` already converted to the same string form `PolicyRuleSchema.effect` uses (`ALLOW`/`DENY`/`APPROVAL_REQUIRED`) — see `suggestPolicy`'s doc comment for why. */
 export interface PolicyRuleDraftAdvisory {
   name: string;
   toolId: string;
   actionId: string;
   resourcePattern: string;
-  effect: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+  effect: 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
   riskWeight: number;
   riskFloor: number;
   description: string;
@@ -507,7 +507,7 @@ export class AiAdvisoryClient implements OnModuleDestroy {
    * Phase 10c — converts a natural-language policy description into a
    * **draft** rule set matching Phase 6's `PolicyContentSchema` field-for-
    * field (`PolicyRuleDraft.effect`'s `EFFECT_*` enum is mapped to the same
-   * bare `ALLOW`/`DENY`/`REQUIRE_APPROVAL` strings `PolicyRuleSchema.effect`
+   * bare `ALLOW`/`DENY`/`APPROVAL_REQUIRED` strings `PolicyRuleSchema.effect`
    * uses, so the caller can hand `rules` straight to that schema without any
    * further translation). **Never published by this class or anything it
    * calls** — `PolicyController.suggestPolicy` (the only caller) must
@@ -559,7 +559,7 @@ export class AiAdvisoryClient implements OnModuleDestroy {
         effect: policyRuleDraft_EffectToJSON(rule.effect).replace(
           /^EFFECT_/,
           '',
-        ) as 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL',
+        ) as 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED',
         riskWeight: rule.riskWeight,
         riskFloor: rule.riskFloor,
         description: rule.description,

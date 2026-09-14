@@ -165,7 +165,7 @@ describe('Policy & Risk Engine (e2e)', () => {
     toolId: string;
     actionId: string;
     resourcePattern?: string;
-    effect: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+    effect: 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
     riskWeight?: number;
     riskFloor?: number;
   }
@@ -328,16 +328,16 @@ describe('Policy & Risk Engine (e2e)', () => {
     }
   }, 30_000);
 
-  it('2. a policy REQUIRE_APPROVAL rule produces that outcome even for a low-risk-scored action', async () => {
+  it('2. a policy APPROVAL_REQUIRED rule produces that outcome even for a low-risk-scored action', async () => {
     await createPublishedPolicy(uniqueSlug('approval-override'), [
       {
         toolId: 'edr',
         actionId: 'read_status',
-        effect: 'REQUIRE_APPROVAL',
+        effect: 'APPROVAL_REQUIRED',
         // No riskWeight/riskFloor at all -- the action itself is
         // low-risk (no destructive keyword, root task, no policy risk
         // contribution), yet the policy's own effect still forces
-        // REQUIRE_APPROVAL.
+        // APPROVAL_REQUIRED.
       },
     ]);
 
@@ -355,14 +355,14 @@ describe('Policy & Risk Engine (e2e)', () => {
       actionId: 'read_status',
       resource: 'host-1',
     });
-    expect(decision.decision).toBe('REQUIRE_APPROVAL');
-    if (decision.decision === 'REQUIRE_APPROVAL') {
+    expect(decision.decision).toBe('APPROVAL_REQUIRED');
+    if (decision.decision === 'APPROVAL_REQUIRED') {
       expect(decision.reason).toBe('policy_requires_approval');
       expect(decision.riskScore).toBeLessThan(20);
     }
   }, 30_000);
 
-  it('3. exceeding task.riskCeiling produces REQUIRE_APPROVAL even with no matching policy rule', async () => {
+  it('3. exceeding task.riskCeiling produces APPROVAL_REQUIRED even with no matching policy rule', async () => {
     const agent = await createEnrolledAgent('riskceil');
     const task = await createTask({
       assignedAgentId: agent.agentId,
@@ -380,8 +380,8 @@ describe('Policy & Risk Engine (e2e)', () => {
       actionId: 'isolate_host',
       resource: 'host-1',
     });
-    expect(decision.decision).toBe('REQUIRE_APPROVAL');
-    if (decision.decision === 'REQUIRE_APPROVAL') {
+    expect(decision.decision).toBe('APPROVAL_REQUIRED');
+    if (decision.decision === 'APPROVAL_REQUIRED') {
       expect(decision.reason).toBe('risk_ceiling_exceeded');
       expect(decision.riskScore).toBeGreaterThan(5);
     }

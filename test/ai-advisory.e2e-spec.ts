@@ -582,7 +582,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         resource: 'host-1',
       });
       // AuthorizeController always responds 200/201 for a well-formed
-      // request -- ALLOW/DENY/REQUIRE_APPROVAL are all legitimate policy
+      // request -- ALLOW/DENY/APPROVAL_REQUIRED are all legitimate policy
       // decisions, never HTTP-level errors (Nest's default POST status,
       // 201, applies here since the controller sets no explicit @HttpCode).
       expect([200, 201]).toContain(response.status);
@@ -594,7 +594,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
     }
   }, 30_000);
 
-  it('2. AI advisory reports HIGH risk for a request the deterministic layer alone would ALLOW -> final decision becomes REQUIRE_APPROVAL', async () => {
+  it('2. AI advisory reports HIGH risk for a request the deterministic layer alone would ALLOW -> final decision becomes APPROVAL_REQUIRED', async () => {
     const fakeServer = new FakeAnalysisServiceServer();
     const target = await fakeServer.start();
     fakeServer.riskResult = {
@@ -626,7 +626,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         resource: 'anything',
       });
       // AuthorizeController always responds 200/201 for a well-formed
-      // request -- ALLOW/DENY/REQUIRE_APPROVAL are all legitimate policy
+      // request -- ALLOW/DENY/APPROVAL_REQUIRED are all legitimate policy
       // decisions, never HTTP-level errors (Nest's default POST status,
       // 201, applies here since the controller sets no explicit @HttpCode).
       expect([200, 201]).toContain(response.status);
@@ -635,7 +635,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         reason: string;
         riskScore: number;
       };
-      expect(decision.decision).toBe('REQUIRE_APPROVAL');
+      expect(decision.decision).toBe('APPROVAL_REQUIRED');
       expect(decision.reason).toBe('risk_ceiling_exceeded');
       expect(decision.riskScore).toBe(90); // AI pushed it up, not deterministic (10)
     } finally {
@@ -687,7 +687,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         resource: 'everything',
       });
       // AuthorizeController always responds 200/201 for a well-formed
-      // request -- ALLOW/DENY/REQUIRE_APPROVAL are all legitimate policy
+      // request -- ALLOW/DENY/APPROVAL_REQUIRED are all legitimate policy
       // decisions, never HTTP-level errors (Nest's default POST status,
       // 201, applies here since the controller sets no explicit @HttpCode).
       expect([200, 201]).toContain(response.status);
@@ -696,7 +696,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         reason: string;
         riskScore: number;
       };
-      expect(decision.decision).toBe('REQUIRE_APPROVAL');
+      expect(decision.decision).toBe('APPROVAL_REQUIRED');
       // Still the deterministic value (100), not the AI's low 5.
       expect(decision.riskScore).toBe(100);
     } finally {
@@ -934,7 +934,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
       // below (still-ALLOW-then-DENY-appropriately) are the proof.
 
       // Subsequent unrelated request: same action, now measurably higher
-      // risk (REQUIRE_APPROVAL, driven by the AgentRiskFlag bump alone --
+      // risk (APPROVAL_REQUIRED, driven by the AgentRiskFlag bump alone --
       // fakeServer.riskResult is still confidence 0 / no signal).
       const after = await authorizeOverMtls(agent.identity, alt.port, {
         taskId: task.id,
@@ -947,7 +947,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         decision: string;
         riskScore?: number;
       };
-      expect(afterDecision.decision).toBe('REQUIRE_APPROVAL');
+      expect(afterDecision.decision).toBe('APPROVAL_REQUIRED');
       expect(afterDecision.riskScore).toBe(45); // 25 deterministic + 20 flag bump
 
       // The deterministic task-scope boundary is still fully enforced
@@ -1037,7 +1037,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         // score (85) -- if the breakers were still shared, this call would
         // have been skipped entirely by the long-form trip above and
         // fallen back to the deterministic-only score instead.
-        expect(decision.decision).toBe('REQUIRE_APPROVAL');
+        expect(decision.decision).toBe('APPROVAL_REQUIRED');
         expect(decision.riskScore).toBe(85);
         expect(fakeServer.callCounts.analyzeRisk).toBe(1);
       } finally {
