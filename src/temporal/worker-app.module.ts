@@ -10,6 +10,8 @@ import { AuditModule } from '../audit/audit.module';
 import { AuditRetentionModule } from '../audit/retention/audit-retention.module';
 import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
+import { AiAdvisoryModule } from '../ai-advisory/ai-advisory.module';
+import { ToolsModule } from '../tools/tools.module';
 import { ApprovalActivitiesFactory } from './activities/approval.activities';
 import { AuditRetentionActivitiesFactory } from './activities/audit-retention.activities';
 import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.activities';
@@ -40,6 +42,13 @@ import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.
     TasksModule,
     PolicyModule,
     RiskModule,
+    // Phase 1 (ADR-004): manar-ai is reached from the WORKER process only.
+    // `ApprovalActivitiesFactory.attachRiskAdvisory` annotates an approval for
+    // the human approver, off the synchronous decision path. The HTTP app's
+    // authorize path must never import these — enforced by
+    // `src/authorization/decision-path-dependencies.spec.ts`.
+    AiAdvisoryModule,
+    ToolsModule,
     ApprovalsModule,
     AuditRetentionModule,
     WebhooksModule,

@@ -40,6 +40,27 @@ const activities = proxyActivities<ApprovalActivities>({
 });
 
 /**
+ * A separate, deliberately impatient proxy for the advisory annotation.
+ *
+ * `activities` above carries the retry budget appropriate to issuing a grant
+ * or recording a human's decision — things that must eventually happen. The
+ * advisory is best-effort: it annotates an approval that is already valid and
+ * already decidable. Giving it the same five-attempt budget would mean a
+ * manar-ai outage holds an activity slot for minutes per approval, to attach
+ * a field the approver can do without. Two attempts, ten seconds, then the
+ * approval proceeds with `advisoryUnavailable = true`.
+ */
+const advisoryActivities = proxyActivities<ApprovalActivities>({
+  startToCloseTimeout: '10 seconds',
+  retry: {
+    initialInterval: '1 second',
+    backoffCoefficient: 2,
+    maximumInterval: '5 seconds',
+    maximumAttempts: 2,
+  },
+});
+
+/**
  * One `ApprovalWorkflow` execution per `ApprovalRequest` (1:1, via that
  * row's own `temporalWorkflowId`) — durably waits for a human `decide`
  * signal or its own `expiresAt` timeout, whichever comes first, entirely
@@ -58,6 +79,25 @@ const activities = proxyActivities<ApprovalActivities>({
 export async function ApprovalWorkflow(
   input: ApprovalWorkflowInput,
 ): Promise<ApprovalWorkflowResult> {
+  // Phase 1 (ADR-004): enrich the approval with manar-ai's advisory *here*,
+  // off the synchronous decision path, for the human approver to read. The
+  // decision itself was made deterministically and committed before this
+  // workflow started, so nothing below can change it.
+  //
+  // Deliberately swallowed on failure. An advisory that cannot be fetched must
+  // never stall or fail an approval a human is waiting on — the approval
+  // simply keeps `advisoryUnavailable = true` and the approver decides without
+  // it (CLAUDE.md §6). Its own proxy, because the retry budget for a
+  // best-effort annotation is not the retry budget for issuing a grant.
+  try {
+    await advisoryActivities.attachRiskAdvisory({
+      tenantId: input.tenantId,
+      approvalRequestId: input.approvalRequestId,
+    });
+  } catch {
+    // Intentionally ignored. `advisoryUnavailable` stays true.
+  }
+
   let receivedSignal: ApprovalDecisionSignal | undefined;
 
   setHandler(decideSignal, (signal) => {
