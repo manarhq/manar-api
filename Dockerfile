@@ -87,9 +87,20 @@ CMD ["node", "dist/main.js"]
 # stage is `runtime` with only its CMD replaced — the same artifact, run
 # as two different container images/deployments (e.g. one Kubernetes
 # Deployment for `runtime`, a second for `worker`) so either can scale,
-# restart, and fail independently. No HEALTHCHECK here: this process
-# serves no HTTP endpoint to probe (a real deployment would instead use
-# Temporal's own worker-heartbeat visibility, or a liveness probe on the
-# process itself, e.g. `docker inspect`'s running state).
+# restart, and fail independently. This process serves no HTTP endpoint to
+# probe (a real deployment would instead use Temporal's own worker-heartbeat
+# visibility, or a liveness probe on the process itself — see
+# deploy/helm/manar-api-worker/values.yaml's exec livenessProbe).
+#
+# `HEALTHCHECK NONE` is load-bearing, not decorative: a derived stage
+# *inherits* its parent's HEALTHCHECK, so until release 2026-11-11 this
+# stage silently kept `runtime`'s HTTP check above — curling
+# /health/live on a port nothing in this container listens on. Every worker
+# container therefore reported `unhealthy` forever, and any orchestrator
+# configured to act on Docker health status (compose `depends_on:
+# service_healthy`, a Swarm/ECS health check) would restart-loop a
+# perfectly functional worker. The comment here previously claimed there
+# was no HEALTHCHECK in this stage; this makes that true.
 FROM runtime AS worker
+HEALTHCHECK NONE
 CMD ["node", "dist/worker.main.js"]

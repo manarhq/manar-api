@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { NestFactory } from '@nestjs/core';
+import type { INestApplication } from '@nestjs/common';
 import {
   FastifyAdapter,
   NestFastifyApplication,
@@ -34,6 +35,7 @@ async function bootstrap(): Promise<void> {
   setupHelmet(app);
   setupCors(app, configService);
   setupOpenApiDocs(app, configService);
+  enableGracefulShutdown(app);
   await app.listen(port, '0.0.0.0');
 
   const agentMtlsApp = await NestFactory.create<NestFastifyApplication>(
@@ -57,7 +59,59 @@ async function bootstrap(): Promise<void> {
   );
   agentMtlsApp.useLogger(agentMtlsApp.get(WINSTON_MODULE_NEST_PROVIDER));
   setupHelmet(agentMtlsApp);
+  enableGracefulShutdown(agentMtlsApp);
   await agentMtlsApp.listen(bootstrapConfig.AGENT_MTLS_PORT, '0.0.0.0');
+}
+
+/**
+ * Turns SIGTERM/SIGINT into an orderly Nest shutdown instead of an abrupt
+ * process death.
+ *
+ * Release 2026-11-11 reliability fix: `enableShutdownHooks()` appeared
+ * nowhere in this codebase, so **no `onModuleDestroy` hook had ever run in
+ * production**. On every rollout, scale-down, node drain, and eviction, the
+ * process was simply killed — which meant:
+ *
+ * - `TenantDatabaseManager.onModuleDestroy` never disconnected its cached
+ *   per-tenant Prisma clients (up to `TENANT_DB_CLIENT_CACHE_MAX` of them,
+ *   each holding a real Postgres connection pool). Postgres kept those
+ *   backends open until its own TCP keepalive reaped them, so a rolling
+ *   restart leaked server-side connections against `max_connections` at
+ *   exactly the moment the replacement replicas were trying to open theirs.
+ * - `KafkaPublisherService`'s producer never flushed or disconnected —
+ *   in-flight audit envelopes were dropped rather than sent, and the broker
+ *   was left to time the producer session out.
+ * - The three Redis clients and `ControlPrismaService` were likewise never
+ *   closed.
+ * - Fastify never stopped accepting new connections *before* the process
+ *   went away, so every in-flight request at that instant became a client-
+ *   visible 502 rather than a completed response.
+ *
+ * `enableShutdownHooks` fixes all of that: on the signal, Nest stops the
+ * HTTP server, then walks the module graph calling `onModuleDestroy`/
+ * `beforeApplicationShutdown`/`onApplicationShutdown` in dependency order.
+ *
+ * Pairing this with the Helm `preStop` sleep and `terminationGracePeriodSeconds`
+ * (deploy/helm/manar-api/templates/deployment.yaml) is what makes rollouts
+ * actually zero-drop: the sleep covers the window during which this pod has
+ * been sent SIGTERM but kube-proxy/the ingress have not yet finished
+ * removing it from their endpoint tables, and the grace period gives the
+ * hooks above room to finish before SIGKILL.
+ *
+ * Registered *before* `listen()` so a SIGTERM arriving during a slow
+ * startup is still handled gracefully rather than racing the listener.
+ *
+ * Called once per Nest application, and this process runs two (the human
+ * HTTP app and the agent mTLS app) with entirely separate DI containers and
+ * therefore separate Prisma/Kafka/Redis instances — both need closing.
+ * Nest's handler re-raises the signal to itself after its own cleanup
+ * finishes; because the other application's listener is still installed at
+ * that moment, that re-raise is absorbed rather than killing the process,
+ * and the process only actually terminates once the *second* application
+ * has finished closing too.
+ */
+function enableGracefulShutdown(app: INestApplication): void {
+  app.enableShutdownHooks();
 }
 
 void bootstrap();

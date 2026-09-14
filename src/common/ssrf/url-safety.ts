@@ -173,3 +173,272 @@ export async function assertSafeOutboundUrl(
     }
   }
 }
+
+/**
+ * Thrown when an outbound response's body exceeds the caller's byte
+ * budget. Separate from `UnsafeOutboundUrlError` because it is not a URL
+ * policy decision: the URL was legitimate, the *response* was hostile (or
+ * simply enormous). Callers map it to their own failure shape the same way.
+ */
+export class OutboundResponseTooLargeError extends Error {
+  constructor(
+    public readonly url: string,
+    public readonly maxBytes: number,
+  ) {
+    super(
+      `Outbound response from "${url}" exceeded the ${maxBytes}-byte response limit`,
+    );
+    this.name = 'OutboundResponseTooLargeError';
+  }
+}
+
+/**
+ * How many redirect hops `safeOutboundFetch` will follow before giving up.
+ * Deliberately smaller than a browser's ~20: a legitimate tool or webhook
+ * endpoint needs one or two hops at most (http→https, a trailing-slash
+ * canonicalisation, a vanity domain), while a long chain is either a loop
+ * or an attempt to exhaust something.
+ */
+export const MAX_OUTBOUND_REDIRECTS = 3;
+
+/** Default body-size budget for `readBoundedResponseText`. Comfortably larger than any real tool response this product consumes, small enough that a malicious endpoint cannot exhaust the process's heap. */
+export const MAX_OUTBOUND_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+/** Statuses that carry a `Location` header for the client to follow. */
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([
+  301, 302, 303, 307, 308,
+]);
+
+/**
+ * Request headers that are *credentials* and must therefore never travel
+ * to an origin other than the one the caller chose. `Authorization` is the
+ * one that matters here (`HttpToolAdapter` puts a broker-issued tool
+ * credential in it), the other two are included because they are
+ * credentials by the same definition and cost nothing to cover.
+ *
+ * Note what is deliberately *not* in this list: `WebhookDeliveryService`'s
+ * `Manar-Signature`. That header is not a bearer credential — it is an
+ * HMAC over one specific body and timestamp, useless for authenticating
+ * anything else, and a receiver that legitimately redirects still needs it
+ * to verify the delivery it finally receives. Stripping it would break
+ * real deliveries and protect nothing.
+ */
+const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set([
+  'authorization',
+  'cookie',
+  'proxy-authorization',
+]);
+
+export interface SafeOutboundFetchOptions {
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+  /** Threaded through to `assertSafeOutboundUrl` on every hop — see `SSRF_ALLOWED_HOSTS`. */
+  allowedHosts?: ReadonlySet<string>;
+  /** Injectable DNS resolver, for tests — see `DnsLookupFn`. */
+  lookup?: DnsLookupFn;
+  /** Injectable `fetch`, for tests. Defaults to the global one. */
+  fetchImpl?: typeof fetch;
+  maxRedirects?: number;
+}
+
+/**
+ * The one outbound HTTP entry point for URLs a *tenant* supplied
+ * (`Tool.baseEndpoint`, `WebhookEndpoint.url`). Callers must use this
+ * rather than bare `fetch`, because `assertSafeOutboundUrl` on its own is
+ * only half an SSRF control.
+ *
+ * The hole it closes: `fetch` (undici) defaults to `redirect: 'follow'`,
+ * and it follows redirects *inside* the runtime, with no callback and no
+ * opportunity for application code to inspect where it is being sent. So a
+ * tenant-registered host that passes every check at request time can
+ * simply answer `302 Location: http://169.254.169.254/latest/meta-data/`
+ * and the process will dutifully fetch the cloud instance metadata
+ * service — and, worse, undici replays the original request headers on a
+ * same-scheme redirect, so `HttpToolAdapter`'s
+ * `Authorization: Bearer <broker-issued credential>` goes with it. That is
+ * both an SSRF bypass and a credential exfiltration primitive, reachable by
+ * anyone who can register a tool or a webhook endpoint.
+ *
+ * So redirects are taken away from the runtime (`redirect: 'manual'`) and
+ * followed here, explicitly, with three rules:
+ *
+ *   1. **Every hop is re-validated.** `assertSafeOutboundUrl` runs against
+ *      each new URL before it is fetched, exactly as it does for the first
+ *      one — a redirect target gets no more trust than a registered one.
+ *   2. **Credentials do not cross an origin boundary.** Any hop to a
+ *      different scheme/host/port drops `CREDENTIAL_HEADERS`, so the worst
+ *      a redirecting endpoint can achieve is making this process issue an
+ *      *unauthenticated* request somewhere else.
+ *   3. **The chain is bounded** at `MAX_OUTBOUND_REDIRECTS`; exceeding it
+ *      is an `UnsafeOutboundUrlError`, the same failure shape every caller
+ *      already handles.
+ *
+ * Method/body rewriting follows the same rules the runtime's own redirect
+ * handling (and every browser) applies, so switching to manual following
+ * does not change how a legitimate endpoint behaves: 303 always becomes a
+ * bodiless `GET`, 301/302 become `GET` for a `POST` (long-standing
+ * practice the whole web depends on), and 307/308 preserve method and body
+ * by definition.
+ *
+ * Known, accepted limitation: there is still a TOCTOU gap between
+ * `assertSafeOutboundUrl`'s DNS resolution and the connection `fetch`
+ * makes with its own separate resolution, so a sufficiently fast DNS
+ * rebind can slip an address past the check. Closing it properly needs a
+ * custom undici connector that pins the validated address, which is a
+ * larger change than this fix; the redirect hole closed here is the
+ * *practical* bypass, requiring nothing but an HTTP response.
+ */
+export async function safeOutboundFetch(
+  rawUrl: string,
+  options: SafeOutboundFetchOptions,
+): Promise<Response> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const maxRedirects = options.maxRedirects ?? MAX_OUTBOUND_REDIRECTS;
+
+  let currentUrl = rawUrl;
+  let method = options.method;
+  let body = options.body;
+  let headers = { ...options.headers };
+
+  for (let hop = 0; ; hop += 1) {
+    await assertSafeOutboundUrl(currentUrl, {
+      lookup: options.lookup,
+      allowedHosts: options.allowedHosts,
+    });
+
+    const response = await fetchImpl(currentUrl, {
+      method,
+      headers,
+      body,
+      signal: options.signal,
+      redirect: 'manual',
+    });
+
+    if (!REDIRECT_STATUSES.has(response.status)) {
+      return response;
+    }
+
+    const location = response.headers.get('location');
+    if (!location) {
+      // A 3xx with no `Location` is not something to follow — hand it back
+      // and let the caller treat it as the non-2xx it is.
+      return response;
+    }
+
+    if (hop >= maxRedirects) {
+      await discardBody(response);
+      throw new UnsafeOutboundUrlError(
+        currentUrl,
+        `too_many_redirects:${maxRedirects}`,
+      );
+    }
+
+    let next: URL;
+    try {
+      next = new URL(location, currentUrl);
+    } catch {
+      await discardBody(response);
+      throw new UnsafeOutboundUrlError(
+        location,
+        'redirect_location_not_a_valid_url',
+      );
+    }
+    await discardBody(response);
+
+    if (next.origin !== new URL(currentUrl).origin) {
+      headers = stripCredentialHeaders(headers);
+    }
+
+    if (shouldRewriteToGet(response.status, method)) {
+      method = 'GET';
+      body = undefined;
+      headers = stripBodyHeaders(headers);
+    }
+
+    currentUrl = next.toString();
+  }
+}
+
+/**
+ * Reads a response body with a hard byte ceiling, so a hostile endpoint
+ * cannot answer a tool call with an unbounded stream and exhaust this
+ * process's memory — the failure mode a bare `await response.json()` has.
+ * Checks the advertised `Content-Length` first (cheap, and rejects the
+ * honest case without transferring anything) but never trusts it: the
+ * stream is counted as it arrives and aborted the moment it crosses the
+ * budget, whatever the header claimed.
+ */
+export async function readBoundedResponseText(
+  response: Response,
+  maxBytes: number = MAX_OUTBOUND_RESPONSE_BYTES,
+): Promise<string> {
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await discardBody(response);
+    throw new OutboundResponseTooLargeError(response.url, maxBytes);
+  }
+
+  if (!response.body) return '';
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        throw new OutboundResponseTooLargeError(response.url, maxBytes);
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  chunks.push(decoder.decode());
+  return chunks.join('');
+}
+
+/**
+ * Releases a response whose body this code will never read (a redirect
+ * hop, or a response being rejected). Without this the underlying socket
+ * stays checked out of undici's pool until the response is garbage
+ * collected. Failures are ignored: the body may already be consumed or the
+ * connection already gone, and neither is worth failing a request over.
+ */
+async function discardBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}
+
+function stripCredentialHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(
+      ([name]) => !CREDENTIAL_HEADERS.has(name.toLowerCase()),
+    ),
+  );
+}
+
+function stripBodyHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const bodyHeaders = new Set(['content-type', 'content-length']);
+  return Object.fromEntries(
+    Object.entries(headers).filter(
+      ([name]) => !bodyHeaders.has(name.toLowerCase()),
+    ),
+  );
+}
+
+/** 303 is defined as "fetch the other resource with GET"; 301/302 on a POST is the same rewrite every HTTP client has done for decades. 307/308 exist precisely to preserve the method, so they never rewrite. */
+function shouldRewriteToGet(status: number, method: string): boolean {
+  const upper = method.toUpperCase();
+  if (upper === 'GET' || upper === 'HEAD') return false;
+  if (status === 303) return true;
+  return (status === 301 || status === 302) && upper === 'POST';
+}

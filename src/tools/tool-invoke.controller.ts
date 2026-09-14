@@ -147,6 +147,11 @@ export class ToolInvokeController {
       const approvalId = await this.startApproval(tenantClient, agent, input, {
         riskScore: decision.riskScore,
         policyVersionId: decision.policyVersionId,
+        deterministicRiskScore: decision.deterministicRiskScore,
+        aiAdvisoryScore: decision.aiAdvisoryScore,
+        riskReasonCodes: decision.riskReasonCodes,
+        riskCeiling: decision.riskCeiling,
+        requiredReason: decision.reason,
       });
       reply.status(202);
       return {
@@ -223,7 +228,15 @@ export class ToolInvokeController {
       resource: string;
       params: unknown;
     },
-    decision: { riskScore: number; policyVersionId: string | null },
+    decision: {
+      riskScore: number;
+      policyVersionId: string | null;
+      deterministicRiskScore: number;
+      aiAdvisoryScore: number | null;
+      riskReasonCodes: string[];
+      riskCeiling: number;
+      requiredReason: string;
+    },
   ): Promise<string> {
     const requestTtlMs = this.configService.get('APPROVAL_REQUEST_TTL_MS', {
       infer: true,
@@ -241,6 +254,13 @@ export class ToolInvokeController {
         resource: input.resource,
         params: input.params,
         riskScore: decision.riskScore,
+        // Release 2026-11-11 (brief §3.4): persist the breakdown alongside
+        // the total so the approver is reviewing the actual factors.
+        deterministicRiskScore: decision.deterministicRiskScore,
+        aiAdvisoryScore: decision.aiAdvisoryScore,
+        riskReasonCodes: decision.riskReasonCodes,
+        taskRiskCeiling: decision.riskCeiling,
+        requiredReason: decision.requiredReason,
         policyVersionId: decision.policyVersionId,
         expiresAt,
         temporalWorkflowId,
@@ -269,6 +289,13 @@ export class ToolInvokeController {
         actionId: input.actionId,
         resource: input.resource,
         riskScore: decision.riskScore,
+        // Release 2026-11-11 (brief §3.4): persist the breakdown alongside
+        // the total so the approver is reviewing the actual factors.
+        deterministicRiskScore: decision.deterministicRiskScore,
+        aiAdvisoryScore: decision.aiAdvisoryScore,
+        riskReasonCodes: decision.riskReasonCodes,
+        taskRiskCeiling: decision.riskCeiling,
+        requiredReason: decision.requiredReason,
         policyVersionId: decision.policyVersionId,
         expiresAt,
       },

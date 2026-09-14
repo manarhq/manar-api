@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
+import type { ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import {
   InjectThrottlerOptions,
@@ -7,11 +8,13 @@ import {
 } from '@nestjs/throttler';
 import type {
   ThrottlerModuleOptions,
+  ThrottlerRequest,
   ThrottlerStorage,
 } from '@nestjs/throttler';
 import { decodeJwt } from 'jose';
 import type { RequestWithAuthContext } from '../auth/auth-context';
 import { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
+import { isHealthRoutePath } from '../health/health.routes';
 
 /**
  * Phase 12a: rate-limits the human JWT surface **per tenant**, not per
@@ -38,6 +41,8 @@ import { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
  */
 @Injectable()
 export class TenantThrottlerGuard extends ThrottlerGuard {
+  private readonly logger = new Logger(TenantThrottlerGuard.name);
+
   constructor(
     @InjectThrottlerOptions() options: ThrottlerModuleOptions,
     @InjectThrottlerStorage() storage: ThrottlerStorage,
@@ -45,6 +50,98 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
     private readonly knownIssuerRegistry: KnownIssuerRegistry,
   ) {
     super(options, storage, reflector);
+  }
+
+  /**
+   * Never rate-limit the kubelet's own probe endpoints.
+   *
+   * Release 2026-11-11 reliability fix. This guard is a global `APP_GUARD`
+   * (`RateLimitModule`), so before this override it ran on **every** route
+   * including `/health/live` — and `ThrottlerGuard.handleRequest` calls
+   * `ThrottlerStorage.increment` unguarded (@nestjs/throttler 6.5.0), while
+   * `RedisThrottlerStorageService.getClient` throws when Redis is
+   * unreachable. The result was that a Redis outage turned `/health/live`
+   * into a 500, the kubelet read that as a dead process, and it restarted
+   * **every replica** — converting a degraded-but-serving dependency into a
+   * full outage plus a crash-loop. A liveness probe must depend on nothing
+   * but this process, and a readiness probe must be able to *report* a
+   * dependency failure rather than be blocked by one.
+   *
+   * Exempting these paths costs nothing security-wise: they are
+   * unauthenticated, take no user input, return a fixed-shape body, and are
+   * reachable only from inside the cluster (`templates/networkpolicy.yaml`
+   * restricts `httpPort` ingress to manar-web and the ingress controller).
+   *
+   * Matched by request path rather than by `@SkipThrottle()` deliberately:
+   * `@SkipThrottle()` with no arguments only skips a throttler *named*
+   * `default`, and this application's only throttler is named `human`
+   * (`RateLimitModule`) — so the decorator form would silently not skip
+   * anything, which is exactly the failure mode this fix exists to remove.
+   * `shouldSkip` short-circuits every configured throttler by name-agnostic
+   * construction.
+   */
+  protected override async shouldSkip(
+    context: ExecutionContext,
+  ): Promise<boolean> {
+    if (context.getType() !== 'http') return super.shouldSkip(context);
+
+    const { req } = this.getRequestResponse(context);
+    const url: unknown = req.url;
+    if (typeof url === 'string' && isHealthRoutePath(url)) return true;
+
+    return super.shouldSkip(context);
+  }
+
+  /**
+   * Fail **open** when the throttler's Redis storage is unreachable: log
+   * it, allow the request through, and let every other guard on the route
+   * run exactly as it normally would.
+   *
+   * **This is a deliberate availability-over-enforcement trade-off — see
+   * docs/release/2026-11-11/fix-notes-reliability.md.** The reasoning:
+   *
+   * - Rate limiting in this codebase is *availability protection* (one
+   *   tenant's burst must not starve another's — see this class's own doc
+   *   comment), not an authorization control. Nothing here decides who may
+   *   do what; `JwtAuthGuard`, `RolesGuard`, `AgentMtlsGuard`,
+   *   `BffServiceGuard`, `PolicyEngine`, and OpenFGA do, and every one of
+   *   them runs *after* this guard and is completely untouched by this
+   *   catch. A Redis outage therefore cannot turn into an authorization
+   *   bypass, only into a temporarily unenforced quota.
+   * - Failing *closed* would mean a Redis outage returns 500 for 100% of
+   *   authenticated traffic on every replica — i.e. the rate limiter, whose
+   *   entire purpose is to keep the API available under load, would itself
+   *   become the thing that takes the API down. That is strictly worse than
+   *   the risk it protects against.
+   * - The abuse window is bounded and observable: Redis being down is
+   *   loud (this logs every occurrence at `error`, and
+   *   `RedisThrottlerStorageService` logs its own connection errors), and
+   *   the kill-switch surface (`src/kill-switches/`) remains available as
+   *   the operator's real "stop this tenant now" control, since it depends
+   *   on Postgres rather than Redis.
+   *
+   * Only *storage/infrastructure* failures fail open. A genuine
+   * `ThrottlerException` — the 429 raised by
+   * `ThrottlerGuard.throwThrottlingException` once a caller is over its
+   * limit — is an `HttpException` and is re-thrown untouched, so the normal
+   * enforcement path is completely unchanged when Redis is healthy.
+   */
+  protected override async handleRequest(
+    requestProps: ThrottlerRequest,
+  ): Promise<boolean> {
+    try {
+      return await super.handleRequest(requestProps);
+    } catch (error) {
+      // Real 429s (and anything else deliberately raised as an HTTP
+      // response by the throttler pipeline) are the enforcement path
+      // working, not a storage failure — never swallow them.
+      if (error instanceof HttpException) throw error;
+
+      this.logger.error(
+        `Rate-limit storage unavailable for throttler "${requestProps.throttler.name}" — allowing the request through unlimited (fail-open, see this guard's doc comment): ${errorMessage(error)}`,
+      );
+      return true;
+    }
   }
 
   protected override async getTracker(
@@ -83,4 +180,8 @@ function readUnverifiedIssuer(token: string): string | null {
   } catch {
     return null;
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -85,12 +85,22 @@ resources:
     memory: 768Mi
 
 # HealthController (src/health/health.controller.ts) exposes `/health/live`
-# (always 200 once the process is up — process liveness only) and
-# `/health/ready` (currently an identical stub — no downstream dependency
-# checks exist yet in this phase; both endpoints are real and unchanged
-# since Phase 1). Both probes target `httpPort`, never `agentMtlsPort`
-# (that listener requires a client certificate — see docs/agent-identity.md
-# — so it cannot serve a plain HTTP kubelet probe).
+# (always 200 once the process is up — process liveness only, no dependency
+# checks, deliberately: a liveness failure kills the container, so it must
+# never depend on anything outside this process) and `/health/ready` (as of
+# release 2026-11-11 a real dependency-aware check — `ReadinessService`
+# probes the nine dependencies `networkPolicy.egressTargets` below
+# enumerates, each under a hard 2s budget, and returns 503 only when a
+# *required* one is unhealthy; an optional dependency being down, including
+# the manar-ai advisory service, reports `status: degraded` with a 200 and
+# keeps the replica serving). Both probes target `httpPort`, never
+# `agentMtlsPort` (that listener requires a client certificate — see
+# docs/agent-identity.md — so it cannot serve a plain HTTP kubelet probe).
+#
+# `timeoutSeconds: 3` sits just above ReadinessService's own 2s per-probe
+# budget on purpose: a slow dependency should come back as a readable
+# `stale` entry in the response body, not as an opaque kubelet-side probe
+# timeout.
 livenessProbe:
   httpGet:
     path: /health/live
@@ -108,6 +118,27 @@ readinessProbe:
   timeoutSeconds: 3
   failureThreshold: 3
 
+# Graceful shutdown (release 2026-11-11). `src/main.ts` now calls
+# `enableShutdownHooks()`, so SIGTERM stops the Fastify listener and runs
+# every `onModuleDestroy` — closing the cached per-tenant Prisma clients,
+# the Kafka producer, and the Redis clients instead of leaking them
+# server-side on every rollout. These two settings are the cluster-side
+# half of that, and neither works without the other:
+#
+# `preStopSleepSeconds` covers the unavoidable race in which the kubelet
+# sends SIGTERM and kube-proxy/the ingress controller remove this pod from
+# their endpoint tables *concurrently* — for a few seconds after SIGTERM,
+# traffic is still being routed here. Sleeping before the signal reaches
+# the app keeps the listener open across that window, which is what turns a
+# rollout from "some requests 502" into zero-drop. Set to 0 to disable the
+# preStop hook entirely (e.g. a local single-node cluster).
+#
+# `terminationGracePeriodSeconds` must exceed preStopSleepSeconds plus the
+# longest in-flight request, or the kubelet SIGKILLs mid-shutdown and the
+# hooks above never finish — which would put this back where it started.
+preStopSleepSeconds: 10
+terminationGracePeriodSeconds: 45
+
 # Non-secret application configuration — rendered into the
 # `<fullname>-config` ConfigMap and consumed via `envFrom`. Values below
 # assume the in-cluster Service DNS names documented in
@@ -118,6 +149,18 @@ readinessProbe:
 config:
   NODE_ENV: production
   LOG_LEVEL: info
+  # REQUIRED in production, and there is no safe default: with
+  # `NODE_ENV=production` set above, `resolveCorsOrigin`
+  # (src/security/cors.ts) *throws at bootstrap* rather than honoring
+  # CORS_ALLOWED_ORIGINS' schema default of `*` — Section 99's hard "no
+  # wildcard origin in production" rule. Leaving this unset therefore does
+  # not produce a permissive API; it produces a pod that crash-loops before
+  # it ever listens, which is exactly what shipped before release
+  # 2026-11-11. Comma-separated, scheme-qualified, no trailing slash.
+  # `example.com` is a placeholder in the same spirit as
+  # `image.repository` above — override it per environment with the real
+  # manar-web origin(s).
+  CORS_ALLOWED_ORIGINS: https://manar.example.com
   KEYCLOAK_BASE_URL: http://keycloak.manar.svc.cluster.local:8080
   KEYCLOAK_ADMIN_CLIENT_ID: admin-cli
   KEYCLOAK_CLIENT_ID: manar-api
@@ -171,6 +214,19 @@ secrets:
     KEYCLOAK_ADMIN_PASSWORD: ''
     OPENBAO_TOKEN: ''
     APPROVAL_GRANT_SIGNING_SECRET: ''
+    # REQUIRED — `MANAR_BFF_SERVICE_TOKEN` has no default and a `min(16)`
+    # constraint (src/tenants/tenants.config.ts), so `validate()` rejects the
+    # environment and the process exits before listening if it is missing.
+    # It was absent from every chart in this repo until release 2026-11-11,
+    # which meant the shipped charts could not boot at all.
+    #
+    # The shared secret between manar-api and manar-web's BFF for
+    # `GET /tenants/:slug/oidc-client-secret`. Same handling as the other
+    # entries here: empty placeholder in version control, populated at
+    # install time or, preferably, supplied by an externally managed Secret
+    # with `secrets.create: false`. Must be >= 16 characters and must match
+    # manar-web's own copy exactly.
+    MANAR_BFF_SERVICE_TOKEN: ''
     PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ''
 
 # The agent mTLS listener's own TLS server identity + client-CA trust

@@ -28,6 +28,16 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "manar-api-worker.serviceAccountName" . }}
+      {{/*
+      Long enough for `Worker.shutdown()` to drain in-flight Temporal
+      Activities and for the Nest DI container to close (releasing the
+      per-tenant Prisma clients, the Kafka producer, and the Redis clients)
+      before SIGKILL — see values.yaml. No preStop hook here, unlike the
+      manar-api chart: this Deployment has no Service, so there is no
+      endpoint-removal race to sleep through, and delaying SIGTERM would
+      only delay the drain.
+      */}}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:

@@ -7,6 +7,7 @@ import { SECRET_PROVIDER } from '../database/secret-provider';
 import type { SecretProvider } from '../database/secret-provider';
 import {
   assertSafeOutboundUrl,
+  safeOutboundFetch,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
 import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
@@ -56,6 +57,14 @@ export class WebhookDeliveryService {
    * success) or throwing `WebhookDeliveryAttemptFailedError` (on any
    * failure — network error, non-2xx, or SSRF rejection) so Temporal's
    * `WebhookDeliveryWorkflow` retry policy actually retries it.
+   *
+   * The SSRF check happens in two places, deliberately: once up front
+   * (`assertSafeOutboundUrl`, so a bad endpoint fails before the signing
+   * secret is ever resolved) and again inside `safeOutboundFetch`, for the
+   * request itself and for every redirect hop it follows. A redirect-chain
+   * rejection surfaces as an `UnsafeOutboundUrlError` thrown from the
+   * request's own `try` and is recorded as a failed attempt like any other
+   * network error — never as a delivery to a host that was never checked.
    */
   async attemptDelivery(
     tenantClient: TenantPrismaClient,
@@ -123,7 +132,15 @@ export class WebhookDeliveryService {
     let responseStatus: number | null = null;
     let success = false;
     try {
-      const response = await fetch(endpoint.url, {
+      // `safeOutboundFetch`, never a bare `fetch`: the pre-flight
+      // `assertSafeOutboundUrl` above only vouches for `endpoint.url`
+      // itself, and the runtime's default `redirect: 'follow'` would take
+      // this delivery anywhere a tenant-registered receiver's
+      // `302 Location:` pointed it -- including the cloud instance
+      // metadata service -- with no application-level check on the target
+      // at all. Every hop is re-validated there instead, and the chain is
+      // bounded.
+      const response = await safeOutboundFetch(endpoint.url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -134,9 +151,15 @@ export class WebhookDeliveryService {
         },
         body,
         signal: controller.signal,
+        allowedHosts: this.ssrfAllowedHosts,
       });
       responseStatus = response.status;
       success = response.ok;
+      // A receiver's response body is never read by anything here (only
+      // its status matters), so there is no size limit to impose -- but
+      // the body still has to be released, or the socket stays checked out
+      // of the connection pool until GC gets to it.
+      await response.body?.cancel().catch(() => undefined);
     } catch (error) {
       this.logger.warn(
         `Webhook delivery "${webhookDeliveryId}" attempt failed: ${

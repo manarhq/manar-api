@@ -30,6 +30,12 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "manar-api.serviceAccountName" . }}
+      {{/*
+      Room for the preStop sleep + the app's own shutdown hooks
+      (src/main.ts's enableGracefulShutdown) to finish before SIGKILL. Must
+      stay greater than preStopSleepSeconds — see values.yaml.
+      */}}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -53,6 +59,24 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.httpPort | quote }}
+          {{- if gt (int .Values.preStopSleepSeconds) 0 }}
+          {{/*
+          Delays SIGTERM reaching the process so Fastify keeps serving
+          across the window in which this pod has been marked Terminating
+          but kube-proxy/the ingress have not finished removing it from
+          their endpoint tables — the race that makes rollouts drop
+          in-flight requests. `sleep` is busybox's, already on PATH in the
+          node:24-alpine runtime image (same assumption the worker chart's
+          exec liveness probe makes). No shell needed, so this works with
+          readOnlyRootFilesystem and every capability dropped.
+          */}}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sleep
+                  - {{ .Values.preStopSleepSeconds | quote }}
+          {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:

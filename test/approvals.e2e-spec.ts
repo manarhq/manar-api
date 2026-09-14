@@ -477,6 +477,14 @@ describe('Approval Engine (e2e)', () => {
       resource: input.resource,
       params: {},
       riskScore: 5,
+      // Release 2026-11-11 (brief §3.4): the persisted risk breakdown.
+      // This helper builds a low-risk fixture request, so the whole score
+      // is deterministic and no advisory signal was involved.
+      deterministicRiskScore: 5,
+      aiAdvisoryScore: null,
+      riskReasonCodes: ['baseline'],
+      taskRiskCeiling: 50,
+      requiredReason: 'policy_requires_approval',
       policyVersionId: null,
       expiresAt,
       temporalWorkflowId,

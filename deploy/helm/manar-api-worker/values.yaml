@@ -15,6 +15,14 @@
 # process never dials over the network — it will crash-loop on startup
 # otherwise. NetworkPolicy egress below is scoped down to what's actually
 # called; ConfigMap/Secret data is not.
+#
+# One deliberate asymmetry with the manar-api chart: `CORS_ALLOWED_ORIGINS`
+# is set there and omitted here. It has a schema default (`*`), so it is not
+# *required*, and the only code that rejects that default under
+# `NODE_ENV=production` is `resolveCorsOrigin` (src/security/cors.ts) —
+# reached exclusively from `setupCors`, which `src/worker.main.ts` never
+# calls because this process constructs no FastifyAdapter at all. Setting a
+# real origin here would be config nothing in this process reads.
 
 replicaCount: 2
 
@@ -91,6 +99,22 @@ livenessProbe:
   timeoutSeconds: 5
   failureThreshold: 3
 
+# Graceful shutdown (release 2026-11-11). SIGTERM makes `src/worker.main.ts`
+# call `Worker.shutdown()` on both Temporal workers — they stop polling,
+# finish the Activities already in flight, and only then does the process
+# close the Nest DI container (releasing the cached per-tenant Prisma
+# clients, the Kafka producer, and the Redis clients, which nothing
+# guaranteed before this release).
+#
+# Much longer than the manar-api chart's 45s, and for a different reason:
+# there is no Service or endpoint race to cover here (no preStop sleep —
+# nothing ever connects *to* this pod), but an in-flight Activity can
+# legitimately run for a while, and a SIGKILL mid-Activity means Temporal
+# has to wait out the Activity's own start-to-close timeout before another
+# worker retries it. This is the ceiling on that; raise it if this
+# deployment's Activities get slower.
+terminationGracePeriodSeconds: 120
+
 config:
   NODE_ENV: production
   LOG_LEVEL: info
@@ -139,6 +163,14 @@ secrets:
     KEYCLOAK_ADMIN_PASSWORD: ''
     OPENBAO_TOKEN: ''
     APPROVAL_GRANT_SIGNING_SECRET: ''
+    # Structurally required by the shared AppConfigSchema (no default,
+    # `min(16)` — src/tenants/tenants.config.ts) and therefore mandatory
+    # here too, even though this process never serves the BFF endpoint it
+    # guards: `validate()` runs identically for both entry points, so its
+    # absence crash-loops the worker exactly as it crash-loops the API. See
+    # this file's own header comment on why config is not scoped down.
+    # Absent from every chart in this repo until release 2026-11-11.
+    MANAR_BFF_SERVICE_TOKEN: ''
     PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ''
 
 # The AgentMtlsConfigSchema paths above are structurally required env vars

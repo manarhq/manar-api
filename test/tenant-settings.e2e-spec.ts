@@ -106,6 +106,9 @@ describe('Tenant Settings (e2e)', () => {
       AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD: 3,
       AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
       AI_ADVISORY_PROVIDER: overrides.provider,
+      // Release 2026-11-11: mTLS to manar-ai is off by default; the
+      // developer stack still uses manar-ai's plaintext listener.
+      AI_ADVISORY_TLS_ENABLED: 'false',
     };
     const configService = {
       get: (key: string) => (values as Record<string, unknown>)[key],

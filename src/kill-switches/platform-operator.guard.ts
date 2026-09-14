@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config/env.validation';
+import { constantTimeEqual } from '../common/security/constant-time-compare';
 
 /**
  * Gates `POST /kill-switches/platform`(`/deactivate`) — see
@@ -33,8 +34,13 @@ import type { AppConfig } from '../config/env.validation';
  * the caller must still be an authenticated human holding
  * `SECURITY_ADMIN`/`TENANT_OWNER` in their own tenant, so there remains a
  * real, attributable `UserProfile` actor for the audit trail this
- * endpoint's own tenant-DB `AuditEvent` records. This mirrors the codebase's
- * existing precedent for genuinely cross-tenant operations having no
+ * endpoint's own tenant-DB `AuditEvent` records. The token itself is
+ * compared against `PLATFORM_KILL_SWITCH_OPERATOR_TOKEN` in constant time
+ * (`constantTimeEqual`) rather than with a plain `!==`, which would leak
+ * the expected value one byte at a time to anyone able to time enough
+ * requests against the most destructive lever in the product.
+ *
+ * This mirrors the codebase's existing precedent for genuinely cross-tenant operations having no
  * per-tenant-RBAC-only path at all (`pnpm manar tenant:create` is CLI-only,
  * operator-host-access-gated, not a `RolesGuard`-gated HTTP endpoint — see
  * docs/tenant-isolation.md) while still meeting the design spec's explicit
@@ -57,7 +63,7 @@ export class PlatformOperatorGuard implements CanActivate {
     if (
       typeof provided !== 'string' ||
       provided.length === 0 ||
-      provided !== expected
+      !constantTimeEqual(provided, expected)
     ) {
       throw new UnauthorizedException(
         'Missing or invalid platform operator credential',

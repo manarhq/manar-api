@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -19,7 +20,11 @@ import type { AppConfig } from '../config/env.validation';
 import { getCorrelationId } from '../logging/correlation-id.store';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import type { DataClassification } from '../common/data-classification';
-import { isExternalAiProvider } from './ai-advisory.config';
+import {
+  aiAdvisoryTlsEnabled,
+  assertAiAdvisoryTlsMaterial,
+  isExternalAiProvider,
+} from './ai-advisory.config';
 
 export interface RiskAdvisory {
   score: number;
@@ -233,14 +238,77 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     this.provider = configService.get('AI_ADVISORY_PROVIDER', {
       infer: true,
     });
-    // Plaintext, matching manar-ai's own deliberate Phase 10a scope call
-    // (see docs/ai-security-model.md's "mTLS status" section) — both sides
-    // of this contract agree mTLS is required before any real cross-network
-    // deployment, not before this phase's local-infra integration.
-    this.client = new AnalysisServiceClient(
-      target,
-      grpc.credentials.createInsecure(),
-    );
+    // Release 2026-11-11: manar-ai's `AnalysisService` now binds
+    // `add_secure_port` with `require_client_auth=True` plus a peer-identity
+    // interceptor, and refuses to bind plaintext at all when its own
+    // ENVIRONMENT is staging/production. It still binds plaintext for
+    // local/development/test, so the default here stays insecure and the
+    // developer stack is unchanged — see AI_ADVISORY_TLS_ENABLED's doc
+    // comment for the certificate identity manar-ai will require
+    // (`manar-api` or `manar-api-worker` as CN/SAN, issued by the same
+    // internal CA; manar-ai does not consult the system trust store).
+    //
+    // The material is validated before the channel is built, so a
+    // half-configured deployment fails at startup with the missing variable
+    // named, rather than at connect time as a generic "AI advisory
+    // unavailable" — which is the correct fail-secure behaviour but a
+    // useless diagnostic.
+    assertAiAdvisoryTlsMaterial({
+      AI_ADVISORY_TLS_ENABLED: configService.get('AI_ADVISORY_TLS_ENABLED', {
+        infer: true,
+      }),
+      AI_ADVISORY_TLS_CA_FILE: configService.get('AI_ADVISORY_TLS_CA_FILE', {
+        infer: true,
+      }),
+      AI_ADVISORY_TLS_CERT_FILE: configService.get(
+        'AI_ADVISORY_TLS_CERT_FILE',
+        { infer: true },
+      ),
+      AI_ADVISORY_TLS_KEY_FILE: configService.get('AI_ADVISORY_TLS_KEY_FILE', {
+        infer: true,
+      }),
+    });
+
+    const tlsEnabled = aiAdvisoryTlsEnabled({
+      AI_ADVISORY_TLS_ENABLED: configService.get('AI_ADVISORY_TLS_ENABLED', {
+        infer: true,
+      }),
+    });
+
+    if (tlsEnabled) {
+      // Read synchronously in the constructor on purpose: an unreadable or
+      // missing certificate must stop the process from starting, not
+      // surface later as an intermittently failing dependency.
+      const credentials = grpc.credentials.createSsl(
+        readFileSync(
+          configService.get('AI_ADVISORY_TLS_CA_FILE', {
+            infer: true,
+          }),
+        ),
+        readFileSync(
+          configService.get('AI_ADVISORY_TLS_KEY_FILE', {
+            infer: true,
+          }),
+        ),
+        readFileSync(
+          configService.get('AI_ADVISORY_TLS_CERT_FILE', {
+            infer: true,
+          }),
+        ),
+      );
+      this.logger.log(
+        `manar-ai AnalysisService channel secured with mTLS to ${target}`,
+      );
+      this.client = new AnalysisServiceClient(target, credentials);
+    } else {
+      this.logger.warn(
+        `manar-ai AnalysisService channel is PLAINTEXT to ${target}. This is supported only against a local/development/test manar-ai; set AI_ADVISORY_TLS_ENABLED=true with the CA/certificate/key for any real deployment.`,
+      );
+      this.client = new AnalysisServiceClient(
+        target,
+        grpc.credentials.createInsecure(),
+      );
+    }
   }
 
   onModuleDestroy(): void {

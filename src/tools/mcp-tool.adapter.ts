@@ -18,6 +18,44 @@ import type { ToolActionRecord, ToolRecord } from './tool-registry.service';
 const MCP_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
+ * Release 2026-11-11 — argument names this adapter owns, which a caller's
+ * `params` may therefore never supply.
+ *
+ * `resource` is Manar's own request-scoping concept and is the exact
+ * string `AuthorizationService.authorize` evaluated, that
+ * `ApprovalRequest`/`AuthorizationGrant` is bound to, and that the
+ * `ToolInvocation` row and audit event record. It is passed to the MCP
+ * tool as a normal argument so the target can see what it is being asked
+ * to act on.
+ *
+ * The defect this guards against: the arguments object was built as
+ * `{ resource, ...params }`, spreading caller-controlled `params` **after**
+ * the canonical field. A caller invoking with `resource: "host-42"` and
+ * `params: { resource: "host-999" }` therefore had `host-42` authorized,
+ * hashed into the grant, written to the `ToolInvocation` row and recorded
+ * in the audit chain — while the MCP server received and acted on
+ * `host-999`. That is an authorization bypass whose audit trail states
+ * the wrong target, so nothing downstream (approvals, evidence export,
+ * compliance mapping) can detect it after the fact.
+ *
+ * The fix is to **reject** a colliding key rather than to silently reorder
+ * the spread. Reordering would make the canonical value win, but it would
+ * also quietly discard what the caller actually asked for, leaving a
+ * request that did something other than what it said with no error — the
+ * same class of dishonesty in a different place. A collision is a caller
+ * bug or an attack; either way it deserves a refusal.
+ *
+ * Note that `validateAgainstSchema` above cannot be relied on for this:
+ * stored `inputSchema` values are not required to set
+ * `additionalProperties: false`, and the seeded demo action's schema is
+ * the wide-open `{ type: 'object' }`.
+ */
+const RESERVED_MCP_ARGUMENT_NAMES = new Set(['resource']);
+
+/** Shutdown handshake budget — deliberately shorter than the request budget; a slow close must never dominate a request's latency. */
+const MCP_CLOSE_TIMEOUT_MS = 2_000;
+
+/**
  * A **real** Model Context Protocol client (`@modelcontextprotocol/sdk`,
  * the official TypeScript SDK — not a hand-rolled approximation of its
  * JSON-RPC wire format), connecting over the Streamable HTTP transport to
@@ -76,6 +114,19 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       };
     }
 
+    // See RESERVED_MCP_ARGUMENT_NAMES: a caller-supplied `resource` would
+    // otherwise reach the MCP server in place of the authorized one.
+    const collidingArgument = this.findReservedArgumentCollision(params);
+    if (collidingArgument !== undefined) {
+      this.logger.warn(
+        `Rejected MCP tool call to "${tool.name}/${action.name}": params supplied the reserved argument "${collidingArgument}", which would override the authorized value`,
+      );
+      return {
+        success: false,
+        errorMessage: `Invalid params for action "${action.name}": "${collidingArgument}" is a reserved argument name and cannot be supplied by the caller`,
+      };
+    }
+
     // Phase 12a (SSRF protection) -- see HttpToolAdapter's identical
     // call-time check for why this is re-validated on every invocation
     // rather than trusted from registration time.
@@ -107,7 +158,13 @@ export class McpToolAdapter implements ToolProtocolAdapter {
     );
 
     try {
-      await client.connect(transport);
+      // The SDK's own default for `initialize` is 60s, so without an
+      // explicit timeout here this adapter's declared 10s budget applied to
+      // nothing on the connect path: a slow or hostile MCP server could
+      // hold a request for ~60s before the tool call was even attempted.
+      // The whole connect -> invoke -> close lifecycle is bounded, not just
+      // the final call.
+      await client.connect(transport, { timeout: MCP_REQUEST_TIMEOUT_MS });
 
       const result = await client.callTool(
         {
@@ -116,7 +173,12 @@ export class McpToolAdapter implements ToolProtocolAdapter {
           // primitive -- passed through as a normal tool argument
           // alongside params so the target MCP tool can see what it's
           // being asked to act on.
-          arguments: { resource, ...(params as Record<string, unknown>) },
+          // Canonical fields are spread LAST as defence in depth. The
+          // collision check above is the actual control; this ordering
+          // means that even if some future edit removes or bypasses that
+          // check, the authorized `resource` still wins over anything the
+          // caller supplied.
+          arguments: { ...(params as Record<string, unknown>), resource },
         },
         undefined,
         { timeout: MCP_REQUEST_TIMEOUT_MS },
@@ -142,8 +204,37 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       );
       return { success: false, errorMessage: `MCP call failed: ${message}` };
     } finally {
-      await client.close().catch(() => undefined);
+      // Bounded like every other step: a server that never completes its
+      // shutdown handshake must not hold this request open.
+      await Promise.race([
+        client.close().catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, MCP_CLOSE_TIMEOUT_MS)),
+      ]);
     }
+  }
+
+  /**
+   * Returns the first caller-supplied key that collides with an argument
+   * name this adapter owns, or `undefined` when there is none.
+   *
+   * Only own enumerable string keys are considered, which is what a spread
+   * would actually copy — checking anything else would reject requests
+   * that the spread would not in fact have been affected by.
+   */
+  private findReservedArgumentCollision(params: unknown): string | undefined {
+    if (
+      typeof params !== 'object' ||
+      params === null ||
+      Array.isArray(params)
+    ) {
+      return undefined;
+    }
+    for (const key of Object.keys(params)) {
+      if (RESERVED_MCP_ARGUMENT_NAMES.has(key)) {
+        return key;
+      }
+    }
+    return undefined;
   }
 
   private summarizeTextContent(content: unknown): string | undefined {

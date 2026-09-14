@@ -7,15 +7,18 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config/env.validation';
+import { constantTimeEqual } from '../common/security/constant-time-compare';
 
 /**
  * Gates `GET /tenants/:slug/oidc-client-secret` — the one piece of this
  * phase's OIDC-config surface that is genuinely sensitive (see
  * `tenants.controller.ts`'s doc comment for the full design). Mirrors
  * `PlatformOperatorGuard`'s exact shape (`src/kill-switches/platform-operator.guard.ts`):
- * a header-carried, non-tenant-scoped shared secret, checked with a
- * constant-shape comparison against `MANAR_BFF_SERVICE_TOKEN`
- * (`tenants.config.ts`).
+ * a header-carried, non-tenant-scoped shared secret, compared against
+ * `MANAR_BFF_SERVICE_TOKEN` (`tenants.config.ts`) in constant time
+ * (`constantTimeEqual` — see that helper's doc comment for why a plain
+ * `!==` is not acceptable for a long-lived shared secret that is this
+ * endpoint's only credential).
  *
  * There is no `JwtAuthGuard` involved here at all, deliberately — unlike
  * `PlatformOperatorGuard` (which runs *in addition to* a real per-tenant
@@ -41,7 +44,7 @@ export class BffServiceGuard implements CanActivate {
     if (
       typeof provided !== 'string' ||
       provided.length === 0 ||
-      provided !== expected
+      !constantTimeEqual(provided, expected)
     ) {
       throw new UnauthorizedException(
         'Missing or invalid BFF service credential',

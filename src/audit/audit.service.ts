@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import type {
+  AuditEvent,
   Prisma,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
@@ -60,6 +61,27 @@ export class AuditService {
 
   /** Fixed, known singleton row id — see `AuditChainState`'s schema doc comment. */
   static readonly SINGLETON_ID = 'singleton';
+
+  /**
+   * How many `AuditEvent` rows `verifyAuditChain` holds in memory at once.
+   *
+   * Release 2026-11-11 reliability fix: this method used to materialize the
+   * *entire* `audit_events` table in one `findMany` before hashing anything.
+   * `GET /audit/verify` is reachable over HTTP by any `AUDITOR`/
+   * `SECURITY_ADMIN`/`TENANT_OWNER`, and the pod's memory limit is 768Mi
+   * (deploy/helm/manar-api/values.yaml) — so a single large tenant's
+   * verification request was enough to OOM-kill the replica handling it,
+   * taking every other in-flight request on that pod down with it.
+   *
+   * Verification is a *sequential* walk: it only ever needs the previous
+   * event's `eventHash` to check the next one, so the whole table never has
+   * to be resident. Batching bounds peak memory at roughly this many rows
+   * regardless of chain length, at the cost of one extra round trip per
+   * batch. 1000 is large enough that the round trips stay negligible next
+   * to the SHA-256 work, and small enough that a batch of even unusually
+   * fat `data` payloads is a few MB rather than hundreds.
+   */
+  private static readonly VERIFY_CHAIN_BATCH_SIZE = 1000;
 
   constructor(private readonly kafkaPublisher: KafkaPublisherService) {}
 
@@ -233,14 +255,29 @@ export class AuditService {
    * mismatch there (the bookkeeping row disagreeing with the event table
    * itself) is reported as `brokenAt: 'audit_chain_state'`, distinct from
    * any single event's own id.
+   *
+   * **Bounded memory (release 2026-11-11)**: the walk is fetched in
+   * `VERIFY_CHAIN_BATCH_SIZE`-row batches (keyset-paginated on `sequence`,
+   * see `fetchAuditEventBatch`) rather than as one whole-table `findMany`.
+   * The check itself is byte-for-byte the same one it always was: the walk
+   * is inherently sequential — each event is validated against nothing but
+   * the *immediately preceding* event's `eventHash` — so carrying
+   * `expectedPreviousHash` across a batch boundary is exactly equivalent to
+   * carrying it across two adjacent array elements. Nothing about batching
+   * lets a tampered event in a later batch slip through; see
+   * `audit.service.spec.ts`'s cross-batch tamper test, which pins that.
    */
   async verifyAuditChain(
     tenantClient: TenantPrismaClient,
   ): Promise<VerifyAuditChainResult> {
-    const events = await tenantClient.auditEvent.findMany({
-      orderBy: { sequence: 'asc' },
-    });
-
+    // Read before the first batch (rather than after, as this used to read
+    // it after the whole-table query): `AuditRetentionWorkflow` only ever
+    // *adds* anchors, so reading them first can only ever make the walk
+    // more permissive-by-a-hash-it-would-otherwise-not-recognize — never
+    // less. Reading them later would leave a window in which retention
+    // prunes history and writes its anchor while the walk is in progress,
+    // and the walk then rejects the new oldest-remaining event for a
+    // linkage the anchor it just missed would have explained.
     const knownAnchorHashes = new Set(
       (await tenantClient.auditChainAnchor.findMany()).map(
         (anchor) => anchor.anchorHash,
@@ -249,32 +286,49 @@ export class AuditService {
 
     let expectedPreviousHash: string | null = null;
     let isFirstRemainingEvent = true;
-    for (const event of events) {
-      const previousHashIsValid = isFirstRemainingEvent
-        ? event.previousHash === null ||
-          (event.previousHash !== null &&
-            knownAnchorHashes.has(event.previousHash))
-        : event.previousHash === expectedPreviousHash;
-      isFirstRemainingEvent = false;
+    let lastSequence: number | null = null;
 
-      if (!previousHashIsValid) {
-        return { valid: false, brokenAt: event.id };
+    for (;;) {
+      const events = await this.fetchAuditEventBatch(
+        tenantClient,
+        lastSequence,
+      );
+      if (events.length === 0) break;
+
+      for (const event of events) {
+        const previousHashIsValid = isFirstRemainingEvent
+          ? event.previousHash === null ||
+            (event.previousHash !== null &&
+              knownAnchorHashes.has(event.previousHash))
+          : event.previousHash === expectedPreviousHash;
+        isFirstRemainingEvent = false;
+
+        if (!previousHashIsValid) {
+          return { valid: false, brokenAt: event.id };
+        }
+
+        const recomputed = computeEventHash({
+          id: event.id,
+          eventType: event.eventType,
+          correlationId: event.correlationId,
+          actor: event.actor,
+          timestamp: event.timestamp.toISOString(),
+          data: event.data,
+          previousHash: event.previousHash,
+        });
+        if (recomputed !== event.eventHash) {
+          return { valid: false, brokenAt: event.id };
+        }
+
+        expectedPreviousHash = event.eventHash;
       }
 
-      const recomputed = computeEventHash({
-        id: event.id,
-        eventType: event.eventType,
-        correlationId: event.correlationId,
-        actor: event.actor,
-        timestamp: event.timestamp.toISOString(),
-        data: event.data,
-        previousHash: event.previousHash,
-      });
-      if (recomputed !== event.eventHash) {
-        return { valid: false, brokenAt: event.id };
-      }
-
-      expectedPreviousHash = event.eventHash;
+      // A short batch means the table is exhausted — stop without paying
+      // for one more round trip that can only come back empty.
+      const lastEvent = events[events.length - 1];
+      if (lastEvent === undefined) break;
+      lastSequence = lastEvent.sequence;
+      if (events.length < AuditService.VERIFY_CHAIN_BATCH_SIZE) break;
     }
 
     const state = await tenantClient.auditChainState.findUnique({
@@ -285,5 +339,39 @@ export class AuditService {
     }
 
     return { valid: true };
+  }
+
+  /**
+   * One `VERIFY_CHAIN_BATCH_SIZE`-row page of this tenant's chain, in
+   * `sequence` order, starting strictly after `afterSequence`.
+   *
+   * Keyset pagination (`WHERE sequence > ?`), deliberately not `skip`/
+   * `take` offset pagination and not Prisma's `cursor` option:
+   *
+   * - Offset pagination would make the database re-scan and re-sort every
+   *   already-verified row for each subsequent page, and — worse — would
+   *   silently *skip* a row if retention pruned the head of the chain
+   *   mid-walk, which for a chain verifier means reporting a break that
+   *   isn't one.
+   * - Prisma's `cursor` wants a uniquely-identifying field, and
+   *   `AuditEvent.sequence` is a plain `Int @default(autoincrement())` —
+   *   not declared `@unique` in the schema (prisma/tenant.prisma), even
+   *   though Postgres's own sequence makes it so in practice. `WHERE >` is
+   *   correct either way and doesn't depend on that distinction.
+   *
+   * Append-only-ness (see this class's doc comment) is what makes paging
+   * safe at all: rows are never updated or reordered, so a row's
+   * `sequence` — and therefore its position in this pagination — is fixed
+   * from insert onward.
+   */
+  private async fetchAuditEventBatch(
+    tenantClient: TenantPrismaClient,
+    afterSequence: number | null,
+  ): Promise<AuditEvent[]> {
+    return tenantClient.auditEvent.findMany({
+      where: afterSequence === null ? {} : { sequence: { gt: afterSequence } },
+      orderBy: { sequence: 'asc' },
+      take: AuditService.VERIFY_CHAIN_BATCH_SIZE,
+    });
   }
 }

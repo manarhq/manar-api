@@ -93,6 +93,9 @@ function fakeConfigService(
     AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_THRESHOLD: 3,
     AI_ADVISORY_LONGFORM_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
     AI_ADVISORY_PROVIDER: 'ollama',
+    // Release 2026-11-11: mTLS to manar-ai is off by default; the
+    // developer stack still uses manar-ai's plaintext listener.
+    AI_ADVISORY_TLS_ENABLED: 'false',
     RATE_LIMIT_HUMAN_TTL_MS: 60_000,
     RATE_LIMIT_HUMAN_LIMIT: 300,
     RATE_LIMIT_AGENT_TTL_MS: 60_000,

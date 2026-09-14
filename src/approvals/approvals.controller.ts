@@ -45,6 +45,7 @@ import {
   ApprovalRequestListResponseDto,
   DecideApprovalRequestDto,
   DecideApprovalResponseDto,
+  ApprovalRequestDetailDto,
 } from './approvals.dto';
 
 /**
@@ -188,6 +189,68 @@ export class ApprovalsController {
       })),
       nextCursor: page.nextCursor,
     };
+  }
+
+  @Get(':id')
+  @ApiOperation({
+    summary: 'The exact action under review (release 2026-11-11)',
+    description:
+      'The immutable, safely redacted snapshot a reviewer needs before approving: the invocation parameters, the parameterDigest an issued grant is bound to, the risk breakdown with deterministic factors and AI signals SEPARATELY attributed, why approval was required, the policy version, expiry, and what the action actually does. Redaction is key-name based, not content-based DLP -- redactedKeyPaths names every withheld value so a partial object is never read as a complete one. Reachable only on the human JWT surface; an agent uses the separate mTLS listener.',
+  })
+  @ApiParam({ name: 'id', description: 'ApprovalRequest ID', format: 'uuid' })
+  @ApiResponse({ status: 200, type: ApprovalRequestDetailDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'No such approval request in this tenant.',
+  })
+  async getOne(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') id: string,
+  ): Promise<ApprovalRequestDetailDto> {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    try {
+      const detail = await this.approvalRequestService.getDetailOrThrow(
+        tenantClient,
+        id,
+      );
+      return {
+        id: detail.id,
+        taskId: detail.taskId,
+        agentId: detail.agentId,
+        toolId: detail.toolId,
+        actionId: detail.actionId,
+        resource: detail.resource,
+        status: detail.status,
+        requestedAt: detail.requestedAt,
+        expiresAt: detail.expiresAt,
+        params: detail.parameters.params,
+        redactedKeyPaths: detail.parameters.redactedKeyPaths,
+        parametersTruncated: detail.parameters.truncated,
+        parameterDigest: detail.parameterDigest,
+        riskScore: detail.riskScore,
+        deterministicRiskScore: detail.deterministicRiskScore,
+        aiAdvisoryScore: detail.aiAdvisoryScore,
+        taskRiskCeiling: detail.taskRiskCeiling,
+        requiredReason: detail.requiredReason,
+        deterministicReasonCodes: detail.deterministicReasonCodes,
+        aiAdvisoryReasonCodes: detail.aiAdvisoryReasonCodes,
+        policyVersionId: detail.policyVersionId,
+        expectedEffect: detail.expectedEffect as Record<string, unknown> | null,
+        decisions: detail.decisions as unknown as Record<string, unknown>[],
+        grantIssued: detail.grantIssued,
+        grantConsumedAt: detail.grantConsumedAt,
+      };
+    } catch (error) {
+      if (error instanceof ApprovalRequestNotFoundError) {
+        throw new NotFoundException(error.message);
+      }
+      throw error;
+    }
   }
 
   @Post(':id/decide')

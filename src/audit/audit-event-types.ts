@@ -60,6 +60,18 @@ export const AUDIT_EVENT_TYPES = {
   INCIDENT_CREATED: 'incident.created',
   /** `PATCH /incidents/:id` changed `status` — see `IncidentsService.updateIncident`. Not recorded for a PATCH that changes only title/description/severity/relatedCorrelationIds without a status change. */
   INCIDENT_STATUS_CHANGED: 'incident.status_changed',
+
+  // Release 2026-11-11 (brief §3.1) — the AI-system inventory. Every
+  // mutation of a governance record is audited, including the link/unlink
+  // assertions: "who said this agent belongs to this system, and when" is
+  // exactly the provenance an assessment later has to cite.
+  AI_SYSTEM_CREATED: 'ai_system.created',
+  AI_SYSTEM_UPDATED: 'ai_system.updated',
+  AI_SYSTEM_STATE_CHANGED: 'ai_system.state_changed',
+  AI_SYSTEM_AGENT_LINKED: 'ai_system.agent_linked',
+  AI_SYSTEM_AGENT_UNLINKED: 'ai_system.agent_unlinked',
+  AI_SYSTEM_TOOL_LINKED: 'ai_system.tool_linked',
+  AI_SYSTEM_TOOL_UNLINKED: 'ai_system.tool_unlinked',
 } as const;
 
 export type AuditEventType =

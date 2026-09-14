@@ -35,6 +35,26 @@ export type AuthorizeDecision =
        * additive field on an already-typed-generically response.
        */
       policyVersionId: string | null;
+
+      /**
+       * Release 2026-11-11 (brief §3.4): the risk *breakdown*, so
+       * `ToolInvokeController` can persist it onto the `ApprovalRequest`
+       * and a human reviewer can see why approval was required rather than
+       * only that a number crossed a line.
+       *
+       * `RiskEngine` has always computed these; until now they reached
+       * only the structured log and the `authorization.pending_approval`
+       * audit event, neither of which the approvals UI can join to a
+       * request. Deterministic and AI contributions stay separately
+       * attributed here for the same reason `RiskScoreResult` keeps them
+       * apart — a blended score is not reviewable.
+       */
+      deterministicRiskScore: number;
+      /** `null` when no advisory signal was available — never "the AI said zero". */
+      aiAdvisoryScore: number | null;
+      riskReasonCodes: string[];
+      /** The `Task.riskCeiling` `riskScore` was actually compared against. */
+      riskCeiling: number;
     };
 
 /**
@@ -322,6 +342,10 @@ export class AuthorizationService {
         reason,
         riskScore: riskResult.finalRiskScore,
         policyVersionId: policyResult.policyVersionId ?? null,
+        deterministicRiskScore: riskResult.deterministicRiskScore,
+        aiAdvisoryScore: riskResult.aiAdvisoryScore,
+        riskReasonCodes: riskResult.reasonCodes,
+        riskCeiling: task.riskCeiling,
       };
     }
 

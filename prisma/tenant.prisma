@@ -92,6 +92,19 @@ model UserProfile {
   /// Phase 15a (Section 70): `Incident`s this user created — see that model's doc comment.
   createdIncidents Incident[] @relation("IncidentCreations")
 
+  /// Release 2026-11-11 (brief §3.1): the AI-system inventory's
+  /// human-attribution edges. `ownedAiSystems` is the accountable-owner
+  /// relation the overview's overdue-review queue reads; the other four are
+  /// provenance trails (who created a record, who changed it, who linked an
+  /// asset to it, who moved it through its lifecycle) — see `AiSystem`'s
+  /// own doc comment.
+  ownedAiSystems         AiSystem[]                @relation("AiSystemOwnership")
+  createdAiSystems       AiSystem[]                @relation("AiSystemCreations")
+  aiSystemVersionChanges AiSystemVersion[]         @relation("AiSystemVersionAuthorship")
+  aiSystemAgentLinks     AiSystemAgentLink[]       @relation("AiSystemAgentLinks")
+  aiSystemToolLinks      AiSystemToolLink[]        @relation("AiSystemToolLinks")
+  aiSystemTransitions    AiSystemStateTransition[] @relation("AiSystemTransitions")
+
   @@map("user_profiles")
 }
 
@@ -184,6 +197,11 @@ model Agent {
   /// a detected prompt-injection attempt — see `AgentRiskFlag`'s own doc
   /// comment.
   riskFlags AgentRiskFlag[]
+
+  /// Release 2026-11-11: the `AiSystem`s this agent has been declared to
+  /// serve. Additive and reversible — linking never rewrites this agent's
+  /// own `createdBy`/`capabilities` (see `AiSystemAgentLink`).
+  aiSystemLinks AiSystemAgentLink[]
 
   @@map("agents")
 }
@@ -627,6 +645,10 @@ model Tool {
   actions      ToolAction[]
   invocations  ToolInvocation[]
 
+  /// Release 2026-11-11: the `AiSystem`s this tool has been declared to
+  /// serve — see `AiSystemToolLink`.
+  aiSystemLinks AiSystemToolLink[]
+
   @@map("tools")
 }
 
@@ -846,6 +868,56 @@ model ApprovalRequest {
   /// structured logs) so a human decision-maker and the eventual
   /// `AuthorizationGrant` can both see exactly what was being approved.
   riskScore Int
+
+  /// Release 2026-11-11 (brief §3.4) — the *breakdown* behind `riskScore`,
+  /// captured at request time.
+  ///
+  /// `riskScore` alone told an approver a number and nothing about where
+  /// it came from. These four fields exist because the brief requires the
+  /// reviewer to receive the risk factors and the policy version behind
+  /// the request, with deterministic factors and AI signals **separately
+  /// attributed** — a blended score is exactly what an approver cannot
+  /// reason about.
+  ///
+  /// All four are nullable/defaulted rather than required, because rows
+  /// written before this migration genuinely do not have them. A reader
+  /// must render those as *not recorded*, never as zero and never as an
+  /// absence of AI involvement — "we did not capture this" and "there was
+  /// no AI signal" are different facts, and `aiAdvisoryScore` is itself
+  /// legitimately null whenever no advisory signal was available.
+  ///
+  /// `RiskEngine` already computes all of this
+  /// (`RiskScoreResult.deterministicRiskScore`/`aiAdvisoryScore`/
+  /// `reasonCodes`); until now it reached only the structured log and the
+  /// `authorization.pending_approval` audit event, neither of which the
+  /// approvals UI can join to a request.
+  deterministicRiskScore Int?
+  /// `null` means no advisory signal was available (manar-ai unreachable,
+  /// timed out, circuit open, or a zero-confidence fail-secure marker) --
+  /// see `AiAdvisoryClient`. It never means "the AI said zero".
+  aiAdvisoryScore        Int?
+  /// `RiskScoreResult.reasonCodes` verbatim, in the order applied.
+  /// AI-derived codes carry the `ai_advisory_*` prefix, so a consumer can
+  /// separate attribution without a second field -- see that type's own
+  /// doc comment for why they are never blended into one anonymous list.
+  riskReasonCodes        Json  @default("[]")
+  /// The `Task.riskCeiling` in force when this request was raised -- what
+  /// `riskScore` was actually compared against. Without it, a reader
+  /// cannot tell whether 62 was over or under the line.
+  taskRiskCeiling        Int?
+
+  /// Why approval was required: `"policy_requires_approval"` (a published
+  /// policy rule's effect) or `"risk_ceiling_exceeded"` (the score alone).
+  ///
+  /// Persisted rather than derived. Deriving it from `policyVersionId`
+  /// being null looks correct and is not: a matched *ALLOW* rule also
+  /// records its `policyVersionId`, so a request that reached approval
+  /// purely on the risk ceiling can still carry one. `AuthorizationService`
+  /// already computes this exact string; it simply never reached the row.
+  ///
+  /// Null on rows written before this migration -- render as "not
+  /// recorded", never as either value.
+  requiredReason         String?
 
   /// The published `PolicyVersion` whose rule produced this
   /// `REQUIRE_APPROVAL` decision -- null when the decision came purely
@@ -1080,6 +1152,12 @@ model AuditEvent {
 
   @@index([eventType])
   @@index([correlationId])
+  /// Release 2026-11-11: `AuditService.verifyAuditChain` walks the chain in
+  /// keyset-paginated batches (`WHERE sequence > ?` ordered by `sequence`)
+  /// so a large tenant can no longer OOM the pod. Without this index every
+  /// batch still costs a sort of the whole table — bounded memory but not
+  /// bounded work. Retention pruning scans the same column.
+  @@index([sequence])
   @@map("audit_events")
 }
 
@@ -1494,7 +1572,247 @@ model Incident {
   /// transition *into* `RESOLVED`).
   resolvedAt DateTime?
 
+  /// Release 2026-11-11 (brief §3.4): the governed `AiSystem` this
+  /// investigation concerns, when one is known. Optional and nullable
+  /// on purpose — an incident is often opened from raw audit evidence
+  /// before anyone has established which governed system it belongs to,
+  /// and forcing a guess at creation time would put fabricated attribution
+  /// into the evidence trail.
+  aiSystemId String?
+  aiSystem   AiSystem? @relation(fields: [aiSystemId], references: [id])
+
   @@index([status])
   @@index([severity])
+  @@index([aiSystemId])
   @@map("incidents")
+}
+
+// ---------------------------------------------------------------------------
+// Release 2026-11-11 — AI-system inventory and ownership (brief §3.1).
+//
+// The runtime foundation this product already has (agents, tasks, tools,
+// policies, approvals, audit) governs *principals and actions*. It has no
+// record of the **business-level AI system or use case** those principals
+// serve, and therefore no accountable owner, lifecycle state, or review
+// date to hang governance on. `AiSystem` is that record.
+//
+// Two properties matter more than the field list:
+//
+//  1. **Declared metadata is not verified discovery.** Everything a human
+//     types here (`declaredProvider`, `declaredModel`, the linked agents)
+//     is a declaration. Whether that system is actually covered by runtime
+//     enforcement is *derived* at read time from real observations — see
+//     `AiSystemsService.resolveCoverage`. There is deliberately no stored
+//     `coverage` column: a stored one would silently go stale and would let
+//     the UI claim coverage this platform cannot prove.
+//  2. **Linking an existing agent must not invent or lose ownership.** An
+//     `AiSystemAgentLink` is an additive, attributed, reversible assertion
+//     that a given `Agent` serves this system. It never rewrites
+//     `Agent.createdBy` and never implies the agent had no prior owner.
+// ---------------------------------------------------------------------------
+
+/// `AiSystem.lifecycleState` (brief §3.1). Transitions are server-enforced
+/// by `AiSystemsService.transitionState` against an explicit allowed-edge
+/// table — never a free `PATCH` of this column — and every edge is
+/// recorded as an `AiSystemStateTransition` row. `RETIRED` is terminal:
+/// retiring is auditable and reversible only by creating a new system,
+/// which keeps a retired system's evidence trail meaningful.
+enum AiSystemLifecycleState {
+  DRAFT
+  REVIEW
+  ACTIVE
+  SUSPENDED
+  RETIRED
+}
+
+/// Which deployment environment an `AiSystem` runs in. Deliberately a
+/// small closed enum rather than free text: the overview's coverage and
+/// finding queues filter on it, and a free-text field would fragment into
+/// "prod"/"Production"/"PROD" within a week.
+enum AiSystemEnvironment {
+  DEVELOPMENT
+  STAGING
+  PRODUCTION
+}
+
+/// A governed AI system or use case — the business-level unit an
+/// accountable owner is answerable for, and the record findings,
+/// investigations, assessments, and evidence attach to. See this section's
+/// header comment for why coverage is derived rather than stored.
+model AiSystem {
+  id   String @id @default(uuid())
+  /// URL-safe stable identifier, unique per tenant database (which is
+  /// unique globally in effect — see `Agent.identifier`'s doc comment for
+  /// the same reasoning). Immutable after creation: it appears in shared
+  /// deep links and exported evidence bundles.
+  slug String @unique
+
+  name            String
+  /// What this system is *for*, in business terms. Required — a system
+  /// nobody can describe cannot be governed, and an empty purpose is the
+  /// single most common way an inventory decays into a list of names.
+  businessPurpose String
+
+  /// The accountable owner. A real `UserProfile` FK, not free text: the
+  /// overview's "overdue decisions" queue and finding assignment both need
+  /// a resolvable principal, and an owner who has left the tenant must
+  /// surface as a broken link rather than as a plausible-looking string.
+  ownerId String
+  owner   UserProfile @relation("AiSystemOwnership", fields: [ownerId], references: [id])
+
+  businessUnit String
+
+  environment    AiSystemEnvironment
+  lifecycleState AiSystemLifecycleState @default(DRAFT)
+
+  /// The classification of data this system is *declared* to handle —
+  /// reuses Phase 15a's `DataClassification` (never a parallel scale) so a
+  /// system's declared classification and a `ToolAction`'s enforced
+  /// classification are directly comparable, which is what makes a
+  /// "declared INTERNAL, observed touching RESTRICTED actions" finding
+  /// expressible at all.
+  dataClassification DataClassification @default(INTERNAL)
+
+  /// The provider/model the owner *declares* this system uses (e.g.
+  /// `"anthropic"` / `"claude-opus-4"`). Declared, never verified — the
+  /// API's own configured provider is a separate fact, and any drift
+  /// between the two is itself a governance finding rather than something
+  /// this column should quietly reconcile.
+  declaredProvider String?
+  declaredModel    String?
+
+  /// Why this system carries the risk posture it does, in the owner's own
+  /// words. Required for the same reason `businessPurpose` is.
+  riskRationale String
+
+  /// When this system's governance record is next due for review. Drives
+  /// the overview's overdue-review queue; `null` means no review has been
+  /// scheduled, which the UI must render as *unscheduled*, never as "not
+  /// due".
+  nextReviewDate DateTime?
+
+  /// Monotonic counter incremented by `AiSystemsService` on every
+  /// *material* change (see `AiSystemVersion`). Not a Prisma
+  /// `@updatedAt`-style field and not an optimistic-concurrency token —
+  /// it is the version number an evidence export cites.
+  version Int @default(1)
+
+  createdAt DateTime    @default(now())
+  createdBy String
+  creator   UserProfile @relation("AiSystemCreations", fields: [createdBy], references: [id])
+  updatedAt DateTime    @updatedAt
+
+  versions    AiSystemVersion[]
+  agentLinks  AiSystemAgentLink[]
+  toolLinks   AiSystemToolLink[]
+  transitions AiSystemStateTransition[]
+  incidents   Incident[]
+
+  @@index([lifecycleState])
+  @@index([environment])
+  @@index([ownerId])
+  @@index([nextReviewDate])
+  @@map("ai_systems")
+}
+
+/// An immutable snapshot of an `AiSystem`'s governed fields taken *before*
+/// each material change, with the reason and the human who made it. This
+/// is what "version material changes and retain their provenance" (brief
+/// §3.1) means concretely: the current row is the live record, and this
+/// table is the history an auditor reads. Never updated or deleted by
+/// application code.
+model AiSystemVersion {
+  id         String   @id @default(uuid())
+  aiSystemId String
+  aiSystem   AiSystem @relation(fields: [aiSystemId], references: [id])
+
+  /// The `AiSystem.version` value this snapshot *replaces* — i.e. the
+  /// state as it was before the change that produced version `version + 1`.
+  version Int
+
+  /// The full governed field set as it stood at `changedAt`, canonicalized
+  /// the same way audit event data is. Stored as a snapshot rather than a
+  /// field-level diff so a reader never has to replay the whole history to
+  /// answer "what did this record say on 3 October".
+  snapshot Json
+
+  /// Free text from the person making the change. Required — an unexplained
+  /// material change to a governance record is not evidence of anything.
+  changeReason String
+
+  changedBy String
+  changer   UserProfile @relation("AiSystemVersionAuthorship", fields: [changedBy], references: [id])
+  changedAt DateTime    @default(now())
+
+  @@unique([aiSystemId, version])
+  @@index([aiSystemId, changedAt])
+  @@map("ai_system_versions")
+}
+
+/// An attributed, reversible assertion that a given `Agent` serves a given
+/// `AiSystem`. See this section's header comment for why this never
+/// rewrites the agent's own ownership fields.
+model AiSystemAgentLink {
+  id         String   @id @default(uuid())
+  aiSystemId String
+  aiSystem   AiSystem @relation(fields: [aiSystemId], references: [id])
+
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id])
+
+  linkedBy String
+  linker   UserProfile @relation("AiSystemAgentLinks", fields: [linkedBy], references: [id])
+  linkedAt DateTime    @default(now())
+
+  @@unique([aiSystemId, agentId])
+  @@index([agentId])
+  @@map("ai_system_agent_links")
+}
+
+/// The same additive assertion for a registered `Tool`. Kept separate from
+/// `AiSystemAgentLink` rather than modelled as one polymorphic "asset link"
+/// row: the two have genuinely different downstream uses (agents drive
+/// runtime-coverage derivation, tools drive classification/destination
+/// analysis), and a polymorphic table would force every consumer to
+/// re-narrow the type.
+model AiSystemToolLink {
+  id         String   @id @default(uuid())
+  aiSystemId String
+  aiSystem   AiSystem @relation(fields: [aiSystemId], references: [id])
+
+  toolId String
+  tool   Tool   @relation(fields: [toolId], references: [id])
+
+  linkedBy String
+  linker   UserProfile @relation("AiSystemToolLinks", fields: [linkedBy], references: [id])
+  linkedAt DateTime    @default(now())
+
+  @@unique([aiSystemId, toolId])
+  @@index([toolId])
+  @@map("ai_system_tool_links")
+}
+
+/// One server-enforced lifecycle edge, recorded whether or not it also
+/// produced an `AiSystemVersion`. Separate from `AiSystemVersion` because
+/// the two answer different questions ("who changed the declared model" vs
+/// "who put this system into production"), and because the
+/// separation-of-duties rule applies only to the latter.
+model AiSystemStateTransition {
+  id         String   @id @default(uuid())
+  aiSystemId String
+  aiSystem   AiSystem @relation(fields: [aiSystemId], references: [id])
+
+  fromState AiSystemLifecycleState
+  toState   AiSystemLifecycleState
+
+  /// Required for every transition. The reviewer's justification is the
+  /// evidence an assessment later cites.
+  reason String
+
+  actorId String
+  actor   UserProfile @relation("AiSystemTransitions", fields: [actorId], references: [id])
+  at      DateTime    @default(now())
+
+  @@index([aiSystemId, at])
+  @@map("ai_system_state_transitions")
 }

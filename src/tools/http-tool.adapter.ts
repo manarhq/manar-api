@@ -2,7 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import {
-  assertSafeOutboundUrl,
+  OutboundResponseTooLargeError,
+  readBoundedResponseText,
+  safeOutboundFetch,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
 import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
@@ -82,33 +84,21 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
         : `${tool.baseEndpoint}/`,
     );
 
-    // Phase 12a (SSRF protection): re-validated on *every* call, never just
-    // once when the Tool was registered -- a hostname that resolved safely
-    // then could have been repointed at an internal address since (DNS
-    // rebinding). See src/common/ssrf/url-safety.ts's doc comment.
-    try {
-      await assertSafeOutboundUrl(url.toString(), {
-        allowedHosts: this.ssrfAllowedHosts,
-      });
-    } catch (error) {
-      if (error instanceof UnsafeOutboundUrlError) {
-        this.logger.warn(
-          `Blocked HTTP tool call to "${tool.name}/${action.name}": ${error.reasonCode}`,
-        );
-        return {
-          success: false,
-          errorMessage: 'blocked_by_outbound_url_policy',
-        };
-      }
-      throw error;
-    }
-
     let lastError: string = 'request failed';
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       try {
-        const response = await fetch(url, {
+        // Phase 12a (SSRF protection), extended: `safeOutboundFetch`
+        // re-runs `assertSafeOutboundUrl` on *every* call and on every
+        // redirect hop, never just once when the Tool was registered -- a
+        // hostname that resolved safely then could have been repointed at
+        // an internal address since (DNS rebinding), and a host that
+        // resolves safely can still answer `302 Location: <internal>`. It
+        // also drops the `Authorization` header below on any cross-origin
+        // hop, so a redirecting tool endpoint cannot walk off with the
+        // broker-issued credential. See that function's doc comment.
+        const response = await safeOutboundFetch(url.toString(), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -116,10 +106,11 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
           },
           body: JSON.stringify({ resource, params }),
           signal: controller.signal,
+          allowedHosts: this.ssrfAllowedHosts,
         });
 
         if (response.ok) {
-          const data: unknown = await response.json().catch(() => undefined);
+          const data = await this.readJsonBody(response);
           return { success: true, data };
         }
 
@@ -129,6 +120,26 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
           return { success: false, errorMessage: lastError };
         }
       } catch (error) {
+        if (error instanceof UnsafeOutboundUrlError) {
+          // A URL-policy rejection is never transient -- the same request
+          // would be blocked identically on every remaining attempt, so it
+          // returns immediately rather than burning the retry budget.
+          this.logger.warn(
+            `Blocked HTTP tool call to "${tool.name}/${action.name}": ${error.reasonCode}`,
+          );
+          return {
+            success: false,
+            errorMessage: 'blocked_by_outbound_url_policy',
+          };
+        }
+        if (error instanceof OutboundResponseTooLargeError) {
+          // Also not transient: the tool answered, just with more than this
+          // process is willing to buffer.
+          this.logger.warn(
+            `HTTP tool call to "${tool.name}/${action.name}" returned an oversized response`,
+          );
+          return { success: false, errorMessage: 'response_too_large' };
+        }
         lastError =
           error instanceof Error && error.name === 'AbortError'
             ? 'request timed out'
@@ -146,5 +157,22 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
     }
 
     return { success: false, errorMessage: lastError };
+  }
+
+  /**
+   * Reads a successful tool response as JSON under a hard byte ceiling
+   * (`readBoundedResponseText`) rather than with a bare `response.json()`,
+   * which would buffer whatever a hostile endpoint chose to send. A body
+   * that is not valid JSON is still tolerated as `undefined`, exactly as
+   * before — an oversized one is not, and propagates as
+   * `OutboundResponseTooLargeError` for `invoke`'s catch to map.
+   */
+  private async readJsonBody(response: Response): Promise<unknown> {
+    const text = await readBoundedResponseText(response);
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return undefined;
+    }
   }
 }

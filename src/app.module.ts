@@ -34,6 +34,7 @@ import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { IncidentsModule } from './incidents/incidents.module';
+import { AiSystemsModule } from './ai-systems/ai-systems.module';
 
 @Module({
   imports: [
@@ -72,6 +73,10 @@ import { IncidentsModule } from './incidents/incidents.module';
     // Phase 15a: Data Classification, Compliance Mapping & Incidents.
     ComplianceModule,
     IncidentsModule,
+    // Release 2026-11-11 (brief §3.1): the governed AI-system/use-case
+    // inventory — the record findings, investigations, assessments, and
+    // evidence attach to.
+    AiSystemsModule,
   ],
   controllers: [AppController],
   providers: [

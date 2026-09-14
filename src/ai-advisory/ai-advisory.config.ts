@@ -19,6 +19,50 @@ export const AiAdvisoryConfigSchema = z.object({
   AI_ADVISORY_GRPC_TARGET: z.string().min(1).default('localhost:50051'),
 
   /**
+   * Release 2026-11-11 — mTLS to manar-ai's `AnalysisService`.
+   *
+   * manar-ai now binds `add_secure_port` with
+   * `ssl_server_credentials(require_client_auth=True)` and a peer-identity
+   * interceptor, and **refuses to bind a plaintext port at all** when its
+   * own `ENVIRONMENT` is `staging` or `production`. It still binds
+   * plaintext for `local`/`development`/`test`, logging a warning, so the
+   * existing developer stack keeps working unchanged.
+   *
+   * This flag therefore defaults to `false`: turning it on is a deployment
+   * decision that has to be made in step with manar-ai's own configuration
+   * and with the PKI that issues both sides' certificates. What must never
+   * happen is this client silently falling back to plaintext against a
+   * server that expects mTLS — that surfaces as a connection failure, which
+   * the circuit breaker then reports as an unavailable advisory service,
+   * which is the correct fail-secure behaviour but an unhelpful diagnostic.
+   * Hence the explicit flag and the all-or-nothing validation below.
+   *
+   * Certificate requirements, from manar-ai's side of the contract
+   * (`manar-ai/docs/grpc-typescript-client.md`):
+   *
+   *  - The client certificate's CN or DNS SAN must be `manar-api` (this
+   *    HTTP process) or `manar-api-worker` (the Temporal worker). Any other
+   *    identity gets `PERMISSION_DENIED` even with a CA-issued certificate
+   *    — possession of a valid certificate is authentication, not
+   *    authorization.
+   *  - Both certificates must be issued by the same internal CA that
+   *    manar-ai loads as its client CA. manar-ai does not consult the
+   *    system trust store, so a publicly-trusted certificate will not work.
+   *  - manar-ai's server certificate must carry a SAN covering the address
+   *    dialled here.
+   *
+   * Paths mirror manar-ai's own mount convention (`/etc/manar/tls/...`) so
+   * the PKI plumbing stays symmetric across the two services.
+   */
+  AI_ADVISORY_TLS_ENABLED: z.enum(['true', 'false']).default('false'),
+  /** PEM bundle of the CA that issued manar-ai's server certificate. */
+  AI_ADVISORY_TLS_CA_FILE: z.string().min(1).optional(),
+  /** This service's own client certificate (CN/SAN `manar-api` or `manar-api-worker`). */
+  AI_ADVISORY_TLS_CERT_FILE: z.string().min(1).optional(),
+  /** Private key for `AI_ADVISORY_TLS_CERT_FILE`. */
+  AI_ADVISORY_TLS_KEY_FILE: z.string().min(1).optional(),
+
+  /**
    * Per-RPC deadline in milliseconds, applied only to the **hot lane**
    * (`AnalyzeRisk`/`AnalyzePromptInjection`/`AnalyzeDlp` — inline on the
    * authorization/tool-invocation path). It does **not** apply to the
@@ -118,3 +162,58 @@ export function isExternalAiProvider(
 }
 
 export type AiAdvisoryConfig = z.infer<typeof AiAdvisoryConfigSchema>;
+
+/**
+ * Whether mTLS to manar-ai is switched on.
+ *
+ * The flag is a `'true' | 'false'` string rather than a coerced boolean on
+ * purpose: `z.coerce.boolean()` runs JavaScript's `Boolean(...)`, under
+ * which the string `"false"` is **true**. A security control that silently
+ * inverts when someone writes the obvious thing in a `.env` file is worse
+ * than no control.
+ */
+export function aiAdvisoryTlsEnabled(config: {
+  AI_ADVISORY_TLS_ENABLED: 'true' | 'false';
+}): boolean {
+  return config.AI_ADVISORY_TLS_ENABLED === 'true';
+}
+
+/**
+ * Startup validation for the mTLS material. Deliberately all-or-nothing.
+ *
+ * A half-configured mTLS client is the worst of the three possible states:
+ * it looks configured, and it fails at connect time as a generic "AI
+ * advisory unavailable" — which the circuit breaker then reports as a
+ * degraded dependency. That is the correct fail-secure *behaviour* and a
+ * useless *diagnostic*. Failing at startup with the missing variable named
+ * is what an operator can act on.
+ *
+ * Lives here rather than as a `.superRefine` on the schema because
+ * `AppConfigSchema` composes these with `.extend(Schema.shape)`, and
+ * `.shape` exists only on a plain `ZodObject` — a refinement would silently
+ * break that composition.
+ */
+export function assertAiAdvisoryTlsMaterial(config: {
+  AI_ADVISORY_TLS_ENABLED: 'true' | 'false';
+  AI_ADVISORY_TLS_CA_FILE?: string;
+  AI_ADVISORY_TLS_CERT_FILE?: string;
+  AI_ADVISORY_TLS_KEY_FILE?: string;
+}): void {
+  if (!aiAdvisoryTlsEnabled(config)) return;
+
+  const missing = (
+    [
+      'AI_ADVISORY_TLS_CA_FILE',
+      'AI_ADVISORY_TLS_CERT_FILE',
+      'AI_ADVISORY_TLS_KEY_FILE',
+    ] as const
+  ).filter((key) => config[key] === undefined || config[key] === '');
+
+  if (missing.length > 0) {
+    throw new Error(
+      `AI_ADVISORY_TLS_ENABLED is true but ${missing.join(', ')} ${
+        missing.length === 1 ? 'is' : 'are'
+      } not set. mTLS to manar-ai needs the CA bundle, this service's client certificate and its key together — see AI_ADVISORY_TLS_ENABLED's doc comment for the certificate identity manar-ai requires.`,
+    );
+  }
+}
