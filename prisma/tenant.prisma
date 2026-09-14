@@ -896,6 +896,16 @@ model ApprovalRequest {
   /// timed out, circuit open, or a zero-confidence fail-secure marker) --
   /// see `AiAdvisoryClient`. It never means "the AI said zero".
   aiAdvisoryScore        Int?
+  /// Phase 1 (ADR-004): whether NO AI advisory is attached to this approval.
+  /// Defaults to `true` — absent until proven present — because the advisory
+  /// is no longer a decision input and is fetched off the decision path by
+  /// `ApprovalWorkflow` after the approval row already exists.
+  ///
+  /// This exists so the console can tell an approver "the AI said low risk"
+  /// apart from "the AI never answered". A null `aiAdvisoryScore` alone cannot
+  /// carry that distinction, and CLAUDE.md §6 requires manar-ai being
+  /// unavailable to be visible on the record rather than silently absent.
+  advisoryUnavailable    Boolean @default(true)
   /// `RiskScoreResult.reasonCodes` verbatim, in the order applied.
   /// AI-derived codes carry the `ai_advisory_*` prefix, so a consumer can
   /// separate attribution without a second field -- see that type's own

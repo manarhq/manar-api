@@ -594,7 +594,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
     }
   }, 30_000);
 
-  it('2. AI advisory reports HIGH risk for a request the deterministic layer alone would ALLOW -> final decision becomes APPROVAL_REQUIRED', async () => {
+  it('2. Phase 1 (ADR-004): a HIGH advisory cannot escalate a decision the deterministic layer would ALLOW -- and is never even consulted', async () => {
     const fakeServer = new FakeAnalysisServiceServer();
     const target = await fakeServer.start();
     fakeServer.riskResult = {
@@ -635,16 +635,28 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         reason: string;
         riskScore: number;
       };
-      expect(decision.decision).toBe('APPROVAL_REQUIRED');
-      expect(decision.reason).toBe('risk_ceiling_exceeded');
-      expect(decision.riskScore).toBe(90); // AI pushed it up, not deterministic (10)
+      // Before Phase 1 this asserted APPROVAL_REQUIRED with riskScore 90 --
+      // the advisory pushing a request over the ceiling. That was a language
+      // model participating in the authorization decision, which CLAUDE.md
+      // §5.1 forbids and ADR-004 keeps off this path. The assertion is
+      // inverted deliberately, not relaxed.
+      expect(decision.decision).toBe('ALLOW');
+      // An ALLOW response carries no risk score at all -- only
+      // APPROVAL_REQUIRED reports one -- so its absence here is itself the
+      // evidence that nothing pushed this request over the ceiling.
+      expect(decision.riskScore).toBeUndefined();
+
+      // The strongest form of the guarantee: the decision path did not merely
+      // ignore the advisory, it never asked for one. A fake server that is
+      // never called cannot influence anything.
+      expect(fakeServer.callCounts.analyzeRisk).toBe(0);
     } finally {
       await alt.app.close();
       await fakeServer.stop();
     }
   }, 30_000);
 
-  it('3. AI advisory reports LOW risk for a request the deterministic layer scores HIGH -> final risk score is unchanged (AI cannot lower risk below the deterministic floor)', async () => {
+  it('3. Phase 1 (ADR-004): a LOW advisory cannot lower a deterministically HIGH score, because the decision never consults one', async () => {
     const fakeServer = new FakeAnalysisServiceServer();
     const target = await fakeServer.start();
     fakeServer.riskResult = {
@@ -697,8 +709,13 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
         riskScore: number;
       };
       expect(decision.decision).toBe('APPROVAL_REQUIRED');
+      // This assertion predates Phase 1 and still holds, but it used to hold
+      // because `max(deterministic, advisory)` clamped the AI's low 5 away.
+      // It now holds because the advisory is not consulted at all -- asserted
+      // explicitly below, so this test cannot pass vacuously.
       // Still the deterministic value (100), not the AI's low 5.
       expect(decision.riskScore).toBe(100);
+      expect(fakeServer.callCounts.analyzeRisk).toBe(0);
     } finally {
       await alt.app.close();
       await fakeServer.stop();
@@ -972,7 +989,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
     }
   }, 30_000);
 
-  it("7. lane isolation: a tripped long-form circuit breaker never affects the hot lane's authorize path", async () => {
+  it('7. Phase 1 (ADR-004): authorize is unaffected by ANY manar-ai state -- tripped breaker or not -- because it never calls it', async () => {
     const fakeServer = new FakeAnalysisServiceServer();
     const target = await fakeServer.start();
     fakeServer.riskResult = {
@@ -1033,13 +1050,22 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
           decision: string;
           riskScore: number;
         };
-        // The hot lane reached the server and got a real, high-confidence
-        // score (85) -- if the breakers were still shared, this call would
-        // have been skipped entirely by the long-form trip above and
-        // fallen back to the deterministic-only score instead.
-        expect(decision.decision).toBe('APPROVAL_REQUIRED');
-        expect(decision.riskScore).toBe(85);
-        expect(fakeServer.callCounts.analyzeRisk).toBe(1);
+        // This test used to prove hot/long-form circuit-breaker isolation by
+        // observing that authorize still got a real advisory score (85) after
+        // the long-form breaker had tripped. Phase 1 removed the advisory from
+        // the decision path entirely, so that property is no longer observable
+        // here -- and the guarantee that replaced it is strictly stronger:
+        // authorize is unaffected by manar-ai's state because it never talks
+        // to manar-ai at all. A tripped breaker, a healthy server and an
+        // unreachable one are now indistinguishable from this path.
+        //
+        // Lane isolation itself is still a real property of AiAdvisoryClient
+        // for its remaining hot-lane callers (DLP and prompt-injection
+        // inspection in the credential broker) and is covered by that class's
+        // own unit tests.
+        expect(decision.decision).toBe('ALLOW');
+        expect(decision.riskScore).toBeUndefined();
+        expect(fakeServer.callCounts.analyzeRisk).toBe(0);
       } finally {
         await alt.app.close();
       }

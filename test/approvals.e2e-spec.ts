@@ -482,6 +482,7 @@ describe('Approval Engine (e2e)', () => {
       // is deterministic and no advisory signal was involved.
       deterministicRiskScore: 5,
       aiAdvisoryScore: null,
+      advisoryUnavailable: true,
       riskReasonCodes: ['baseline'],
       taskRiskCeiling: 50,
       requiredReason: 'policy_requires_approval',

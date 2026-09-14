@@ -3,7 +3,6 @@ import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-cli
 import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import type { PolicyRule } from '../policy/policy-content.schema';
 import { ToolRegistryService } from '../tools/tool-registry.service';
-import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
 import type { DataClassification } from '../common/data-classification';
 
 export interface RiskScoreInput {
@@ -20,11 +19,15 @@ export interface RiskScoreInput {
 }
 
 export interface RiskScoreResult {
-  deterministicRiskScore: number;
-  /** Phase 10b: `AiAdvisoryClient.analyzeRisk`'s score (0-100) when a real advisory signal was available, `null` when it was not (unreachable/timed out/circuit open/zero-confidence fail-secure marker — see that class's doc comment). */
-  aiAdvisoryScore: number | null;
-  /** `max(deterministicRiskScore, aiAdvisoryScore ?? 0)` — see class doc comment for why this is the mechanism that lets AI only ever add restriction, never remove it. */
-  finalRiskScore: number;
+  /**
+   * The score the decision is made on. Phase 1 (ADR-004, CLAUDE.md §12): this
+   * is **deterministic only**. The AI advisory used to be folded in here as
+   * `max(deterministic, advisory ?? 0)`, which put a language model inside the
+   * authorization decision. It is now fetched off the decision path and
+   * attached to the ApprovalRequest for the human approver instead — see
+   * `RiskAdvisoryService`.
+   */
+  riskScore: number;
   /** Deterministic and AI-attributed contributors, in the order applied. AI-derived codes are always prefixed `ai_advisory_*`, kept clearly distinct from deterministic ones — never blended into one anonymous list. */
   reasonCodes: string[];
 }
@@ -122,7 +125,6 @@ export class RiskEngine {
   constructor(
     private readonly tasksService: TasksService,
     private readonly toolRegistry: ToolRegistryService,
-    private readonly aiAdvisoryClient: AiAdvisoryClient,
   ) {}
 
   async score(
@@ -213,46 +215,6 @@ export class RiskEngine {
       deterministicRiskScore = clamp(floored, MIN_SCORE, MAX_SCORE);
     }
 
-    // Phase 10b: AI advisory risk scoring — strictly additive, see class
-    // doc comment. Never re-derives anything steps above already decided;
-    // `null` (no advisory available, for any reason) leaves
-    // `finalRiskScore` untouched.
-    const advisory = await this.aiAdvisoryClient.analyzeRisk({
-      actionDescription: `Agent action: ${input.toolId}.${input.actionId} on resource "${input.resource}"`,
-      context: `taskId=${input.task.id} riskCeiling=${input.task.riskCeiling} delegationDepth=${ancestors.length} deterministicRiskScore=${deterministicRiskScore}`,
-      tenantId: input.tenantId,
-      // Phase 15a (Section 53): lets AiAdvisoryClient's residency gate
-      // independently block this specific call to an external provider
-      // when the action is RESTRICTED, regardless of the tenant's
-      // allowExternalAi flag — see that class's residencyAllows. undefined
-      // (no registered ToolAction) is treated identically to any other
-      // non-RESTRICTED classification there.
-      classification: registered?.action.classification,
-    });
-
-    let aiAdvisoryScore: number | null = null;
-    if (advisory) {
-      aiAdvisoryScore = clamp(advisory.score, MIN_SCORE, MAX_SCORE);
-      reasonCodes.push(`ai_advisory_score:${aiAdvisoryScore}`);
-      reasonCodes.push(
-        `ai_advisory_recommended_action:${advisory.recommendedAction}`,
-      );
-      for (const signal of advisory.signals) {
-        reasonCodes.push(`ai_advisory_signal:${signal}`);
-      }
-    }
-
-    const finalRiskScore = clamp(
-      Math.max(deterministicRiskScore, aiAdvisoryScore ?? MIN_SCORE),
-      MIN_SCORE,
-      MAX_SCORE,
-    );
-
-    return {
-      deterministicRiskScore,
-      aiAdvisoryScore,
-      finalRiskScore,
-      reasonCodes,
-    };
+    return { riskScore: deterministicRiskScore, reasonCodes };
   }
 }

@@ -43,6 +43,7 @@ export interface CreateApprovalRequestInput {
    */
   deterministicRiskScore: number;
   aiAdvisoryScore: number | null;
+  advisoryUnavailable: boolean;
   riskReasonCodes: string[];
   taskRiskCeiling: number;
   /** `'policy_requires_approval'` or `'risk_ceiling_exceeded'` — `AuthorizationService`'s own `reason`, persisted rather than re-derived (see the column's schema doc comment for why deriving it is wrong). */
@@ -79,6 +80,7 @@ export class ApprovalRequestService {
         riskScore: input.riskScore,
         deterministicRiskScore: input.deterministicRiskScore,
         aiAdvisoryScore: input.aiAdvisoryScore,
+        advisoryUnavailable: input.advisoryUnavailable,
         riskReasonCodes: input.riskReasonCodes,
         taskRiskCeiling: input.taskRiskCeiling,
         requiredReason: input.requiredReason,
@@ -208,6 +210,7 @@ export class ApprovalRequestService {
       riskScore: row.riskScore,
       deterministicRiskScore: row.deterministicRiskScore,
       aiAdvisoryScore: row.aiAdvisoryScore,
+      advisoryUnavailable: row.advisoryUnavailable,
       taskRiskCeiling: row.taskRiskCeiling,
       requiredReason: row.requiredReason,
       deterministicReasonCodes: reasonCodes.filter(
@@ -263,6 +266,7 @@ export interface ApprovalRequestDetail {
   deterministicRiskScore: number | null;
   /** `null` means no advisory signal was available, never "the AI scored zero". */
   aiAdvisoryScore: number | null;
+  advisoryUnavailable: boolean;
   taskRiskCeiling: number | null;
   requiredReason: string | null;
   deterministicReasonCodes: string[];

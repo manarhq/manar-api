@@ -148,7 +148,14 @@ export class ToolInvokeController {
         riskScore: decision.riskScore,
         policyVersionId: decision.policyVersionId,
         deterministicRiskScore: decision.deterministicRiskScore,
-        aiAdvisoryScore: decision.aiAdvisoryScore,
+        // ADR-004: the advisory is no longer a decision input, so nothing is
+        // known about it here. `ApprovalWorkflow` fetches it off the decision
+        // path and fills it in for the human approver. Until it does the
+        // approval records that no advisory is attached, rather than implying
+        // a low one -- "the AI said low risk" and "the AI never answered" must
+        // not look the same to an approver (CLAUDE.md §6).
+        aiAdvisoryScore: null,
+        advisoryUnavailable: true,
         riskReasonCodes: decision.riskReasonCodes,
         riskCeiling: decision.riskCeiling,
         requiredReason: decision.reason,
@@ -233,6 +240,7 @@ export class ToolInvokeController {
       policyVersionId: string | null;
       deterministicRiskScore: number;
       aiAdvisoryScore: number | null;
+      advisoryUnavailable: boolean;
       riskReasonCodes: string[];
       riskCeiling: number;
       requiredReason: string;
@@ -258,6 +266,7 @@ export class ToolInvokeController {
         // the total so the approver is reviewing the actual factors.
         deterministicRiskScore: decision.deterministicRiskScore,
         aiAdvisoryScore: decision.aiAdvisoryScore,
+        advisoryUnavailable: decision.advisoryUnavailable,
         riskReasonCodes: decision.riskReasonCodes,
         taskRiskCeiling: decision.riskCeiling,
         requiredReason: decision.requiredReason,
