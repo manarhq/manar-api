@@ -21,7 +21,7 @@ export type AuthorizeDecision =
   | { decision: 'ALLOW' }
   | { decision: 'DENY'; reason: string }
   | {
-      decision: 'REQUIRE_APPROVAL';
+      decision: 'APPROVAL_REQUIRED';
       reason: string;
       riskScore: number;
       /**
@@ -92,7 +92,7 @@ export type AuthorizeDecision =
  *      already-permitted action above; it never re-decides steps 1-5. A
  *      policy `DENY` short-circuits to DENY immediately.
  *   7. `RiskEngine.score` (Phase 6) — a deterministic 0-100 risk score.
- *      `REQUIRE_APPROVAL` if the matched policy's own effect says so, OR
+ *      `APPROVAL_REQUIRED` if the matched policy's own effect says so, OR
  *      the score exceeds this task's `riskCeiling`.
  *   8. Otherwise ALLOW: atomically increment `executionCount` — a
  *      conditional `UPDATE` that also closes the race against a
@@ -108,7 +108,7 @@ export type AuthorizeDecision =
  * never as an unhandled 5xx that could be mistaken for anything but a
  * definite non-ALLOW. Steps 6-7 (Phase 6) are inserted strictly *after*
  * Phase 5's own OpenFGA check and *before* its `executionCount` increment
- * — none of Phase 5's steps 1-5 are touched. `REQUIRE_APPROVAL` is a real,
+ * — none of Phase 5's steps 1-5 are touched. `APPROVAL_REQUIRED` is a real,
  * stable decision from this phase onward, but this phase implements no
  * path to ever fulfil one (Phase 8) — it's correctly a dead end for now.
  * See docs/policy-model.md.
@@ -310,7 +310,7 @@ export class AuthorizationService {
     // Step 7 (Phase 6): RiskEngine. finalRiskScore vs. this task's own
     // riskCeiling (Phase 5's field, unused until now) — either that or
     // the matched policy rule itself asking for approval routes this
-    // request to REQUIRE_APPROVAL instead of ALLOW.
+    // request to APPROVAL_REQUIRED instead of ALLOW.
     const riskResult = await this.riskEngine.score(tenantClient, {
       tenantId,
       toolId: request.toolId,
@@ -322,11 +322,11 @@ export class AuthorizationService {
     });
 
     if (
-      policyResult.effect === 'REQUIRE_APPROVAL' ||
+      policyResult.effect === 'APPROVAL_REQUIRED' ||
       riskResult.finalRiskScore > task.riskCeiling
     ) {
       const reason =
-        policyResult.effect === 'REQUIRE_APPROVAL'
+        policyResult.effect === 'APPROVAL_REQUIRED'
           ? 'policy_requires_approval'
           : 'risk_ceiling_exceeded';
       await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_PENDING_APPROVAL, {
@@ -338,7 +338,7 @@ export class AuthorizationService {
         riskCeiling: task.riskCeiling,
       });
       return {
-        decision: 'REQUIRE_APPROVAL',
+        decision: 'APPROVAL_REQUIRED',
         reason,
         riskScore: riskResult.finalRiskScore,
         policyVersionId: policyResult.policyVersionId ?? null,

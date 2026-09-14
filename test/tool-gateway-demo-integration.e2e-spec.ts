@@ -437,7 +437,7 @@ describe('Tool Gateway <-> real demo-soc-tools (integration e2e)', () => {
     // on `WS-042` -- Phase 4/5's real API, not a shortcut. riskCeiling is
     // raised above this scenario's deterministic score (baseline 10 +
     // riskBaseScore 15 + mutating 15 = 40) so the real pipeline reaches
-    // ALLOW, not REQUIRE_APPROVAL -- this test is about proving the real
+    // ALLOW, not APPROVAL_REQUIRED -- this test is about proving the real
     // tool call happens, not re-testing Phase 6's approval routing (see
     // test/tool-gateway.e2e-spec.ts scenario 6 for that).
     const agent = await createEnrolledAgent('demo-edr');

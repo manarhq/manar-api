@@ -36,7 +36,7 @@ import { ToolInvokeRequestSchema } from './tool-invoke.validation';
 
 /**
  * `POST /agent/v1/tools/invoke` — mTLS-gated (Phase 7b), extended by
- * Phase 8 to give `REQUIRE_APPROVAL` a real fulfillment path (see
+ * Phase 8 to give `APPROVAL_REQUIRED` a real fulfillment path (see
  * docs/approvals.md; docs/tool-gateway.md covers the rest of this
  * controller's Phase 7b shape, unchanged).
  *
@@ -46,7 +46,7 @@ import { ToolInvokeRequestSchema } from './tool-invoke.validation';
  *     unchanged `AuthorizationService.authorize(...)` pipeline exactly as
  *     Phase 7b did.
  *       - `DENY` -> 403, no tool call ever attempted.
- *       - `REQUIRE_APPROVAL` -> creates an `ApprovalRequest`, starts
+ *       - `APPROVAL_REQUIRED` -> creates an `ApprovalRequest`, starts
  *         `ApprovalWorkflow`, responds 202
  *         `{ status: 'PENDING', reason, riskScore, approvalId }` — no
  *         tool call is ever attempted (Section 80's "pending action cannot
@@ -143,7 +143,7 @@ export class ToolInvokeController {
         reason: decision.reason,
       });
     }
-    if (decision.decision === 'REQUIRE_APPROVAL') {
+    if (decision.decision === 'APPROVAL_REQUIRED') {
       const approvalId = await this.startApproval(tenantClient, agent, input, {
         riskScore: decision.riskScore,
         policyVersionId: decision.policyVersionId,

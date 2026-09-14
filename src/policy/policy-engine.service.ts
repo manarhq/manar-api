@@ -27,7 +27,7 @@ export interface PolicyEvaluationResult {
 
 const EFFECT_RANK: Record<PolicyEffect, number> = {
   ALLOW: 0,
-  REQUIRE_APPROVAL: 1,
+  APPROVAL_REQUIRED: 1,
   DENY: 2,
 };
 

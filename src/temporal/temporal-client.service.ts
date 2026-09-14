@@ -12,7 +12,7 @@ import type { AppConfig } from '../config/env.validation';
  * The one place in either Nest application (human-facing `AppModule`,
  * agent-facing `AgentMtlsAppModule`) that holds a `@temporalio/client`
  * connection — used to *start* `ApprovalWorkflow`
- * (`POST /agent/v1/tools/invoke`, on a `REQUIRE_APPROVAL` decision) and to
+ * (`POST /agent/v1/tools/invoke`, on a `APPROVAL_REQUIRED` decision) and to
  * *signal* it (`POST /approvals/:id/decide`). Never runs a Worker itself —
  * that's `src/worker.main.ts`'s own separate process (Section 28: workflow
  * code, and the Activities it calls, never share an event loop with the

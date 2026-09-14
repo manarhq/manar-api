@@ -37,8 +37,8 @@ export class PolicyRuleDto {
   resourceClassification?:
     'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED';
 
-  @ApiProperty({ enum: ['ALLOW', 'DENY', 'REQUIRE_APPROVAL'] })
-  effect!: 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL';
+  @ApiProperty({ enum: ['ALLOW', 'DENY', 'APPROVAL_REQUIRED'] })
+  effect!: 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
 
   @ApiProperty({
     required: false,

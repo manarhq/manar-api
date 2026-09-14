@@ -12,7 +12,7 @@ import { ToolsModule } from './tools.module';
  * single-app-only shape. Imports `AgentAuthorizeModule` for its exported
  * `AuthorizationService` — this controller calls that *exact* existing
  * pipeline unchanged, never a fork of it. Phase 8 adds `ApprovalsModule`
- * (creating an `ApprovalRequest` on `REQUIRE_APPROVAL`, validating a
+ * (creating an `ApprovalRequest` on `APPROVAL_REQUIRED`, validating a
  * retried `grantToken`) and `TemporalModule` (starting `ApprovalWorkflow`)
  * — see docs/approvals.md.
  */

@@ -339,7 +339,7 @@ export enum PolicyRuleDraft_Effect {
   EFFECT_UNSPECIFIED = 0,
   EFFECT_ALLOW = 1,
   EFFECT_DENY = 2,
-  EFFECT_REQUIRE_APPROVAL = 3,
+  EFFECT_APPROVAL_REQUIRED = 3,
   UNRECOGNIZED = -1,
 }
 
@@ -357,8 +357,8 @@ export function policyRuleDraft_EffectFromJSON(
     case 'EFFECT_DENY':
       return PolicyRuleDraft_Effect.EFFECT_DENY;
     case 3:
-    case 'EFFECT_REQUIRE_APPROVAL':
-      return PolicyRuleDraft_Effect.EFFECT_REQUIRE_APPROVAL;
+    case 'EFFECT_APPROVAL_REQUIRED':
+      return PolicyRuleDraft_Effect.EFFECT_APPROVAL_REQUIRED;
     case -1:
     case 'UNRECOGNIZED':
     default:
@@ -376,8 +376,8 @@ export function policyRuleDraft_EffectToJSON(
       return 'EFFECT_ALLOW';
     case PolicyRuleDraft_Effect.EFFECT_DENY:
       return 'EFFECT_DENY';
-    case PolicyRuleDraft_Effect.EFFECT_REQUIRE_APPROVAL:
-      return 'EFFECT_REQUIRE_APPROVAL';
+    case PolicyRuleDraft_Effect.EFFECT_APPROVAL_REQUIRED:
+      return 'EFFECT_APPROVAL_REQUIRED';
     case PolicyRuleDraft_Effect.UNRECOGNIZED:
     default:
       return 'UNRECOGNIZED';

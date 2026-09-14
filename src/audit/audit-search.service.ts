@@ -25,7 +25,7 @@ export interface AuditSearchFilters {
   taskId?: string;
   toolId?: string;
   actionId?: string;
-  /** `ALLOW`/`DENY`/`REQUIRE_APPROVAL`/`APPROVE`/`DENY` — see `audit-search-fields.ts`'s `deriveDecision`. */
+  /** `ALLOW`/`DENY`/`APPROVAL_REQUIRED`/`APPROVE`/`DENY` — see `audit-search-fields.ts`'s `deriveDecision`. */
   decision?: string;
   riskMin?: number;
   riskMax?: number;

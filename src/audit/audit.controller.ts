@@ -104,7 +104,7 @@ export class AuditController {
     name: 'decision',
     required: false,
     description:
-      'ALLOW, DENY, REQUIRE_APPROVAL, APPROVE, or DENY (approval decisions).',
+      'ALLOW, DENY, APPROVAL_REQUIRED, APPROVE, or DENY (approval decisions).',
   })
   @ApiQuery({ name: 'riskMin', required: false, type: Number })
   @ApiQuery({ name: 'riskMax', required: false, type: Number })

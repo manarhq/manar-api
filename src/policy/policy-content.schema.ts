@@ -23,8 +23,26 @@ const TOOL_ACTION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
  * that's `ALLOW`/pass-through, never an implicit deny).
  */
 
-export const PolicyEffectSchema = z.enum(['ALLOW', 'DENY', 'REQUIRE_APPROVAL']);
-export type PolicyEffect = z.infer<typeof PolicyEffectSchema>;
+/**
+ * Phase 1: the effect vocabulary is `CLAUDE.md` §7's, so `APPROVAL_REQUIRED`,
+ * not the `REQUIRE_APPROVAL` this codebase used until now.
+ *
+ * `REQUIRE_APPROVAL` is accepted as a **deprecated alias on read and
+ * normalised away**, never written. It is not a courtesy: `PolicyVersion`
+ * rows are immutable and carry a `contentHash` over `content`, so a data
+ * migration that rewrote the stored spelling would invalidate every hash it
+ * touched. Reading the old spelling and normalising it keeps those rows
+ * verifiable *and* keeps the evaluator on one vocabulary.
+ *
+ * Remove the alias once no `PolicyVersion` row predating this change
+ * survives retention.
+ */
+export const PolicyEffectSchema = z
+  .enum(['ALLOW', 'DENY', 'APPROVAL_REQUIRED', 'REQUIRE_APPROVAL'])
+  .transform((effect) =>
+    effect === 'REQUIRE_APPROVAL' ? ('APPROVAL_REQUIRED' as const) : effect,
+  );
+export type PolicyEffect = 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
 
 export const PolicyRuleSchema = z.object({
   /** Human-readable label for this rule — audit/debugging convenience only, never matched against. */
