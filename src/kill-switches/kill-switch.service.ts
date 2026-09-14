@@ -42,7 +42,7 @@ export interface KillSwitchCheckParams {
 export interface KillSwitchCheckResult {
   killed: boolean;
   /** Present only when `killed` is true. */
-  scope?: 'PLATFORM' | TenantKillSwitchScope;
+  scope?: 'PLATFORM' | TenantKillSwitchScope | 'AI_SYSTEM';
   /** Present only when `killed` is true — a specific, non-leaky reason (app-layer deterministic state, safe to expose — same posture as `AuthorizationService`'s steps 1-4). */
   reason?: string;
 }
@@ -242,6 +242,50 @@ export class KillSwitchService {
             reason: 'tool_kill_switch_active',
           };
         }
+      }
+    }
+
+    // CLAUDE.md §7: `GovernanceState SUSPENDED` -> `RuntimeState BLOCKED`, and
+    // §3's demo chain steps 18-20 ("Governance Manager suspends the AI system
+    // -> further governed actions blocked"). Phase 0 finding N2 was that
+    // nothing read the governance state at authorization time, so suspending
+    // an AI system changed a column and stopped no agent.
+    //
+    // This is DERIVED from `AiSystem.lifecycleState`, not mirrored into a
+    // `KillSwitch` row, and deliberately so: two facts can disagree — a
+    // suspend that forgets to write the row, or a row that outlives the
+    // suspend — and a governance control that can silently drift out of
+    // agreement with the runtime is precisely the "monitored vs enforced"
+    // confusion CLAUDE.md §5.16 names. One fact cannot drift.
+    //
+    // Both queries are indexed (`ai_system_agent_links(agentId)` and the
+    // `AiSystem` primary key) and hit PostgreSQL only, which ADR-004 permits
+    // on the decision path.
+    const links = await tenantClient.aiSystemAgentLink.findMany({
+      where: { agentId: params.agentId },
+      select: { aiSystemId: true },
+    });
+    if (links.length > 0) {
+      // An agent may belong to more than one AI system. The strictest state
+      // wins: if any owning system is suspended or retired, the agent stops.
+      const blocking = await tenantClient.aiSystem.findMany({
+        where: {
+          id: { in: links.map((link) => link.aiSystemId) },
+          lifecycleState: { in: ['SUSPENDED', 'RETIRED'] },
+        },
+        select: { id: true, lifecycleState: true },
+      });
+      if (blocking.length > 0) {
+        // SUSPENDED is reversible and RETIRED is not, so an operator reading
+        // the reason needs to know which one stopped the call.
+        const suspended = blocking.some(
+          (system) => system.lifecycleState === 'SUSPENDED',
+        );
+        return {
+          killed: true,
+          scope: 'AI_SYSTEM',
+          reason: suspended ? 'ai_system_suspended' : 'ai_system_retired',
+        };
       }
     }
 
