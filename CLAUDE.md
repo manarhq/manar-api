@@ -1,8 +1,8 @@
 # manar-api — control plane
 
-Workspace context and the build program: `../CLAUDE.md` and `../MANAR-BUILD-SPEC.md`. Read them
-first. This file holds what is specific to this repo. The architecture decision this repo is
-being built toward is `docs/adr/ADR-0001-capability-based-enforcement.md`.
+Workspace context and the build program: `../CLAUDE.md`, `../MANAR-BUILD-SPEC.md` and
+`../MANAR-BUILD-SPEC-ADDENDUM-01.md` (which wins where they differ). Read them first. This file
+holds what is specific to this repo. The architecture decision this repo is being built toward is `docs/adr/ADR-0001-capability-based-enforcement.md`.
 
 ## Stack
 
@@ -16,8 +16,8 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 | Task                  | Command                                                                                                  | Baseline                                           |
 | --------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | Backing services      | `pnpm infra:up` (Compose `deploy/docker-compose.yml`) then `pnpm infra:openbao-init`                     | all healthy                                        |
-| Lint                  | `pnpm lint` (runs `eslint --fix`)                                                                        | clean on tracked source                            |
-| Typecheck             | `pnpm typecheck` (api, scripts, sdk-node, manar-ai client)                                               | pass                                               |
+| Lint                  | `pnpm lint` (gating, no auto-fix; `pnpm lint:fix` to fix)                                                | clean on tracked source                            |
+| Typecheck             | `pnpm typecheck` (builds `packages/manar-ai-client` and `packages/sdk-node` first, then api + scripts)   | pass                                               |
 | Unit tests            | `pnpm test` / `pnpm test:cov`                                                                            | 36 files, 318 tests; lines 57.35%, branches 39.75% |
 | E2E tests             | `pnpm test:e2e` (needs the stack and OpenBao PKI; stop any host worker first, the specs start their own) | 27 files, 168 tests                                |
 | Build                 | `pnpm build`                                                                                             | pass                                               |
@@ -31,8 +31,10 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 vanish and agent enrollment returns 500 until you run `pnpm infra:openbao-init` and restart
 the API. `/health/ready` does not detect this.
 
-Plain `eslint` without `--fix` reports ~53 prettier errors in the gitignored `src/generated/**`;
-that is Prisma output, not source.
+`src/generated/**` is Prisma output and is ignored by eslint. `pnpm demo:agent` runs the scripted
+demo against `packages/demo-soc-tools`; with `test/complete-demo.e2e-spec.ts` it is the rehearsed
+fallback for 11 November and must keep passing through every phase (Addendum 01 §A). It currently
+loads `.env` through `ts-node -r dotenv/config`; the Phase 1 runtime must not (Addendum 01 §C.4).
 
 ## Architecture map
 
@@ -87,8 +89,9 @@ Longer per-area docs are in `docs/*.md`. Treat them as leads; the code and tests
 
 ## ADRs and CI
 
-- ADRs: `docs/adr/ADR-NNNN-<slug>.md` from `ADR-0000-template.md`. ADR-0002 (LLM proxy),
-  ADR-0003 (capability tokens), ADR-0004 (connectors and credentials) and ADR-0005 (Cedar) are
-  reserved by the spec. Workspace ADR-001…009 in `../docs/adr/` remain the cross-repo record.
+- ADRs: `docs/adr/ADR-NNNN-<slug>.md` from `ADR-0000-template.md`. Written: ADR-0001 (the
+  thesis), ADR-0003 (capability token format, deferred), ADR-0005 (Cedar, proposed and
+  conditional). Reserved: ADR-0002 (LLM proxy, Phase 1), ADR-0004 (connectors and credentials,
+  Phase 2). Workspace ADR-001…009 in `../docs/adr/` remain the cross-repo record.
 - CI: GitLab (`.gitlab-ci.yml`): lint, typecheck, unit (PostgreSQL + Redis), e2e (full services),
   build, images, gitleaks, semgrep, Trivy, SBOM, Helm render + kubeconform + kube-linter.
