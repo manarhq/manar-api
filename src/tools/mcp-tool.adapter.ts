@@ -7,7 +7,10 @@ import {
   assertSafeOutboundUrl,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
-import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
+import {
+  ssrfPolicyFromConfig,
+  type SsrfPolicy,
+} from '../common/ssrf/ssrf.config';
 import { validateAgainstSchema } from './json-schema-validator.util';
 import type {
   ToolInvocationResult,
@@ -91,12 +94,10 @@ const MCP_CLOSE_TIMEOUT_MS = 2_000;
 @Injectable()
 export class McpToolAdapter implements ToolProtocolAdapter {
   private readonly logger = new Logger(McpToolAdapter.name);
-  private readonly ssrfAllowedHosts: Set<string>;
+  private readonly ssrfPolicy: SsrfPolicy;
 
   constructor(configService: ConfigService<AppConfig, true>) {
-    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
-      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
-    );
+    this.ssrfPolicy = ssrfPolicyFromConfig(configService);
   }
 
   async invoke(
@@ -132,7 +133,7 @@ export class McpToolAdapter implements ToolProtocolAdapter {
     // rather than trusted from registration time.
     try {
       await assertSafeOutboundUrl(tool.baseEndpoint, {
-        allowedHosts: this.ssrfAllowedHosts,
+        ...this.ssrfPolicy,
       });
     } catch (error) {
       if (error instanceof UnsafeOutboundUrlError) {

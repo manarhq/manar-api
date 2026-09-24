@@ -5,7 +5,10 @@ import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-cli
 import type { AppConfig } from '../config/env.validation';
 import { OpenBaoKvClient } from '../openbao/openbao-kv.client';
 import { assertSafeOutboundUrl } from '../common/ssrf/url-safety';
-import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
+import {
+  ssrfPolicyFromConfig,
+  type SsrfPolicy,
+} from '../common/ssrf/ssrf.config';
 import {
   CursorPage,
   DecodedCursor,
@@ -54,15 +57,13 @@ export interface WebhookEndpointSummary {
  */
 @Injectable()
 export class WebhookRegistryService {
-  private readonly ssrfAllowedHosts: Set<string>;
+  private readonly ssrfPolicy: SsrfPolicy;
 
   constructor(
     private readonly openBaoKvClient: OpenBaoKvClient,
     configService: ConfigService<AppConfig, true>,
   ) {
-    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
-      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
-    );
+    this.ssrfPolicy = ssrfPolicyFromConfig(configService);
   }
 
   /**
@@ -81,7 +82,7 @@ export class WebhookRegistryService {
     // see src/common/ssrf/url-safety.ts's doc comment for why both checks
     // matter (DNS rebinding).
     await assertSafeOutboundUrl(input.url, {
-      allowedHosts: this.ssrfAllowedHosts,
+      ...this.ssrfPolicy,
     });
 
     const id = randomUUID();
@@ -159,7 +160,7 @@ export class WebhookRegistryService {
       // Re-validated here too -- an update is a fresh registration of a
       // URL, not exempt from the same SSRF check `create` applies.
       await assertSafeOutboundUrl(input.url, {
-        allowedHosts: this.ssrfAllowedHosts,
+        ...this.ssrfPolicy,
       });
     }
 

@@ -7,7 +7,10 @@ import {
   safeOutboundFetch,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
-import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
+import {
+  ssrfPolicyFromConfig,
+  type SsrfPolicy,
+} from '../common/ssrf/ssrf.config';
 import { validateAgainstSchema } from './json-schema-validator.util';
 import type {
   ToolInvocationResult,
@@ -65,12 +68,10 @@ function sleep(ms: number): Promise<void> {
 @Injectable()
 export class HttpToolAdapter implements ToolProtocolAdapter {
   private readonly logger = new Logger(HttpToolAdapter.name);
-  private readonly ssrfAllowedHosts: Set<string>;
+  private readonly ssrfPolicy: SsrfPolicy;
 
   constructor(configService: ConfigService<AppConfig, true>) {
-    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
-      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
-    );
+    this.ssrfPolicy = ssrfPolicyFromConfig(configService);
   }
 
   async invoke(
@@ -120,7 +121,7 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
           },
           body: JSON.stringify({ resource, params }),
           signal: controller.signal,
-          allowedHosts: this.ssrfAllowedHosts,
+          ...this.ssrfPolicy,
         });
 
         if (response.ok) {

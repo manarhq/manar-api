@@ -17,7 +17,8 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 }));
 
 const adapter = new McpToolAdapter({
-  get: () => '127.0.0.1',
+  get: (key: string) =>
+    ({ SSRF_ALLOWED_HOSTS: '127.0.0.1', SSRF_ALLOW_LOOPBACK: true })[key],
 } as unknown as ConfigService<never, true>);
 
 const tool = {
