@@ -234,4 +234,35 @@ describe('Evidence export (e2e)', () => {
     );
     expect(verifyTampered.valid).toBe(false);
   });
+
+  it('POST /evidence/verify confirms an untouched bundle and rejects a tampered one (R9)', async () => {
+    const exported = (
+      await request(app.getHttpServer() as App)
+        .post('/evidence/export')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ taskId })
+        .expect(201)
+    ).body as EvidenceExportResult;
+
+    const verify = (bundle: unknown) =>
+      request(app.getHttpServer() as App)
+        .post('/evidence/verify')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ bundle, signature: exported.signature.signature })
+        .expect(200);
+
+    expect((await verify(exported.bundle)).body).toEqual({ valid: true });
+    expect(
+      (await verify({ ...exported.bundle, tenantId: 'someone-else' })).body,
+    ).toMatchObject({ valid: false });
+
+    await request(app.getHttpServer() as App)
+      .post('/evidence/verify')
+      .set('Authorization', `Bearer ${readOnlyToken}`)
+      .send({
+        bundle: exported.bundle,
+        signature: exported.signature.signature,
+      })
+      .expect(403);
+  });
 });

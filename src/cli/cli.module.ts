@@ -6,6 +6,7 @@ import { OpenSearchIndexModule } from '../audit/opensearch/opensearch-index.modu
 import { TenantCreateCommand } from './commands/tenant-create.command';
 import { AuditReindexCommand } from './commands/audit-reindex.command';
 import { DemoSeedCommand } from './commands/demo-seed.command';
+import { TenantsMigrateCommand } from './commands/tenants-migrate.command';
 
 /**
  * Root module for the `pnpm manar` CLI (see src/cli.ts). Deliberately
@@ -34,6 +35,11 @@ import { DemoSeedCommand } from './commands/demo-seed.command';
     KeycloakModule,
     OpenSearchIndexModule,
   ],
-  providers: [TenantCreateCommand, AuditReindexCommand, DemoSeedCommand],
+  providers: [
+    TenantCreateCommand,
+    AuditReindexCommand,
+    DemoSeedCommand,
+    TenantsMigrateCommand,
+  ],
 })
 export class CliModule {}
