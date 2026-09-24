@@ -1,0 +1,128 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import type { OpenBaoPkiClient } from '../openbao/openbao-pki.client';
+import { CertificateAuthorityService } from './certificate-authority.service';
+
+interface CertRow {
+  id: string;
+  agentId: string;
+  serialNumber: string;
+  revokedAt: Date | null;
+  revocationReason: string | null;
+  caRevokedAt: Date | null;
+}
+
+/** Just enough of the tenant client for `revoke`, backed by arrays. */
+function fakeTenantClient(certs: CertRow[]) {
+  const agent = { id: 'agent-1', status: 'ACTIVE' };
+  const client = {
+    agent: {
+      update: vi.fn(({ data }: { data: { status: string } }) => {
+        agent.status = data.status;
+        return Promise.resolve();
+      }),
+    },
+    agentCertificate: {
+      updateMany: vi.fn(({ data }: { data: Partial<CertRow> }) => {
+        for (const c of certs) if (c.revokedAt === null) Object.assign(c, data);
+        return Promise.resolve();
+      }),
+      findMany: vi.fn(() =>
+        Promise.resolve(
+          certs.filter((c) => c.revokedAt !== null && c.caRevokedAt === null),
+        ),
+      ),
+      update: vi.fn(
+        ({
+          where,
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<CertRow>;
+        }) => {
+          Object.assign(
+            certs.find((c) => c.id === where.id)!,
+            data,
+          );
+          return Promise.resolve();
+        },
+      ),
+    },
+    $transaction: vi.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
+  };
+  return { client: client as unknown as TenantPrismaClient, agent };
+}
+
+function cert(id: string, serialNumber: string): CertRow {
+  return {
+    id,
+    agentId: 'agent-1',
+    serialNumber,
+    revokedAt: null,
+    revocationReason: null,
+    caRevokedAt: null,
+  };
+}
+
+describe('CertificateAuthorityService.revoke (S10: local first)', () => {
+  it('blocks the agent locally even when OpenBao is down, and reports the CA revocation as pending', async () => {
+    const certs = [cert('c1', '0A0B')];
+    const { client, agent } = fakeTenantClient(certs);
+    const openBao = {
+      revoke: vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')),
+    };
+    const service = new CertificateAuthorityService(
+      openBao as unknown as OpenBaoPkiClient,
+    );
+
+    const result = await service.revoke(client, 'agent-1', 'compromised');
+
+    expect(agent.status).toBe('REVOKED');
+    expect(certs[0].revokedAt).toBeInstanceOf(Date);
+    expect(certs[0].caRevokedAt).toBeNull();
+    expect(result).toEqual({ caRevocationPending: 1 });
+  });
+
+  it('retries the owed CA revocation on the next call and records the confirmation', async () => {
+    const certs = [cert('c1', '0A0B')];
+    const { client } = fakeTenantClient(certs);
+    const openBao = {
+      revoke: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('connect ECONNREFUSED'))
+        .mockResolvedValue(undefined),
+    };
+    const service = new CertificateAuthorityService(
+      openBao as unknown as OpenBaoPkiClient,
+    );
+
+    await service.revoke(client, 'agent-1', 'compromised');
+    const firstRevokedAt = certs[0].revokedAt;
+    const result = await service.revoke(client, 'agent-1', 'compromised');
+
+    expect(openBao.revoke).toHaveBeenCalledTimes(2);
+    expect(openBao.revoke).toHaveBeenLastCalledWith('0A:0B');
+    expect(certs[0].caRevokedAt).toBeInstanceOf(Date);
+    expect(certs[0].revokedAt).toBe(firstRevokedAt);
+    expect(result).toEqual({ caRevocationPending: 0 });
+  });
+
+  it('commits local revocation before calling OpenBao', async () => {
+    const certs = [cert('c1', '0A0B')];
+    const { client, agent } = fakeTenantClient(certs);
+    let statusSeenByOpenBao: string | undefined;
+    const openBao = {
+      revoke: vi.fn(() => {
+        statusSeenByOpenBao = agent.status;
+        return Promise.resolve();
+      }),
+    };
+    const service = new CertificateAuthorityService(
+      openBao as unknown as OpenBaoPkiClient,
+    );
+
+    await service.revoke(client, 'agent-1', 'compromised');
+
+    expect(statusSeenByOpenBao).toBe('REVOKED');
+  });
+});

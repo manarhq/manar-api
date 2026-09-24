@@ -286,6 +286,10 @@ model AgentCertificate {
 
   revokedAt        DateTime?
   revocationReason String?
+  /// When OpenBao confirmed the revocation. `revokedAt` is set first (the
+  /// mTLS guard reads it), so a row with `revokedAt` set and this null is a
+  /// CA revocation still owed; `CertificateAuthorityService.revoke` retries it.
+  caRevokedAt      DateTime?
 
   createdAt DateTime @default(now())
 
