@@ -29,7 +29,8 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 
 **OpenBao runs in dev mode (in-memory).** Whenever its container restarts, the PKI mounts
 vanish and agent enrollment returns 500 until you run `pnpm infra:openbao-init` and restart
-the API. `/health/ready` does not detect this.
+the API. `/health/ready` reports `openbao` unhealthy when this happens (it probes the
+intermediate's `ca_chain`, not just the port).
 
 `src/generated/**` is Prisma output and is ignored by eslint. `pnpm demo:agent` runs the scripted
 demo against `packages/demo-soc-tools`; with `test/complete-demo.e2e-spec.ts` it is the rehearsed
