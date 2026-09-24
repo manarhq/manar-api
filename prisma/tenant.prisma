@@ -799,6 +799,9 @@ model ToolInvocation {
 enum ToolInvocationStatus {
   SUCCESS
   FAILURE
+  /// A mutating or destructive call ended without a definite answer; the
+  /// side effect may have happened and needs reconciliation (Gate 0 R1).
+  UNKNOWN
 }
 
 /// `ApprovalRequest.status` (Phase 8, Sections 27/28/31). A new request is

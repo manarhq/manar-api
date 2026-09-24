@@ -29,6 +29,8 @@ export const AUDIT_EVENT_TYPES = {
   TOOL_INVOCATION_STARTED: 'tool.invocation.started',
   TOOL_INVOCATION_COMPLETED: 'tool.invocation.completed',
   TOOL_INVOCATION_FAILED: 'tool.invocation.failed',
+  /** A mutating call ended without a definite answer; needs reconciliation. */
+  TOOL_INVOCATION_OUTCOME_UNKNOWN: 'tool.invocation.outcome_unknown',
 
   POLICY_PUBLISHED: 'policy.published',
 

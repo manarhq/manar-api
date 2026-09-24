@@ -157,6 +157,7 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       },
     );
 
+    let callSent = false;
     try {
       // The SDK's own default for `initialize` is 60s, so without an
       // explicit timeout here this adapter's declared 10s budget applied to
@@ -166,6 +167,7 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       // the final call.
       await client.connect(transport, { timeout: MCP_REQUEST_TIMEOUT_MS });
 
+      callSent = true;
       const result = await client.callTool(
         {
           name: action.name,
@@ -202,6 +204,16 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       this.logger.warn(
         `MCP tool call to "${tool.name}/${action.name}" failed: ${message}`,
       );
+      // Gate 0 finding R1: once `tools/call` was sent, a lost answer on a
+      // mutating or destructive action means the side effect may have
+      // happened. Connect failures happen before anything was asked.
+      if (callSent && (action.mutating || action.destructive)) {
+        return {
+          success: false,
+          errorMessage: `MCP call failed: ${message}`,
+          outcomeUnknown: true,
+        };
+      }
       return { success: false, errorMessage: `MCP call failed: ${message}` };
     } finally {
       // Bounded like every other step: a server that never completes its

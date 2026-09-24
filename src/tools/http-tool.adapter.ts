@@ -20,20 +20,31 @@ const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * Retry policy (Section 35: "keep it simple — no exponential-backoff
- * framework needed"): up to `MAX_ATTEMPTS` total attempts, a short fixed
- * delay between them, retrying only on what looks like a *transient*
- * failure — a network-level error (`fetch` itself rejecting: DNS,
- * connection refused, timeout) or an HTTP 5xx response. A 4xx response is
- * never retried (it's the tool's own considered answer that this specific
- * request is invalid — retrying it verbatim would never succeed). This is
- * deliberately not safe for non-idempotent actions in general (a POST that
- * partially succeeded server-side before the response was lost would be
- * retried) — acceptable for this phase's scope per the design spec; a real
- * integration wanting idempotency would need the target tool to support an
- * idempotency key, which is out of scope here.
+ * framework needed"): a read-only action gets up to `READ_MAX_ATTEMPTS`
+ * attempts with a short fixed delay, retrying only on what looks transient
+ * (a network-level error or an HTTP 5xx). A 4xx is never retried.
+ *
+ * A mutating or destructive action gets exactly one attempt (Gate 0 finding
+ * R1: a disable-user or isolate-host call whose response was lost must not
+ * be sent again). If that attempt ends without a definite answer (timeout,
+ * connection lost after sending, 5xx) the result carries `outcomeUnknown`.
+ * A connection that was never established (refused, DNS failure) is a
+ * definite FAILURE: nothing was sent.
  */
-const MAX_ATTEMPTS = 3;
+const READ_MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 200;
+
+/** Errors that prove the request never left this process's network stack. */
+const NOT_SENT_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+
+function errorCode(error: unknown): string | undefined {
+  const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+  return typeof cause?.code === 'string' ? cause.code : undefined;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,8 +95,11 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
         : `${tool.baseEndpoint}/`,
     );
 
+    const sideEffecting = action.mutating || action.destructive;
+    const maxAttempts = sideEffecting ? 1 : READ_MAX_ATTEMPTS;
     let lastError: string = 'request failed';
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    let mayHaveReachedTool = false;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       try {
@@ -115,6 +129,7 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
         }
 
         lastError = `HTTP ${response.status}`;
+        mayHaveReachedTool = true;
         if (response.status < 500) {
           // A 4xx is the tool's own considered answer -- never retried.
           return { success: false, errorMessage: lastError };
@@ -144,11 +159,12 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
           error instanceof Error && error.name === 'AbortError'
             ? 'request timed out'
             : `request failed: ${error instanceof Error ? error.message : String(error)}`;
+        mayHaveReachedTool = !NOT_SENT_ERROR_CODES.has(errorCode(error) ?? '');
       } finally {
         clearTimeout(timeout);
       }
 
-      if (attempt < MAX_ATTEMPTS) {
+      if (attempt < maxAttempts) {
         this.logger.warn(
           `HTTP tool call to "${tool.name}/${action.name}" attempt ${attempt} failed (${lastError}) — retrying`,
         );
@@ -156,6 +172,12 @@ export class HttpToolAdapter implements ToolProtocolAdapter {
       }
     }
 
+    if (sideEffecting && mayHaveReachedTool) {
+      this.logger.error(
+        `HTTP tool call to "${tool.name}/${action.name}" ended without a definite answer (${lastError}); outcome UNKNOWN, not retried`,
+      );
+      return { success: false, errorMessage: lastError, outcomeUnknown: true };
+    }
     return { success: false, errorMessage: lastError };
   }
 

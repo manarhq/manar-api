@@ -172,7 +172,9 @@ export function mapAuditEventToOcsf(
 
     case AUDIT_EVENT_TYPES.TOOL_INVOCATION_STARTED:
     case AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED:
-    case AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED: {
+    case AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED:
+    case AUDIT_EVENT_TYPES.TOOL_INVOCATION_OUTCOME_UNKNOWN: {
+      // outcome_unknown lands on OCSF status_id 0, "Unknown": its meaning.
       const statusId =
         event.eventType === AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED
           ? 1

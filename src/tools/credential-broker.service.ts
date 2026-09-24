@@ -356,8 +356,14 @@ export class CredentialBrokerService {
       result = { success: false, errorMessage: 'tool invocation failed' };
     }
 
+    const status = result.success
+      ? 'SUCCESS'
+      : result.outcomeUnknown
+        ? 'UNKNOWN'
+        : 'FAILURE';
+
     await this.recordInvocation(tenantClient, input, {
-      status: result.success ? 'SUCCESS' : 'FAILURE',
+      status,
       startedAt,
       completedAt: new Date(),
       errorMessage: result.success
@@ -375,16 +381,21 @@ export class CredentialBrokerService {
     // operational `ToolInvocation` row above already takes (`resource`/
     // `status`/`errorMessage` are shape/summary only).
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
-      eventType: result.success
-        ? AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED
-        : AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED,
+      // `outcome_unknown` is the reconciliation hook: an operator (or a later
+      // reconciliation job) must confirm with the tool whether it happened.
+      eventType:
+        status === 'SUCCESS'
+          ? AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED
+          : status === 'UNKNOWN'
+            ? AUDIT_EVENT_TYPES.TOOL_INVOCATION_OUTCOME_UNKNOWN
+            : AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED,
       actor: { type: 'agent', id: input.agentId },
       data: {
         taskId: input.taskId,
         toolId: input.toolId,
         actionId: input.actionId,
         resource: input.resource,
-        status: result.success ? 'SUCCESS' : 'FAILURE',
+        status,
         errorMessage: result.success ? null : (result.errorMessage ?? null),
       },
     });
@@ -540,7 +551,7 @@ export class CredentialBrokerService {
     tenantClient: TenantPrismaClient,
     input: CredentialBrokerInvokeInput,
     record: {
-      status: 'SUCCESS' | 'FAILURE';
+      status: 'SUCCESS' | 'FAILURE' | 'UNKNOWN';
       startedAt: Date;
       completedAt: Date;
       errorMessage: string | null;
