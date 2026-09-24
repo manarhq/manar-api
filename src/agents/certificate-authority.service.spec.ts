@@ -66,7 +66,8 @@ function cert(id: string, serialNumber: string): CertRow {
 
 describe('CertificateAuthorityService.revoke (S10: local first)', () => {
   it('blocks the agent locally even when OpenBao is down, and reports the CA revocation as pending', async () => {
-    const certs = [cert('c1', '0A0B')];
+    const c1 = cert('c1', '0A0B');
+    const certs = [c1];
     const { client, agent } = fakeTenantClient(certs);
     const openBao = {
       revoke: vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')),
@@ -78,13 +79,14 @@ describe('CertificateAuthorityService.revoke (S10: local first)', () => {
     const result = await service.revoke(client, 'agent-1', 'compromised');
 
     expect(agent.status).toBe('REVOKED');
-    expect(certs[0].revokedAt).toBeInstanceOf(Date);
-    expect(certs[0].caRevokedAt).toBeNull();
+    expect(c1.revokedAt).toBeInstanceOf(Date);
+    expect(c1.caRevokedAt).toBeNull();
     expect(result).toEqual({ caRevocationPending: 1 });
   });
 
   it('retries the owed CA revocation on the next call and records the confirmation', async () => {
-    const certs = [cert('c1', '0A0B')];
+    const c1 = cert('c1', '0A0B');
+    const certs = [c1];
     const { client } = fakeTenantClient(certs);
     const openBao = {
       revoke: vi
@@ -97,18 +99,19 @@ describe('CertificateAuthorityService.revoke (S10: local first)', () => {
     );
 
     await service.revoke(client, 'agent-1', 'compromised');
-    const firstRevokedAt = certs[0].revokedAt;
+    const firstRevokedAt = c1.revokedAt;
     const result = await service.revoke(client, 'agent-1', 'compromised');
 
     expect(openBao.revoke).toHaveBeenCalledTimes(2);
     expect(openBao.revoke).toHaveBeenLastCalledWith('0A:0B');
-    expect(certs[0].caRevokedAt).toBeInstanceOf(Date);
-    expect(certs[0].revokedAt).toBe(firstRevokedAt);
+    expect(c1.caRevokedAt).toBeInstanceOf(Date);
+    expect(c1.revokedAt).toBe(firstRevokedAt);
     expect(result).toEqual({ caRevocationPending: 0 });
   });
 
   it('commits local revocation before calling OpenBao', async () => {
-    const certs = [cert('c1', '0A0B')];
+    const c1 = cert('c1', '0A0B');
+    const certs = [c1];
     const { client, agent } = fakeTenantClient(certs);
     let statusSeenByOpenBao: string | undefined;
     const openBao = {

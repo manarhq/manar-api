@@ -6,6 +6,8 @@ import type {
   ThrottlerStorage,
 } from '@nestjs/throttler';
 import { describe, expect, it, vi } from 'vitest';
+import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from 'jose';
+import type { JwksCacheService } from '../auth/jwks-cache.service';
 import type { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
 import { TenantThrottlerGuard } from './tenant-throttler.guard';
 
@@ -84,6 +86,7 @@ async function makeGuard(
     storage,
     new Reflector(),
     knownIssuerRegistry,
+    {} as JwksCacheService,
   );
   // The base class resolves its throttler list here; `canActivate` reads it.
   await guard.onModuleInit();
@@ -159,5 +162,61 @@ describe('TenantThrottlerGuard storage failure handling', () => {
 
     await expect(guard.canActivate(makeContext('/tasks'))).resolves.toBe(true);
     expect(increment).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('TenantThrottlerGuard tracker (S11: never trust an unverified issuer)', () => {
+  const ISSUER = 'http://keycloak.test/realms/victim';
+
+  async function setup() {
+    const trusted = await generateKeyPair('RS256');
+    const attacker = await generateKeyPair('RS256');
+    const jwks = createLocalJWKSet({
+      keys: [{ ...(await exportJWK(trusted.publicKey)), alg: 'RS256' }],
+    });
+    const guard = new TenantThrottlerGuard(
+      THROTTLER_OPTIONS,
+      { increment: vi.fn() },
+      new Reflector(),
+      {
+        resolveByIssuer: (issuer: string) =>
+          Promise.resolve(
+            issuer === ISSUER
+              ? { tenantId: 'victim-tenant', issuerUrl: ISSUER }
+              : null,
+          ),
+      } as unknown as KnownIssuerRegistry,
+      { getJwks: () => jwks } as unknown as JwksCacheService,
+    );
+    const sign = (key: CryptoKey) =>
+      new SignJWT({})
+        .setProtectedHeader({ alg: 'RS256' })
+        .setIssuer(ISSUER)
+        .setExpirationTime('5m')
+        .sign(key);
+    const tracker = (token: string) =>
+      (
+        guard as unknown as {
+          getTracker(req: unknown): Promise<string>;
+        }
+      ).getTracker({
+        headers: { authorization: `Bearer ${token}` },
+        ip: '203.0.113.9',
+      });
+    return { trusted, attacker, sign, tracker };
+  }
+
+  it("keys a forged token naming another tenant's issuer on the caller IP, not that tenant", async () => {
+    const { attacker, sign, tracker } = await setup();
+    await expect(tracker(await sign(attacker.privateKey))).resolves.toBe(
+      'ip:203.0.113.9',
+    );
+  });
+
+  it('keys a correctly signed token on its tenant', async () => {
+    const { trusted, sign, tracker } = await setup();
+    await expect(tracker(await sign(trusted.privateKey))).resolves.toBe(
+      'tenant:victim-tenant',
+    );
   });
 });
