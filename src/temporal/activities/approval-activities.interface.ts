@@ -27,7 +27,35 @@ export interface ExpireApprovalRequestInput {
   approvalRequestId: string;
 }
 
+export interface AttachRiskAdvisoryInput {
+  tenantId: string;
+  approvalRequestId: string;
+}
+
 export interface ApprovalActivities {
+  /**
+   * Phase 1 (ADR-004). Fetches manar-ai's risk advisory and attaches it to the
+   * ApprovalRequest **for the human approver**.
+   *
+   * This exists because the advisory used to be a decision input —
+   * `RiskEngine` awaited it and folded it in as
+   * `max(deterministic, advisory ?? 0)`, putting a language model inside the
+   * authorization decision. ADR-004 and CLAUDE.md §12 forbid that. Running it
+   * here instead keeps it off the synchronous decision path while preserving
+   * what CLAUDE.md §5.1 actually licenses: an advisory signal *attached to* a
+   * deterministic decision.
+   *
+   * Never affects the outcome. The decision was already made, durably, before
+   * this workflow started. On any failure — manar-ai down, circuit open,
+   * timeout, zero-confidence fail-secure marker — the approval keeps
+   * `advisoryUnavailable = true` and the human decides without it. That is the
+   * `CLAUDE.md` §6 row: "manar-ai unavailable → continue deterministic path;
+   * advisory_unavailable = true on the record".
+   *
+   * Idempotent: re-running overwrites the same columns with the same result.
+   */
+  attachRiskAdvisory(input: AttachRiskAdvisoryInput): Promise<void>;
+
   /**
    * Runs on both an `APPROVE` and a `DENY` signal (Section 27/28's "an
    * Activity", not workflow code, does the re-evaluation and any DB

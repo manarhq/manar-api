@@ -32,7 +32,6 @@ import type { AuditService } from '../src/audit/audit.service';
 import { PolicyEngine } from '../src/policy/policy-engine.service';
 import { RiskEngine } from '../src/risk/risk-engine.service';
 import { ToolRegistryService } from '../src/tools/tool-registry.service';
-import type { AiAdvisoryClient } from '../src/ai-advisory/ai-advisory-client.service';
 import type { KillSwitchService } from '../src/kill-switches/kill-switch.service';
 import {
   assignRealmRole,
@@ -660,11 +659,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       tasksServiceForBrokenClient,
       brokenOpenFga,
       new PolicyEngine(new ToolRegistryService()),
-      new RiskEngine(
-        tasksServiceForBrokenClient,
-        new ToolRegistryService(),
-        {} as unknown as AiAdvisoryClient,
-      ),
+      new RiskEngine(tasksServiceForBrokenClient, new ToolRegistryService()),
       {
         recordSafely: () => Promise.resolve(undefined),
       } as unknown as AuditService,

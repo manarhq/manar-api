@@ -50,8 +50,6 @@ export type AuthorizeDecision =
        * apart — a blended score is not reviewable.
        */
       deterministicRiskScore: number;
-      /** `null` when no advisory signal was available — never "the AI said zero". */
-      aiAdvisoryScore: number | null;
       riskReasonCodes: string[];
       /** The `Task.riskCeiling` `riskScore` was actually compared against. */
       riskCeiling: number;
@@ -323,7 +321,7 @@ export class AuthorizationService {
 
     if (
       policyResult.effect === 'APPROVAL_REQUIRED' ||
-      riskResult.finalRiskScore > task.riskCeiling
+      riskResult.riskScore > task.riskCeiling
     ) {
       const reason =
         policyResult.effect === 'APPROVAL_REQUIRED'
@@ -331,7 +329,7 @@ export class AuthorizationService {
           : 'risk_ceiling_exceeded';
       await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_PENDING_APPROVAL, {
         reason,
-        riskScore: riskResult.finalRiskScore,
+        riskScore: riskResult.riskScore,
         riskReasonCodes: riskResult.reasonCodes,
         policyVersionId: policyResult.policyVersionId ?? null,
         matchedRule: policyResult.matchedRule ?? null,
@@ -340,10 +338,9 @@ export class AuthorizationService {
       return {
         decision: 'APPROVAL_REQUIRED',
         reason,
-        riskScore: riskResult.finalRiskScore,
+        riskScore: riskResult.riskScore,
         policyVersionId: policyResult.policyVersionId ?? null,
-        deterministicRiskScore: riskResult.deterministicRiskScore,
-        aiAdvisoryScore: riskResult.aiAdvisoryScore,
+        deterministicRiskScore: riskResult.riskScore,
         riskReasonCodes: riskResult.reasonCodes,
         riskCeiling: task.riskCeiling,
       };
@@ -368,7 +365,7 @@ export class AuthorizationService {
     }
 
     await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_ALLOWED, {
-      riskScore: riskResult.finalRiskScore,
+      riskScore: riskResult.riskScore,
       policyVersionId: policyResult.policyVersionId ?? null,
       matchedRule: policyResult.matchedRule ?? null,
       openFgaResult: { exactAllowed, wildcardAllowed },

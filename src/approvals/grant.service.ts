@@ -493,7 +493,7 @@ export class GrantService {
         resource: approvalRequest.resource,
         parameterHash,
         policyVersionId: policyResult.policyVersionId ?? null,
-        riskScore: riskResult.finalRiskScore,
+        riskScore: riskResult.riskScore,
         issuedAt,
         expiresAt,
       },

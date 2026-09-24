@@ -4,7 +4,6 @@ import { TaskGrantSyncService } from '../authorization/task-grant-sync.service';
 import type { AuditService } from '../audit/audit.service';
 import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import { ToolRegistryService } from '../tools/tool-registry.service';
-import type { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
 import { RiskEngine } from './risk-engine.service';
 
 function makeTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
@@ -137,16 +136,6 @@ function fakeTenantClient(options: {
 }
 
 /** A fake `AiAdvisoryClient` returning a fixed (or `null`) advisory — never makes a real gRPC call. */
-function fakeAiAdvisoryClient(
-  analyzeRiskResult: Awaited<
-    ReturnType<AiAdvisoryClient['analyzeRisk']>
-  > = null,
-): AiAdvisoryClient {
-  return {
-    analyzeRisk: () => Promise.resolve(analyzeRiskResult),
-  } as unknown as AiAdvisoryClient;
-}
-
 describe('RiskEngine', () => {
   const tasksService = new TasksService(
     {} as TaskGrantSyncService,
@@ -155,10 +144,9 @@ describe('RiskEngine', () => {
     } as unknown as AuditService,
   );
   const toolRegistry = new ToolRegistryService();
-  const noAiAdvisory = fakeAiAdvisoryClient(null);
 
   it('scores a root task with an innocuous action at the baseline', async () => {
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const task = makeTask();
     const result = await engine.score(
       fakeTenantClient({ tasksById: { [task.id]: task } }),
@@ -171,9 +159,7 @@ describe('RiskEngine', () => {
         tenantId: 'tenant-1',
       },
     );
-    expect(result.deterministicRiskScore).toBe(10);
-    expect(result.finalRiskScore).toBe(10);
-    expect(result.aiAdvisoryScore).toBeNull();
+    expect(result.riskScore).toBe(10);
     expect(result.reasonCodes).toEqual(['baseline_risk:10']);
   });
 
@@ -185,7 +171,7 @@ describe('RiskEngine', () => {
       tasksById: { root, child, grandchild },
     });
 
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const result = await engine.score(client, {
       toolId: 'fs',
       actionId: 'read',
@@ -195,13 +181,13 @@ describe('RiskEngine', () => {
       tenantId: 'tenant-1',
     });
     // baseline 10 + depth(2 ancestors * 5) = 20
-    expect(result.deterministicRiskScore).toBe(20);
+    expect(result.riskScore).toBe(20);
     expect(result.reasonCodes).toContain('delegation_depth:2:10');
   });
 
   it('a {toolId, actionId} pair with no registered ToolAction contributes nothing beyond the baseline', async () => {
     const task = makeTask();
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const result = await engine.score(
       fakeTenantClient({ tasksById: { [task.id]: task } }),
       {
@@ -213,13 +199,13 @@ describe('RiskEngine', () => {
         tenantId: 'tenant-1',
       },
     );
-    expect(result.deterministicRiskScore).toBe(10);
+    expect(result.riskScore).toBe(10);
     expect(result.reasonCodes).toEqual(['baseline_risk:10']);
   });
 
   it('adds a registered ToolAction.riskBaseScore', async () => {
     const task = makeTask();
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const client = fakeTenantClient({
       tasksById: { [task.id]: task },
       tools: [{ id: 'tool-1', name: 'edr' }],
@@ -236,13 +222,13 @@ describe('RiskEngine', () => {
       tenantId: 'tenant-1',
     });
     // baseline 10 + riskBaseScore 30 = 40
-    expect(result.deterministicRiskScore).toBe(40);
+    expect(result.riskScore).toBe(40);
     expect(result.reasonCodes).toContain('tool_action_risk_base:30');
   });
 
   it('adds mutating and destructive contributions independently, on top of riskBaseScore', async () => {
     const task = makeTask();
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const client = fakeTenantClient({
       tasksById: { [task.id]: task },
       tools: [{ id: 'tool-1', name: 'edr' }],
@@ -265,7 +251,7 @@ describe('RiskEngine', () => {
       tenantId: 'tenant-1',
     });
     // baseline 10 + riskBaseScore 20 + mutating 15 + destructive 25 = 70
-    expect(result.deterministicRiskScore).toBe(70);
+    expect(result.riskScore).toBe(70);
     expect(result.reasonCodes).toContain('tool_action_risk_base:20');
     expect(result.reasonCodes).toContain('tool_action_mutating:15');
     expect(result.reasonCodes).toContain('tool_action_destructive:25');
@@ -273,7 +259,7 @@ describe('RiskEngine', () => {
 
   it('adds the matched policy rule riskWeight', async () => {
     const task = makeTask();
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const result = await engine.score(
       fakeTenantClient({ tasksById: { [task.id]: task } }),
       {
@@ -287,12 +273,12 @@ describe('RiskEngine', () => {
       },
     );
     // baseline 10 + riskWeight 40 = 50
-    expect(result.deterministicRiskScore).toBe(50);
+    expect(result.riskScore).toBe(50);
   });
 
   it('clamps up to riskFloor when the additive sum is lower', async () => {
     const task = makeTask();
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const result = await engine.score(
       fakeTenantClient({ tasksById: { [task.id]: task } }),
       {
@@ -305,14 +291,14 @@ describe('RiskEngine', () => {
         policyMatch: { riskFloor: 90 },
       },
     );
-    expect(result.deterministicRiskScore).toBe(90);
+    expect(result.riskScore).toBe(90);
     expect(result.reasonCodes).toContain('policy_risk_floor:90');
   });
 
   it('never exceeds 100', async () => {
     const root = makeTask({ id: 'root' });
     const deep = makeTask({ id: 'deep', parentTaskId: 'root' });
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const result = await engine.score(
       fakeTenantClient({ tasksById: { root, deep } }),
       {
@@ -325,12 +311,12 @@ describe('RiskEngine', () => {
         policyMatch: { riskWeight: 100 },
       },
     );
-    expect(result.deterministicRiskScore).toBe(100);
+    expect(result.riskScore).toBe(100);
   });
 
   it('an active AgentRiskFlag applies a fixed bump to deterministicRiskScore, via a plain DB lookup (no AI call)', async () => {
     const task = makeTask();
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const client = fakeTenantClient({
       tasksById: { [task.id]: task },
       agentRiskFlags: [
@@ -350,7 +336,7 @@ describe('RiskEngine', () => {
       tenantId: 'tenant-1',
     });
     // baseline 10 + agent risk flag bump 20 = 30
-    expect(result.deterministicRiskScore).toBe(30);
+    expect(result.riskScore).toBe(30);
     expect(
       result.reasonCodes.some((c) =>
         c.startsWith('agent_risk_flag:prompt_injection_detected'),
@@ -360,7 +346,7 @@ describe('RiskEngine', () => {
 
   it('an EXPIRED AgentRiskFlag contributes nothing', async () => {
     const task = makeTask();
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const client = fakeTenantClient({
       tasksById: { [task.id]: task },
       agentRiskFlags: [
@@ -379,12 +365,12 @@ describe('RiskEngine', () => {
       agentId: 'agent-1',
       tenantId: 'tenant-1',
     });
-    expect(result.deterministicRiskScore).toBe(10);
+    expect(result.riskScore).toBe(10);
   });
 
   it('a flag on a DIFFERENT agent contributes nothing', async () => {
     const task = makeTask();
-    const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const client = fakeTenantClient({
       tasksById: { [task.id]: task },
       agentRiskFlags: [
@@ -403,80 +389,58 @@ describe('RiskEngine', () => {
       agentId: 'agent-1',
       tenantId: 'tenant-1',
     });
-    expect(result.deterministicRiskScore).toBe(10);
+    expect(result.riskScore).toBe(10);
   });
 
-  it('AI advisory reports high risk for a request the deterministic layer alone would score low -> finalRiskScore is pushed up, deterministicRiskScore is untouched, AI reason codes are clearly attributed', async () => {
+  /**
+   * Phase 1 (ADR-004, CLAUDE.md §12). Three tests were removed here. Two
+   * asserted `finalRiskScore = max(deterministic, advisory ?? 0)` — the
+   * mechanism that let manar-ai raise a request from ALLOW to
+   * APPROVAL_REQUIRED, and therefore the mechanism that put a language model
+   * inside the authorization decision. A third asserted the resolved data
+   * classification was forwarded to `AiAdvisoryClient.analyzeRisk`; that
+   * forwarding moves to `ApprovalWorkflow`'s advisory activity, off the
+   * decision path, and is tested there.
+   *
+   * What replaces them is the inverse assertion: the score this engine
+   * produces is deterministic, full stop. The structural guarantee — that the
+   * advisory client is not even reachable from the PDP's import graph — lives
+   * in `src/authorization/decision-path-dependencies.spec.ts`.
+   */
+  it('produces a purely deterministic score, with no advisory contribution and no AI reason codes', async () => {
+    const engine = new RiskEngine(tasksService, toolRegistry);
     const task = makeTask();
-    const aiAdvisory = fakeAiAdvisoryClient({
-      score: 85,
-      confidence: 0.9,
-      signals: ['unusual_destination'],
-      explanation: 'looks anomalous',
-      recommendedAction: 'RECOMMENDED_ACTION_REVIEW',
-    });
-    const engine = new RiskEngine(tasksService, toolRegistry, aiAdvisory);
-    const result = await engine.score(
-      fakeTenantClient({ tasksById: { [task.id]: task } }),
-      {
-        toolId: 'fs',
-        actionId: 'read',
-        resource: 'anything',
-        task,
-        agentId: 'agent-1',
-        tenantId: 'tenant-1',
-      },
-    );
-    expect(result.deterministicRiskScore).toBe(10);
-    expect(result.aiAdvisoryScore).toBe(85);
-    expect(result.finalRiskScore).toBe(85);
-    expect(result.reasonCodes).toContain('ai_advisory_score:85');
-    expect(result.reasonCodes).toContain(
-      'ai_advisory_signal:unusual_destination',
-    );
-  });
-
-  it('AI advisory reports LOW risk for a request the deterministic layer scores HIGH -> finalRiskScore stays the deterministic value (AI cannot lower risk below the deterministic floor)', async () => {
-    const task = makeTask();
-    const aiAdvisory = fakeAiAdvisoryClient({
-      score: 5,
-      confidence: 0.9,
-      signals: [],
-      explanation: 'looks fine to the model',
-      recommendedAction: 'RECOMMENDED_ACTION_ALLOW',
-    });
-    const engine = new RiskEngine(tasksService, toolRegistry, aiAdvisory);
-    const client = fakeTenantClient({
-      tasksById: { [task.id]: task },
-      tools: [{ id: 'tool-1', name: 'edr' }],
-      toolActions: [
-        {
-          toolId: 'tool-1',
-          name: 'isolate_host',
-          riskBaseScore: 20,
-          mutating: true,
-          destructive: true,
-        },
-      ],
-    });
-    const result = await engine.score(client, {
-      toolId: 'edr',
-      actionId: 'isolate_host',
-      resource: 'host-1',
+    const input = {
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
       task,
       agentId: 'agent-1',
       tenantId: 'tenant-1',
-    });
-    // baseline 10 + riskBaseScore 20 + mutating 15 + destructive 25 = 70
-    expect(result.deterministicRiskScore).toBe(70);
-    expect(result.aiAdvisoryScore).toBe(5);
-    expect(result.finalRiskScore).toBe(70);
+    };
+
+    const first = await engine.score(
+      fakeTenantClient({ tasksById: { [task.id]: task } }),
+      input,
+    );
+    const second = await engine.score(
+      fakeTenantClient({ tasksById: { [task.id]: task } }),
+      input,
+    );
+
+    // Determinism: identical input, identical output. An advisory call on this
+    // path would make that flaky by construction.
+    expect(second).toEqual(first);
+    expect(
+      first.reasonCodes.some((code) => code.startsWith('ai_advisory')),
+    ).toBe(false);
+    expect(Object.keys(first).sort()).toEqual(['reasonCodes', 'riskScore']);
   });
 
   describe('data classification contributor (Phase 15a, Section 53)', () => {
     it('CONFIDENTIAL adds 10 points, recorded in reasonCodes', async () => {
       const task = makeTask();
-      const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+      const engine = new RiskEngine(tasksService, toolRegistry);
       const client = fakeTenantClient({
         tasksById: { [task.id]: task },
         tools: [{ id: 'tool-1', name: 'fs' }],
@@ -498,7 +462,7 @@ describe('RiskEngine', () => {
         tenantId: 'tenant-1',
       });
       // baseline 10 + riskBaseScore 0 + classification(CONFIDENTIAL) 10 = 20
-      expect(result.deterministicRiskScore).toBe(20);
+      expect(result.riskScore).toBe(20);
       expect(result.reasonCodes).toContain(
         'tool_action_classification:CONFIDENTIAL:10',
       );
@@ -506,7 +470,7 @@ describe('RiskEngine', () => {
 
     it('RESTRICTED adds 25 points, recorded in reasonCodes', async () => {
       const task = makeTask();
-      const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+      const engine = new RiskEngine(tasksService, toolRegistry);
       const client = fakeTenantClient({
         tasksById: { [task.id]: task },
         tools: [{ id: 'tool-1', name: 'fs' }],
@@ -528,7 +492,7 @@ describe('RiskEngine', () => {
         tenantId: 'tenant-1',
       });
       // baseline 10 + riskBaseScore 0 + classification(RESTRICTED) 25 = 35
-      expect(result.deterministicRiskScore).toBe(35);
+      expect(result.riskScore).toBe(35);
       expect(result.reasonCodes).toContain(
         'tool_action_classification:RESTRICTED:25',
       );
@@ -536,7 +500,7 @@ describe('RiskEngine', () => {
 
     it('PUBLIC/INTERNAL contribute 0 points but are still recorded (registered ToolAction is never silently omitted)', async () => {
       const task = makeTask();
-      const engine = new RiskEngine(tasksService, toolRegistry, noAiAdvisory);
+      const engine = new RiskEngine(tasksService, toolRegistry);
       const client = fakeTenantClient({
         tasksById: { [task.id]: task },
         tools: [{ id: 'tool-1', name: 'fs' }],
@@ -557,43 +521,10 @@ describe('RiskEngine', () => {
         agentId: 'agent-1',
         tenantId: 'tenant-1',
       });
-      expect(result.deterministicRiskScore).toBe(10);
+      expect(result.riskScore).toBe(10);
       expect(result.reasonCodes).toContain(
         'tool_action_classification:PUBLIC:0',
       );
-    });
-
-    it('passes the resolved classification through to AiAdvisoryClient.analyzeRisk', async () => {
-      const task = makeTask();
-      let seenClassification: string | undefined;
-      const aiAdvisory = {
-        analyzeRisk: (input: { classification?: string }) => {
-          seenClassification = input.classification;
-          return Promise.resolve(null);
-        },
-      } as unknown as AiAdvisoryClient;
-      const engine = new RiskEngine(tasksService, toolRegistry, aiAdvisory);
-      const client = fakeTenantClient({
-        tasksById: { [task.id]: task },
-        tools: [{ id: 'tool-1', name: 'fs' }],
-        toolActions: [
-          {
-            toolId: 'tool-1',
-            name: 'read',
-            riskBaseScore: 0,
-            classification: 'RESTRICTED',
-          },
-        ],
-      });
-      await engine.score(client, {
-        toolId: 'fs',
-        actionId: 'read',
-        resource: 'anything',
-        task,
-        agentId: 'agent-1',
-        tenantId: 'tenant-1',
-      });
-      expect(seenClassification).toBe('RESTRICTED');
     });
   });
 });

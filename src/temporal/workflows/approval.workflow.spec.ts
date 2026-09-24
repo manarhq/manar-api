@@ -53,6 +53,7 @@ describe('ApprovalWorkflow (time-skipping TestWorkflowEnvironment)', () => {
         .fn()
         .mockResolvedValue({ status: 'APPROVED', grantId: 'default-grant' }),
       expireApprovalRequest: vi.fn().mockResolvedValue(undefined),
+      attachRiskAdvisory: vi.fn().mockResolvedValue(undefined),
       ...overrides,
     };
   }
@@ -228,6 +229,86 @@ describe('ApprovalWorkflow (time-skipping TestWorkflowEnvironment)', () => {
       approvalRequestId: 'approval-4',
     });
     expect(finalizeApprovalDecision).not.toHaveBeenCalled();
+  }, 30_000);
+
+  /**
+   * Phase 1 (ADR-004). The advisory was removed from the synchronous decision
+   * path and relocated here. These two tests pin the property that makes that
+   * relocation safe: the advisory annotates an approval, it never gates one.
+   */
+  it('attaches the risk advisory for the approver, before waiting on a human', async () => {
+    const attachRiskAdvisory = vi.fn().mockResolvedValue(undefined);
+    const activities = mockActivities({ attachRiskAdvisory });
+    const worker = await createWorker(activities);
+
+    const result = await worker.runUntil(async () => {
+      const handle = await testEnv.client.workflow.start(ApprovalWorkflow, {
+        workflowId: `wf-${randomUUID()}`,
+        taskQueue: 'approval-workflow-test',
+        args: [
+          {
+            tenantId: 'tenant-1',
+            approvalRequestId: 'approval-advisory-1',
+            expiresAtEpochMs: Date.now() + 10 * 60 * 1000,
+          },
+        ],
+      });
+      await handle.signal(decideSignal, {
+        decision: 'APPROVE',
+        approverId: 'approver-1',
+      });
+      return handle.result();
+    });
+
+    expect(result).toEqual({ outcome: 'APPROVED', grantId: 'default-grant' });
+    expect(attachRiskAdvisory).toHaveBeenCalledExactlyOnceWith({
+      tenantId: 'tenant-1',
+      approvalRequestId: 'approval-advisory-1',
+    });
+  }, 30_000);
+
+  it('a failing advisory neither fails nor stalls the approval — the human still decides', async () => {
+    // manar-ai down, circuit open, timeout: all surface here as a throw. The
+    // approval was already decided deterministically and durably before this
+    // workflow started, so an annotation that cannot be fetched must not be
+    // able to take it down. CLAUDE.md §6: "manar-ai unavailable -> continue
+    // deterministic path; advisory_unavailable = true on the record".
+    const attachRiskAdvisory = vi
+      .fn()
+      .mockRejectedValue(new Error('manar-ai unreachable'));
+    const finalizeApprovalDecision = vi
+      .fn()
+      .mockResolvedValue({ status: 'APPROVED', grantId: 'grant-despite-ai' });
+    const activities = mockActivities({
+      attachRiskAdvisory,
+      finalizeApprovalDecision,
+    });
+    const worker = await createWorker(activities);
+
+    const result = await worker.runUntil(async () => {
+      const handle = await testEnv.client.workflow.start(ApprovalWorkflow, {
+        workflowId: `wf-${randomUUID()}`,
+        taskQueue: 'approval-workflow-test',
+        args: [
+          {
+            tenantId: 'tenant-1',
+            approvalRequestId: 'approval-advisory-down',
+            expiresAtEpochMs: Date.now() + 10 * 60 * 1000,
+          },
+        ],
+      });
+      await handle.signal(decideSignal, {
+        decision: 'APPROVE',
+        approverId: 'approver-1',
+      });
+      return handle.result();
+    });
+
+    expect(result).toEqual({
+      outcome: 'APPROVED',
+      grantId: 'grant-despite-ai',
+    });
+    expect(finalizeApprovalDecision).toHaveBeenCalledOnce();
   }, 30_000);
 
   it('a second decide signal after the first is ignored (first decision wins)', async () => {
