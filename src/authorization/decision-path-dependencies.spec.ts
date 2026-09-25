@@ -120,4 +120,34 @@ describe('ADR-004 — synchronous decision path dependencies', () => {
     );
     expect(offenders.map((f) => f.replace(`${SRC}/`, ''))).toEqual([]);
   });
+
+  /**
+   * ADR-0002: the LLM proxy and its upstream client live in `agent-runtime/`
+   * and must never become reachable from the PDP. Its config schema is the
+   * one permitted module, for the same reason as `ai-advisory.config.ts`.
+   */
+  const LLM_CONFIG_ONLY = resolve(SRC, 'agent-runtime/llm-proxy.config.ts');
+
+  it('cannot reach the LLM proxy or its upstream client', () => {
+    const offenders = [...graph.keys()]
+      .filter(
+        (file) =>
+          file.startsWith(resolve(SRC, 'agent-runtime')) &&
+          file !== LLM_CONFIG_ONLY,
+      )
+      .map((f) => f.replace(`${SRC}/`, ''));
+    expect(offenders).toEqual([]);
+  });
+
+  it('the one permitted agent-runtime module is a schema that imports nothing but zod', () => {
+    const source = readFileSync(LLM_CONFIG_ONLY, 'utf8');
+    expect([...source.matchAll(IMPORT_RE)].map((m) => m[1])).toEqual(['zod']);
+  });
+
+  it('no module on the decision path calls fetch (the LLM upstream is HTTP)', () => {
+    const offenders = [...graph.keys()]
+      .filter((file) => /\bfetch\(/.test(readFileSync(file, 'utf8')))
+      .map((f) => f.replace(`${SRC}/`, ''));
+    expect(offenders).toEqual([]);
+  });
 });

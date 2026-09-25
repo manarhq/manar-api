@@ -45,6 +45,9 @@ export const AUDIT_EVENT_TYPES = {
   /** `AiAdvisoryClient.analyzePromptInjection` detected a prompt-injection attempt in a tool's returned result. */
   PROMPT_INJECTION_DETECTED: 'prompt_injection.detected',
 
+  /** One call through the LLM proxy (ADR-0002): metadata only, never prompt or completion content. */
+  LLM_REQUEST: 'llm.request',
+
   // Kill-switch phase (Section 32) — see docs/kill-switches.md.
   /** A kill switch (any of the five scopes) was activated — see `src/kill-switches/`. */
   KILL_SWITCH_ACTIVATED: 'kill_switch.activated',
