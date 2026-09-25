@@ -145,6 +145,7 @@ function makeService(options: {
     mcpAdapter,
     auditService,
     aiAdvisoryClient,
+    microsoftAdapter,
     {
       get: () => options.injectionBlockThreshold ?? 0.8,
     } as unknown as ConfigService<AppConfig, true>,
