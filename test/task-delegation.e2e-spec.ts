@@ -403,6 +403,46 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     expect(writeDecision.decision).toBe('DENY');
   }, 30_000);
 
+  it('5b. delegation cannot raise riskCeiling or maxExecutions above the parent; omitted values are clamped', async () => {
+    const parentAgent = await createEnrolledAgent('deleg-limits-parent');
+    const parentTask = await createTask({
+      assignedAgentId: parentAgent.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+      maxExecutions: 2,
+    });
+    const base = {
+      name: 'Limits child',
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    };
+
+    // The parent's riskCeiling is the default 20.
+    for (const excess of [
+      { riskCeiling: 21 },
+      { maxExecutions: 3 },
+      { maxExecutions: null },
+    ]) {
+      await expect(
+        parentAgent.manar.delegateTask(parentTask.id, {
+          ...base,
+          ...excess,
+          childAgentSlug: uniqueSlug('deleg-limits-reject'),
+        }),
+      ).rejects.toThrow(/exceeds the parent task's/);
+    }
+
+    const delegation = await parentAgent.manar.delegateTask(parentTask.id, {
+      ...base,
+      childAgentSlug: uniqueSlug('deleg-limits-child'),
+    });
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    const childTask = await tenantClient.task.findUniqueOrThrow({
+      where: { id: delegation.childTask.id },
+    });
+    expect(childTask).toMatchObject({ riskCeiling: 20, maxExecutions: 2 });
+  }, 30_000);
+
   it('6. privilege amplification: direct out-of-grant authorize, and a second delegation trying to broaden scope, both DENY/rejected', async () => {
     const parentAgent = await createEnrolledAgent('amplify-parent');
     const parentTask = await createTask({

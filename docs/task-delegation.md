@@ -90,6 +90,11 @@ mTLS-guarded (`src/delegation/`), the caller must be `:id`'s
    asked for later (or omitted it) — pure hygiene, not a security boundary
    in itself, since `AuthorizationService`'s ancestor walk would deny a
    too-long-lived child regardless once the parent expires.
+   `riskCeiling` and `maxExecutions` are limits, not hygiene: a request
+   above the parent's `riskCeiling` or above its remaining executions
+   (`maxExecutions - executionCount`; `null` means unlimited) is rejected
+   with 403 before any write. Omitted, they default to
+   `min(parent riskCeiling, 20)` and the parent's remaining executions.
 6. Returns `{ childTask, childAgent, enrollmentToken }`.
 
 ### Root requester: who does a delegated task/agent belong to?

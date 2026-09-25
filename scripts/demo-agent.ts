@@ -280,21 +280,30 @@ async function main(): Promise<void> {
     searchResult.success,
     `expected SIEM search-events to succeed, got ${JSON.stringify(searchResult)}`,
   );
-  const events = (
-    searchResult.data as { events: Array<{ description: string }> }
-  ).events;
-  console.log(
-    `Retrieved ${events.length} real SIEM events for ${DEMO_HOST_ID}.`,
-  );
-  const injectedEvent = events.find((e) =>
-    e.description.includes('Ignore your previous instructions'),
-  );
-  assert(
-    injectedEvent !== undefined,
-    'expected one seeded SIEM event to contain the prompt-injection payload',
-  );
-  console.log('\n  >>> Suspicious event content encountered:');
-  console.log(`  >>> "${injectedEvent.description}"\n`);
+  // With a confident prompt-injection advisory, Manar withholds the result
+  // (Gate 0 R5); with the advisory unavailable it passes through as before.
+  const searchData = searchResult.data as
+    | { withheld: true; reason: string }
+    | { events: Array<{ description: string }> };
+  if ('withheld' in searchData) {
+    console.log(
+      `\n  >>> Manar withheld the SIEM result from the agent (${searchData.reason}).\n`,
+    );
+  } else {
+    const events = searchData.events;
+    console.log(
+      `Retrieved ${events.length} real SIEM events for ${DEMO_HOST_ID}.`,
+    );
+    const injectedEvent = events.find((e) =>
+      e.description.includes('Ignore your previous instructions'),
+    );
+    assert(
+      injectedEvent !== undefined,
+      'expected one seeded SIEM event to contain the prompt-injection payload',
+    );
+    console.log('\n  >>> Suspicious event content encountered:');
+    console.log(`  >>> "${injectedEvent.description}"\n`);
+  }
 
   section(`2b. SIEM fetch-incident on ${DEMO_INCIDENT_ID} -> ALLOW`);
   const incidentResult = await manar.invokeTool({

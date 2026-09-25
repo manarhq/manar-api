@@ -17,6 +17,7 @@ import { TaskNotFoundError } from '../tasks/tasks.errors';
 import { DelegationService } from './delegation.service';
 import {
   DelegationExceedsParentAuthorityError,
+  DelegationExceedsParentLimitsError,
   DelegationNotAssignedAgentError,
   DelegationTaskNotLiveError,
 } from './delegation.errors';
@@ -86,7 +87,10 @@ export class DelegationController {
       if (error instanceof DelegationTaskNotLiveError) {
         throw new ConflictException(error.message);
       }
-      if (error instanceof DelegationExceedsParentAuthorityError) {
+      if (
+        error instanceof DelegationExceedsParentAuthorityError ||
+        error instanceof DelegationExceedsParentLimitsError
+      ) {
         throw new ForbiddenException(error.message);
       }
       if (isUniqueConstraintViolation(error)) {
