@@ -11,6 +11,8 @@ import {
 import { buildAgentIdentifier } from './agent-identifier';
 import {
   AgentNotFoundError,
+  AgentTerminatedError,
+  EnrollmentFailureReason,
   EnrollmentTokenInvalidError,
 } from './agents.errors';
 import {
@@ -21,6 +23,13 @@ import {
   generateEnrollmentToken,
   hashEnrollmentToken,
 } from './enrollment-token.util';
+
+/** Terminal agent states: never issued a token, never re-enrolled (Gate 0 R4). `PENDING_ENROLLMENT` and `ACTIVE` stay enrollable. */
+const TERMINAL_AGENT_STATUSES: ('REVOKED' | 'KILLED')[] = ['REVOKED', 'KILLED'];
+
+function isTerminal(status: string): boolean {
+  return (TERMINAL_AGENT_STATUSES as string[]).includes(status);
+}
 
 export interface CreateAgentInput {
   slug: string;
@@ -123,6 +132,9 @@ export class AgentsService {
       where: { id: agentId },
     });
     if (!agent) throw new AgentNotFoundError(agentId);
+    if (isTerminal(agent.status)) {
+      throw new AgentTerminatedError(agentId, agent.status);
+    }
 
     const rawToken = generateEnrollmentToken({
       tenantSlug,
@@ -190,6 +202,17 @@ export class AgentsService {
       );
       throw new EnrollmentTokenInvalidError('expired');
     }
+    // A token issued before the agent was revoked or killed must not bring
+    // it back: checked before OpenBao signs anything.
+    if (isTerminal(tokenRow.agent.status)) {
+      await this.recordEnrollmentFailure(
+        tenantClient,
+        tenantId,
+        'agent_terminated',
+        tokenRow.agentId,
+      );
+      throw new EnrollmentTokenInvalidError('agent_terminated');
+    }
 
     const claim = await tenantClient.agentEnrollmentToken.updateMany({
       where: { id: tokenRow.id, usedAt: null },
@@ -212,8 +235,14 @@ export class AgentsService {
       csrPem,
     );
 
-    await tenantClient.agent.update({
-      where: { id: tokenRow.agentId },
+    // Conditional, so a revocation that lands while the certificate is
+    // being signed still wins: the agent stays REVOKED and
+    // AgentMtlsGuard refuses the fresh certificate.
+    await tenantClient.agent.updateMany({
+      where: {
+        id: tokenRow.agentId,
+        status: { notIn: TERMINAL_AGENT_STATUSES },
+      },
       data: { status: 'ACTIVE' },
     });
 
@@ -270,7 +299,7 @@ export class AgentsService {
   private async recordEnrollmentFailure(
     tenantClient: TenantPrismaClient,
     tenantId: string,
-    reason: 'not_found' | 'used' | 'expired',
+    reason: EnrollmentFailureReason,
     agentId?: string,
   ): Promise<void> {
     await this.auditService.recordSafely(tenantClient, tenantId, {

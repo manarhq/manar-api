@@ -205,8 +205,14 @@ leak risk in analyzing the unredacted value). On `detected === true`
 2. Inserts an `AgentRiskFlag` row for the requesting agent, `reason:
 "prompt_injection_detected:<toolId>/<actionId>"`,
    `expiresAt: now + 15 minutes` (`PROMPT_INJECTION_RISK_FLAG_TTL_MS`).
+3. When `confidence >= PROMPT_INJECTION_BLOCK_THRESHOLD` (default 0.8),
+   withholds the result (Gate 0 R5): the agent gets `{ success: true,
+data: { withheld: true, reason: 'prompt_injection_suspected' } }` and
+   the audit event carries `withheld: true`. Below the threshold the result
+   is returned unchanged (`withheld: false`). An unavailable advisory
+   (`null`) never withholds.
 
-The injected content itself is never trusted, echoed, or executed by
+The injected content itself is never trusted or executed by
 anything in this codebase as a result of this mechanism — the actual
 security boundary stays the deterministic task/grant scope
 `AuthorizationService` already enforces (Section 72). This is a secondary,

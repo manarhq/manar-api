@@ -184,6 +184,12 @@ merely at next renewal — verified by an actual test
 provision, use successfully once via `/agent/v1/whoami`, revoke, retry,
 must fail), per Section 71's mandatory invariant.
 
+`REVOKED` and `KILLED` are terminal. `POST /agents/:id/enrollment-tokens`
+returns 409 for such an agent, and `POST /agents/enroll` refuses a token
+issued before the revocation (uniform 401, audited as
+`agent.enrollment_failed` with reason `agent_terminated`) before OpenBao
+signs anything.
+
 ## TypeScript SDK (`packages/sdk-node`)
 
 A new pnpm workspace package (`pnpm-workspace.yaml`'s `packages: ['packages/*']`),

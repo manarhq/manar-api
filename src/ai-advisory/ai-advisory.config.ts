@@ -152,6 +152,19 @@ export const AiAdvisoryConfigSchema = z.object({
   AI_ADVISORY_PROVIDER: z
     .enum(['anthropic', 'ollama', 'vllm'])
     .default('ollama'),
+
+  /**
+   * Gate 0 R5: a tool result the prompt-injection advisory flags with at
+   * least this confidence (0-1) is withheld from the agent
+   * (`CredentialBrokerService.applyPostCallAdvisories`). Below it the
+   * result is still returned and only the agent's risk flag is set. An
+   * unavailable advisory never withholds anything.
+   */
+  PROMPT_INJECTION_BLOCK_THRESHOLD: z.coerce
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.8),
 });
 
 /** The only provider this codebase currently treats as "external" (leaves this deployment's infrastructure) — see `AI_ADVISORY_PROVIDER`'s own doc comment. */
