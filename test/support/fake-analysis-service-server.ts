@@ -58,6 +58,8 @@ export class FakeAnalysisServiceServer {
     indicators: [],
     explanation: '',
   };
+  /** When set, only content containing this marker gets `promptInjectionResult`; anything else is reported clean. */
+  promptInjectionMarker: string | undefined;
   dlpResult: DlpAnalysisResult = { findings: [], overallSeverity: 0 };
   incidentSummaryResult: IncidentSummaryResult = {
     summary: '',
@@ -96,9 +98,19 @@ export class FakeAnalysisServiceServer {
         this.callCounts.analyzeRisk += 1;
         this.respond(callback, () => this.riskResult);
       },
-      analyzePromptInjection: (_call, callback) => {
+      analyzePromptInjection: (call, callback) => {
         this.callCounts.analyzePromptInjection += 1;
-        this.respond(callback, () => this.promptInjectionResult);
+        this.respond(callback, () =>
+          this.promptInjectionMarker === undefined ||
+          call.request.content.includes(this.promptInjectionMarker)
+            ? this.promptInjectionResult
+            : {
+                detected: false,
+                confidence: 0,
+                indicators: [],
+                explanation: '',
+              },
+        );
       },
       analyzeDlp: (_call, callback) => {
         this.callCounts.analyzeDlp += 1;
