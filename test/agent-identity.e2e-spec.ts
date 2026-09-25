@@ -457,6 +457,50 @@ describe('Agent identity & enrollment (e2e)', () => {
     await identityStore.clear();
   }, 30_000);
 
+  it('5b. a revoked agent cannot be re-enrolled, not even with a token issued before the revocation', async () => {
+    const { agentId, rawToken, slug } = await createAgentWithToken('reenrol');
+    const identifier = `agent://${tenant.slug}/${slug}`;
+    const identityStore = new FileIdentityStore(
+      `/tmp/manar-sdk-test-${randomUUID()}.identity`,
+      'test-passphrase-not-for-production',
+    );
+    const manar = new ManarAgent({ endpoint: humanEndpoint, identityStore });
+    await manar.enroll(rawToken);
+    await identityStore.clear();
+
+    const staleToken = (
+      (
+        await request(humanApp.getHttpServer() as App)
+          .post(`/agents/${agentId}/enrollment-tokens`)
+          .set('Authorization', `Bearer ${adminToken}`)
+          .expect(201)
+      ).body as { token: string }
+    ).token;
+
+    await request(humanApp.getHttpServer() as App)
+      .post(`/agents/${agentId}/revoke`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ reason: 'e2e re-enrolment test' })
+      .expect(201);
+
+    const { csrPem } = await generateAgentCsr(identifier);
+    await request(humanApp.getHttpServer() as App)
+      .post('/agents/enroll')
+      .send({ token: staleToken, csr: csrPem })
+      .expect(401);
+
+    await request(humanApp.getHttpServer() as App)
+      .post(`/agents/${agentId}/enrollment-tokens`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(409);
+
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    const agent = await tenantClient.agent.findUniqueOrThrow({
+      where: { id: agentId },
+    });
+    expect(agent.status).toBe('REVOKED');
+  }, 30_000);
+
   it('6. an mTLS request with a certificate from a foreign (non-Manar) CA is rejected', async () => {
     const identifier = `agent://${tenant.slug}/foreign-ca-agent`;
     const foreignIdentity =
