@@ -56,6 +56,7 @@ bundle through `POST /evidence/verify`, never with the signing secret.
 | Rate limiting      | `src/rate-limit/`                                                                                                                             | Redis + Lua throttler, per tenant and per agent                                                                                     |
 | Idempotency        | `src/idempotency/`                                                                                                                            | Redis `SET NX` interceptor on selected routes                                                                                       |
 | Audit + evidence   | `src/audit/` (hash chain, Kafka `manar.audit-events`, OpenSearch `manar-audit-events`, OCSF), `src/evidence/`                                 | Linear SHA-256 chain; evidence export                                                                                               |
+| Agent runtime      | `src/agent-runtime/` (ADR-0002)                                                                                                               | LLM proxy, per-task tool manifest, governed MCP server on the mTLS listener; `ToolInvocationService` is shared with tools/invoke    |
 | AI advisory        | `src/ai-advisory/`, `packages/manar-ai-client`                                                                                                | gRPC to manar-ai; never on the decision path (`src/authorization/decision-path-dependencies.spec.ts`)                               |
 | Packages           | `packages/sdk-node` (TS agent SDK), `packages/demo-soc-tools` (fixture SIEM/EDR/IAM), `packages/manar-ai-client` (vendored proto client)      |                                                                                                                                     |
 | Deploy             | `deploy/docker-compose.yml`, `deploy/helm/{manar-api,manar-api-worker,demo-soc-tools}`, `deploy/openbao-init.mjs`                             |                                                                                                                                     |
@@ -94,7 +95,7 @@ Longer per-area docs are in `docs/*.md`. Treat them as leads; the code and tests
 ## ADRs and CI
 
 - ADRs: `docs/adr/ADR-NNNN-<slug>.md` from `ADR-0000-template.md`. Written: ADR-0001 (the
-  thesis), ADR-0003 (capability token format, deferred), ADR-0004 (Microsoft connectors and credentials),
-  ADR-0005 (Cedar, proposed and conditional). Reserved: ADR-0002 (LLM proxy, Phase 1). Workspace ADR-001…009 in `../docs/adr/` remain the cross-repo record.
+  thesis), ADR-0002 (LLM proxy, tool manifest, governed MCP server; its "Agent contract" section is the agent API), ADR-0003 (capability token format, deferred), ADR-0004 (Microsoft connectors and credentials),
+  ADR-0005 (Cedar, proposed and conditional). Workspace ADR-001…009 in `../docs/adr/` remain the cross-repo record.
 - CI: GitLab (`.gitlab-ci.yml`): lint, typecheck, unit (PostgreSQL + Redis), e2e (full services),
   build, images, gitleaks, semgrep, Trivy, SBOM, Helm render + kubeconform + kube-linter.
