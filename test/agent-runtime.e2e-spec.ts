@@ -47,6 +47,7 @@ import {
   MICROSOFT_FIXTURE_IDS,
   MICROSOFT_GRAPH_TOOL,
   microsoftPolicyContent,
+  socAgentTaskGrants,
 } from '../src/cli/commands/microsoft-fixture-seed';
 import { buildMicrosoftFixtureApp } from '../packages/demo-soc-tools/src/microsoft/fixture';
 import { FIXTURE_SECOND_USER_ID } from '../packages/demo-soc-tools/src/microsoft/seed-data';
@@ -570,6 +571,32 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
       expect(body.tools[2]?.resourceSelector).toEqual(
         [incidentId, userId].sort(),
       );
+    });
+
+    it('the demo:seed SOC agent task exposes its reads plus disable and isolate', async () => {
+      const seeded = await createTask(socAgentTaskGrants());
+      const res = await mtlsRequest(
+        agentA,
+        'GET',
+        `/agent/v1/tasks/${seeded.id}/tool-manifest`,
+      );
+      const tools = (
+        res.body as { tools: { name: string; mutating: boolean }[] }
+      ).tools;
+      expect(tools.map((t) => t.name)).toEqual([
+        'microsoft-defender__defender.machine.get',
+        'microsoft-defender__defender.machine.isolate',
+        'microsoft-graph__entra.user.disable',
+        'microsoft-graph__entra.user.get',
+        'microsoft-graph__entra.user.risk.get',
+        'microsoft-graph__entra.user.signins.list',
+        'microsoft-graph__security.alert.get',
+        'microsoft-graph__security.incident.get',
+      ]);
+      expect(tools.filter((t) => t.mutating).map((t) => t.name)).toEqual([
+        'microsoft-defender__defender.machine.isolate',
+        'microsoft-graph__entra.user.disable',
+      ]);
     });
 
     it('is refused for a task assigned to another agent and for an unknown task', async () => {

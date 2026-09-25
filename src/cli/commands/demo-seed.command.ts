@@ -18,6 +18,7 @@ import {
   MICROSOFT_FIXTURE_KV_PATH,
   MICROSOFT_GRAPH_TOOL,
   microsoftPolicyContent,
+  socAgentTaskGrants,
 } from './microsoft-fixture-seed';
 
 interface DemoSeedOptions {
@@ -62,10 +63,17 @@ const DEMO_USERS = [
   },
 ] as const;
 
+/** Enrolls itself; see DEMO_AGENTS. */
+const SOC_LLM_AGENT_SLUG = 'manar-soc-agent';
+
 const DEMO_AGENTS = [
   { slug: 'soc-response-agent', displayName: 'SOC Response Agent' },
   { slug: 'threat-hunting-agent', displayName: 'Threat Hunting Agent' },
   { slug: 'compromised-demo-agent', displayName: 'Compromised Demo Agent' },
+  // The Python LLM SOC agent (manar-agents). Created here but never enrolled
+  // by this command: the agent generates its own key in its pod and enrolls
+  // with a one-time token (docs/adr/ADR-0002-llm-proxy.md, "Agent contract").
+  { slug: SOC_LLM_AGENT_SLUG, displayName: 'Manar SOC Agent (LLM)' },
 ] as const;
 
 /** The exact `WS-042`/`INC-2026-0042` demo host/incident seeded by `packages/demo-soc-tools` (Phase 7a) — never renamed casually, see that package's own seed-data.ts doc comment. */
@@ -336,6 +344,8 @@ const DEMO_POLICIES: PolicyDef[] = [
 const DEMO_TASK_NAME = 'SOC Incident Response — INC-2026-0042';
 const MICROSOFT_TASK_NAME =
   'Microsoft Incident Response — incident 4201 (DEMO FIXTURE)';
+const SOC_LLM_TASK_NAME =
+  'Manar SOC agent — triage incident 4201 (DEMO FIXTURE)';
 
 /**
  * Where this command hands the demo tenant's credentials off to
@@ -363,6 +373,8 @@ interface DemoTenantCredentials {
   taskId: string;
   /** Present only when seeded with `--microsoft-fixture-url`. */
   microsoftTaskId?: string;
+  /** The Python LLM SOC agent's task; present only with `--microsoft-fixture-url`. */
+  socLlmAgent?: { agentId: string; agentSlug: string; taskId: string };
 }
 
 interface HttpJsonOptions {
@@ -492,6 +504,17 @@ export class DemoSeedCommand extends CommandRunner {
         )
       : undefined;
 
+    const socLlmAgent = agents.get(SOC_LLM_AGENT_SLUG);
+    const socLlmTask =
+      options.microsoftFixtureUrl && socLlmAgent
+        ? await this.ensureSocLlmTask(
+            tenant.id,
+            options.apiEndpoint,
+            ownerToken,
+            socLlmAgent.id,
+          )
+        : undefined;
+
     await this.writeCredentialsFile({
       tenantId: tenant.id,
       tenantSlug: TENANT_SLUG,
@@ -505,6 +528,15 @@ export class DemoSeedCommand extends CommandRunner {
       ),
       taskId: task.id,
       ...(microsoftTask ? { microsoftTaskId: microsoftTask.id } : {}),
+      ...(socLlmAgent && socLlmTask
+        ? {
+            socLlmAgent: {
+              agentId: socLlmAgent.id,
+              agentSlug: SOC_LLM_AGENT_SLUG,
+              taskId: socLlmTask.id,
+            },
+          }
+        : {}),
     });
 
     this.logger.log('');
@@ -523,6 +555,11 @@ export class DemoSeedCommand extends CommandRunner {
       );
     }
     this.logger.log(`Task: ${DEMO_TASK_NAME} (id=${task.id})`);
+    if (socLlmTask) {
+      this.logger.log(
+        `LLM SOC agent task: ${SOC_LLM_TASK_NAME} (id=${socLlmTask.id}); enroll the agent with a token from POST /agents/${socLlmAgent?.id}/enrollment-tokens`,
+      );
+    }
     this.logger.log(`Wrote credentials handoff file: ${CREDENTIALS_FILE_PATH}`);
     this.logger.log(
       'See docs/demo.md for how to run the demo agent script next.',
@@ -725,7 +762,10 @@ export class DemoSeedCommand extends CommandRunner {
     >,
   ): Promise<void> {
     for (const agent of agents.values()) {
-      if (agent.status !== 'PENDING_ENROLLMENT') {
+      if (
+        agent.status !== 'PENDING_ENROLLMENT' ||
+        agent.slug === SOC_LLM_AGENT_SLUG
+      ) {
         continue;
       }
       const tokenResponse = await this.httpJson<{ token: string }>(
@@ -986,6 +1026,41 @@ export class DemoSeedCommand extends CommandRunner {
     );
     this.logger.log(
       `Created task "${MICROSOFT_TASK_NAME}" (id=${created.id}) against the Microsoft DEMO FIXTURE`,
+    );
+    return created;
+  }
+
+  /** The Python LLM SOC agent's task against the fixture (ADR-0002). Idempotent by name. */
+  private async ensureSocLlmTask(
+    tenantId: string,
+    apiEndpoint: string,
+    ownerToken: string,
+    agentId: string,
+  ): Promise<{ id: string }> {
+    const tenantClient = await this.tenantDatabaseManager.getClient(tenantId);
+    const existing = await tenantClient.task.findFirst({
+      where: { name: SOC_LLM_TASK_NAME, status: 'ACTIVE' },
+    });
+    if (existing && existing.expiresAt > new Date()) return existing;
+    const created = await this.httpJson<{ id: string }>(apiEndpoint, '/tasks', {
+      method: 'POST',
+      token: ownerToken,
+      body: {
+        name: SOC_LLM_TASK_NAME,
+        description:
+          'DEMO FIXTURE: triage Defender XDR incident 4201 with the LLM SOC agent: read the ' +
+          'incident, alerts, user and device; disable the user and isolate the device only ' +
+          'with human approval.',
+        assignedAgentId: agentId,
+        ...socAgentTaskGrants(),
+        expiresAt: new Date(
+          Date.now() + 30 * 24 * 60 * 60 * 1000,
+        ).toISOString(),
+        riskCeiling: 50,
+      },
+    });
+    this.logger.log(
+      `Created task "${SOC_LLM_TASK_NAME}" (id=${created.id}) for the LLM SOC agent`,
     );
     return created;
   }

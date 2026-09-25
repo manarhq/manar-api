@@ -30,6 +30,48 @@ export const MICROSOFT_FIXTURE_IDS = {
 
 export const MICROSOFT_FIXTURE_KV_PATH = 'tools/microsoft-fixture';
 
+/** The fixture's two alerts on incident 4201 (mirrors the fixture's `seed-data.ts`). */
+export const MICROSOFT_FIXTURE_ALERT_IDS = [
+  'da-fixture-0001',
+  'da-fixture-0002',
+] as const;
+
+/**
+ * Grants for the LLM SOC agent's task (ADR-0002): read the incident, its
+ * alerts, the user (profile, sign-ins, risk) and the device; disable the user
+ * and isolate the device, both APPROVAL_REQUIRED under
+ * `microsoftPolicyContent()`.
+ *
+ * No list actions: grants are the cross-join of actions and selectors per
+ * tool, and one more selector (`all`) would push task creation past
+ * OpenFGA's 100-tuple write limit. The incident read returns its alerts.
+ */
+export function socAgentTaskGrants() {
+  const { userId, machineId, incidentId } = MICROSOFT_FIXTURE_IDS;
+  return {
+    allowedToolActions: [
+      ...[
+        'security.incident.get',
+        'security.alert.get',
+        'entra.user.get',
+        'entra.user.signins.list',
+        'entra.user.risk.get',
+        'entra.user.disable',
+      ].map((actionId) => ({ toolId: MICROSOFT_GRAPH_TOOL, actionId })),
+      ...['defender.machine.get', 'defender.machine.isolate'].map(
+        (actionId) => ({ toolId: MICROSOFT_DEFENDER_TOOL, actionId }),
+      ),
+    ],
+    allowedResourceSelectors: [
+      ...[incidentId, userId, ...MICROSOFT_FIXTURE_ALERT_IDS].map(
+        (pattern) => ({ toolId: MICROSOFT_GRAPH_TOOL, pattern }),
+      ),
+      { toolId: MICROSOFT_DEFENDER_TOOL, pattern: machineId },
+    ],
+    forbiddenActions: [],
+  };
+}
+
 export async function ensureMicrosoftFixtureTools(
   tenantClient: TenantPrismaClient,
   input: { fixtureBaseUrl: string; kvPath: string },
