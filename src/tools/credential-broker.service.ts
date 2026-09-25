@@ -214,6 +214,7 @@ export class CredentialBrokerService {
     private readonly mcpAdapter: McpToolAdapter,
     private readonly auditService: AuditService,
     private readonly aiAdvisoryClient: AiAdvisoryClient,
+    private readonly microsoftAdapter: MicrosoftToolAdapter,
     configService: ConfigService<AppConfig, true>,
   ) {
     this.injectionBlockThreshold = configService.get(
