@@ -17,6 +17,7 @@ import { AgentApprovalsModule } from '../approvals/agent-approvals.module';
 import { AuditModule } from '../audit/audit.module';
 import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { AgentRateLimitModule } from '../rate-limit/agent-rate-limit.module';
+import { AgentRuntimeModule } from '../agent-runtime/agent-runtime.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
@@ -70,6 +71,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     ToolInvokeModule,
     TemporalModule,
     AgentApprovalsModule,
+    AgentRuntimeModule,
   ],
   controllers: [AgentWhoamiController],
   providers: [{ provide: APP_INTERCEPTOR, useClass: LoggingInterceptor }],

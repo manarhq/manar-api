@@ -109,6 +109,12 @@ function fakeConfigService(
     IDEMPOTENCY_KEY_TTL_MS: 86_400_000,
     SSRF_ALLOWED_HOSTS: '127.0.0.1,localhost',
     SSRF_ALLOW_LOOPBACK: true,
+    LLM_PROVIDER: 'ollama',
+    LLM_OLLAMA_BASE_URL: 'http://localhost:11434/v1',
+    LLM_MODEL: 'qwen3.5:9b',
+    LLM_AZURE_OPENAI_API_VERSION: '2024-10-21',
+    LLM_TASK_TOKEN_BUDGET: 200_000,
+    LLM_UPSTREAM_TIMEOUT_MS: 180_000,
     ...overrides,
   };
   return {

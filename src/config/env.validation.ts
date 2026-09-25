@@ -17,6 +17,7 @@ import { WebhooksConfigSchema } from '../webhooks/webhooks.config';
 import { IdempotencyConfigSchema } from '../idempotency/idempotency.config';
 import { SsrfConfigSchema } from '../common/ssrf/ssrf.config';
 import { TenantsConfigSchema } from '../tenants/tenants.config';
+import { LlmProxyConfigSchema } from '../agent-runtime/llm-proxy.config';
 
 /**
  * Application-level environment schema.
@@ -58,7 +59,8 @@ export const AppConfigSchema = z
   .extend(WebhooksConfigSchema.shape)
   .extend(IdempotencyConfigSchema.shape)
   .extend(SsrfConfigSchema.shape)
-  .extend(TenantsConfigSchema.shape);
+  .extend(TenantsConfigSchema.shape)
+  .extend(LlmProxyConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

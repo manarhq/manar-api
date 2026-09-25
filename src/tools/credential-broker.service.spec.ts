@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ConfigService } from '@nestjs/config';
+import type { HttpException } from '@nestjs/common';
 import type { AppConfig } from '../config/env.validation';
 import { EnforcementDependencyUnavailableException } from '../common/fail-closed/fail-closed';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
@@ -7,8 +8,15 @@ import type { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type {
   AiAdvisoryClient,
+  DlpAdvisory,
   PromptInjectionAdvisory,
 } from '../ai-advisory/ai-advisory-client.service';
+import type { AgentContext } from '../agent-mtls/agent-context';
+import type { AgentTaskAccessService } from '../agent-runtime/agent-task-access.service';
+import type { LlmBudgetStore } from '../agent-runtime/llm-budget.store';
+import { LlmProxyService } from '../agent-runtime/llm-proxy.service';
+import type { LlmUpstreamClient } from '../agent-runtime/llm-upstream.client';
+import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import type { SecretProvider } from '../database/secret-provider';
 import type { HttpToolAdapter } from './http-tool.adapter';
 import type { McpToolAdapter } from './mcp-tool.adapter';
@@ -466,5 +474,391 @@ describe('CredentialBrokerService protocol dispatch', () => {
     expect(invokeHttp).not.toHaveBeenCalled();
     expect(invokeMicrosoft).toHaveBeenCalledTimes(1);
     expect(invokeMicrosoft.mock.calls[0]![4]).toBe('resolved-secret');
+  });
+});
+
+describe('CredentialBrokerService result DLP (redact fields, not results)', () => {
+  const CLEAN: DlpAdvisory = { findings: [], overallSeverity: 'SEVERITY_NONE' };
+  const finding = (type: string, source = 'pattern') => ({
+    type,
+    source,
+    redactedPreview: 'xxxx...xx (20 chars)',
+    confidence: 0.9,
+  });
+
+  /** Before-call DLP sees `{}` (the params) and gets CLEAN; the result scan gets `advisory`. */
+  async function invokeWith(
+    data: unknown,
+    advisory: DlpAdvisory | null = CLEAN,
+  ) {
+    const analyzeDlp = vi
+      .fn<(req: { content: string }) => Promise<DlpAdvisory | null>>()
+      .mockImplementation(({ content }: { content: string }) =>
+        Promise.resolve(content === '{}' ? CLEAN : advisory),
+      );
+    const { service, recordSafely } = makeService({
+      toolResult: { success: true, data },
+      analyzeDlp,
+    });
+    const result = await service.invoke(
+      fakeTenantClient().tenantClient,
+      baseInput,
+    );
+    const events = recordSafely.mock.calls
+      .map((c) => c[2])
+      .filter((e) => e.eventType === AUDIT_EVENT_TYPES.DLP_RESULT_REDACTED);
+    return { result, events, analyzeDlp };
+  }
+
+  const incident = (extra: Record<string, unknown> = {}) => ({
+    id: '4201',
+    assignedTo: 'adele.vance@fixture.example',
+    alerts: [
+      {
+        userStates: [{ userPrincipalName: 'adele.vance@fixture.example' }],
+        ...extra,
+      },
+    ],
+  });
+
+  it('passes an incident with UPNs through unchanged, even when manar-ai rates the e-mail HIGH', async () => {
+    const { result, events } = await invokeWith(incident(), {
+      findings: [finding('TYPE_EMAIL')],
+      overallSeverity: 'SEVERITY_HIGH',
+    });
+    expect(result).toEqual({ success: true, data: incident() });
+    expect(events).toEqual([]);
+  });
+
+  it.each([
+    ['EMIRATES_ID', 'EID 784-1990-1234567-1', 'emirates_id'],
+    ['UAE_IBAN', 'IBAN AE07 0331 2345 6789 0123 456', 'uae_iban'],
+    ['PAYMENT_CARD', 'card 4111 1111 1111 1111', 'payment_card'],
+    ['UAE_MOBILE', 'mobile +971 50 123 4567', 'uae_mobile'],
+  ])(
+    'replaces %s in place and returns the rest of the nested result',
+    async (tag, text, type) => {
+      const { result, events } = await invokeWith(incident({ comment: text }));
+      const data = result.data as ReturnType<typeof incident>;
+      expect(data.id).toBe('4201');
+      expect(data.assignedTo).toBe('adele.vance@fixture.example');
+      expect(data.alerts[0]).toMatchObject({
+        userStates: [{ userPrincipalName: 'adele.vance@fixture.example' }],
+      });
+      expect(
+        (data.alerts[0] as unknown as { comment: string }).comment,
+      ).toContain(`[REDACTED:${tag}]`);
+      expect(events).toHaveLength(1);
+      expect(events[0]!.data).toMatchObject({
+        mode: 'redacted_in_place',
+        floorFindingCounts: { [type]: 1 },
+      });
+      const digits = text.replace(/\D/g, '').slice(-7);
+      expect(JSON.stringify(result)).not.toContain(digits);
+      expect(JSON.stringify(events[0])).not.toContain(digits);
+    },
+  );
+
+  it.each([
+    [
+      'a PEM private key',
+      '-----BEGIN RSA PRIVATE KEY-----\nMIIE',
+      'private_key',
+    ],
+    [
+      'an Entra client secret',
+      'Abc8Q~0123456789abcdefghijklmnopqrstuvwx',
+      'entra_client_secret',
+    ],
+    [
+      'a connection string',
+      'AccountKey=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA==;',
+      'azure_connection_string',
+    ],
+  ])(
+    'withholds the whole result when the floor finds %s',
+    async (_label, secret, type) => {
+      const { result, events } = await invokeWith(incident({ note: secret }));
+      expect(result.data).toEqual({
+        redacted: true,
+        reason: 'sensitive_data_detected',
+        findingCount: 1,
+        findingTypes: [type],
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0]!.data).toMatchObject({
+        mode: 'withheld',
+        floorFindingCounts: { [type]: 1 },
+      });
+      expect(JSON.stringify(events[0])).not.toContain(secret.slice(0, 20));
+    },
+  );
+
+  it('withholds the whole result on a manar-ai credential finding the floor does not know', async () => {
+    const { result, events } = await invokeWith('leaked AKIAIOSFODNN7EXAMPLE', {
+      findings: [finding('TYPE_API_KEY'), finding('TYPE_EMAIL')],
+      overallSeverity: 'SEVERITY_HIGH',
+    });
+    expect(result.data).toEqual({
+      redacted: true,
+      reason: 'sensitive_data_detected',
+      findingCount: 1,
+      findingTypes: ['TYPE_API_KEY'],
+    });
+    expect(events[0]!.data).toMatchObject({
+      mode: 'withheld',
+      findings: [{ type: 'TYPE_API_KEY', source: 'pattern' }],
+    });
+  });
+
+  it('never withholds on the manar-ai system marker alone', async () => {
+    const { result, events } = await invokeWith(incident(), {
+      findings: [finding('TYPE_OTHER', 'system')],
+      overallSeverity: 'SEVERITY_MEDIUM',
+    });
+    expect(result.data).toEqual(incident());
+    expect(events).toEqual([]);
+  });
+
+  it('manar-ai unavailable (null): the manar-ai check is skipped, the deterministic floor still applies', async () => {
+    const clean = await invokeWith(incident(), null);
+    expect(clean.result.data).toEqual(incident());
+    const pii = await invokeWith({ n: 'EID 784199012345671' }, null);
+    expect(pii.result.data).toEqual({ n: 'EID [REDACTED:EMIRATES_ID]' });
+    const cred = await invokeWith({ k: '-----BEGIN PRIVATE KEY-----' }, null);
+    expect(cred.result.data).toMatchObject({ redacted: true });
+  });
+
+  /** manar-ai flags generic PII in any content containing `needle`, and always reports the e-mail. */
+  async function invokeWithLeafPii(
+    data: unknown,
+    needle: string,
+    reproduces = true,
+  ) {
+    const analyzeDlp = vi
+      .fn<(req: { content: string }) => Promise<DlpAdvisory | null>>()
+      .mockImplementation(({ content }: { content: string }) => {
+        if (content === '{}') return Promise.resolve(CLEAN);
+        const whole = analyzeDlp.mock.calls.length === 2;
+        const findings = content.includes('@') ? [finding('TYPE_EMAIL')] : [];
+        if (content.includes(needle) && (reproduces || whole))
+          findings.push(finding('TYPE_PII', 'ai'));
+        return Promise.resolve({ findings, overallSeverity: 'SEVERITY_LOW' });
+      });
+    const { service, recordSafely } = makeService({
+      toolResult: { success: true, data },
+      analyzeDlp,
+    });
+    const result = await service.invoke(
+      fakeTenantClient().tenantClient,
+      baseInput,
+    );
+    const events = recordSafely.mock.calls
+      .map((c) => c[2])
+      .filter((e) => e.eventType === AUDIT_EVENT_TYPES.DLP_RESULT_REDACTED);
+    return { result, events };
+  }
+
+  it('replaces the leaf carrying a manar-ai PII finding, keeps UPNs and everything else', async () => {
+    const data = incident({
+      displayName: 'Fatima Al Mansoori',
+      reviewer: 'Fatima Al Mansoori',
+      title: 'Credential dumping on fx-ws-042',
+    });
+    const { result, events } = await invokeWithLeafPii(data, 'Fatima');
+    expect(result.data).toEqual(
+      incident({
+        displayName: '[REDACTED:PII]',
+        reviewer: '[REDACTED:PII]',
+        title: 'Credential dumping on fx-ws-042',
+      }),
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]!.data).toMatchObject({
+      mode: 'redacted_in_place',
+      advisoryRedactedCounts: { TYPE_PII: 2 },
+      unlocatedTypes: [],
+    });
+    expect(JSON.stringify(events[0])).not.toContain('Fatima');
+  });
+
+  it('withholds the whole result when manar-ai PII cannot be pinned to a leaf', async () => {
+    const { result, events } = await invokeWithLeafPii(
+      incident({ displayName: 'Fatima Al Mansoori' }),
+      'Fatima',
+      false,
+    );
+    expect(result.data).toEqual({
+      redacted: true,
+      reason: 'sensitive_data_detected',
+      findingCount: 1,
+      findingTypes: ['TYPE_PII'],
+    });
+    expect(events[0]!.data).toMatchObject({
+      mode: 'withheld',
+      unlocatedTypes: ['TYPE_PII'],
+    });
+  });
+
+  it('sends manar-ai the PII-redacted string leaves, not the raw result', async () => {
+    const { analyzeDlp } = await invokeWith({ a: 'EID 784199012345671', b: 1 });
+    expect(analyzeDlp.mock.calls[1]![0].content).toBe(
+      'EID [REDACTED:EMIRATES_ID]',
+    );
+  });
+});
+
+describe('LLM proxy and tool-result DLP classify identically', () => {
+  const AGENT: AgentContext = {
+    tenant: { id: 'tenant-1', slug: 't' },
+    agent: { id: 'agent-1', slug: 'a', identifier: 'agent://t/a' },
+    certificate: { serialNumber: 'AB' },
+  };
+  const f = (type: string) => ({
+    type,
+    source: 'pattern',
+    redactedPreview: 'x',
+    confidence: 0.9,
+  });
+  const CLEAN: DlpAdvisory = { findings: [], overallSeverity: 'SEVERITY_NONE' };
+  const HIGH = (type: string): DlpAdvisory => ({
+    findings: [f(type)],
+    overallSeverity: 'SEVERITY_HIGH',
+  });
+
+  /** [label, text, manar-ai's answer for any content containing `text`, what the agent / model gets ('blocked' = withheld / refused)]. */
+  const samples: Array<[string, string, DlpAdvisory, string]> = [
+    [
+      'clean',
+      'incident 4201 on fx-ws-042',
+      CLEAN,
+      'incident 4201 on fx-ws-042',
+    ],
+    [
+      'e-mail rated HIGH',
+      'user adele.vance@fixture.example',
+      HIGH('TYPE_EMAIL'),
+      'user adele.vance@fixture.example',
+    ],
+    [
+      'manar-ai PII',
+      'holder Fatima Al Mansoori',
+      HIGH('TYPE_PII'),
+      '[REDACTED:PII]',
+    ],
+    [
+      'manar-ai other',
+      'passport no. N1234567',
+      HIGH('TYPE_OTHER'),
+      '[REDACTED:OTHER]',
+    ],
+    [
+      'Emirates ID',
+      'EID 784-1990-1234567-1',
+      CLEAN,
+      'EID [REDACTED:EMIRATES_ID]',
+    ],
+    ['UAE IBAN', 'AE07 0331 2345 6789 0123 456', CLEAN, '[REDACTED:UAE_IBAN]'],
+    ['card', '4111 1111 1111 1111', CLEAN, '[REDACTED:PAYMENT_CARD]'],
+    ['UAE mobile', '+971 50 123 4567', CLEAN, '[REDACTED:UAE_MOBILE]'],
+    [
+      'JWT',
+      'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl',
+      CLEAN,
+      'blocked',
+    ],
+    ['PEM', '-----BEGIN PRIVATE KEY-----', CLEAN, 'blocked'],
+    [
+      'manar-ai API key',
+      'AKIAIOSFODNN7EXAMPLE',
+      HIGH('TYPE_API_KEY'),
+      'blocked',
+    ],
+    [
+      'manar-ai credential',
+      'pwd: hunter22',
+      HIGH('TYPE_CREDENTIAL'),
+      'blocked',
+    ],
+  ];
+
+  /** manar-ai as a content-aware fake: it reports `advisory` only for content that contains `text`. */
+  const manarAi = (text: string, advisory: DlpAdvisory) =>
+    vi
+      .fn<(req: { content: string }) => Promise<DlpAdvisory | null>>()
+      .mockImplementation(({ content }: { content: string }) =>
+        Promise.resolve(content.includes(text) ? advisory : CLEAN),
+      );
+
+  function proxy(text: string, advisory: DlpAdvisory) {
+    const analyzeDlp = manarAi(text, advisory);
+    const chat = vi
+      .fn<(req: { messages: Array<{ content: string }> }) => Promise<unknown>>()
+      .mockResolvedValue({
+        provider: 'ollama',
+        model: 'm',
+        body: { choices: [], usage: { total_tokens: 1 } },
+      });
+    const service = new LlmProxyService(
+      {
+        assertTaskAccess: vi.fn().mockResolvedValue({
+          tenantClient: {},
+          task: { id: 'task-1', expiresAt: new Date(Date.now() + 60_000) },
+        }),
+      } as unknown as AgentTaskAccessService,
+      {
+        used: vi.fn().mockResolvedValue(0),
+        add: vi.fn().mockResolvedValue(1),
+      } as unknown as LlmBudgetStore,
+      { chat } as unknown as LlmUpstreamClient,
+      { analyzeDlp } as unknown as AiAdvisoryClient,
+      {
+        record: vi.fn().mockResolvedValue({}),
+        recordSafely: vi.fn().mockResolvedValue({}),
+      } as unknown as AuditService,
+      {
+        getClient: vi.fn().mockResolvedValue({}),
+      } as unknown as TenantDatabaseManager,
+      { get: () => 200_000 } as unknown as ConfigService<AppConfig, true>,
+    );
+    return { service, chat, analyzeDlp };
+  }
+
+  it.each(samples)('%s', async (_label, text, advisory, expected) => {
+    const p = proxy(text, advisory);
+    let proxyBlocked = false;
+    try {
+      await p.service.complete(AGENT, 'task-1', {
+        messages: [{ role: 'tool', content: text }],
+      });
+    } catch (error) {
+      expect((error as HttpException).getResponse()).toMatchObject({
+        reason: 'dlp_policy_violation',
+      });
+      proxyBlocked = true;
+    }
+
+    const analyzeDlp = manarAi(text, advisory);
+    const { service } = makeService({
+      toolResult: { success: true, data: { content: text } },
+      analyzeDlp,
+    });
+    const result = await service.invoke(
+      fakeTenantClient().tenantClient,
+      baseInput,
+    );
+    const withheld = (result.data as { redacted?: boolean }).redacted === true;
+
+    expect(withheld).toBe(proxyBlocked);
+    expect(proxyBlocked).toBe(expected === 'blocked');
+    if (!proxyBlocked) {
+      const sent = p.chat.mock.calls[0]![0].messages[0]!.content;
+      expect(sent).toBe(expected);
+      expect((result.data as { content: string }).content).toBe(expected);
+      // manar-ai saw the same floor-redacted text on both paths (the proxy also scans the role string).
+      expect(p.analyzeDlp.mock.calls[0]![0].content).toBe(
+        `tool\n${analyzeDlp.mock.calls[1]![0].content}`,
+      );
+    }
   });
 });

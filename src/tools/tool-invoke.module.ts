@@ -4,6 +4,7 @@ import { AgentMtlsGuardModule } from '../agent-mtls/agent-mtls-guard.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
 import { TemporalModule } from '../temporal/temporal.module';
 import { ToolInvokeController } from './tool-invoke.controller';
+import { ToolInvocationService } from './tool-invocation.service';
 import { ToolsModule } from './tools.module';
 
 /**
@@ -25,5 +26,7 @@ import { ToolsModule } from './tools.module';
     TemporalModule,
   ],
   controllers: [ToolInvokeController],
+  providers: [ToolInvocationService],
+  exports: [ToolInvocationService],
 })
 export class ToolInvokeModule {}
