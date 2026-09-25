@@ -10,7 +10,6 @@ import { z } from 'zod';
 import type { AppConfig } from '../config/env.validation';
 import type { AgentContext } from '../agent-mtls/agent-context';
 import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
-import type { DlpAdvisory } from '../ai-advisory/ai-advisory-client.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
@@ -20,7 +19,11 @@ import {
 } from '../common/fail-closed/fail-closed';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { AgentTaskAccessService, denied } from './agent-task-access.service';
-import { applyDlpFloor } from './llm-dlp-floor';
+import {
+  advisoryBlocks,
+  applyDlpFloor,
+  dlpScanText,
+} from '../common/dlp/dlp-classification';
 import { LlmBudgetStore } from './llm-budget.store';
 import { LlmUpstreamClient, LlmUpstreamError } from './llm-upstream.client';
 import type { UpstreamChatResponse } from './llm-upstream.client';
@@ -36,38 +39,6 @@ export const ChatCompletionRequestSchema = z.object({
   stream: z.literal(false).optional(),
 });
 export type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;
-
-/**
- * manar-ai finding types that block on the proxy path. E-mail/UPN and other
- * PII do not block: a SOC agent cannot reason about an incident without the
- * user's UPN, and UAE PII is already redacted by the floor. `source:
- * "system"` markers (manar-ai's AI layer did not run) never block (S7).
- */
-const BLOCKING_ADVISORY_TYPES = new Set([
-  'TYPE_API_KEY',
-  'TYPE_PRIVATE_KEY',
-  'TYPE_JWT',
-  'TYPE_CREDENTIAL',
-]);
-
-export function advisoryBlocks(advisory: DlpAdvisory): boolean {
-  return advisory.findings.some(
-    (f) => f.source !== 'system' && BLOCKING_ADVISORY_TYPES.has(f.type),
-  );
-}
-
-/** Every string leaf of the forwarded payload, for manar-ai's DLP scan. */
-function textOf(value: unknown): string {
-  const parts: string[] = [];
-  const walk = (node: unknown): void => {
-    if (typeof node === 'string') parts.push(node);
-    else if (Array.isArray(node)) node.forEach(walk);
-    else if (node !== null && typeof node === 'object')
-      Object.values(node).forEach(walk);
-  };
-  walk(value);
-  return parts.join('\n');
-}
 
 export class LlmBudgetExhaustedException extends HttpException {
   constructor() {
@@ -164,7 +135,7 @@ export class LlmProxyService {
 
       const advisory = await failClosed('dlp-advisory', () =>
         this.aiAdvisory.analyzeDlp({
-          content: textOf(floor.value),
+          content: dlpScanText(floor.value),
           tenantId: agent.tenant.id,
         }),
       );

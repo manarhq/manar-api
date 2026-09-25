@@ -28,11 +28,11 @@
  * hunter2" }` — is **not** redacted by this function. Two reasons for
  * accepting that:
  *
- *  1. Content detection is manar-ai's job, and this codebase deliberately
- *     refuses to implement DLP pattern matching in two places (see
- *     `src/tools/dlp-redaction.util.ts`'s doc comment for the same call
- *     made for tool results). A second, weaker detector here would drift
- *     from the real one and create false confidence.
+ *  1. Content detection lives in one place: manar-ai plus the shared
+ *     in-process classification in `src/common/dlp/dlp-classification.ts`
+ *     (LLM prompts and tool results, ADR-0002). A second, separate detector
+ *     here would drift from those and create false confidence; applying the
+ *     shared one to approval parameters is possible but not done yet.
  *  2. The primary control on this surface is authorization, not redaction.
  *     This data is reachable only through the JWT human surface, gated to
  *     `APPROVER`/`SECURITY_ADMIN`/`TENANT_OWNER`. It is never reachable by

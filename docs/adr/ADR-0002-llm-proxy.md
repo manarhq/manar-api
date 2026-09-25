@@ -31,11 +31,14 @@ All three surfaces are in manar-api, on the mTLS agent listener (`AgentMtlsAppMo
       and reason codes as steps 0–3 of `AuthorizationService`.
    3. Per-task token budget (`LLM_TASK_TOKEN_BUDGET`, default 200 000 upstream-reported
       total tokens) kept in Redis. Used ≥ budget → 429 `llm_budget_exhausted`.
-   4. Deterministic DLP floor in-process (`llm-dlp-floor.ts`): credential shapes **block**
+   4. Deterministic DLP floor in-process (`src/common/dlp/dlp-classification.ts`, shared
+      with the tool-result path, see "Result DLP" below): credential shapes **block**
       (JWT, bearer tokens, PEM private keys, Azure storage/Service Bus connection strings,
       SAS `sig=`, JSON `client_secret`/`password`/`secret` values, Entra client secrets);
-      UAE PII is **redacted** to `[REDACTED:EMIRATES_ID]` / `[REDACTED:UAE_IBAN]` before the
-      prompt goes anywhere, manar-ai included.
+      UAE PII is **redacted** to `[REDACTED:EMIRATES_ID]` / `[REDACTED:UAE_IBAN]` /
+      `[REDACTED:PAYMENT_CARD]` (Luhn-checked) / `[REDACTED:UAE_MOBILE]` before the prompt
+      goes anywhere, manar-ai included. Nesting deeper than 64 levels is not scanned and
+      blocks as `scan_depth_exceeded`.
    5. manar-ai `AnalyzeDlp` on the redacted text. **`null` blocks** (503; S6 closed on this
       path). A non-`system` finding of type API key, private key, JWT or credential blocks.
       E-mail and other PII findings do not block: a SOC agent cannot reason about an
@@ -62,6 +65,33 @@ All three surfaces are in manar-api, on the mTLS agent listener (`AgentMtlsAppMo
    stateless, JSON responses (a fresh SDK `Server` per request). `tools/list` is the
    manifest; `tools/call` runs `ToolInvocationService`, which is the code behind
    `POST /agent/v1/tools/invoke` moved out of its controller. One decision path, two doors.
+
+**Result DLP** (owner decision 25 Sep 2026, "redact fields, not results"). Tool results
+returned to the agent (`CredentialBrokerService.applyPostCallAdvisories`, so both
+`tools/invoke` and MCP `tools/call`) go through the same classification as prompts, in the
+same order: floor, then manar-ai `AnalyzeDlp` on the floor's redacted string leaves, then
+`advisoryBlocks`. The two checkpoints cannot disagree; a unit test runs the same samples
+through both.
+
+- Credential (floor shape, or a non-`system` manar-ai finding of type API key, private key,
+  JWT or credential) → the **whole result is withheld**:
+  `{"redacted":true,"reason":"sensitive_data_detected","findingCount":N,"findingTypes":[...]}`.
+- UAE PII (Emirates ID, UAE IBAN, payment card, UAE mobile) → **replaced in place** with
+  `[REDACTED:<TYPE>]`; the rest of the JSON is returned.
+- E-mail addresses / UPNs and manar-ai `TYPE_PII`/`TYPE_OTHER` findings → **returned
+  unchanged**. The agent needs the UPN to act, and the data goes only to the customer's own
+  model deployment. Before this decision any real manar-ai finding (an e-mail is
+  deterministic HIGH) replaced the whole result, so the SOC agent could not read an incident
+  (docs/reports/FIRST-AGENT-RUN-2026-09-25.md, workspace repo).
+- Each withhold or in-place redaction records `dlp.result_redacted` with `mode`
+  (`withheld` / `redacted_in_place`), per-type floor match counts and manar-ai finding
+  types/previews. Never the values.
+- manar-ai unavailable (`null`) on this path: unchanged, the manar-ai check is skipped and
+  does not block (unlike the proxy, where `null` is a 503). The tool call has already
+  happened; the result goes to the agent, whose next LLM call passes through the proxy, where
+  `null` blocks. The deterministic floor does not depend on manar-ai and now applies to
+  results whether or not manar-ai answers (before this, a `null` returned the result
+  untouched).
 
 None of this is on the authorization decision path. `decision-path-dependencies.spec.ts`
 now also fails if anything under `src/agent-runtime/` (other than the zod config schema)

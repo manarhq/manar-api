@@ -148,36 +148,20 @@ the caller. No `ToolInvocation` row is created (mirrors
 failure shape) and, structurally, no adapter/tool call is ever reached —
 the block happens before credential resolution.
 
-### After-call: redacts findings in the tool's own result
+### After-call: result DLP (redact fields, not results)
 
-`AiAdvisoryClient.analyzeDlp({ content: JSON.stringify(result.data) })`
-runs after a _successful_ tool call. Any _real_ finding (excluding
-manar-ai's own `source: "system"` AI-unavailable status marker — see the
-before-call section above for why that exclusion matters: without it,
-manar-ai's own LLM-backend outage would redact every clean tool result,
-not just genuinely sensitive ones — regardless of severity otherwise, since
-this cannot undo an already-completed call, so the bar for "worth
-redacting" is much lower than "worth blocking") causes `result.data` to be
-replaced with a fixed placeholder
-(`redactedToolResultPlaceholder` — `{ redacted: true, reason:
-'sensitive_data_detected', findingCount, findingTypes }`) before it's
-returned to the agent, and records `dlp.result_redacted` (same
-redacted-metadata-only shape as the before-call block) via
-`AuditService.recordSafely`.
-
-**Why whole-value redaction, not substring splicing**: the gRPC contract
-deliberately never transmits a finding's raw matched value _or_ its offset
-within the scanned content, even internally within manar-ai (Section 73 —
-`DlpFinding.redactedPreview` is a short, non-reversible preview only).
-`manar-api` therefore cannot precisely excise just the matched
-substring(s) from the original result without re-deriving detection
-locally — which would duplicate manar-ai's ownership of DLP pattern
-matching, exactly the "never re-implement detection in two places" problem
-Section 73 already argues against for the LLM-only case. Given that real
-interface constraint, replacing the entire flagged value is what actually
-achieves the security goal (the agent's own context/output channel can
-never become an exfiltration path for whatever the tool leaked) using only
-the signal the contract legitimately provides.
+Superseded on 25 Sep 2026 by ADR-0002's "Result DLP" section, which is the
+reference. In short: after a _successful_ tool call the result goes through
+the same classification as LLM prompts (`src/common/dlp/dlp-classification.ts`):
+the in-process deterministic floor, then `analyzeDlp` on the floor's redacted
+string leaves. A credential (floor shape or a manar-ai credential-type finding)
+withholds the whole result (`redactedToolResultPlaceholder` — `{ redacted:
+true, reason: 'sensitive_data_detected', findingCount, findingTypes }`); UAE
+PII (Emirates ID, UAE IBAN, payment card, UAE mobile) is replaced in place with
+`[REDACTED:<TYPE>]`; e-mail addresses / UPNs and other manar-ai findings pass
+through. Either redaction records `dlp.result_redacted` (types and counts, never
+values). The earlier "whole-value redaction because manar-ai sends no offsets"
+argument no longer applies: the in-process floor finds the spans itself.
 
 ## Prompt-injection advisory
 
