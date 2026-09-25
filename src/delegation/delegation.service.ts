@@ -8,11 +8,16 @@ import {
 } from '../authorization/grant-triples';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
-import { TaskRecord, TasksService } from '../tasks/tasks.service';
+import {
+  DEFAULT_RISK_CEILING,
+  TaskRecord,
+  TasksService,
+} from '../tasks/tasks.service';
 import { TaskNotFoundError } from '../tasks/tasks.errors';
 import type { DelegateTaskRequest } from './delegation.validation';
 import {
   DelegationExceedsParentAuthorityError,
+  DelegationExceedsParentLimitsError,
   DelegationNotAssignedAgentError,
   DelegationTaskNotLiveError,
 } from './delegation.errors';
@@ -112,6 +117,41 @@ export class DelegationService {
       throw new DelegationExceedsParentAuthorityError(rejected);
     }
 
+    // Same non-amplification rule for the task's limits (Gate 0 R3): a
+    // child never gets a higher riskCeiling than the parent, nor more
+    // executions than the parent has left. An explicit request for more is
+    // rejected like a broader grant; an omitted value is clamped. The
+    // liveness check above guarantees parentRemaining >= 1. Only the direct
+    // parent is compared: it was itself clamped against its own parent when
+    // delegated. Drawing the parent's budget down on child executions is
+    // Phase 3.
+    const parentRemaining =
+      parentTask.maxExecutions == null
+        ? null
+        : parentTask.maxExecutions - parentTask.executionCount;
+    if (
+      input.riskCeiling !== undefined &&
+      input.riskCeiling > parentTask.riskCeiling
+    ) {
+      throw new DelegationExceedsParentLimitsError(
+        `Requested riskCeiling ${input.riskCeiling} exceeds the parent task's ${parentTask.riskCeiling}`,
+      );
+    }
+    if (
+      parentRemaining !== null &&
+      input.maxExecutions !== undefined &&
+      (input.maxExecutions === null || input.maxExecutions > parentRemaining)
+    ) {
+      throw new DelegationExceedsParentLimitsError(
+        `Requested maxExecutions ${input.maxExecutions ?? 'unlimited'} exceeds the parent task's ${parentRemaining} remaining`,
+      );
+    }
+    const riskCeiling =
+      input.riskCeiling ??
+      Math.min(parentTask.riskCeiling, DEFAULT_RISK_CEILING);
+    const maxExecutions =
+      input.maxExecutions === undefined ? parentRemaining : input.maxExecutions;
+
     // Everything below this line only runs once the subset check has
     // already passed -- no partial writes are possible on rejection.
     const rootRequesterId = await this.tasksService.resolveRootRequesterId(
@@ -158,8 +198,8 @@ export class DelegationService {
         allowedResourceSelectors: input.allowedResourceSelectors,
         forbiddenActions: input.forbiddenActions,
         expiresAt,
-        maxExecutions: input.maxExecutions,
-        riskCeiling: input.riskCeiling,
+        maxExecutions,
+        riskCeiling,
         // The delegating agent, not the root human requester — see
         // CreateTaskInput.actor's doc comment.
         actor: { type: 'agent', id: callerAgentId },
@@ -183,6 +223,7 @@ export class DelegationService {
         forbiddenActions: input.forbiddenActions,
         expiresAt: childTask.expiresAt,
         maxExecutions: childTask.maxExecutions,
+        riskCeiling: childTask.riskCeiling,
       },
     });
 

@@ -1,4 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { AppConfig } from '../config/env.validation';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { SECRET_PROVIDER } from '../database/secret-provider';
 import type { SecretProvider } from '../database/secret-provider';
@@ -43,6 +45,12 @@ const DLP_BLOCKING_SEVERITIES = new Set(['SEVERITY_HIGH', 'SEVERITY_CRITICAL']);
 
 /** How long a detected prompt-injection attempt keeps the requesting agent's `AgentRiskFlag` active — see that model's doc comment and `RiskEngine`'s `AGENT_RISK_FLAG_BUMP`. Short and fixed: long enough to matter for an agent's next few requests, short enough that a stale flag doesn't linger indefinitely. */
 const PROMPT_INJECTION_RISK_FLAG_TTL_MS = 15 * 60 * 1000;
+
+/** What the agent receives instead of a tool result withheld as suspected prompt injection (Gate 0 R5). Fixed: nothing from the result, not even the indicators, reaches the agent. */
+const PROMPT_INJECTION_WITHHELD = Object.freeze({
+  withheld: true,
+  reason: 'prompt_injection_suspected',
+});
 
 /**
  * Task 5 (see docs/superpowers/sdd/plan-mvp-unblock, task-5-brief.md):
@@ -196,6 +204,7 @@ export interface CredentialBrokerInvokeInput {
 @Injectable()
 export class CredentialBrokerService {
   private readonly logger = new Logger(CredentialBrokerService.name);
+  private readonly injectionBlockThreshold: number;
 
   constructor(
     private readonly toolRegistry: ToolRegistryService,
@@ -204,7 +213,13 @@ export class CredentialBrokerService {
     private readonly mcpAdapter: McpToolAdapter,
     private readonly auditService: AuditService,
     private readonly aiAdvisoryClient: AiAdvisoryClient,
-  ) {}
+    configService: ConfigService<AppConfig, true>,
+  ) {
+    this.injectionBlockThreshold = configService.get(
+      'PROMPT_INJECTION_BLOCK_THRESHOLD',
+      { infer: true },
+    );
+  }
 
   async invoke(
     tenantClient: TenantPrismaClient,
@@ -437,7 +452,10 @@ export class CredentialBrokerService {
    *      nothing string-shaped at all (a bare number/boolean/`null`, or an
    *      object with zero string leaves) skips the call entirely, same as
    *      before Task 5. On detection, records a `prompt_injection.detected`
-   *      audit event and sets a short-lived `AgentRiskFlag` for this agent
+   *      audit event, replaces `data` with `PROMPT_INJECTION_WITHHELD` when
+   *      the confidence reaches `PROMPT_INJECTION_BLOCK_THRESHOLD` (the
+   *      event's `withheld` field says which), and sets a short-lived
+   *      `AgentRiskFlag` for this agent
    *      (`RiskEngine` folds an active flag into `deterministicRiskScore`
    *      for this agent's *subsequent* requests -- see that class's
    *      `AGENT_RISK_FLAG_BUMP` doc comment). Runs against the *original*,
@@ -521,6 +539,13 @@ export class CredentialBrokerService {
       });
       if (injection && injection.detected) {
         const reason = `prompt_injection_detected:${input.toolId}/${input.actionId}`;
+        // Gate 0 R5 block-and-flag: a confident detection withholds the
+        // result from the agent (the call itself already happened and
+        // still reports success); a weaker one only flags, as before.
+        const withheld = injection.confidence >= this.injectionBlockThreshold;
+        if (withheld) {
+          outcome = { ...outcome, data: PROMPT_INJECTION_WITHHELD };
+        }
         await this.auditService.recordSafely(tenantClient, input.tenantId, {
           eventType: AUDIT_EVENT_TYPES.PROMPT_INJECTION_DETECTED,
           actor: { type: 'agent', id: input.agentId },
@@ -532,6 +557,7 @@ export class CredentialBrokerService {
             confidence: injection.confidence,
             indicators: injection.indicators,
             explanation: injection.explanation,
+            withheld,
           },
         });
         await tenantClient.agentRiskFlag.create({

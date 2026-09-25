@@ -29,6 +29,9 @@ import { AncestorChainTooDeepError, TaskNotFoundError } from './tasks.errors';
  * identifier })`). Every real call site is a genuine tenant-client query
  * result, which satisfies this structurally.
  */
+/** `createTask`'s fallback when the caller passes no `riskCeiling`. */
+export const DEFAULT_RISK_CEILING = 20;
+
 export interface TaskRecord {
   id: string;
   /** Phase 11b Part 1: added so `listTasks`/`GET /tasks` (and the real `createTask` bug fix — see `CreateTaskResponseDto`'s doc comment) can be typed against this shape without a second, parallel interface. */
@@ -140,7 +143,7 @@ export class TasksService {
         startsAt: input.startsAt ?? new Date(),
         expiresAt: input.expiresAt,
         maxExecutions: input.maxExecutions ?? null,
-        riskCeiling: input.riskCeiling ?? 20,
+        riskCeiling: input.riskCeiling ?? DEFAULT_RISK_CEILING,
       },
     });
 

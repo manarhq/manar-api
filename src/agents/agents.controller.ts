@@ -1,5 +1,6 @@
 import {
   Body,
+  ConflictException,
   Controller,
   Get,
   NotFoundException,
@@ -30,7 +31,7 @@ import {
   parseCursor,
   parseLimit,
 } from '../common/pagination/cursor-pagination';
-import { AgentNotFoundError } from './agents.errors';
+import { AgentNotFoundError, AgentTerminatedError } from './agents.errors';
 import { AgentsService } from './agents.service';
 import {
   CreateAgentRequestSchema,
@@ -53,6 +54,9 @@ async function mapAgentNotFound<T>(operation: () => Promise<T>): Promise<T> {
   } catch (error) {
     if (error instanceof AgentNotFoundError) {
       throw new NotFoundException(error.message);
+    }
+    if (error instanceof AgentTerminatedError) {
+      throw new ConflictException(error.message);
     }
     throw error;
   }
@@ -188,6 +192,11 @@ export class AgentsController {
     status: 404,
     type: ErrorResponseDto,
     description: 'Agent not found.',
+  })
+  @ApiResponse({
+    status: 409,
+    type: ErrorResponseDto,
+    description: 'Agent is REVOKED or KILLED and cannot be re-enrolled.',
   })
   async createEnrollmentToken(
     @CurrentAuth() auth: AuthContext,
