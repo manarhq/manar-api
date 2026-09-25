@@ -39,7 +39,7 @@ export interface ToolRecord {
   vendor: string | null;
   description: string | null;
   baseEndpoint: string;
-  protocol: 'HTTP' | 'MCP';
+  protocol: 'HTTP' | 'MCP' | 'MICROSOFT';
   credentialReference: SecretReferenceDescriptor;
   enabled: boolean;
   metadata: unknown;
@@ -195,7 +195,7 @@ export class ToolRegistryService {
       vendor: row.vendor,
       description: row.description,
       baseEndpoint: row.baseEndpoint,
-      protocol: row.protocol as 'HTTP' | 'MCP',
+      protocol: row.protocol as ToolRecord['protocol'],
       credentialReference: SecretReferenceDescriptorSchema.parse(
         row.credentialReference,
       ),

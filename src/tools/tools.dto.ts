@@ -59,8 +59,8 @@ export class ToolSummaryDto {
   @ApiProperty()
   baseEndpoint!: string;
 
-  @ApiProperty({ enum: ['HTTP', 'MCP'] })
-  protocol!: 'HTTP' | 'MCP';
+  @ApiProperty({ enum: ['HTTP', 'MCP', 'MICROSOFT'] })
+  protocol!: 'HTTP' | 'MCP' | 'MICROSOFT';
 
   @ApiProperty()
   enabled!: boolean;
