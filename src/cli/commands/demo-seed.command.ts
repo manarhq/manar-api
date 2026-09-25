@@ -10,11 +10,22 @@ import { TenantDatabaseManager } from '../../database/tenant-database-manager.se
 import { TenantProvisioningService } from '../../keycloak/tenant-provisioning.service';
 import { KeycloakAdminClient } from '../../keycloak/keycloak-admin.client';
 import { OpenBaoKvClient } from '../../openbao/openbao-kv.client';
+import {
+  ensureMicrosoftFixtureTools,
+  MICROSOFT_DEFENDER_TOOL,
+  MICROSOFT_FIXTURE_APP,
+  MICROSOFT_FIXTURE_IDS,
+  MICROSOFT_FIXTURE_KV_PATH,
+  MICROSOFT_GRAPH_TOOL,
+  microsoftPolicyContent,
+} from './microsoft-fixture-seed';
 
 interface DemoSeedOptions {
   apiEndpoint: string;
   demoToolsBaseUrl: string;
   demoToolsApiKey: string;
+  /** Base URL of demo-soc-tools serving the Microsoft DEMO FIXTURE; empty skips the Microsoft catalog. */
+  microsoftFixtureUrl: string;
 }
 
 /** Fixed, deterministic identifiers — never randomized — so re-running this command finds and reuses everything a prior run already created (Section 85: "idempotently provisions"). */
@@ -323,6 +334,8 @@ const DEMO_POLICIES: PolicyDef[] = [
 ];
 
 const DEMO_TASK_NAME = 'SOC Incident Response — INC-2026-0042';
+const MICROSOFT_TASK_NAME =
+  'Microsoft Incident Response — incident 4201 (DEMO FIXTURE)';
 
 /**
  * Where this command hands the demo tenant's credentials off to
@@ -348,6 +361,8 @@ interface DemoTenantCredentials {
   users: Record<string, string>;
   agents: Record<string, { id: string; slug: string }>;
   taskId: string;
+  /** Present only when seeded with `--microsoft-fixture-url`. */
+  microsoftTaskId?: string;
 }
 
 interface HttpJsonOptions {
@@ -452,7 +467,7 @@ export class DemoSeedCommand extends CommandRunner {
     await this.ensureToolsAndActions(tenant.id, options.demoToolsBaseUrl);
     this.logger.log(`Ensured ${DEMO_TOOLS.length} demo tools`);
 
-    await this.ensurePolicies(options.apiEndpoint, ownerToken);
+    await this.ensurePolicies(options.apiEndpoint, ownerToken, DEMO_POLICIES);
     this.logger.log(`Ensured ${DEMO_POLICIES.length} demo policies`);
 
     const socResponseAgent = agents.get('soc-response-agent');
@@ -468,6 +483,15 @@ export class DemoSeedCommand extends CommandRunner {
       socResponseAgent.id,
     );
 
+    const microsoftTask = options.microsoftFixtureUrl
+      ? await this.ensureMicrosoftFixture(
+          tenant.id,
+          options,
+          ownerToken,
+          socResponseAgent.id,
+        )
+      : undefined;
+
     await this.writeCredentialsFile({
       tenantId: tenant.id,
       tenantSlug: TENANT_SLUG,
@@ -480,6 +504,7 @@ export class DemoSeedCommand extends CommandRunner {
         [...agents.values()].map((a) => [a.slug, { id: a.id, slug: a.slug }]),
       ),
       taskId: task.id,
+      ...(microsoftTask ? { microsoftTaskId: microsoftTask.id } : {}),
     });
 
     this.logger.log('');
@@ -791,8 +816,9 @@ export class DemoSeedCommand extends CommandRunner {
   private async ensurePolicies(
     apiEndpoint: string,
     ownerToken: string,
+    policies: PolicyDef[],
   ): Promise<void> {
-    for (const policyDef of DEMO_POLICIES) {
+    for (const policyDef of policies) {
       const existingPolicies = await this.httpJson<{
         items: Array<{ id: string; name: string }>;
       }>(apiEndpoint, '/policies?limit=100', {
@@ -872,6 +898,106 @@ export class DemoSeedCommand extends CommandRunner {
     });
     this.logger.log(`Created task "${DEMO_TASK_NAME}" (id=${created.id})`);
     return created;
+  }
+
+  // ---- Microsoft catalog against the DEMO FIXTURE (ADR-0004) ----
+
+  /**
+   * Registers `microsoft-graph`/`microsoft-defender` against the fixture
+   * served by demo-soc-tools, a policy requiring approval for every
+   * Microsoft mutation, and a task letting the SOC Response Agent read the
+   * fixture incident and, with approval, disable its user and isolate its
+   * device. Everything here is DEMO FIXTURE data, not a live tenant.
+   */
+  private async ensureMicrosoftFixture(
+    tenantId: string,
+    options: DemoSeedOptions,
+    ownerToken: string,
+    socResponseAgentId: string,
+  ): Promise<{ id: string }> {
+    await this.openBaoKvClient.writeSecret(MICROSOFT_FIXTURE_KV_PATH, {
+      value: MICROSOFT_FIXTURE_APP.clientSecret,
+    });
+    const tenantClient = await this.tenantDatabaseManager.getClient(tenantId);
+    await ensureMicrosoftFixtureTools(tenantClient, {
+      fixtureBaseUrl: options.microsoftFixtureUrl,
+      kvPath: MICROSOFT_FIXTURE_KV_PATH,
+    });
+    await this.ensurePolicies(options.apiEndpoint, ownerToken, [
+      {
+        name: 'Microsoft Connector Approval Policy',
+        description:
+          'Every Microsoft Graph/Defender mutation needs a human approval; reads are allowed.',
+        content: microsoftPolicyContent(),
+      },
+    ]);
+
+    const existing = await tenantClient.task.findFirst({
+      where: { name: MICROSOFT_TASK_NAME },
+    });
+    if (existing) return existing;
+    const { userId, machineId, incidentId } = MICROSOFT_FIXTURE_IDS;
+    const created = await this.httpJson<{ id: string }>(
+      options.apiEndpoint,
+      '/tasks',
+      {
+        method: 'POST',
+        token: ownerToken,
+        body: {
+          name: MICROSOFT_TASK_NAME,
+          description:
+            'DEMO FIXTURE: read Defender XDR incident 4201 and its alerts, investigate the ' +
+            'user and device, and (with human approval) disable the user, revoke sessions ' +
+            'and isolate the device.',
+          assignedAgentId: socResponseAgentId,
+          allowedToolActions: [
+            ...[
+              'security.incident.list',
+              'security.incident.get',
+              'security.alert.list',
+              'entra.user.get',
+              'entra.user.signins.list',
+              'entra.user.risk.get',
+              'entra.user.disable',
+              'entra.user.sessions.revoke',
+            ].map((actionId) => ({ toolId: MICROSOFT_GRAPH_TOOL, actionId })),
+            ...[
+              'defender.machine.get',
+              'defender.machineaction.list',
+              'defender.machine.isolate',
+            ].map((actionId) => ({
+              toolId: MICROSOFT_DEFENDER_TOOL,
+              actionId,
+            })),
+          ],
+          allowedResourceSelectors: [
+            { toolId: MICROSOFT_GRAPH_TOOL, pattern: 'all' },
+            { toolId: MICROSOFT_GRAPH_TOOL, pattern: incidentId },
+            { toolId: MICROSOFT_GRAPH_TOOL, pattern: userId },
+            { toolId: MICROSOFT_DEFENDER_TOOL, pattern: machineId },
+          ],
+          forbiddenActions: [],
+          expiresAt: new Date(
+            Date.now() + 30 * 24 * 60 * 60 * 1000,
+          ).toISOString(),
+          riskCeiling: 50,
+        },
+      },
+    );
+    this.logger.log(
+      `Created task "${MICROSOFT_TASK_NAME}" (id=${created.id}) against the Microsoft DEMO FIXTURE`,
+    );
+    return created;
+  }
+
+  @Option({
+    flags: '--microsoft-fixture-url <url>',
+    description:
+      'Base URL of demo-soc-tools serving the Microsoft DEMO FIXTURE (e.g. http://localhost:3101); registers the Microsoft catalog against it',
+    defaultValue: process.env.MICROSOFT_FIXTURE_BASE_URL ?? '',
+  })
+  parseMicrosoftFixtureUrl(value: string): string {
+    return value;
   }
 
   @Option({

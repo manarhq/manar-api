@@ -3,6 +3,7 @@ import { AiAdvisoryModule } from '../ai-advisory/ai-advisory.module';
 import { CredentialBrokerService } from './credential-broker.service';
 import { HttpToolAdapter } from './http-tool.adapter';
 import { McpToolAdapter } from './mcp-tool.adapter';
+import { MicrosoftToolAdapter } from './microsoft-tool.adapter';
 import { ToolRegistryService } from './tool-registry.service';
 
 /**
@@ -22,6 +23,7 @@ import { ToolRegistryService } from './tool-registry.service';
     ToolRegistryService,
     HttpToolAdapter,
     McpToolAdapter,
+    MicrosoftToolAdapter,
     CredentialBrokerService,
   ],
   exports: [ToolRegistryService, CredentialBrokerService],

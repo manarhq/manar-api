@@ -7,6 +7,7 @@ import edrRoutes from './routes/edr';
 import iamRoutes from './routes/iam';
 import firewallRoutes from './routes/firewall';
 import { DemoStore } from './state/store';
+import microsoftFixtureRoutes from './microsoft/fixture';
 
 export interface BuildAppOptions {
   /** The single static bearer token every `/v1/*` request must present. */
@@ -46,6 +47,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     },
     { prefix: '/v1' },
   );
+
+  // DEMO FIXTURE mimic of the Entra token endpoint, Graph and Defender for
+  // manar-api's Microsoft connector; its own auth, see microsoft/fixture.ts.
+  void app.register(microsoftFixtureRoutes, { prefix: '/microsoft' });
 
   return app;
 }

@@ -12,6 +12,7 @@ import type {
 import type { SecretProvider } from '../database/secret-provider';
 import type { HttpToolAdapter } from './http-tool.adapter';
 import type { McpToolAdapter } from './mcp-tool.adapter';
+import type { MicrosoftToolAdapter } from './microsoft-tool.adapter';
 import type {
   ToolActionRecord,
   ToolRecord,
@@ -117,6 +118,10 @@ function makeService(options: {
   const mcpAdapter = {
     invoke: vi.fn(),
   } as unknown as McpToolAdapter;
+  const invokeMicrosoft = vi.fn().mockResolvedValue(options.toolResult);
+  const microsoftAdapter = {
+    invoke: invokeMicrosoft,
+  } as unknown as MicrosoftToolAdapter;
   const recordSafely = vi
     .fn<AuditService['recordSafely']>()
     .mockResolvedValue(undefined);
@@ -152,6 +157,7 @@ function makeService(options: {
     analyzePromptInjection,
     resolveSecret,
     invokeHttp,
+    invokeMicrosoft,
   };
 }
 
@@ -443,5 +449,21 @@ describe('CredentialBrokerService audit-before-side-effect (R2)', () => {
     ).rejects.toBeInstanceOf(EnforcementDependencyUnavailableException);
     expect(resolveSecret).not.toHaveBeenCalled();
     expect(invokeHttp).not.toHaveBeenCalled();
+  });
+});
+
+describe('CredentialBrokerService protocol dispatch', () => {
+  it('sends a MICROSOFT tool to MicrosoftToolAdapter with the broker-resolved secret, never to the HTTP adapter', async () => {
+    const { service, invokeHttp, invokeMicrosoft } = makeService({
+      toolResult: { success: true, data: { value: [] } },
+      tool: makeTool({ protocol: 'MICROSOFT' }),
+    });
+    const { tenantClient } = fakeTenantClient();
+
+    await service.invoke(tenantClient, baseInput);
+
+    expect(invokeHttp).not.toHaveBeenCalled();
+    expect(invokeMicrosoft).toHaveBeenCalledTimes(1);
+    expect(invokeMicrosoft.mock.calls[0]![4]).toBe('resolved-secret');
   });
 });

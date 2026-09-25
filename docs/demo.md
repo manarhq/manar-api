@@ -173,6 +173,31 @@ It also writes a gitignored handoff file, `.manar-demo/tenant-credentials.json`
 list) — see `docs/demo.md`'s "Why a credentials file" note below for why
 this exists.
 
+### Optional: the Microsoft connector against the DEMO FIXTURE
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build demo-soc-tools  # image with /microsoft
+pnpm manar tenants:migrate                                               # adds ToolProtocol MICROSOFT
+pnpm manar demo:seed --microsoft-fixture-url http://localhost:3101
+```
+
+This additionally registers `microsoft-graph` and `microsoft-defender`
+(ADR-0004) pointed at the local mimic of the Entra token endpoint, Graph
+and Defender served by demo-soc-tools under `/microsoft`, stores the
+fixture's app secret in OpenBao, publishes "Microsoft Connector Approval
+Policy" (every Microsoft mutation needs approval, reads are allowed) and
+creates a task (`microsoftTaskId` in the credentials file) letting the SOC
+Response Agent read fixture incident `4201`, investigate its user and
+device, and, after approval, disable the user, revoke sessions and
+isolate the device.
+
+Say it out loud in the demo: **this is a DEMO FIXTURE, not Microsoft and not
+a customer tenant.** Every object it returns carries
+`"_dataOrigin": "DEMO_FIXTURE"`, and the tool descriptions say so. Its state
+is at `GET http://localhost:3101/microsoft/_fixture/state` and resets with
+`POST /microsoft/_fixture/reset`. The automated proof is
+`test/microsoft-connector.e2e-spec.ts`.
+
 ## 2. Run the demo agent script
 
 ```bash

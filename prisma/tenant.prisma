@@ -590,10 +590,13 @@ model PolicyVersion {
 /// server URL) — both protocols go through the *identical*
 /// `CredentialBrokerService`/`AuthorizationService` pipeline; there is no
 /// separate, weaker path for MCP. See docs/tool-gateway.md and
-/// docs/mcp.md.
+/// docs/mcp.md. `MICROSOFT` -> `MicrosoftToolAdapter` (Phase 2, ADR-0004):
+/// Graph or Defender for Endpoint via an OAuth2 client-credentials token,
+/// actions from the fixed catalog in `src/tools/microsoft-actions.ts`.
 enum ToolProtocol {
   HTTP
   MCP
+  MICROSOFT
 }
 
 /// A registered tool a task's grants may authorize an agent to call —

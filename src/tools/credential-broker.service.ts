@@ -18,6 +18,7 @@ import {
 } from './credential-broker.errors';
 import { HttpToolAdapter } from './http-tool.adapter';
 import { McpToolAdapter } from './mcp-tool.adapter';
+import { MicrosoftToolAdapter } from './microsoft-tool.adapter';
 import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
 import { failClosed } from '../common/fail-closed/fail-closed';
 import { ToolRegistryService } from './tool-registry.service';
@@ -186,9 +187,9 @@ export interface CredentialBrokerInvokeInput {
  *      held only in a local variable for exactly as long as step 4 takes —
  *      never logged, never assigned to any field that could end up in the
  *      `ToolInvocation` row or the returned `ToolInvocationResult`.
- *   4. Dispatches to `HttpToolAdapter` or `McpToolAdapter` based on
- *      `Tool.protocol` — the identical two-adapter set, no separate path
- *      for either protocol.
+ *   4. Dispatches to `HttpToolAdapter`, `McpToolAdapter` or
+ *      `MicrosoftToolAdapter` (ADR-0004) based on `Tool.protocol` — all
+ *      three behind this same pipeline, no separate path for any protocol.
  *   5. Records a `ToolInvocation` row (`SUCCESS`/`FAILURE`, timing,
  *      `resource`, a short `errorMessage` on failure) — never the resolved
  *      credential, never a raw request/response payload (an adapter's
@@ -347,7 +348,11 @@ export class CredentialBrokerService {
         tool.credentialReference,
       );
       const adapter =
-        tool.protocol === 'MCP' ? this.mcpAdapter : this.httpAdapter;
+        tool.protocol === 'MCP'
+          ? this.mcpAdapter
+          : tool.protocol === 'MICROSOFT'
+            ? this.microsoftAdapter
+            : this.httpAdapter;
       result = await adapter.invoke(
         tool,
         action,
