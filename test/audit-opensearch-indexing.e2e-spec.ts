@@ -113,6 +113,7 @@ function fakeConfigService(
     WEBHOOK_DELIVERY_MAX_ATTEMPTS: 6,
     IDEMPOTENCY_KEY_TTL_MS: 86_400_000,
     SSRF_ALLOWED_HOSTS: '127.0.0.1,localhost',
+    SSRF_ALLOW_LOOPBACK: true,
     ...overrides,
   };
   return {

@@ -10,7 +10,10 @@ import {
   safeOutboundFetch,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
-import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
+import {
+  ssrfPolicyFromConfig,
+  type SsrfPolicy,
+} from '../common/ssrf/ssrf.config';
 import {
   signWebhookRequest,
   WEBHOOK_DELIVERY_ID_HEADER,
@@ -36,15 +39,13 @@ const SecretReferenceDescriptorSchema = z.object({
 @Injectable()
 export class WebhookDeliveryService {
   private readonly logger = new Logger(WebhookDeliveryService.name);
-  private readonly ssrfAllowedHosts: Set<string>;
+  private readonly ssrfPolicy: SsrfPolicy;
 
   constructor(
     @Inject(SECRET_PROVIDER) private readonly secretProvider: SecretProvider,
     private readonly configService: ConfigService<AppConfig, true>,
   ) {
-    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
-      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
-    );
+    this.ssrfPolicy = ssrfPolicyFromConfig(configService);
   }
 
   /**
@@ -100,7 +101,7 @@ export class WebhookDeliveryService {
 
     try {
       await assertSafeOutboundUrl(endpoint.url, {
-        allowedHosts: this.ssrfAllowedHosts,
+        ...this.ssrfPolicy,
       });
     } catch (error) {
       await this.recordAttempt(tenantClient, webhookDeliveryId, {
@@ -151,7 +152,7 @@ export class WebhookDeliveryService {
         },
         body,
         signal: controller.signal,
-        allowedHosts: this.ssrfAllowedHosts,
+        ...this.ssrfPolicy,
       });
       responseStatus = response.status;
       success = response.ok;

@@ -7,7 +7,10 @@ import {
   assertSafeOutboundUrl,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
-import { parseSsrfAllowedHosts } from '../common/ssrf/ssrf.config';
+import {
+  ssrfPolicyFromConfig,
+  type SsrfPolicy,
+} from '../common/ssrf/ssrf.config';
 import { validateAgainstSchema } from './json-schema-validator.util';
 import type {
   ToolInvocationResult,
@@ -91,12 +94,10 @@ const MCP_CLOSE_TIMEOUT_MS = 2_000;
 @Injectable()
 export class McpToolAdapter implements ToolProtocolAdapter {
   private readonly logger = new Logger(McpToolAdapter.name);
-  private readonly ssrfAllowedHosts: Set<string>;
+  private readonly ssrfPolicy: SsrfPolicy;
 
   constructor(configService: ConfigService<AppConfig, true>) {
-    this.ssrfAllowedHosts = parseSsrfAllowedHosts(
-      configService.get('SSRF_ALLOWED_HOSTS', { infer: true }),
-    );
+    this.ssrfPolicy = ssrfPolicyFromConfig(configService);
   }
 
   async invoke(
@@ -132,7 +133,7 @@ export class McpToolAdapter implements ToolProtocolAdapter {
     // rather than trusted from registration time.
     try {
       await assertSafeOutboundUrl(tool.baseEndpoint, {
-        allowedHosts: this.ssrfAllowedHosts,
+        ...this.ssrfPolicy,
       });
     } catch (error) {
       if (error instanceof UnsafeOutboundUrlError) {
@@ -157,6 +158,7 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       },
     );
 
+    let callSent = false;
     try {
       // The SDK's own default for `initialize` is 60s, so without an
       // explicit timeout here this adapter's declared 10s budget applied to
@@ -166,6 +168,7 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       // the final call.
       await client.connect(transport, { timeout: MCP_REQUEST_TIMEOUT_MS });
 
+      callSent = true;
       const result = await client.callTool(
         {
           name: action.name,
@@ -202,6 +205,16 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       this.logger.warn(
         `MCP tool call to "${tool.name}/${action.name}" failed: ${message}`,
       );
+      // Gate 0 finding R1: once `tools/call` was sent, a lost answer on a
+      // mutating or destructive action means the side effect may have
+      // happened. Connect failures happen before anything was asked.
+      if (callSent && (action.mutating || action.destructive)) {
+        return {
+          success: false,
+          errorMessage: `MCP call failed: ${message}`,
+          outcomeUnknown: true,
+        };
+      }
       return { success: false, errorMessage: `MCP call failed: ${message}` };
     } finally {
       // Bounded like every other step: a server that never completes its

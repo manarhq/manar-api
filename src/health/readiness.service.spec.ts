@@ -1,4 +1,5 @@
-import { createServer, type Server } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer, type AddressInfo, type Server } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
@@ -60,10 +61,14 @@ function makeService(
     tenantCheckHealth?: (tenantId: string) => Promise<boolean>;
     /** Point the required OpenFGA probe at the live socket above. */
     openfgaReachable?: boolean;
+    openbaoAddr?: string;
   } = {},
 ): ReadinessService {
   const configService = {
     get: (key: string) => {
+      if (key === 'OPENBAO_ADDR' && overrides.openbaoAddr) {
+        return overrides.openbaoAddr;
+      }
       if (key === 'OPENFGA_API_URL' && overrides.openfgaReachable) {
         return `http://${reachableAddress}`;
       }
@@ -211,5 +216,39 @@ describe('ReadinessService.check', () => {
     // nothing must not report a green it did not earn.
     expect(report.dependencies['postgres-tenant']?.status).toBe('degraded');
     expect(report.ready).toBe(true);
+  });
+});
+
+describe('ReadinessService OpenBao probe (F1)', () => {
+  async function openBaoFixture(status: number) {
+    const server = createHttpServer((_req, res) => {
+      res.statusCode = status;
+      res.end(status === 200 ? '-----BEGIN CERTIFICATE-----' : '');
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    return { server, addr: `http://127.0.0.1:${port}` };
+  }
+
+  it('reports OpenBao unhealthy when it answers but the agent PKI is gone', async () => {
+    const { server, addr } = await openBaoFixture(404);
+    try {
+      const report = await makeService({ openbaoAddr: addr }).check();
+      expect(report.dependencies.openbao?.status).not.toBe('ok');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports OpenBao ok when the agent PKI is mounted', async () => {
+    const { server, addr } = await openBaoFixture(200);
+    try {
+      const report = await makeService({ openbaoAddr: addr }).check();
+      expect(report.dependencies.openbao?.status).toBe('ok');
+    } finally {
+      server.close();
+    }
   });
 });

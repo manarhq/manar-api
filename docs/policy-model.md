@@ -202,7 +202,7 @@ conventions:
 | `POST /policies/:id/versions`                    | same                                                      | New `DRAFT` version — `content`, `contentYaml`, or `rollbackToVersionId`             |
 | `POST /policies/:id/versions/:versionId/publish` | `SECURITY_ADMIN`\|`TENANT_OWNER` only                     | `DRAFT` → `PUBLISHED`                                                                |
 | `GET /policies/:id`                              | same as create                                            | Policy + its current (latest `PUBLISHED`) content                                    |
-| `GET /policies/:id/versions`                     | same                                                      | Full immutable version history                                                       |
+| `GET /policies/:id/versions`                     | same                                                      | Full version history (append-only)                                                   |
 | `GET /policies/:id/versions/:versionId`          | same                                                      | One version; `?format=yaml` returns YAML text instead of JSON                        |
 
 No update/delete endpoint for a published version exists anywhere in this

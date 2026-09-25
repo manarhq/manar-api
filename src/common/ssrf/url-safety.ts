@@ -70,8 +70,8 @@ function isPrivateOrReservedIpv6(address: string): boolean {
   const lower = address.toLowerCase();
   if (lower === '::1' || lower === '::') return true;
 
-  const v4Mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-  if (v4Mapped?.[1]) return isPrivateOrReservedIpv4(v4Mapped[1]);
+  const embedded = embeddedIpv4(lower);
+  if (embedded) return isPrivateOrReservedIpv4(embedded);
 
   // fc00::/7 -- first 7 bits are 1111 110x, i.e. the first hex nibble is c-f
   // and covers "fc"/"fd" as the first byte.
@@ -80,6 +80,63 @@ function isPrivateOrReservedIpv6(address: string): boolean {
   if (/^fe[89ab][0-9a-f]:/.test(lower)) return true;
 
   return false;
+}
+
+/**
+ * The IPv4 address carried inside an IPv4-mapped (`::ffff:0:0/96`),
+ * IPv4-compatible (`::/96`) or NAT64 (`64:ff9b::/96`) IPv6 address, in
+ * either the dotted form or the hex form the WHATWG URL parser produces
+ * (`new URL('http://[::ffff:127.0.0.1]/').hostname` is `[::ffff:7f00:1]`).
+ * Gate 0 finding S1: only the dotted mapped form used to be recognised, so
+ * `http://[::ffff:7f00:1]/` reached loopback and `[::ffff:a9fe:a9fe]` the
+ * metadata service.
+ */
+function embeddedIpv4(lowerIpv6: string): string | null {
+  const match =
+    /^(?:::ffff:|::|64:ff9b::)(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(
+      lowerIpv6,
+    );
+  if (!match) return null;
+  if (match[1]) return match[1];
+  const high = parseInt(match[2] as string, 16);
+  const low = parseInt(match[3] as string, 16);
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff].join('.');
+}
+
+type AddressClass = 'public' | 'private' | 'loopback' | 'never';
+
+/**
+ * `private` (RFC 1918, CGNAT, benchmarking, unique-local) may be reached
+ * through an allow-listed hostname. `loopback` only with `allowLoopback`
+ * as well (local development). `never` (link-local and the metadata
+ * service, unspecified, multicast, reserved) is never reachable.
+ */
+function classifyAddress(address: string): AddressClass {
+  let v4: string | null = isIPv4(address) ? address : null;
+  if (!v4 && isIPv6(address)) {
+    const lower = address.toLowerCase();
+    if (lower === '::1') return 'loopback';
+    v4 = embeddedIpv4(lower);
+    if (!v4) {
+      if (/^fe[89ab][0-9a-f]:/.test(lower) || lower === '::') return 'never';
+      if (/^f[cd][0-9a-f]{2}:/.test(lower)) return 'private';
+      return isPrivateOrReservedIpv6(lower) ? 'never' : 'public';
+    }
+  }
+  if (!v4) return 'never';
+  if (!isPrivateOrReservedIpv4(v4)) return 'public';
+  const [a, b] = v4.split('.').map(Number) as [number, number];
+  if (a === 127) return 'loopback';
+  if (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 198 && (b === 18 || b === 19))
+  ) {
+    return 'private';
+  }
+  return 'never';
 }
 
 /**
@@ -119,7 +176,11 @@ function isPrivateOrReservedIpv6(address: string): boolean {
  */
 export async function assertSafeOutboundUrl(
   rawUrl: string,
-  options: { lookup?: DnsLookupFn; allowedHosts?: ReadonlySet<string> } = {},
+  options: {
+    lookup?: DnsLookupFn;
+    allowedHosts?: ReadonlySet<string>;
+    allowLoopback?: boolean;
+  } = {},
 ): Promise<void> {
   const lookup = options.lookup ?? defaultLookup;
   let parsed: URL;
@@ -138,9 +199,10 @@ export async function assertSafeOutboundUrl(
   // IPv6 range checks above both expect the bare address form.
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
 
-  if (options.allowedHosts?.has(hostname)) {
-    return;
-  }
+  // Gate 0 finding S2: the allowlist used to skip resolution and every
+  // range check. It now only widens which *classes* of address this host
+  // may resolve to, and never to link-local or the metadata service.
+  const allowListed = options.allowedHosts?.has(hostname) ?? false;
 
   let addresses: ResolvedAddress[];
   try {
@@ -160,12 +222,14 @@ export async function assertSafeOutboundUrl(
   }
 
   for (const { address } of addresses) {
-    const unsafe = isIPv4(address)
-      ? isPrivateOrReservedIpv4(address)
-      : isIPv6(address)
-        ? isPrivateOrReservedIpv6(address)
-        : true; // neither -- fail closed, this should never happen from a real dns.lookup
-    if (unsafe) {
+    const addressClass = classifyAddress(address);
+    const permitted =
+      addressClass === 'public' ||
+      (addressClass === 'private' && allowListed) ||
+      (addressClass === 'loopback' &&
+        allowListed &&
+        options.allowLoopback === true);
+    if (!permitted) {
       throw new UnsafeOutboundUrlError(
         rawUrl,
         `resolves_to_private_or_reserved_address:${address}`,
@@ -234,8 +298,10 @@ export interface SafeOutboundFetchOptions {
   headers: Record<string, string>;
   body?: string;
   signal?: AbortSignal;
-  /** Threaded through to `assertSafeOutboundUrl` on every hop — see `SSRF_ALLOWED_HOSTS`. */
+  /** Applied to the first hop only; redirect targets must be public (Gate 0 S2). See `SSRF_ALLOWED_HOSTS`. */
   allowedHosts?: ReadonlySet<string>;
+  /** Development only — see `SSRF_ALLOW_LOOPBACK`. */
+  allowLoopback?: boolean;
   /** Injectable DNS resolver, for tests — see `DnsLookupFn`. */
   lookup?: DnsLookupFn;
   /** Injectable `fetch`, for tests. Defaults to the global one. */
@@ -303,10 +369,16 @@ export async function safeOutboundFetch(
   let headers = { ...options.headers };
 
   for (let hop = 0; ; hop += 1) {
-    await assertSafeOutboundUrl(currentUrl, {
-      lookup: options.lookup,
-      allowedHosts: options.allowedHosts,
-    });
+    await assertSafeOutboundUrl(
+      currentUrl,
+      hop === 0
+        ? {
+            lookup: options.lookup,
+            allowedHosts: options.allowedHosts,
+            allowLoopback: options.allowLoopback,
+          }
+        : { lookup: options.lookup },
+    );
 
     const response = await fetchImpl(currentUrl, {
       method,
@@ -348,6 +420,14 @@ export async function safeOutboundFetch(
     await discardBody(response);
 
     if (next.origin !== new URL(currentUrl).origin) {
+      // 307/308 replay the body, which the agent supplied for the original
+      // tool. It is not forwarded to another origin (Gate 0 finding S2).
+      if (body !== undefined && !shouldRewriteToGet(response.status, method)) {
+        throw new UnsafeOutboundUrlError(
+          next.toString(),
+          'cross_origin_redirect_would_replay_body',
+        );
+      }
       headers = stripCredentialHeaders(headers);
     }
 

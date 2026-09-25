@@ -32,6 +32,7 @@ import {
   ToolNotFoundError,
 } from './credential-broker.errors';
 import { CredentialBrokerService } from './credential-broker.service';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import { ToolInvokeRequestSchema } from './tool-invoke.validation';
 
 /**
@@ -92,14 +93,17 @@ export class ToolInvokeController {
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
     const input = parseBodyOrThrow(ToolInvokeRequestSchema, body);
-    const tenantClient = await this.tenantDatabaseManager.getClient(
-      agent.tenant.id,
+    const tenantClient = await failClosed('tenant-db', () =>
+      this.tenantDatabaseManager.getClient(agent.tenant.id),
     );
 
     if (input.grantToken) {
-      const validation = await this.grantService.validateAndConsumeGrant(
-        tenantClient,
-        {
+      const grantToken = input.grantToken;
+      // Gate 0 finding S33: a grant-store or kill-switch lookup failure is a
+      // 503 `enforcement_dependency_unavailable`, not a bare 500, and every
+      // redemption, accepted or not, leaves an audit event.
+      const validation = await failClosed('grant-store', () =>
+        this.grantService.validateAndConsumeGrant(tenantClient, {
           tenantId: agent.tenant.id,
           agentId: agent.agent.id,
           taskId: input.taskId,
@@ -107,9 +111,24 @@ export class ToolInvokeController {
           actionId: input.actionId,
           resource: input.resource,
           params: input.params,
-          grantToken: input.grantToken,
-        },
+          grantToken,
+        }),
       );
+      await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
+        eventType: validation.valid
+          ? AUDIT_EVENT_TYPES.APPROVAL_GRANT_REDEEMED
+          : AUDIT_EVENT_TYPES.APPROVAL_GRANT_REJECTED,
+        actor: { type: 'agent', id: agent.agent.id },
+        data: {
+          taskId: input.taskId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          ...(validation.valid
+            ? { grantId: validation.grantId }
+            : { reason: validation.reason }),
+        },
+      });
       if (!validation.valid) {
         throw new ForbiddenException({
           decision: 'DENY',

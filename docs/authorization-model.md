@@ -46,7 +46,7 @@ every time this process boots (`OpenFgaClientService.onModuleInit`,
    `src/authorization/model/manar.fga`), transform it to JSON via
    `@openfga/syntax-transformer`, and compare it against the store's
    latest model. If they match, reuse that model's ID; otherwise write a
-   new model version (OpenFGA model versions are immutable and purely
+   new model version (OpenFGA model versions are write-once and purely
    additive, so this never mutates or loses an old version — it just
    avoids churning `authorizationModelId` on every boot when the DSL
    hasn't actually changed, e.g. in local dev with hot reload).
@@ -108,7 +108,7 @@ type grant
 `of_task`'s `assigned_agent`, right now" — rather than ever being a tuple
 written directly against an agent. An agent that stops being a task's
 `assigned_agent` (which never actually happens in this phase — task
-assignment is immutable after creation — but the model doesn't special-case
+assignment cannot be changed after creation — but the model doesn't special-case
 that) loses `can_use` automatically, with no tuple to delete. This is the
 literal implementation of Section 18: "agents start with effectively zero
 useful permanent authority" — `Agent.capabilities` stays an unused empty

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { EnforcementDependencyUnavailableException } from '../common/fail-closed/fail-closed';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import type { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
@@ -97,6 +98,7 @@ function makeService(options: {
   analyzeDlp?: ReturnType<typeof vi.fn>;
   tool?: ToolRecord;
   action?: ToolActionRecord;
+  record?: ReturnType<typeof vi.fn>;
 }) {
   const toolRegistry = {
     findToolAction: vi.fn().mockResolvedValue({
@@ -105,20 +107,20 @@ function makeService(options: {
     }),
     findToolByName: vi.fn(),
   } as unknown as ToolRegistryService;
-  const secretProvider: SecretProvider = {
-    resolve: vi.fn().mockResolvedValue('resolved-secret'),
-  };
-  const httpAdapter = {
-    invoke: vi.fn().mockResolvedValue(options.toolResult),
-  } as unknown as HttpToolAdapter;
+  const resolveSecret = vi.fn().mockResolvedValue('resolved-secret');
+  const secretProvider: SecretProvider = { resolve: resolveSecret };
+  const invokeHttp = vi.fn().mockResolvedValue(options.toolResult);
+  const httpAdapter = { invoke: invokeHttp } as unknown as HttpToolAdapter;
   const mcpAdapter = {
     invoke: vi.fn(),
   } as unknown as McpToolAdapter;
   const recordSafely = vi
     .fn<AuditService['recordSafely']>()
     .mockResolvedValue(undefined);
+  const record = options.record ?? vi.fn().mockResolvedValue({});
   const auditService = {
     recordSafely,
+    record,
   } as unknown as AuditService;
   const analyzeDlp = options.analyzeDlp ?? vi.fn().mockResolvedValue(null);
   const analyzePromptInjection =
@@ -137,7 +139,14 @@ function makeService(options: {
     aiAdvisoryClient,
   );
 
-  return { service, recordSafely, analyzeDlp, analyzePromptInjection };
+  return {
+    service,
+    recordSafely,
+    analyzeDlp,
+    analyzePromptInjection,
+    resolveSecret,
+    invokeHttp,
+  };
 }
 
 describe('CredentialBrokerService prompt-injection advisory hook (structured results — Task 5)', () => {
@@ -346,5 +355,20 @@ describe('CredentialBrokerService prompt-injection advisory hook (structured res
       ).resolves.toMatchObject({ success: true });
       expect(analyzePromptInjection).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('CredentialBrokerService audit-before-side-effect (R2)', () => {
+  it('fails closed with 503 and never resolves a credential or contacts the tool when the started audit write fails', async () => {
+    const { service, resolveSecret, invokeHttp } = makeService({
+      toolResult: { success: true, data: {} },
+      record: vi.fn().mockRejectedValue(new Error('disk full')),
+    });
+
+    await expect(
+      service.invoke(fakeTenantClient().tenantClient, baseInput),
+    ).rejects.toBeInstanceOf(EnforcementDependencyUnavailableException);
+    expect(resolveSecret).not.toHaveBeenCalled();
+    expect(invokeHttp).not.toHaveBeenCalled();
   });
 });

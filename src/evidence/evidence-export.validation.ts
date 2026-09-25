@@ -35,3 +35,11 @@ export const EvidenceExportRequestSchema = z
   );
 
 export type EvidenceExportRequest = z.infer<typeof EvidenceExportRequestSchema>;
+
+/** `POST /evidence/verify`: an exported bundle and its signature, as `POST /evidence/export` returned them. */
+export const EvidenceVerifyRequestSchema = z.object({
+  bundle: z
+    .unknown()
+    .refine((value) => value !== undefined, 'bundle is required'),
+  signature: z.string().min(1),
+});

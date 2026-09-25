@@ -25,7 +25,7 @@
  *      iam.disable-user in response -> DENIED, by deterministic task
  *      scope, regardless of what the tool output said (Section 72) — the
  *      injected text was never trusted or executed by anything here.
- *   4. edr.isolate-host on WS-042 -> REQUIRE_APPROVAL.
+ *   4. edr.isolate-host on WS-042 -> APPROVAL_REQUIRED.
  *   5. A human (the "approver" persona) decides APPROVE via the real
  *      POST /approvals/:id/decide.
  *   6. The agent polls, retries with the issued grant -> EXECUTE — and
@@ -41,7 +41,6 @@
 import { readFileSync } from 'node:fs';
 import { FileIdentityStore, ManarAgent } from '@manar/sdk-node';
 import type { InvokeToolResult } from '@manar/sdk-node';
-import { verifyEvidenceBundle } from '../src/evidence/evidence-signing.util';
 
 const API_ENDPOINT =
   process.env.MANAR_DEMO_API_ENDPOINT ?? 'http://localhost:3000';
@@ -53,9 +52,6 @@ const DEMO_TOOLS_BASE_URL =
   process.env.DEMO_SOC_TOOLS_BASE_URL ?? 'http://localhost:3101';
 const DEMO_TOOLS_API_KEY =
   process.env.DEMO_TOOLS_API_KEY ?? 'manar-dev-demo-tools-key';
-const EVIDENCE_SIGNING_SECRET =
-  process.env.APPROVAL_GRANT_SIGNING_SECRET ??
-  'dev-only-approval-grant-signing-secret-change-me';
 const CREDENTIALS_FILE_PATH =
   process.env.MANAR_DEMO_CREDENTIALS_FILE ??
   '.manar-demo/tenant-credentials.json';
@@ -333,7 +329,7 @@ async function main(): Promise<void> {
     `Correctly DENIED (reason: "${iamAttempt.reason}") -- the injected instruction was never trusted or executed.`,
   );
 
-  section('4. EDR isolate-host on WS-042 -> REQUIRE_APPROVAL');
+  section('4. EDR isolate-host on WS-042 -> APPROVAL_REQUIRED');
   const isolateAttempt = await manar.invokeTool({
     taskId: credentials.taskId,
     toolId: 'edr',
@@ -457,17 +453,23 @@ async function main(): Promise<void> {
   }>('POST', '/evidence/export', auditorToken, {
     taskId: credentials.taskId,
   });
-  const verified = await verifyEvidenceBundle(
-    exportResult.bundle,
-    exportResult.signature.signature,
-    EVIDENCE_SIGNING_SECRET,
+  // Verified by the API, never with the signing secret in this process
+  // (Gate 0 finding R9).
+  const verified = await httpJson<{ valid: boolean; reason?: string }>(
+    'POST',
+    '/evidence/verify',
+    auditorToken,
+    {
+      bundle: exportResult.bundle,
+      signature: exportResult.signature.signature,
+    },
   );
   assert(
     verified.valid,
     `expected the exported evidence bundle's signature to verify, got ${JSON.stringify(verified)}`,
   );
   console.log(
-    `Evidence bundle exported (exportId=${exportResult.exportId}) and its signature independently verified: valid.`,
+    `Evidence bundle exported (exportId=${exportResult.exportId}) and its signature verified by the API: valid.`,
   );
 
   section('Demo complete — every checkpoint passed.');

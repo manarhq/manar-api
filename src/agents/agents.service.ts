@@ -248,12 +248,21 @@ export class AgentsService {
     });
     if (!agent) throw new AgentNotFoundError(agentId);
 
-    await this.certificateAuthority.revoke(tenantClient, agentId, reason);
+    const { caRevocationPending } = await this.certificateAuthority.revoke(
+      tenantClient,
+      agentId,
+      reason,
+    );
 
     await this.auditService.recordSafely(tenantClient, tenantId, {
       eventType: AUDIT_EVENT_TYPES.AGENT_REVOKED,
       actor: { type: 'human', id: revokedByUserId },
-      data: { agentId, agentIdentifier: agent.identifier, reason },
+      data: {
+        agentId,
+        agentIdentifier: agent.identifier,
+        reason,
+        caRevocationPending,
+      },
     });
   }
 
