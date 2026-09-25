@@ -34,3 +34,17 @@ export class DelegationExceedsParentAuthorityError extends Error {
     this.name = 'DelegationExceedsParentAuthorityError';
   }
 }
+
+/**
+ * Thrown when the request asks for a higher `riskCeiling` than the parent
+ * task's, or for more executions than the parent has left (including
+ * unlimited when the parent is limited). Rejected rather than clamped, like
+ * the grant subset check above; omitted values are clamped instead (see
+ * DelegationService.delegate). Always thrown before any write.
+ */
+export class DelegationExceedsParentLimitsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DelegationExceedsParentLimitsError';
+  }
+}
