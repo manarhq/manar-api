@@ -41,8 +41,10 @@ All three surfaces are in manar-api, on the mTLS agent listener (`AgentMtlsAppMo
       blocks as `scan_depth_exceeded`.
    5. manar-ai `AnalyzeDlp` on the redacted text. **`null` blocks** (503; S6 closed on this
       path). A non-`system` finding of type API key, private key, JWT or credential blocks.
-      E-mail and other PII findings do not block: a SOC agent cannot reason about an
-      incident without the user's UPN. The `source: "system"` marker never blocks (S7).
+      E-mail findings do not block: a SOC agent cannot reason about an incident without
+      the user's UPN. `TYPE_PII` / `TYPE_OTHER` findings are **redacted in place** per
+      string leaf before upstream (see "Result DLP", same code). The `source: "system"`
+      marker never blocks (S7).
    6. Upstream `POST <base>/chat/completions`: `LLM_PROVIDER=ollama` (default,
       `LLM_OLLAMA_BASE_URL` default `http://localhost:11434/v1`, `LLM_MODEL` default
       `qwen3.5:9b`) or `azure_openai` (`LLM_AZURE_OPENAI_ENDPOINT`,
@@ -78,14 +80,32 @@ through both.
   `{"redacted":true,"reason":"sensitive_data_detected","findingCount":N,"findingTypes":[...]}`.
 - UAE PII (Emirates ID, UAE IBAN, payment card, UAE mobile) → **replaced in place** with
   `[REDACTED:<TYPE>]`; the rest of the JSON is returned.
-- E-mail addresses / UPNs and manar-ai `TYPE_PII`/`TYPE_OTHER` findings → **returned
-  unchanged**. The agent needs the UPN to act, and the data goes only to the customer's own
-  model deployment. Before this decision any real manar-ai finding (an e-mail is
-  deterministic HIGH) replaced the whole result, so the SOC agent could not read an incident
-  (docs/reports/FIRST-AGENT-RUN-2026-09-25.md, workspace repo).
+- manar-ai `TYPE_PII` / `TYPE_OTHER` (non-`system`) → **the string leaf that carries the
+  finding is replaced whole** with `[REDACTED:PII]` / `[REDACTED:OTHER]` (owner decision
+  25 Sep, second half). **Granularity is the string leaf, not the span.** manar-ai's
+  `DlpFinding` carries a type, a confidence and a model-written preview, no offsets, and
+  `AnalyzeDlp` returns no redacted content; these types come only from manar-ai's model
+  layer, so there is no pattern to re-apply. `classifyDlp` therefore locates the leaf by
+  bisection: the distinct string leaves are split in halves and each flagged half is
+  re-scanned until single leaves remain (about 2 × log2(leaves) extra `AnalyzeDlp` calls per
+  flagged leaf, siblings in parallel, each under the hot-lane deadline), bounded by
+  `DLP_LOCATE_MAX_CALLS` (32). Every occurrence of a flagged leaf value is replaced. A
+  whole JSON field (e.g. `displayName`) goes, not just the name inside it; on the proxy
+  path a leaf is a whole message `content`, so a flagged tool message is replaced whole.
+  If the finding cannot be located (bound reached, a locating call returns `null`, or a
+  flagged group reproduces in neither half) the prompt is refused (`dlp_policy_violation`)
+  / the result withheld with `findingTypes` naming the type: never passed. A credential
+  finding that only appears while locating also blocks. No proto change was needed.
+- E-mail addresses / UPNs → **returned unchanged**. The agent needs the UPN to act, and the
+  data goes only to the customer's own model deployment. Before this decision any real
+  manar-ai finding (an e-mail is deterministic HIGH) replaced the whole result, so the SOC
+  agent could not read an incident (docs/reports/FIRST-AGENT-RUN-2026-09-25.md, workspace
+  repo).
 - Each withhold or in-place redaction records `dlp.result_redacted` with `mode`
-  (`withheld` / `redacted_in_place`), per-type floor match counts and manar-ai finding
-  types/previews. Never the values.
+  (`withheld` / `redacted_in_place`), per-type floor match counts, `advisoryRedactedCounts`
+  (leaves replaced per manar-ai type), `unlocatedTypes`, and the blocking manar-ai finding
+  types/previews. Never the values. The proxy's `llm.request` carries
+  `dlp.advisoryRedactedCounts` the same way.
 - manar-ai unavailable (`null`) on this path: unchanged, the manar-ai check is skipped and
   does not block (unlike the proxy, where `null` is a 503). The tool call has already
   happened; the result goes to the agent, whose next LLM call passes through the proxy, where

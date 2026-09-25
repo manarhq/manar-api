@@ -321,6 +321,46 @@ describe('LlmProxyService', () => {
     );
   });
 
+  it('redacts the message manar-ai flags as generic PII before upstream; e-mail passes', async () => {
+    const { service, upstream, aiAdvisory, audit } = setup();
+    aiAdvisory.analyzeDlp.mockImplementation(
+      ({ content }: { content: string }) =>
+        Promise.resolve({
+          overallSeverity: 'SEVERITY_LOW',
+          findings: content.includes('Fatima')
+            ? [
+                {
+                  type: 'TYPE_PII',
+                  confidence: 0.8,
+                  redactedPreview: 'F...',
+                  source: 'ai',
+                },
+              ]
+            : [],
+        }),
+    );
+    await service.complete(AGENT, 'task-1', {
+      messages: [
+        { role: 'user', content: SECRET_PROMPT },
+        { role: 'tool', content: 'owner Fatima Al Mansoori' },
+      ],
+    });
+    const sent = (upstream.chat.mock.calls[0]![0] as { messages: unknown[] })
+      .messages;
+    expect(sent).toEqual([
+      { role: 'user', content: SECRET_PROMPT },
+      { role: 'tool', content: '[REDACTED:PII]' },
+    ]);
+    const event = audit.record.mock.calls[0]?.[2] as {
+      data: { dlp: unknown };
+    };
+    expect(event.data.dlp).toMatchObject({
+      advisoryFindingTypes: ['TYPE_PII'],
+      advisoryRedactedCounts: { TYPE_PII: 1 },
+    });
+    expect(JSON.stringify(audit.record.mock.calls)).not.toContain('Fatima');
+  });
+
   it('refuses with 429 llm_budget_exhausted once the task budget is used', async () => {
     const { service, upstream } = setup({ used: 1000, budget: 1000 });
     await expectDeny(

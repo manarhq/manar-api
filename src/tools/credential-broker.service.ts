@@ -7,14 +7,9 @@ import type { SecretProvider } from '../database/secret-provider';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
-import type { DlpAdvisory } from '../ai-advisory/ai-advisory-client.service';
 import type { DataClassification } from '../common/data-classification';
 import { redactedToolResultPlaceholder } from './dlp-redaction.util';
-import {
-  applyDlpFloor,
-  blockingAdvisoryFindings,
-  dlpScanText,
-} from '../common/dlp/dlp-classification';
+import { classifyDlp } from '../common/dlp/dlp-classification';
 import {
   DlpBlockedError,
   ToolActionNotFoundError,
@@ -447,12 +442,15 @@ export class CredentialBrokerService {
    *   1. Result DLP (ADR-0002 "Result DLP"), the same classification the
    *      LLM proxy applies to prompts (`src/common/dlp/dlp-classification.ts`):
    *      the deterministic floor runs first, in-process, then manar-ai
-   *      `analyzeDlp` on the floor's PII-redacted text.
+   *      `analyzeDlp` on the floor's PII-redacted text (`classifyDlp`).
    *      - a credential (floor shape, or a manar-ai credential-type finding)
    *        -> the whole `data` is withheld (`redactedToolResultPlaceholder`);
    *      - UAE PII -> replaced in place with `[REDACTED:<TYPE>]`, the rest
    *        of the result is returned;
-   *      - e-mail / UPN and other manar-ai findings -> returned unchanged.
+   *      - manar-ai `TYPE_PII`/`TYPE_OTHER` -> the string leaf carrying it
+   *        is replaced whole with `[REDACTED:PII|OTHER]`; if it cannot be
+   *        located within `DLP_LOCATE_MAX_CALLS`, the result is withheld;
+   *      - e-mail / UPN -> returned unchanged.
    *      Either redaction records `dlp.result_redacted` with finding types
    *      and counts (never the values).
    *   2. Prompt-injection advisory: when `result.data` is a string, runs
@@ -492,33 +490,33 @@ export class CredentialBrokerService {
     const originalData = result.data;
     let outcome = result;
 
-    const floor = applyDlpFloor(originalData);
-    const dlpAfter: DlpAdvisory | null = await this.aiAdvisoryClient.analyzeDlp(
-      {
-        content: dlpScanText(floor.value),
+    const dlp = await classifyDlp(originalData, (content) =>
+      this.aiAdvisoryClient.analyzeDlp({
+        content,
         tenantId: input.tenantId,
         classification,
-      },
+      }),
     );
-    // Only credential-type findings withhold; `source: "system"` (manar-ai's
-    // AI-backend-unavailable marker) never does -- see DLP_BLOCKING_SEVERITIES.
-    const advisoryFindings = dlpAfter ? blockingAdvisoryFindings(dlpAfter) : [];
-    const withheld =
-      floor.credentialTypes.length > 0 || advisoryFindings.length > 0;
-    if (withheld || floor.piiTypes.length > 0) {
-      const floorCount = Object.values(floor.counts).reduce((a, n) => a + n, 0);
+    const redactedInPlace =
+      dlp.piiTypes.length > 0 ||
+      Object.keys(dlp.advisoryRedactedCounts).length > 0;
+    if (dlp.blocked || redactedInPlace) {
+      const floorCount = Object.values(dlp.counts).reduce((a, n) => a + n, 0);
       outcome = {
         ...outcome,
-        data: withheld
+        data: dlp.blocked
           ? redactedToolResultPlaceholder(
               [
-                ...floor.credentialTypes,
-                ...floor.piiTypes,
-                ...advisoryFindings.map((f) => f.type),
+                ...dlp.credentialTypes,
+                ...dlp.piiTypes,
+                ...dlp.blockingFindings.map((f) => f.type),
+                ...dlp.unlocatedTypes,
               ],
-              floorCount + advisoryFindings.length,
+              floorCount +
+                dlp.blockingFindings.length +
+                dlp.unlocatedTypes.length,
             )
-          : floor.value,
+          : dlp.value,
       };
       await this.auditService.recordSafely(tenantClient, input.tenantId, {
         eventType: AUDIT_EVENT_TYPES.DLP_RESULT_REDACTED,
@@ -528,11 +526,13 @@ export class CredentialBrokerService {
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
-          mode: withheld ? 'withheld' : 'redacted_in_place',
+          mode: dlp.blocked ? 'withheld' : 'redacted_in_place',
           // Types and counts only, never the matched values.
-          floorFindingCounts: floor.counts,
-          overallSeverity: dlpAfter?.overallSeverity,
-          findings: advisoryFindings.map((f) => ({
+          floorFindingCounts: dlp.counts,
+          advisoryRedactedCounts: dlp.advisoryRedactedCounts,
+          unlocatedTypes: dlp.unlocatedTypes,
+          overallSeverity: dlp.advisory?.overallSeverity,
+          findings: dlp.blockingFindings.map((f) => ({
             type: f.type,
             source: f.source,
             redactedPreview: f.redactedPreview,

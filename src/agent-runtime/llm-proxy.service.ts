@@ -19,11 +19,7 @@ import {
 } from '../common/fail-closed/fail-closed';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { AgentTaskAccessService, denied } from './agent-task-access.service';
-import {
-  advisoryBlocks,
-  applyDlpFloor,
-  dlpScanText,
-} from '../common/dlp/dlp-classification';
+import { classifyDlp } from '../common/dlp/dlp-classification';
 import { LlmBudgetStore } from './llm-budget.store';
 import { LlmUpstreamClient, LlmUpstreamError } from './llm-upstream.client';
 import type { UpstreamChatResponse } from './llm-upstream.client';
@@ -66,6 +62,7 @@ interface CallRecord {
     floorCredentialTypes: string[];
     floorRedactedPiiTypes: string[];
     advisoryFindingTypes: string[];
+    advisoryRedactedCounts: Record<string, number>;
   };
   budget?: { used: number; limit: number };
 }
@@ -73,7 +70,7 @@ interface CallRecord {
 /**
  * `POST /agent/v1/llm/chat/completions` (ADR-0002). In order, each step
  * fail-closed: task access (kill switches, task assigned/live) -> token
- * budget -> deterministic DLP floor -> manar-ai DLP (a `null` blocks here)
+ * budget -> DLP (floor, manar-ai with a `null` blocking here, generic PII redacted per leaf)
  * -> upstream -> count usage -> audit `llm.request` (metadata only) -> reply.
  * None of this is on the authorization decision path.
  */
@@ -120,38 +117,31 @@ export class LlmProxyService {
       record.budget = { used, limit };
       if (used >= limit) throw new LlmBudgetExhaustedException();
 
-      const floor = applyDlpFloor({
-        messages: request.messages,
-        tools: request.tools,
-      });
-      record.dlp = {
-        floorCredentialTypes: floor.credentialTypes,
-        floorRedactedPiiTypes: floor.piiTypes,
-        advisoryFindingTypes: [],
-      };
-      if (floor.credentialTypes.length > 0) {
-        throw denied('dlp_policy_violation');
-      }
-
-      const advisory = await failClosed('dlp-advisory', () =>
-        this.aiAdvisory.analyzeDlp({
-          content: dlpScanText(floor.value),
-          tenantId: agent.tenant.id,
-        }),
+      const dlp = await classifyDlp(
+        { messages: request.messages, tools: request.tools },
+        (content) =>
+          failClosed('dlp-advisory', () =>
+            this.aiAdvisory.analyzeDlp({ content, tenantId: agent.tenant.id }),
+          ),
       );
-      if (advisory === null) {
+      record.dlp = {
+        floorCredentialTypes: dlp.credentialTypes,
+        floorRedactedPiiTypes: dlp.piiTypes,
+        advisoryFindingTypes: [
+          ...new Set(dlp.advisory?.findings.map((f) => f.type) ?? []),
+        ].sort(),
+        advisoryRedactedCounts: dlp.advisoryRedactedCounts,
+      };
+      if (dlp.advisory === null) {
         throw new EnforcementDependencyUnavailableException('dlp-advisory');
       }
-      record.dlp.advisoryFindingTypes = [
-        ...new Set(advisory.findings.map((f) => f.type)),
-      ].sort();
-      if (advisoryBlocks(advisory)) throw denied('dlp_policy_violation');
+      if (dlp.blocked) throw denied('dlp_policy_violation');
 
       let response: UpstreamChatResponse;
       try {
         response = await this.upstream.chat({
-          messages: floor.value.messages,
-          ...(floor.value.tools ? { tools: floor.value.tools } : {}),
+          messages: dlp.value.messages,
+          ...(dlp.value.tools ? { tools: dlp.value.tools } : {}),
           ...(request.tool_choice !== undefined
             ? { tool_choice: request.tool_choice }
             : {}),
@@ -181,7 +171,7 @@ export class LlmProxyService {
         usage.total_tokens ??
         (promptTokens + completionTokens ||
           Math.ceil(
-            (JSON.stringify(floor.value).length +
+            (JSON.stringify(dlp.value).length +
               JSON.stringify(response.body.choices).length) /
               4,
           ));

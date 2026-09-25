@@ -158,10 +158,11 @@ string leaves. A credential (floor shape or a manar-ai credential-type finding)
 withholds the whole result (`redactedToolResultPlaceholder` — `{ redacted:
 true, reason: 'sensitive_data_detected', findingCount, findingTypes }`); UAE
 PII (Emirates ID, UAE IBAN, payment card, UAE mobile) is replaced in place with
-`[REDACTED:<TYPE>]`; e-mail addresses / UPNs and other manar-ai findings pass
-through. Either redaction records `dlp.result_redacted` (types and counts, never
-values). The earlier "whole-value redaction because manar-ai sends no offsets"
-argument no longer applies: the in-process floor finds the spans itself.
+`[REDACTED:<TYPE>]`; a manar-ai `TYPE_PII`/`TYPE_OTHER` finding replaces the
+whole string leaf that carries it (`[REDACTED:PII]`/`[REDACTED:OTHER]`, located
+by bisection because manar-ai sends no offsets; unlocatable → withheld); e-mail
+addresses / UPNs pass through. Either redaction records `dlp.result_redacted`
+(types and counts, never values).
 
 ## Prompt-injection advisory
 

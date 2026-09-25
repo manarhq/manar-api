@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { DlpAdvisory } from '../../ai-advisory/ai-advisory-client.service';
 import {
+  DLP_LOCATE_MAX_CALLS,
   advisoryBlocks,
   applyDlpFloor,
+  classifyDlp,
   dlpScanText,
 } from './dlp-classification';
 
@@ -216,5 +219,122 @@ describe('shared DLP classification (result DLP, 25 Sep decision)', () => {
       'x\ny\nz',
     );
     expect(dlpScanText('plain')).toBe('plain');
+  });
+});
+
+describe('classifyDlp: manar-ai generic PII located per string leaf', () => {
+  const finding = (type: string, source = 'ai') => ({
+    type,
+    source,
+    redactedPreview: 'x',
+    confidence: 0.8,
+  });
+  /** Fake manar-ai: `rule(content)` gives the finding types for that content. */
+  const fake = (rule: (content: string) => string[] | null) =>
+    vi.fn((content: string) => {
+      const types = rule(content);
+      return Promise.resolve<DlpAdvisory | null>(
+        types && {
+          findings: types.map((t) => finding(t)),
+          overallSeverity: 'SEVERITY_LOW',
+        },
+      );
+    });
+  const piiIf = (needle: string) => (c: string) =>
+    c.includes(needle) ? ['TYPE_PII'] : [];
+
+  it('replaces only the flagged leaf among many, within the call bound', async () => {
+    const input = {
+      upn: 'adele.vance@fixture.example',
+      rows: Array.from({ length: 200 }, (_, i) => `row ${i}`),
+      owner: { name: 'Fatima Al Mansoori', id: 7 },
+    };
+    const analyze = fake(piiIf('Fatima'));
+    const r = await classifyDlp(input, analyze);
+    expect(r.blocked).toBe(false);
+    expect(r.value).toEqual({
+      ...input,
+      owner: { name: '[REDACTED:PII]', id: 7 },
+    });
+    expect(r.advisoryRedactedCounts).toEqual({ TYPE_PII: 1 });
+    expect(analyze.mock.calls.length).toBeLessThanOrEqual(
+      1 + DLP_LOCATE_MAX_CALLS,
+    );
+    expect(input.owner.name).toBe('Fatima Al Mansoori');
+  });
+
+  it('uses [REDACTED:OTHER] for TYPE_OTHER and ignores the system marker and e-mail', async () => {
+    const analyze = vi.fn((c: string) =>
+      Promise.resolve<DlpAdvisory>({
+        findings: [
+          finding('TYPE_OTHER', 'system'),
+          finding('TYPE_EMAIL', 'deterministic'),
+          ...(c.includes('N1234567') ? [finding('TYPE_OTHER')] : []),
+        ],
+        overallSeverity: 'SEVERITY_MEDIUM',
+      }),
+    );
+    const r = await classifyDlp(
+      { a: 'passport N1234567', b: 'adele.vance@fixture.example' },
+      analyze,
+    );
+    expect(r.value).toEqual({
+      a: '[REDACTED:OTHER]',
+      b: 'adele.vance@fixture.example',
+    });
+  });
+
+  it('blocks when a flagged group does not reproduce in either half', async () => {
+    const r = await classifyDlp(
+      { a: 'first', b: 'second' },
+      fake((c) => (c.includes('\n') ? ['TYPE_PII'] : [])),
+    );
+    expect(r.blocked).toBe(true);
+    expect(r.unlocatedTypes).toEqual(['TYPE_PII']);
+  });
+
+  it('blocks when manar-ai becomes unavailable while locating', async () => {
+    let n = 0;
+    const r = await classifyDlp(
+      { a: 'Fatima', b: 'x' },
+      fake((c) => (n++ === 0 ? piiIf('Fatima')(c) : null)),
+    );
+    expect(r.blocked).toBe(true);
+    expect(r.unlocatedTypes).toEqual(['TYPE_PII']);
+  });
+
+  it('blocks instead of passing when locating needs more calls than the bound', async () => {
+    const leaves = Array.from({ length: 64 }, (_, i) => `pii-${i}`);
+    const analyze = fake((c) => (c.includes('pii-') ? ['TYPE_PII'] : []));
+    const r = await classifyDlp(leaves, analyze);
+    expect(r.blocked).toBe(true);
+    expect(analyze.mock.calls.length).toBeLessThanOrEqual(
+      1 + DLP_LOCATE_MAX_CALLS,
+    );
+  });
+
+  it('blocks on a credential finding that only shows up in a located half', async () => {
+    const r = await classifyDlp(
+      { a: 'Fatima', b: 'k' },
+      fake((c) => (c === 'k' ? ['TYPE_API_KEY'] : piiIf('Fatima')(c))),
+    );
+    expect(r.blocked).toBe(true);
+    expect(r.blockingFindings.map((f) => f.type)).toEqual(['TYPE_API_KEY']);
+  });
+
+  it('returns manar-ai null to the caller and skips manar-ai after a floor credential', async () => {
+    const down = await classifyDlp(
+      { a: 'x' },
+      fake(() => null),
+    );
+    expect(down.advisory).toBeNull();
+    expect(down.blocked).toBe(false);
+    const analyze = fake(() => []);
+    const cred = await classifyDlp(
+      { a: '-----BEGIN PRIVATE KEY-----' },
+      analyze,
+    );
+    expect(cred.blocked).toBe(true);
+    expect(analyze).not.toHaveBeenCalled();
   });
 });
