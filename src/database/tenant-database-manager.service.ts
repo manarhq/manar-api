@@ -218,6 +218,45 @@ export class TenantDatabaseManager implements OnModuleDestroy {
   }
 
   /**
+   * Applies pending tenant migrations to every ACTIVE tenant database and
+   * records the version on its binding. Tenant migrations used to run only
+   * at provisioning, so an existing tenant never received a schema change
+   * after an upgrade (found in Phase 1: the demo tenant lacked
+   * `agent_certificates.caRevokedAt` and every enrollment 500'd). Run on
+   * every deploy, before the new API version takes traffic. Stops at the
+   * first failure, leaving the remaining tenants untouched for inspection.
+   */
+  async migrateAllTenants(): Promise<{ tenantId: string; version: string }[]> {
+    const tenants = await this.control.tenant.findMany({
+      where: {
+        status: 'ACTIVE',
+        databaseBinding: { provisioningStatus: 'ACTIVE' },
+      },
+      include: { databaseBinding: { include: { secretReference: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const migrated: { tenantId: string; version: string }[] = [];
+    for (const tenant of tenants) {
+      const binding = tenant.databaseBinding;
+      if (!binding) continue;
+      const version = await this.runTenantMigrations(
+        await this.resolveTenantConnectionString(
+          binding.secretReference,
+          binding.databaseName,
+        ),
+      );
+      await this.control.tenantDatabaseBinding.update({
+        where: { id: binding.id },
+        data: { lastMigratedAt: new Date(), lastMigrationVersion: version },
+      });
+      this.logger.log(`Migrated tenant "${tenant.slug}" to ${version}`);
+      migrated.push({ tenantId: tenant.id, version });
+    }
+    return migrated;
+  }
+
+  /**
    * Transitions a tenant to DELETED and evicts any cached client. Does
    * **not** drop the underlying database — see
    * `dangerouslyDropTenantDatabase` for the explicit, separately-invoked

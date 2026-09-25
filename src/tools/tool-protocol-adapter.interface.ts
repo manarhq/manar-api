@@ -15,6 +15,14 @@ export interface ToolInvocationResult {
   data?: unknown;
   /** A short, credential-free error summary — present only when `success` is `false` (e.g. `"HTTP 503"`, `"request timed out"`, never a raw response body). */
   errorMessage?: string;
+  /**
+   * Set (with `success: false`) when a mutating or destructive action's
+   * request may have reached the tool but no definite answer came back: a
+   * timeout, a connection lost after sending, a 5xx. The side effect may or
+   * may not have happened, so it is recorded as `UNKNOWN` and must be
+   * reconciled, never retried blindly (Gate 0 finding R1).
+   */
+  outcomeUnknown?: true;
 }
 
 /**

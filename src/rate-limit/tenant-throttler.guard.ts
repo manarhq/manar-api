@@ -11,8 +11,10 @@ import type {
   ThrottlerRequest,
   ThrottlerStorage,
 } from '@nestjs/throttler';
-import { decodeJwt } from 'jose';
+import { decodeJwt, jwtVerify } from 'jose';
 import type { RequestWithAuthContext } from '../auth/auth-context';
+import { JwksCacheService } from '../auth/jwks-cache.service';
+import { ACCEPTED_SIGNING_ALGORITHMS } from '../auth/jwt-auth.guard';
 import { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
 import { isHealthRoutePath } from '../health/health.routes';
 
@@ -48,6 +50,7 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
     @InjectThrottlerStorage() storage: ThrottlerStorage,
     reflector: Reflector,
     private readonly knownIssuerRegistry: KnownIssuerRegistry,
+    private readonly jwksCache: JwksCacheService,
   ) {
     super(options, storage, reflector);
   }
@@ -157,13 +160,28 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
       if (issuer) {
         const knownIssuer =
           await this.knownIssuerRegistry.resolveByIssuer(issuer);
-        if (knownIssuer) {
+        if (
+          knownIssuer &&
+          (await this.isSignedBy(token, knownIssuer.issuerUrl))
+        ) {
           return `tenant:${knownIssuer.tenantId}`;
         }
       }
     }
 
     return `ip:${req.ip}`;
+  }
+
+  private async isSignedBy(token: string, issuerUrl: string): Promise<boolean> {
+    try {
+      await jwtVerify(token, this.jwksCache.getJwks(issuerUrl), {
+        issuer: issuerUrl,
+        algorithms: [...ACCEPTED_SIGNING_ALGORITHMS],
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

@@ -1,5 +1,5 @@
 import type { TLSSocket } from 'node:tls';
-import { Injectable } from '@nestjs/common';
+import { HttpException, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import {
   InjectThrottlerOptions,
@@ -8,10 +8,13 @@ import {
 } from '@nestjs/throttler';
 import type {
   ThrottlerModuleOptions,
+  ThrottlerRequest,
   ThrottlerStorage,
 } from '@nestjs/throttler';
+import type { FastifyReply } from 'fastify';
 import * as x509 from '@peculiar/x509';
 import type { RequestWithAgentContext } from '../agent-mtls/agent-context';
+import { throwFailClosed } from '../common/fail-closed/fail-closed';
 
 /**
  * Phase 12a: rate-limits the mTLS `/agent/v1/*` surface **per agent**, not
@@ -47,6 +50,30 @@ export class AgentThrottlerGuard extends ThrottlerGuard {
     reflector: Reflector,
   ) {
     super(options, storage, reflector);
+  }
+
+  /**
+   * The agent surface fails **closed** when the limits store is down
+   * (Gate 0 finding R6): a 503 `enforcement_dependency_unavailable` with
+   * `Retry-After`, where it used to be an unhandled 500. Unlike the human
+   * surface (`TenantThrottlerGuard`, fail-open), per-agent limits are an
+   * enforcement control on what an agent may do (`CLAUDE.md`: fail closed on
+   * the limits store). Real 429s pass through untouched.
+   */
+  protected override async handleRequest(
+    requestProps: ThrottlerRequest,
+  ): Promise<boolean> {
+    try {
+      return await super.handleRequest(requestProps);
+    } catch (error) {
+      if (!(error instanceof HttpException)) {
+        requestProps.context
+          .switchToHttp()
+          .getResponse<FastifyReply>()
+          .header('Retry-After', '5');
+      }
+      throwFailClosed('rate-limit-store', error);
+    }
   }
 
   protected override getTracker(req: RequestWithAgentContext): Promise<string> {

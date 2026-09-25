@@ -77,6 +77,7 @@ describe('Live audit-event SSE feed (e2e)', () => {
   async function provisionAdminUser(
     tenant: ProvisionedTenant,
     username: string,
+    role = 'SECURITY_ADMIN',
   ): Promise<string> {
     if (!tenant.keycloakRealm) {
       throw new Error('Expected provisioned tenant to have a Keycloak realm');
@@ -89,7 +90,7 @@ describe('Live audit-event SSE feed (e2e)', () => {
       email: `${username}@example.test`,
       password: USER_PASSWORD,
     });
-    await assignRealmRole(tenant.keycloakRealm, userId, 'SECURITY_ADMIN');
+    await assignRealmRole(tenant.keycloakRealm, userId, role);
     return getUserToken({
       realm: tenant.keycloakRealm,
       clientId: tenant.keycloakClientId!,
@@ -275,5 +276,18 @@ describe('Live audit-event SSE feed (e2e)', () => {
 
     connectionA.close();
     connectionB.close();
+  }, 30_000);
+
+  it('refuses a tenant user without an audit read role (S24)', async () => {
+    const readOnlyToken = await provisionAdminUser(
+      tenantA,
+      `sse-ro-${randomUUID().slice(0, 8)}`,
+      'READ_ONLY',
+    );
+    const response = await fetch(`${endpoint}/events/live`, {
+      headers: { Authorization: `Bearer ${readOnlyToken}` },
+    });
+    expect(response.status).toBe(403);
+    await response.body?.cancel();
   }, 30_000);
 });

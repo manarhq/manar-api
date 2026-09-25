@@ -1,4 +1,4 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -14,7 +14,10 @@ import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
-import { EvidenceExportRequestSchema } from './evidence-export.validation';
+import {
+  EvidenceExportRequestSchema,
+  EvidenceVerifyRequestSchema,
+} from './evidence-export.validation';
 import { EvidenceExportService } from './evidence-export.service';
 import {
   EvidenceExportRequestDto,
@@ -65,5 +68,22 @@ export class EvidenceController {
       auth.user.id,
       filter,
     );
+  }
+
+  @Post('verify')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Verify an exported evidence bundle',
+    description:
+      'Checks the signature and the bundle hash of a bundle returned by POST /evidence/export. Returns { valid } and, when invalid, a reason.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: '{ valid: boolean, reason?: string }',
+  })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  async verify(@Body() body: unknown) {
+    const input = parseBodyOrThrow(EvidenceVerifyRequestSchema, body);
+    return this.evidenceExportService.verify(input.bundle, input.signature);
   }
 }

@@ -1,3 +1,4 @@
+import { ssrfPolicyFromConfig } from './ssrf.config';
 import { describe, expect, it } from 'vitest';
 import {
   assertSafeOutboundUrl,
@@ -127,14 +128,55 @@ describe('assertSafeOutboundUrl', () => {
     ).rejects.toThrow(UnsafeOutboundUrlError);
   });
 
+  describe('S1: IPv4-mapped IPv6 in the hex form the URL parser produces', () => {
+    it.each([
+      'http://[::ffff:127.0.0.1]:6379/',
+      'http://[::ffff:7f00:1]:6379/',
+      'http://[::ffff:a9fe:a9fe]/latest/meta-data/',
+      'http://[::7f00:1]/',
+      'http://[64:ff9b::a9fe:a9fe]/',
+      'http://[::ffff:a00:1]/',
+    ])('rejects %s', async (url) => {
+      await expect(assertSafeOutboundUrl(url)).rejects.toThrow(
+        UnsafeOutboundUrlError,
+      );
+    });
+  });
+
   describe('allowedHosts (SSRF_ALLOWED_HOSTS operator exception list)', () => {
-    it('an allow-listed hostname skips the range check entirely, even though it resolves to a private address', async () => {
+    it('an allow-listed hostname may resolve to a private address', async () => {
       await expect(
-        assertSafeOutboundUrl('http://127.0.0.1:4000/hook', {
-          lookup: fixedLookup({ address: '127.0.0.1', family: 4 }),
-          allowedHosts: new Set(['127.0.0.1']),
+        assertSafeOutboundUrl('http://siem.internal:4000/hook', {
+          lookup: fixedLookup({ address: '10.1.2.3', family: 4 }),
+          allowedHosts: new Set(['siem.internal']),
         }),
       ).resolves.toBeUndefined();
+    });
+
+    it('an allow-listed hostname may resolve to loopback only with allowLoopback (development)', async () => {
+      const options = {
+        lookup: fixedLookup({ address: '127.0.0.1', family: 4 }),
+        allowedHosts: new Set(['localhost']),
+      };
+      await expect(
+        assertSafeOutboundUrl('http://localhost:4000/hook', options),
+      ).rejects.toThrow(UnsafeOutboundUrlError);
+      await expect(
+        assertSafeOutboundUrl('http://localhost:4000/hook', {
+          ...options,
+          allowLoopback: true,
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('S2: an allow-listed hostname that resolves to the metadata service is rejected, even with allowLoopback', async () => {
+      await expect(
+        assertSafeOutboundUrl('http://tools.internal/latest/meta-data/', {
+          lookup: fixedLookup({ address: '169.254.169.254', family: 4 }),
+          allowedHosts: new Set(['tools.internal']),
+          allowLoopback: true,
+        }),
+      ).rejects.toThrow(UnsafeOutboundUrlError);
     });
 
     it('a hostname NOT on the allow-list is still rejected as usual', async () => {
@@ -327,7 +369,7 @@ describe('safeOutboundFetch', () => {
     // is blocked -- the only thing standing between a redirecting tool
     // endpoint and the broker-issued credential is this header rule.
     const { fetchImpl, requests } = scriptedFetch([
-      { status: 307, location: 'https://attacker.example.test/collect' },
+      { status: 302, location: 'https://attacker.example.test/collect' },
       { status: 200, body: '{}' },
     ]);
 
@@ -349,7 +391,7 @@ describe('safeOutboundFetch', () => {
 
   it('drops the Authorization header on a same-host, different-scheme redirect', async () => {
     const { fetchImpl, requests } = scriptedFetch([
-      { status: 307, location: 'http://tool.example.test/run' },
+      { status: 302, location: 'http://tool.example.test/run' },
       { status: 200, body: '{}' },
     ]);
 
@@ -361,6 +403,47 @@ describe('safeOutboundFetch', () => {
     expect(Object.keys(requests[1]?.headers ?? {})).not.toContain(
       'Authorization',
     );
+  });
+
+  it.each([307, 308])(
+    'S2: refuses a cross-origin %i, which would replay the agent-supplied body to another origin',
+    async (status) => {
+      const { fetchImpl, requests } = scriptedFetch([
+        { status, location: 'https://attacker.example.test/collect' },
+        { status: 200, body: '{}' },
+      ]);
+
+      await expect(
+        safeOutboundFetch('https://tool.example.test/run', {
+          ...baseOptions,
+          fetchImpl,
+        }),
+      ).rejects.toThrow(UnsafeOutboundUrlError);
+      expect(requests).toHaveLength(1);
+    },
+  );
+
+  it('S2: does not apply the allowlist to redirect hops', async () => {
+    const { fetchImpl, requests } = scriptedFetch([
+      { status: 302, location: 'http://siem.internal/' },
+      { status: 200, body: '{}' },
+    ]);
+
+    await expect(
+      safeOutboundFetch('https://tool.example.test/run', {
+        ...baseOptions,
+        fetchImpl,
+        allowedHosts: new Set(['siem.internal']),
+        lookup: (host) =>
+          Promise.resolve([
+            {
+              address: host === 'siem.internal' ? '10.0.0.5' : '203.0.113.10',
+              family: 4,
+            },
+          ]),
+      }),
+    ).rejects.toThrow(UnsafeOutboundUrlError);
+    expect(requests).toHaveLength(1);
   });
 
   it('keeps the Authorization header on a same-origin redirect', async () => {
@@ -484,5 +567,19 @@ describe('readBoundedResponseText', () => {
     await expect(
       readBoundedResponseText(new Response(null, { status: 204 })),
     ).resolves.toBe('');
+  });
+});
+
+describe('ssrfPolicyFromConfig', () => {
+  it('refuses to boot with SSRF_ALLOW_LOOPBACK in production', () => {
+    const config = {
+      get: (key: string) =>
+        ({
+          SSRF_ALLOW_LOOPBACK: true,
+          NODE_ENV: 'production',
+          SSRF_ALLOWED_HOSTS: '',
+        })[key],
+    } as unknown as Parameters<typeof ssrfPolicyFromConfig>[0];
+    expect(() => ssrfPolicyFromConfig(config)).toThrow(/refused/);
   });
 });

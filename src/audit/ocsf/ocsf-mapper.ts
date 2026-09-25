@@ -172,7 +172,9 @@ export function mapAuditEventToOcsf(
 
     case AUDIT_EVENT_TYPES.TOOL_INVOCATION_STARTED:
     case AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED:
-    case AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED: {
+    case AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED:
+    case AUDIT_EVENT_TYPES.TOOL_INVOCATION_OUTCOME_UNKNOWN: {
+      // outcome_unknown lands on OCSF status_id 0, "Unknown": its meaning.
       const statusId =
         event.eventType === AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED
           ? 1
@@ -254,6 +256,8 @@ function unmappedReason(eventType: string): string {
     case AUDIT_EVENT_TYPES.APPROVAL_APPROVED:
     case AUDIT_EVENT_TYPES.APPROVAL_DENIED:
     case AUDIT_EVENT_TYPES.APPROVAL_GRANT_ISSUED:
+    case AUDIT_EVENT_TYPES.APPROVAL_GRANT_REDEEMED:
+    case AUDIT_EVENT_TYPES.APPROVAL_GRANT_REJECTED:
       return "OCSF has no human-approval-workflow class in v1.9.0 (nothing under Identity & Access Management or elsewhere models a pending request awaiting a second human's decision) — no existing class fits without inventing semantics OCSF doesn't define.";
     case AUDIT_EVENT_TYPES.POLICY_PUBLISHED:
       return 'OCSF v1.9.0 has no policy-authoring/publication class — the closest candidates (e.g. classes under Application Activity) model runtime API calls, not versioned governance-document lifecycle events.';

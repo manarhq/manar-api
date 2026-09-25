@@ -10,6 +10,8 @@ import type { EvidenceExportRequest } from './evidence-export.validation';
 import {
   EvidenceBundleSignature,
   signEvidenceBundle,
+  verifyEvidenceBundle,
+  type VerifyEvidenceBundleResult,
 } from './evidence-signing.util';
 
 export interface EvidenceExportResult {
@@ -392,6 +394,23 @@ export class EvidenceExportService {
     const signature = await signEvidenceBundle(bundle, exportId, secret);
 
     return { exportId, bundle, signature };
+  }
+
+  /**
+   * Verifies a bundle server-side, so a holder of the bundle never needs
+   * the signing secret (Gate 0 finding R9: the demo agent used to read it
+   * from the API's `.env`). Offline verification with a public key is
+   * finding F10's fix.
+   */
+  verify(
+    bundle: unknown,
+    signature: string,
+  ): Promise<VerifyEvidenceBundleResult> {
+    return verifyEvidenceBundle(
+      bundle,
+      signature,
+      this.configService.get('APPROVAL_GRANT_SIGNING_SECRET', { infer: true }),
+    );
   }
 }
 

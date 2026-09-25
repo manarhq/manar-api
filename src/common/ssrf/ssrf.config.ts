@@ -1,4 +1,6 @@
+import type { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
+import type { AppConfig } from '../../config/env.validation';
 
 /**
  * Phase 12a (SSRF protection). `SSRF_ALLOWED_HOSTS`: an explicit,
@@ -28,6 +30,16 @@ import { z } from 'zod';
  */
 export const SsrfConfigSchema = z.object({
   SSRF_ALLOWED_HOSTS: z.string().default(''),
+  /**
+   * Development only: lets an allow-listed hostname resolve to loopback, so
+   * local fixtures and the demo tool container keep working. Link-local and
+   * the metadata service stay unreachable regardless. Refused at boot when
+   * `NODE_ENV=production` (`ssrfPolicyFromConfig`).
+   */
+  SSRF_ALLOW_LOOPBACK: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
 });
 
 export type SsrfConfig = z.infer<typeof SsrfConfigSchema>;
@@ -40,4 +52,30 @@ export function parseSsrfAllowedHosts(raw: string): Set<string> {
       .map((host) => host.trim())
       .filter(Boolean),
   );
+}
+
+export interface SsrfPolicy {
+  allowedHosts: ReadonlySet<string>;
+  allowLoopback: boolean;
+}
+
+/** Reads the SSRF policy from config; throws (so the process fails to boot) if loopback is allowed in production. */
+export function ssrfPolicyFromConfig(
+  config: ConfigService<AppConfig, true>,
+): SsrfPolicy {
+  const allowLoopback = config.get('SSRF_ALLOW_LOOPBACK', { infer: true });
+  if (
+    allowLoopback &&
+    config.get('NODE_ENV', { infer: true }) === 'production'
+  ) {
+    throw new Error(
+      'SSRF_ALLOW_LOOPBACK=true is refused when NODE_ENV=production',
+    );
+  }
+  return {
+    allowedHosts: parseSsrfAllowedHosts(
+      config.get('SSRF_ALLOWED_HOSTS', { infer: true }),
+    ),
+    allowLoopback,
+  };
 }

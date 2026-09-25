@@ -128,7 +128,20 @@ export class ReadinessService {
         required: false,
         impact:
           'Tenant database credential resolution and agent PKI issuance. Already-cached tenant clients keep working, so this degrades rather than gates.',
-        run: this.tcpProbe('OPENBAO_ADDR'),
+        // Not a TCP probe (Gate 0 finding F1): a dev-mode OpenBao restarted
+        // with an empty PKI still accepts connections while every enrollment
+        // 500s. The intermediate's public CA chain is unauthenticated and
+        // exists only once the agent PKI is mounted.
+        run: async () => {
+          const response = await fetch(
+            `${this.configService.get('OPENBAO_ADDR', { infer: true })}/v1/${this.configService.get('OPENBAO_PKI_INTERMEDIATE_PATH', { infer: true })}/ca_chain`,
+          );
+          if (!response.ok) {
+            throw new Error(
+              `agent PKI not mounted (ca_chain HTTP ${response.status})`,
+            );
+          }
+        },
       },
       {
         name: 'keycloak',

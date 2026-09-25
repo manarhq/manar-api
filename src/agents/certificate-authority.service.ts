@@ -109,36 +109,23 @@ export class CertificateAuthorityService {
   }
 
   /**
-   * Revokes every currently-unrevoked certificate for `agentId` (normally
-   * exactly one — enrollment issues one certificate per agent this phase,
-   * no renewal) via OpenBao's revoke endpoint, then marks them revoked
-   * locally and sets `Agent.status = REVOKED`. `AgentMtlsGuard` checks
-   * both the agent's status *and* the specific certificate serial's
-   * `revokedAt` on every request (defense in depth beyond OpenBao's own
-   * CRL/OCSP, which nothing in this phase's mTLS listener consults
-   * per-request) — so a revoked agent's certificate stops working on its
-   * very next request, not merely at next renewal (Section 71's mandatory
-   * immediate-revocation invariant).
+   * Revokes every certificate for `agentId`, local state first: the
+   * certificates' `revokedAt` and `Agent.status = REVOKED` are committed
+   * before OpenBao is called. `AgentMtlsGuard` reads both from PostgreSQL on
+   * every request, so the agent is blocked on its next request even when
+   * OpenBao is down (Gate 0 finding S10: the old OpenBao-first order threw
+   * before any local change and left the agent working).
    *
-   * If an OpenBao revoke call fails partway through, already-revoked
-   * certificates stay revoked but the DB update (and `Agent.status`) is
-   * not applied for the remainder — consistent with this codebase's
-   * existing "no automatic rollback, fail loud, leave state for manual
-   * inspection" stance (see `TenantDatabaseManager.provisionTenant`).
+   * OpenBao is then asked to revoke each serial it has not yet confirmed
+   * (`caRevokedAt` null). Failures are logged and counted, not thrown: the
+   * enforcement already happened, and calling `revoke` again retries them.
+   * Returns the number of serials still owed to OpenBao.
    */
   async revoke(
     tenantClient: TenantPrismaClient,
     agentId: string,
     reason: string,
-  ): Promise<void> {
-    const activeCertificates = await tenantClient.agentCertificate.findMany({
-      where: { agentId, revokedAt: null },
-    });
-
-    for (const certificate of activeCertificates) {
-      await this.openBao.revoke(toColonSeparatedHex(certificate.serialNumber));
-    }
-
+  ): Promise<{ caRevocationPending: number }> {
     await tenantClient.$transaction([
       tenantClient.agentCertificate.updateMany({
         where: { agentId, revokedAt: null },
@@ -150,9 +137,32 @@ export class CertificateAuthorityService {
       }),
     ]);
 
+    const owed = await tenantClient.agentCertificate.findMany({
+      where: { agentId, revokedAt: { not: null }, caRevokedAt: null },
+    });
+
+    let caRevocationPending = 0;
+    for (const certificate of owed) {
+      try {
+        await this.openBao.revoke(
+          toColonSeparatedHex(certificate.serialNumber),
+        );
+        await tenantClient.agentCertificate.update({
+          where: { id: certificate.id },
+          data: { caRevokedAt: new Date() },
+        });
+      } catch (error) {
+        caRevocationPending++;
+        this.logger.error(
+          `OpenBao revoke failed for certificate ${certificate.serialNumber} of agent "${agentId}"; the agent is blocked locally, retry by revoking again: ${(error as Error).message}`,
+        );
+      }
+    }
+
     this.logger.log(
-      `Revoked ${activeCertificates.length} certificate(s) for agent "${agentId}": ${reason}`,
+      `Revoked agent "${agentId}" (${owed.length} certificate(s) sent to OpenBao, ${caRevocationPending} pending): ${reason}`,
     );
+    return { caRevocationPending };
   }
 
   /**

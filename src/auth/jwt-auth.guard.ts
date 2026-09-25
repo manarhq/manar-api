@@ -42,7 +42,7 @@ import { RequestWithAuthContext } from './auth-context';
  * whereas anything outside this list would be a change this deployment
  * never makes.
  */
-const ACCEPTED_SIGNING_ALGORITHMS = ['RS256', 'RS384', 'RS512'] as const;
+export const ACCEPTED_SIGNING_ALGORITHMS = ['RS256', 'RS384', 'RS512'] as const;
 
 /**
  * Keycloak stamps every token it mints with a `typ` *payload* claim naming

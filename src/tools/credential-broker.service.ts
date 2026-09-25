@@ -17,6 +17,7 @@ import {
 import { HttpToolAdapter } from './http-tool.adapter';
 import { McpToolAdapter } from './mcp-tool.adapter';
 import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import { ToolRegistryService } from './tool-registry.service';
 
 /**
@@ -241,16 +242,24 @@ export class CredentialBrokerService {
     // constraint `recordInvocation`'s own FK-backed `ToolInvocation` row
     // has always had (see step 1's early-return above, which never records
     // an operational row either, for the same reason).
-    await this.auditService.recordSafely(tenantClient, input.tenantId, {
-      eventType: AUDIT_EVENT_TYPES.TOOL_INVOCATION_STARTED,
-      actor: { type: 'agent', id: input.agentId },
-      data: {
-        taskId: input.taskId,
-        toolId: input.toolId,
-        actionId: input.actionId,
-        resource: input.resource,
-      },
-    });
+    //
+    // This write must succeed before anything else happens (Gate 0 finding
+    // R2): it uses the throwing `record`, and a failure is a 503
+    // `enforcement_dependency_unavailable` with no credential fetched and no
+    // adapter contacted. A side effect with no audit trail is worse than no
+    // side effect.
+    await failClosed('audit-store', () =>
+      this.auditService.record(tenantClient, input.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.TOOL_INVOCATION_STARTED,
+        actor: { type: 'agent', id: input.agentId },
+        data: {
+          taskId: input.taskId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+        },
+      }),
+    );
 
     if (!tool.enabled) {
       await this.recordInvocation(tenantClient, input, {
@@ -347,8 +356,14 @@ export class CredentialBrokerService {
       result = { success: false, errorMessage: 'tool invocation failed' };
     }
 
+    const status = result.success
+      ? 'SUCCESS'
+      : result.outcomeUnknown
+        ? 'UNKNOWN'
+        : 'FAILURE';
+
     await this.recordInvocation(tenantClient, input, {
-      status: result.success ? 'SUCCESS' : 'FAILURE',
+      status,
       startedAt,
       completedAt: new Date(),
       errorMessage: result.success
@@ -366,16 +381,21 @@ export class CredentialBrokerService {
     // operational `ToolInvocation` row above already takes (`resource`/
     // `status`/`errorMessage` are shape/summary only).
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
-      eventType: result.success
-        ? AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED
-        : AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED,
+      // `outcome_unknown` is the reconciliation hook: an operator (or a later
+      // reconciliation job) must confirm with the tool whether it happened.
+      eventType:
+        status === 'SUCCESS'
+          ? AUDIT_EVENT_TYPES.TOOL_INVOCATION_COMPLETED
+          : status === 'UNKNOWN'
+            ? AUDIT_EVENT_TYPES.TOOL_INVOCATION_OUTCOME_UNKNOWN
+            : AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED,
       actor: { type: 'agent', id: input.agentId },
       data: {
         taskId: input.taskId,
         toolId: input.toolId,
         actionId: input.actionId,
         resource: input.resource,
-        status: result.success ? 'SUCCESS' : 'FAILURE',
+        status,
         errorMessage: result.success ? null : (result.errorMessage ?? null),
       },
     });
@@ -531,7 +551,7 @@ export class CredentialBrokerService {
     tenantClient: TenantPrismaClient,
     input: CredentialBrokerInvokeInput,
     record: {
-      status: 'SUCCESS' | 'FAILURE';
+      status: 'SUCCESS' | 'FAILURE' | 'UNKNOWN';
       startedAt: Date;
       completedAt: Date;
       errorMessage: string | null;

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { TaskRecord, TasksService } from '../tasks/tasks.service';
 import { TaskNotFoundError } from '../tasks/tasks.errors';
@@ -9,6 +9,7 @@ import type { AuditEventType } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { parseToolActions } from './grant-triples';
+import { ENFORCEMENT_DEPENDENCY_UNAVAILABLE } from '../common/fail-closed/fail-closed';
 import {
   ANY_RESOURCE_PATTERN,
   agentObjectId,
@@ -124,7 +125,47 @@ export class AuthorizationService {
     private readonly killSwitchService: KillSwitchService,
   ) {}
 
+  /**
+   * Any exception escaping the pipeline below (a tenant-DB or control-DB
+   * error in a kill-switch or task lookup, `AncestorChainTooDeepError`, a
+   * dangling parent, malformed stored actions) is a DENY with reason
+   * `enforcement_dependency_unavailable`, audited on a best-effort basis,
+   * never a bare 500 (Gate 0 findings S32 and S61).
+   */
   async authorize(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    authenticatedAgentId: string,
+    request: AuthorizeRequest,
+  ): Promise<AuthorizeDecision> {
+    try {
+      return await this.evaluate(
+        tenantClient,
+        tenantId,
+        authenticatedAgentId,
+        request,
+      );
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      this.logger.error(
+        `authorize failed closed for task "${request.taskId}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await this.auditService.recordSafely(tenantClient, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED,
+        actor: { type: 'agent', id: authenticatedAgentId },
+        data: {
+          taskId: request.taskId,
+          toolId: request.toolId,
+          actionId: request.actionId,
+          resource: request.resource,
+          reason: ENFORCEMENT_DEPENDENCY_UNAVAILABLE,
+        },
+      });
+      return { decision: 'DENY', reason: ENFORCEMENT_DEPENDENCY_UNAVAILABLE };
+    }
+  }
+
+  private async evaluate(
     tenantClient: TenantPrismaClient,
     tenantId: string,
     authenticatedAgentId: string,

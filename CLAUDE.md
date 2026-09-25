@@ -13,28 +13,32 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 
 ## Commands (verified 2026-09-17)
 
-| Task                  | Command                                                                                                  | Baseline                                           |
-| --------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| Backing services      | `pnpm infra:up` (Compose `deploy/docker-compose.yml`) then `pnpm infra:openbao-init`                     | all healthy                                        |
-| Lint                  | `pnpm lint` (gating, no auto-fix; `pnpm lint:fix` to fix)                                                | clean on tracked source                            |
-| Typecheck             | `pnpm typecheck` (builds `packages/manar-ai-client` and `packages/sdk-node` first, then api + scripts)   | pass                                               |
-| Unit tests            | `pnpm test` / `pnpm test:cov`                                                                            | 36 files, 318 tests; lines 57.35%, branches 39.75% |
-| E2E tests             | `pnpm test:e2e` (needs the stack and OpenBao PKI; stop any host worker first, the specs start their own) | 27 files, 168 tests                                |
-| Build                 | `pnpm build`                                                                                             | pass                                               |
-| API                   | `pnpm start:dev` / `pnpm start:prod` — HTTP `:3000`, agent mTLS `:3443`                                  |                                                    |
-| Temporal worker       | `pnpm worker:dev` / `pnpm worker:prod`                                                                   |                                                    |
-| OpenFGA model tests   | `pnpm fga:test`                                                                                          |                                                    |
-| Prisma client         | `pnpm db:generate` (runs on install)                                                                     |                                                    |
-| Control DB migrations | `pnpm db:migrate:control` (dev) / `pnpm db:migrate:control:deploy`                                       | 3 migrations                                       |
+| Task                  | Command                                                                                                    | Baseline                                           |
+| --------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Backing services      | `pnpm infra:up` (Compose `deploy/docker-compose.yml`) then `pnpm infra:openbao-init`                       | all healthy                                        |
+| Lint                  | `pnpm lint` (gating, no auto-fix; `pnpm lint:fix` to fix)                                                  | clean on tracked source                            |
+| Typecheck             | `pnpm typecheck` (builds `packages/manar-ai-client` and `packages/sdk-node` first, then api + scripts)     | pass                                               |
+| Unit tests            | `pnpm test` / `pnpm test:cov`                                                                              | 36 files, 318 tests; lines 57.35%, branches 39.75% |
+| E2E tests             | `pnpm test:e2e` (needs the stack and OpenBao PKI; stop any host worker first, the specs start their own)   | 27 files, 168 tests                                |
+| Build                 | `pnpm build`                                                                                               | pass                                               |
+| API                   | `pnpm start:dev` / `pnpm start:prod` — HTTP `:3000`, agent mTLS `:3443`                                    |                                                    |
+| Temporal worker       | `pnpm worker:dev` / `pnpm worker:prod`                                                                     |                                                    |
+| OpenFGA model tests   | `pnpm fga:test`                                                                                            |                                                    |
+| Prisma client         | `pnpm db:generate` (runs on install)                                                                       |                                                    |
+| Control DB migrations | `pnpm db:migrate:control` (dev) / `pnpm db:migrate:control:deploy`                                         | 3 migrations                                       |
+| Tenant DB migrations  | `pnpm manar tenants:migrate` (every ACTIVE tenant; run on every upgrade, after the control migrations)     |                                                    |
+| Demo reseed           | `pnpm manar demo:seed` (idempotent; needed after an OpenBao restart, which drops the demo tool credential) |                                                    |
 
 **OpenBao runs in dev mode (in-memory).** Whenever its container restarts, the PKI mounts
 vanish and agent enrollment returns 500 until you run `pnpm infra:openbao-init` and restart
-the API. `/health/ready` does not detect this.
+the API. `/health/ready` reports `openbao` unhealthy when this happens (it probes the
+intermediate's `ca_chain`, not just the port).
 
 `src/generated/**` is Prisma output and is ignored by eslint. `pnpm demo:agent` runs the scripted
 demo against `packages/demo-soc-tools`; with `test/complete-demo.e2e-spec.ts` it is the rehearsed
-fallback for 11 November and must keep passing through every phase (Addendum 01 §A). It currently
-loads `.env` through `ts-node -r dotenv/config`; the Phase 1 runtime must not (Addendum 01 §C.4).
+fallback for 11 November and must keep passing through every phase (Addendum 01 §A). It does not
+load the API's `.env` (variables it reads: `.env.demo-agent.example`) and verifies the evidence
+bundle through `POST /evidence/verify`, never with the signing secret.
 
 ## Architecture map
 

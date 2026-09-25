@@ -12,6 +12,7 @@ import { normalizeSerialNumber } from '../agents/serial-number.util';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { TenantNotFoundError } from '../database/tenant-database.errors';
+import { failClosed, throwFailClosed } from '../common/fail-closed/fail-closed';
 import { AgentContext, RequestWithAgentContext } from './agent-context';
 
 /**
@@ -91,9 +92,11 @@ export class AgentMtlsGuard implements CanActivate {
       );
     }
 
-    const tenant = await this.control.tenant.findUnique({
-      where: { slug: parsedIdentifier.tenantSlug },
-    });
+    const tenant = await failClosed('control-db', () =>
+      this.control.tenant.findUnique({
+        where: { slug: parsedIdentifier.tenantSlug },
+      }),
+    );
     if (!tenant) {
       this.logger.warn(
         `mTLS request for unknown tenant slug "${parsedIdentifier.tenantSlug}"`,
@@ -105,17 +108,17 @@ export class AgentMtlsGuard implements CanActivate {
       tenant.id,
     );
 
-    const agent = await tenantClient.agent.findUnique({
-      where: { identifier },
-    });
+    const agent = await failClosed('tenant-db', () =>
+      tenantClient.agent.findUnique({ where: { identifier } }),
+    );
     if (!agent || agent.status !== 'ACTIVE') {
       throw new UnauthorizedException('Agent is not active');
     }
 
     const serialNumber = normalizeSerialNumber(certificate.serialNumber);
-    const certificateRow = await tenantClient.agentCertificate.findUnique({
-      where: { serialNumber },
-    });
+    const certificateRow = await failClosed('tenant-db', () =>
+      tenantClient.agentCertificate.findUnique({ where: { serialNumber } }),
+    );
     if (
       !certificateRow ||
       certificateRow.agentId !== agent.id ||
@@ -143,7 +146,7 @@ export class AgentMtlsGuard implements CanActivate {
       if (error instanceof TenantNotFoundError) {
         throw new UnauthorizedException('Unknown agent');
       }
-      throw error;
+      throwFailClosed('tenant-db', error);
     }
   }
 }

@@ -23,10 +23,14 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_APPROVED: 'approval.approved',
   APPROVAL_DENIED: 'approval.denied',
   APPROVAL_GRANT_ISSUED: 'approval.grant_issued',
+  APPROVAL_GRANT_REDEEMED: 'approval.grant_redeemed',
+  APPROVAL_GRANT_REJECTED: 'approval.grant_rejected',
 
   TOOL_INVOCATION_STARTED: 'tool.invocation.started',
   TOOL_INVOCATION_COMPLETED: 'tool.invocation.completed',
   TOOL_INVOCATION_FAILED: 'tool.invocation.failed',
+  /** A mutating call ended without a definite answer; needs reconciliation. */
+  TOOL_INVOCATION_OUTCOME_UNKNOWN: 'tool.invocation.outcome_unknown',
 
   POLICY_PUBLISHED: 'policy.published',
 
