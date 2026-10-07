@@ -319,6 +319,14 @@ export class TasksService {
     tenantClient: TenantPrismaClient,
     task: TaskRecord,
     now: Date,
+    options: {
+      /**
+       * Approval-grant redemption: this request's own execution was already
+       * counted on `task` when the grant was issued, so it must not count
+       * against the limit a second time.
+       */
+      executionAlreadyCounted?: boolean;
+    } = {},
   ): Promise<LivenessResult> {
     const ancestors = await this.getAncestorChain(tenantClient, task);
     for (const ancestor of ancestors) {
@@ -327,7 +335,12 @@ export class TasksService {
         return { ok: false, reason: `ancestor_${liveness.reason}` };
       }
     }
-    return this.evaluateLiveness(task, now);
+    return this.evaluateLiveness(
+      options.executionAlreadyCounted
+        ? { ...task, executionCount: task.executionCount - 1 }
+        : task,
+      now,
+    );
   }
 
   /**

@@ -75,6 +75,15 @@ export interface DecisionContext {
   params?: unknown;
 }
 
+export type DecisionStage = 'REQUEST' | 'GRANT_REDEMPTION';
+
+type DecisionRecordKind =
+  { stage: 'REQUEST' } | { stage: 'GRANT_REDEMPTION'; grantId?: string };
+
+/** What `GrantService.verifyGrant` concluded about the presented grant token. */
+export type GrantCheck =
+  { valid: true; grantId: string } | { valid: false; reason: string };
+
 /** What `evaluate` concluded, before anything is written. */
 interface Evaluation {
   verdict: Verdict;
@@ -199,6 +208,7 @@ export class AuthorizationService {
       tenantId,
       authenticatedAgentId,
       request,
+      'REQUEST',
     );
     return this.commit(
       tenantClient,
@@ -207,6 +217,58 @@ export class AuthorizationService {
       request,
       context,
       evaluation,
+      { stage: 'REQUEST' },
+    );
+  }
+
+  /**
+   * Security finding S6/F7 (spec §6.2): redeeming an approval grant re-runs
+   * the whole pipeline against current state, never trusting the decision
+   * that was true when the human approved. Kill switches at every level,
+   * AI-system suspension, task liveness and TTL (ancestors included),
+   * assignment, forbidden actions, OpenFGA and the current policy version
+   * are all evaluated again; signature, expiry, revocation, single use and
+   * parameter binding were checked by `GrantService.verifyGrant` (`grant`).
+   *
+   * Differences from a first attempt, both because a human has already
+   * approved this exact request: a policy `APPROVAL_REQUIRED` and a risk
+   * score above the task ceiling do not block, only `DENY` does; and the
+   * execution count is not incremented again (it was at grant issuance), so
+   * the task's own limit does not count this request twice.
+   *
+   * ALLOW consumes the grant (`UPDATE ... WHERE consumedAt IS NULL AND
+   * revokedAt IS NULL AND expiresAt > now`) in the same transaction as the
+   * `Decision` insert; losing that race records DENY `grant_already_consumed`.
+   * Every outcome, including an invalid grant, is a recorded `Decision`.
+   */
+  async authorizeRedemption(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    authenticatedAgentId: string,
+    request: AuthorizeRequest,
+    context: DecisionContext,
+    grant: GrantCheck,
+  ): Promise<AuthorizeDecision> {
+    const evaluation = grant.valid
+      ? await this.evaluateFailClosed(
+          tenantClient,
+          tenantId,
+          authenticatedAgentId,
+          request,
+          'GRANT_REDEMPTION',
+        )
+      : deny(grant.reason);
+    return this.commit(
+      tenantClient,
+      tenantId,
+      authenticatedAgentId,
+      request,
+      context,
+      evaluation,
+      {
+        stage: 'GRANT_REDEMPTION',
+        grantId: grant.valid ? grant.grantId : undefined,
+      },
     );
   }
 
@@ -215,6 +277,7 @@ export class AuthorizationService {
     tenantId: string,
     authenticatedAgentId: string,
     request: AuthorizeRequest,
+    stage: DecisionStage,
   ): Promise<Evaluation> {
     try {
       return await this.evaluate(
@@ -222,6 +285,7 @@ export class AuthorizationService {
         tenantId,
         authenticatedAgentId,
         request,
+        stage,
       );
     } catch (error) {
       if (error instanceof HttpException) throw error;
@@ -233,10 +297,11 @@ export class AuthorizationService {
   }
 
   /**
-   * Writes the `Decision` row, then audits. For ALLOW the execution-count
-   * increment and the insert share one transaction, so a decision that
-   * commits has consumed its execution and one that does not commit has not.
-   * Losing the increment race turns ALLOW into DENY before anything is
+   * Writes the `Decision` row, then audits. For ALLOW the reservation (the
+   * execution-count increment on a first attempt, the grant consumption on
+   * redemption) and the insert are one transaction, so a decision that
+   * commits has reserved its execution and one that does not commit has not.
+   * Losing the reservation race turns ALLOW into DENY before anything is
    * written. Any failure here is a 503 (`failClosed`): the caller never gets
    * a decision it could execute under without a durable record of it.
    */
@@ -247,29 +312,33 @@ export class AuthorizationService {
     request: AuthorizeRequest,
     context: DecisionContext,
     evaluation: Evaluation,
+    kind: DecisionRecordKind,
   ): Promise<AuthorizeDecision> {
+    const insert = (
+      client: Pick<TenantPrismaClient, 'decision'>,
+      final: Evaluation,
+    ) => this.insertDecision(client, agentId, request, context, final, kind);
+
     const { decisionId, final } = await failClosed('decision-store', () => {
-      if (evaluation.verdict.decision !== 'ALLOW' || !evaluation.task) {
-        return this.insertDecision(
-          tenantClient,
-          agentId,
-          request,
-          context,
-          evaluation,
-        );
+      if (evaluation.verdict.decision !== 'ALLOW') {
+        return insert(tenantClient, evaluation);
       }
       const task = evaluation.task;
       return tenantClient.$transaction(async (tx) => {
-        const incremented = await this.tasksService.incrementExecutionCount(
+        const reserved =
+          kind.stage === 'GRANT_REDEMPTION'
+            ? await this.consumeGrant(tx, kind.grantId)
+            : task !== undefined &&
+              (await this.tasksService.incrementExecutionCount(tx, task));
+        return insert(
           tx,
-          task,
-        );
-        return this.insertDecision(
-          tx,
-          agentId,
-          request,
-          context,
-          incremented ? evaluation : deny('task_execution_limit_reached'),
+          reserved
+            ? evaluation
+            : deny(
+                kind.stage === 'GRANT_REDEMPTION'
+                  ? 'grant_already_consumed'
+                  : 'task_execution_limit_reached',
+              ),
         );
       });
     });
@@ -289,11 +358,34 @@ export class AuthorizationService {
         resource: request.resource,
         decisionId,
         channel: context.channel,
+        stage: kind.stage,
+        ...(kind.stage === 'GRANT_REDEMPTION' && kind.grantId
+          ? { grantId: kind.grantId }
+          : {}),
         ...('reason' in final.verdict ? { reason: final.verdict.reason } : {}),
         ...final.audit,
       },
     });
     return { ...final.verdict, decisionId };
+  }
+
+  /** Single use, enforced in the database: only one redemption can win. */
+  private async consumeGrant(
+    tx: Pick<TenantPrismaClient, 'authorizationGrant'>,
+    grantId: string | undefined,
+  ): Promise<boolean> {
+    if (!grantId) return false;
+    const now = new Date();
+    const result = await tx.authorizationGrant.updateMany({
+      where: {
+        id: grantId,
+        consumedAt: null,
+        revokedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: { consumedAt: now },
+    });
+    return result.count > 0;
   }
 
   private async insertDecision(
@@ -302,6 +394,7 @@ export class AuthorizationService {
     request: AuthorizeRequest,
     context: DecisionContext,
     evaluation: Evaluation,
+    kind: DecisionRecordKind,
   ): Promise<{ decisionId: string; final: Evaluation }> {
     const { verdict } = evaluation;
     const decisive = verdict.decision === 'ALLOW' ? 'allowed' : verdict.reason;
@@ -326,7 +419,9 @@ export class AuthorizationService {
         actionId: request.actionId,
         resource: request.resource,
         channel: context.channel,
-        stage: 'REQUEST',
+        stage: kind.stage,
+        grantId:
+          kind.stage === 'GRANT_REDEMPTION' ? (kind.grantId ?? null) : null,
         correlationId: correlationIdForRecord(),
       },
     });
@@ -338,7 +433,10 @@ export class AuthorizationService {
     tenantId: string,
     authenticatedAgentId: string,
     request: AuthorizeRequest,
+    stage: DecisionStage,
   ): Promise<Evaluation> {
+    const redemption = stage === 'GRANT_REDEMPTION';
+
     // Step 0 (kill-switch phase, Section 32): platform → tenant → agent →
     // agent-group(s) → tool, then AI-system lifecycle. Runs before the task
     // is even resolved — none of these checks need it, and this is the
@@ -379,6 +477,7 @@ export class AuthorizationService {
       tenantClient,
       task,
       new Date(),
+      { executionAlreadyCounted: redemption },
     );
     if (!liveness.ok) return deny(liveness.reason as string);
 
@@ -464,6 +563,22 @@ export class AuthorizationService {
         },
         policy,
       );
+    }
+
+    // Redemption: a human approved this exact request, so the policy asking
+    // for approval and the risk ceiling are already satisfied; only DENY
+    // (above) refuses. The grant is consumed in `commit`.
+    if (redemption) {
+      return {
+        verdict: { decision: 'ALLOW' },
+        audit: {
+          policyVersionId: policyResult.policyVersionId ?? null,
+          matchedRule: policyResult.matchedRule ?? null,
+          openFgaResult,
+        },
+        ...policy,
+        task,
+      };
     }
 
     // Step 7 (Phase 6): RiskEngine. finalRiskScore vs. this task's own

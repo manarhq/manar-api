@@ -8,11 +8,9 @@ import { PlatformOperatorGuard } from './platform-operator.guard';
  * human-facing admin surface), mirroring `AuthorizationModule`/
  * `ApprovalsModule`'s split. `@Global()` for the same reason
  * `AuthorizationModule` is: `KillSwitchService.checkAll` is consumed by
- * `AuthorizationService` (`AgentMtlsAppModule` only) AND
- * `GrantService.validateAndConsumeGrant` (needed everywhere `GrantService`
- * itself is instantiated — `AppModule`, `AgentMtlsAppModule`, and
- * `WorkerAppModule` alike, even though the redemption check only ever
- * actually runs from the mTLS app's `ToolInvokeController`) — every app
+ * `AuthorizationService` (both its first-attempt `authorize` and its
+ * grant-redemption `authorizeRedemption`, which run in the mTLS app;
+ * `GrantService` no longer calls it) — every app
  * graph that imports this module gets both services without needing a
  * second copy of "how to check the five kill-switch scopes."
  */

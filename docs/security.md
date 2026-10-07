@@ -268,7 +268,7 @@ registration — the strongest case: a replay would otherwise silently
 rotate the signing secret and orphan the old one).
 
 **Deliberately NOT applied to grant redemption**
-(`GrantService.validateAndConsumeGrant`, `POST /agent/v1/tools/invoke`
+(`AuthorizationService.authorizeRedemption`, `POST /agent/v1/tools/invoke`
 with a `grantToken`) — Phase 8 already made that single-use by its own,
 different mechanism (the grant token itself is consumed exactly once);
 adding a second idempotency layer on top would be redundant, not

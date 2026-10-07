@@ -66,11 +66,11 @@ export function isPendingApproval(
  *         riskScore, approvalId }` — no tool call is ever attempted.
  *       - `ALLOW` -> `CredentialBrokerService.invoke(...)`.
  *   - **`grantToken` present** (the retry after `GET /agent/v1/approvals/:id`
- *     reported `APPROVED`): skips `authorize` (already satisfied at approval
- *     time) and validates the grant itself (`GrantService
- *     .validateAndConsumeGrant`: signature, expiry, single-use, kill switches
- *     and the parameter hash of *this exact request*). A valid grant proceeds
- *     to the broker; anything else is a 403 DENY.
+ *     reported `APPROVED`): `GrantService.verifyGrant` checks the grant is
+ *     for *this exact request* (signature, expiry, revocation, single use,
+ *     parameter hash), then `AuthorizationService.authorizeRedemption`
+ *     re-runs the full decision against current state (S6/F7) and consumes
+ *     the grant only if it still allows. Anything else is a 403 DENY.
  *
  * ADR-003: every path records a `Decision` before anything executes, and the
  * broker runs under that decision's id (`ToolInvocation.decisionId`). If the
@@ -104,11 +104,13 @@ export class ToolInvocationService {
 
     if (input.grantToken) {
       const grantToken = input.grantToken;
-      // Gate 0 finding S33: a grant-store or kill-switch lookup failure is a
-      // 503 `enforcement_dependency_unavailable`, not a bare 500, and every
-      // redemption, accepted or not, leaves an audit event.
-      const validation = await failClosed('grant-store', () =>
-        this.grantService.validateAndConsumeGrant(tenantClient, {
+      // S6/F7: verify the grant is for this exact request (signature,
+      // expiry, revocation, single use, parameter binding), then re-run the
+      // full decision against current state. Only a still-allowed decision
+      // consumes the grant, in the same transaction as its `Decision` row.
+      // Gate 0 finding S33: a grant-store failure is a 503, not a bare 500.
+      const grantCheck = await failClosed('grant-store', () =>
+        this.grantService.verifyGrant(tenantClient, {
           tenantId: agent.tenant.id,
           agentId: agent.agent.id,
           taskId: input.taskId,
@@ -119,28 +121,50 @@ export class ToolInvocationService {
           grantToken,
         }),
       );
+      const redemption = await this.authorizationService.authorizeRedemption(
+        tenantClient,
+        agent.tenant.id,
+        agent.agent.id,
+        {
+          taskId: input.taskId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+        },
+        { channel, params: input.params },
+        grantCheck,
+      );
       await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
-        eventType: validation.valid
-          ? AUDIT_EVENT_TYPES.APPROVAL_GRANT_REDEEMED
-          : AUDIT_EVENT_TYPES.APPROVAL_GRANT_REJECTED,
+        eventType:
+          redemption.decision === 'ALLOW'
+            ? AUDIT_EVENT_TYPES.APPROVAL_GRANT_REDEEMED
+            : AUDIT_EVENT_TYPES.APPROVAL_GRANT_REJECTED,
         actor: { type: 'agent', id: agent.agent.id },
         data: {
           taskId: input.taskId,
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
-          ...(validation.valid
-            ? { grantId: validation.grantId }
-            : { reason: validation.reason }),
+          decisionId: redemption.decisionId,
+          ...(grantCheck.valid ? { grantId: grantCheck.grantId } : {}),
+          ...(redemption.decision === 'ALLOW'
+            ? {}
+            : { reason: redemption.reason }),
         },
       });
-      if (!validation.valid) {
+      if (redemption.decision !== 'ALLOW') {
         throw new ForbiddenException({
           decision: 'DENY',
-          reason: validation.reason,
+          reason: redemption.reason,
+          decisionId: redemption.decisionId,
         });
       }
-      return this.invokeViaBroker(tenantClient, agent, input, undefined);
+      return this.invokeViaBroker(
+        tenantClient,
+        agent,
+        input,
+        redemption.decisionId,
+      );
     }
 
     const decision = await this.authorizationService.authorize(
@@ -199,7 +223,7 @@ export class ToolInvocationService {
     tenantClient: TenantClient,
     agent: AgentContext,
     input: ToolInvokeRequest,
-    decisionId: string | undefined,
+    decisionId: string,
   ): Promise<ToolInvocationResult> {
     try {
       return await this.credentialBroker.invoke(tenantClient, {

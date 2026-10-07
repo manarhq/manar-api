@@ -121,3 +121,70 @@ describe('ToolInvocationService: decision before execution (ADR-003, S1)', () =>
     expect(brokerInvoke).not.toHaveBeenCalled();
   });
 });
+describe('ToolInvocationService: grant redemption re-runs the decision (S6/F7)', () => {
+  const WITH_GRANT = { ...INPUT, grantToken: 'signed-grant' };
+
+  it('policy now DENY: refused with 403, DENY decision recorded, broker never called, rejection audited with the decision id', async () => {
+    const { h, service, brokerInvoke, auditRecordSafely } = setup({
+      policy: { effect: 'DENY', policyId: 'p', policyVersionId: 'pv-2' },
+    });
+
+    await expect(
+      service.invoke(AGENT, WITH_GRANT, 'REST'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(brokerInvoke).not.toHaveBeenCalled();
+    expect(h.decisions[0]).toMatchObject({
+      outcome: 'DENY',
+      stage: 'GRANT_REDEMPTION',
+      reasonCodes: ['policy_denied'],
+    });
+    expect(auditRecordSafely).toHaveBeenCalledWith(
+      h.tenantClient,
+      'tenant-1',
+      expect.objectContaining({
+        eventType: 'approval.grant_rejected',
+        data: expect.objectContaining({
+          decisionId: 'decision-1',
+          reason: 'policy_denied',
+        }) as unknown,
+      }),
+    );
+  });
+
+  it('still allowed: grant consumed with the decision, then executed under the redemption decision id', async () => {
+    const { h, service, brokerInvoke, auditRecordSafely } = setup();
+
+    await service.invoke(AGENT, WITH_GRANT, 'MCP');
+
+    expect(h.events).toEqual(['consume:tx', 'decision:tx', 'broker']);
+    expect(brokerInvoke).toHaveBeenCalledWith(
+      h.tenantClient,
+      expect.objectContaining({ decisionId: 'decision-1' }),
+    );
+    expect(auditRecordSafely).toHaveBeenCalledWith(
+      h.tenantClient,
+      'tenant-1',
+      expect.objectContaining({
+        eventType: 'approval.grant_redeemed',
+        data: expect.objectContaining({
+          decisionId: 'decision-1',
+          grantId: 'grant-1',
+        }) as unknown,
+      }),
+    );
+  });
+
+  it('an already-consumed grant is a recorded DENY', async () => {
+    const { h, service, brokerInvoke } = setup({ grantValid: false });
+
+    await expect(
+      service.invoke(AGENT, WITH_GRANT, 'REST'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(brokerInvoke).not.toHaveBeenCalled();
+    expect(h.decisions[0]).toMatchObject({
+      outcome: 'DENY',
+      reasonCodes: ['grant_already_consumed'],
+    });
+  });
+});

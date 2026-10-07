@@ -165,7 +165,7 @@ export interface CredentialBrokerInvokeInput {
   resource: string;
   params: unknown;
   /** ADR-003: the committed `Decision` this execution runs under. */
-  decisionId?: string;
+  decisionId: string;
 }
 
 /**
