@@ -491,7 +491,10 @@ describe('Phase 10c: AI Extended Capabilities (e2e)', () => {
         actionId,
         resource: 'anything',
       });
-      expect(beforePublish).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+      expect(beforePublish).toEqual<AuthorizeDecision>({
+        decision: 'ALLOW',
+        decisionId: expect.any(String) as string,
+      });
 
       // Now publish it through the normal, separate publish endpoint.
       await request(humanApp.getHttpServer() as App)

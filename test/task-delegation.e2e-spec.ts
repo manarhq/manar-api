@@ -273,7 +273,10 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       actionId: 'read',
       resource: 'anything',
     });
-    expect(decision).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(decision).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
   }, 30_000);
 
   it('2. the assigned agent attempts an action outside task scope -> DENY', async () => {
@@ -314,6 +317,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     expect(decision).toEqual<AuthorizeDecision>({
       decision: 'DENY',
       reason: 'not_assigned_agent',
+      decisionId: expect.any(String) as string,
     });
   }, 30_000);
 
@@ -391,7 +395,10 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       actionId: 'read',
       resource: 'anything',
     });
-    expect(readDecision).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(readDecision).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     // The parent could "write"; the child was never granted it.
     const writeDecision = await childManar.authorize({
@@ -537,7 +544,10 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
 
     // Works once, before revocation.
     const before = await childManar.authorize(authorizeRequest);
-    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     // Revoke the PARENT -- never the child.
     await revokeTask(parentTask.id);
@@ -573,7 +583,10 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       actionId: 'read',
       resource: 'anything',
     });
-    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
     await tenantClient.task.update({
@@ -590,6 +603,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     expect(after).toEqual<AuthorizeDecision>({
       decision: 'DENY',
       reason: 'task_outside_time_window',
+      decisionId: expect.any(String) as string,
     });
   }, 30_000);
 
@@ -610,12 +624,16 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     };
 
     const first = await agent.manar.authorize(request);
-    expect(first).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(first).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     const second = await agent.manar.authorize(request);
     expect(second).toEqual<AuthorizeDecision>({
       decision: 'DENY',
       reason: 'task_execution_limit_reached',
+      decisionId: expect.any(String) as string,
     });
   }, 30_000);
 
@@ -638,7 +656,10 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     // first, so the outage result below is a meaningful before/after
     // comparison, not just "it was always going to deny".
     const healthy = await agent.manar.authorize(authorizeRequest);
-    expect(healthy).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(healthy).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     // Exercises the REAL AuthorizationService/OpenFgaClientService/
     // TasksService classes directly (no HTTP layer, no mocking of the
@@ -724,6 +745,9 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     // same request against it still succeeds, proving this wasn't a
     // permanent break of anything shared.
     const afterOutage = await agent.manar.authorize(authorizeRequest);
-    expect(afterOutage).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(afterOutage).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
   }, 30_000);
 });

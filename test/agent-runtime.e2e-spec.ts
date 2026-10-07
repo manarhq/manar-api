@@ -680,6 +680,22 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
         success: true,
         data: { id: incidentId, _dataOrigin: 'DEMO_FIXTURE' },
       });
+
+      // ADR-003: the MCP door records its decision, and the execution
+      // outcome is linked to it.
+      const decision = await tenantClientRef.decision.findFirstOrThrow({
+        where: { taskId: task.id, actionId: 'security.incident.get' },
+        orderBy: { createdAt: 'desc' },
+        include: { toolInvocations: true },
+      });
+      expect(decision).toMatchObject({
+        outcome: 'ALLOW',
+        channel: 'MCP',
+        stage: 'REQUEST',
+        resource: incidentId,
+      });
+      expect(decision.toolInvocations).toHaveLength(1);
+      expect(decision.toolInvocations[0]!.status).toBe('SUCCESS');
     });
 
     it('DENY: out-of-scope resource and forbidden action come back as isError with the reason', async () => {
@@ -700,6 +716,12 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
         isError: true,
         structuredContent: { status: 'DENIED', reason: 'forbidden_action' },
       });
+      const denials = await tenantClientRef.decision.findMany({
+        where: { taskId: task.id, outcome: 'DENY', channel: 'MCP' },
+      });
+      expect(denials.map((d) => d.reasonCodes[0])).toEqual(
+        expect.arrayContaining(['not_authorized', 'forbidden_action']),
+      );
       expect(
         (await fixtureState()).users.find(
           (u) => u.id === FIXTURE_SECOND_USER_ID,
@@ -786,6 +808,15 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
         },
       );
       expect(replay.status).toBe(403);
+      const replayDecision = await tenantClientRef.decision.findUniqueOrThrow({
+        where: { id: (replay.body as { decisionId: string }).decisionId },
+      });
+      expect(replayDecision).toMatchObject({
+        outcome: 'DENY',
+        stage: 'GRANT_REDEMPTION',
+        channel: 'REST',
+        reasonCodes: ['grant_already_consumed'],
+      });
     });
   });
 

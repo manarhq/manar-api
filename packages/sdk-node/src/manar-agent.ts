@@ -36,10 +36,12 @@ export interface AuthorizeRequest {
   resource: string;
 }
 
-export type AuthorizeDecision =
+/** `decisionId` is the durable `Decision` record committed before the answer (ADR-0006). */
+export type AuthorizeDecision = (
   | { decision: 'ALLOW' }
   | { decision: 'DENY'; reason: string }
-  | { decision: 'APPROVAL_REQUIRED'; reason: string; riskScore: number };
+  | { decision: 'APPROVAL_REQUIRED'; reason: string; riskScore: number }
+) & { decisionId: string };
 
 export interface DelegateTaskGrant {
   toolId: string;
