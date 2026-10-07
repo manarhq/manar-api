@@ -342,7 +342,8 @@ export class TasksService {
    * implementation, not two copies of the same race-closing update.
    */
   async incrementExecutionCount(
-    tenantClient: TenantPrismaClient,
+    /** A client or an interactive-transaction client (`AuthorizationService.commit`). */
+    tenantClient: Pick<TenantPrismaClient, 'task'>,
     task: TaskRecord,
   ): Promise<boolean> {
     if (task.maxExecutions == null) {

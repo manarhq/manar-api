@@ -198,7 +198,11 @@ export class AgentRuntimeController {
       if (!parsed.success) return deniedResult('invalid_arguments');
 
       try {
-        const outcome = await this.toolInvocation.invoke(agent, parsed.data);
+        const outcome = await this.toolInvocation.invoke(
+          agent,
+          parsed.data,
+          'MCP',
+        );
         if (isPendingApproval(outcome)) {
           return okResult({
             status: 'PENDING',

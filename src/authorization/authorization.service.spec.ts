@@ -8,6 +8,11 @@ import type { TasksService } from '../tasks/tasks.service';
 import { AuthorizationService } from './authorization.service';
 import type { OpenFgaClientService } from './openfga-client.service';
 
+/** Only what the fail-closed path touches: the `Decision` insert. */
+const tenantClient = {
+  decision: { create: vi.fn().mockResolvedValue({ id: 'decision-1' }) },
+} as unknown as TenantPrismaClient;
+
 const REQUEST = {
   taskId: 'task-1',
   toolId: 'entra',
@@ -43,10 +48,11 @@ describe('AuthorizationService.authorize fails closed (S32, S61)', () => {
     });
 
     await expect(
-      service.authorize({} as TenantPrismaClient, 't1', 'agent-1', REQUEST),
+      service.authorize(tenantClient, 't1', 'agent-1', REQUEST),
     ).resolves.toEqual({
       decision: 'DENY',
       reason: 'enforcement_dependency_unavailable',
+      decisionId: 'decision-1',
     });
     expect(recordSafely).toHaveBeenCalledWith(
       expect.anything(),
@@ -66,10 +72,11 @@ describe('AuthorizationService.authorize fails closed (S32, S61)', () => {
     });
 
     await expect(
-      service.authorize({} as TenantPrismaClient, 't1', 'agent-1', REQUEST),
+      service.authorize(tenantClient, 't1', 'agent-1', REQUEST),
     ).resolves.toEqual({
       decision: 'DENY',
       reason: 'enforcement_dependency_unavailable',
+      decisionId: 'decision-1',
     });
   });
 });

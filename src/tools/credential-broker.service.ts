@@ -164,6 +164,8 @@ export interface CredentialBrokerInvokeInput {
   actionId: string;
   resource: string;
   params: unknown;
+  /** ADR-003: the committed `Decision` this execution runs under. */
+  decisionId?: string;
 }
 
 /**
@@ -243,6 +245,7 @@ export class CredentialBrokerService {
         actor: { type: 'agent', id: input.agentId },
         data: {
           taskId: input.taskId,
+          decisionId: input.decisionId,
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
@@ -271,6 +274,7 @@ export class CredentialBrokerService {
         actor: { type: 'agent', id: input.agentId },
         data: {
           taskId: input.taskId,
+          decisionId: input.decisionId,
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
@@ -292,6 +296,7 @@ export class CredentialBrokerService {
         actor: { type: 'agent', id: input.agentId },
         data: {
           taskId: input.taskId,
+          decisionId: input.decisionId,
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
@@ -325,6 +330,7 @@ export class CredentialBrokerService {
         actor: { type: 'agent', id: input.agentId },
         data: {
           taskId: input.taskId,
+          decisionId: input.decisionId,
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
@@ -413,6 +419,7 @@ export class CredentialBrokerService {
       actor: { type: 'agent', id: input.agentId },
       data: {
         taskId: input.taskId,
+        decisionId: input.decisionId,
         toolId: input.toolId,
         actionId: input.actionId,
         resource: input.resource,
@@ -523,6 +530,7 @@ export class CredentialBrokerService {
         actor: { type: 'agent', id: input.agentId },
         data: {
           taskId: input.taskId,
+          decisionId: input.decisionId,
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
@@ -573,6 +581,7 @@ export class CredentialBrokerService {
           actor: { type: 'agent', id: input.agentId },
           data: {
             taskId: input.taskId,
+            decisionId: input.decisionId,
             toolId: input.toolId,
             actionId: input.actionId,
             resource: input.resource,
@@ -618,6 +627,7 @@ export class CredentialBrokerService {
         startedAt: record.startedAt,
         completedAt: record.completedAt,
         errorMessage: record.errorMessage,
+        decisionId: input.decisionId,
       },
     });
   }

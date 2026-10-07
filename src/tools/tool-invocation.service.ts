@@ -8,7 +8,10 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import type { AgentContext } from '../agent-mtls/agent-context';
-import { AuthorizationService } from '../authorization/authorization.service';
+import {
+  AuthorizationService,
+  type DecisionChannel,
+} from '../authorization/authorization.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { ApprovalRequestService } from '../approvals/approval-request.service';
 import { GrantService } from '../approvals/grant.service';
@@ -69,6 +72,10 @@ export function isPendingApproval(
  *     and the parameter hash of *this exact request*). A valid grant proceeds
  *     to the broker; anything else is a 403 DENY.
  *
+ * ADR-003: every path records a `Decision` before anything executes, and the
+ * broker runs under that decision's id (`ToolInvocation.decisionId`). If the
+ * decision cannot be written the request is a 503 and nothing executes.
+ *
  * Errors are Nest HTTP exceptions (403 DENY, 404 unknown tool/action, 409
  * disabled tool, 503 `enforcement_dependency_unavailable`) so the REST
  * controller can let them through unchanged and the MCP server can map them.
@@ -89,6 +96,7 @@ export class ToolInvocationService {
   async invoke(
     agent: AgentContext,
     input: ToolInvokeRequest,
+    channel: Extract<DecisionChannel, 'REST' | 'MCP'>,
   ): Promise<ToolInvocationOutcome> {
     const tenantClient = await failClosed('tenant-db', () =>
       this.tenantDatabaseManager.getClient(agent.tenant.id),
@@ -132,7 +140,7 @@ export class ToolInvocationService {
           reason: validation.reason,
         });
       }
-      return this.invokeViaBroker(tenantClient, agent, input);
+      return this.invokeViaBroker(tenantClient, agent, input, undefined);
     }
 
     const decision = await this.authorizationService.authorize(
@@ -145,12 +153,14 @@ export class ToolInvocationService {
         actionId: input.actionId,
         resource: input.resource,
       },
+      { channel, params: input.params },
     );
 
     if (decision.decision === 'DENY') {
       throw new ForbiddenException({
         decision: 'DENY',
         reason: decision.reason,
+        decisionId: decision.decisionId,
       });
     }
     if (decision.decision === 'APPROVAL_REQUIRED') {
@@ -167,6 +177,7 @@ export class ToolInvocationService {
         riskReasonCodes: decision.riskReasonCodes,
         riskCeiling: decision.riskCeiling,
         requiredReason: decision.reason,
+        decisionId: decision.decisionId,
       });
       return {
         status: 'PENDING',
@@ -176,13 +187,19 @@ export class ToolInvocationService {
       };
     }
 
-    return this.invokeViaBroker(tenantClient, agent, input);
+    return this.invokeViaBroker(
+      tenantClient,
+      agent,
+      input,
+      decision.decisionId,
+    );
   }
 
   private async invokeViaBroker(
     tenantClient: TenantClient,
     agent: AgentContext,
     input: ToolInvokeRequest,
+    decisionId: string | undefined,
   ): Promise<ToolInvocationResult> {
     try {
       return await this.credentialBroker.invoke(tenantClient, {
@@ -193,6 +210,7 @@ export class ToolInvocationService {
         actionId: input.actionId,
         resource: input.resource,
         params: input.params,
+        decisionId,
       });
     } catch (error) {
       if (error instanceof ToolNotFoundError) {
@@ -235,6 +253,7 @@ export class ToolInvocationService {
       riskReasonCodes: string[];
       riskCeiling: number;
       requiredReason: string;
+      decisionId: string;
     },
   ): Promise<string> {
     const requestTtlMs = this.configService.get('APPROVAL_REQUEST_TTL_MS', {
@@ -282,6 +301,7 @@ export class ToolInvocationService {
       actor: { type: 'agent', id: agent.agent.id },
       data: {
         approvalRequestId: approvalRequest.id,
+        decisionId: decision.decisionId,
         taskId: input.taskId,
         toolId: input.toolId,
         actionId: input.actionId,

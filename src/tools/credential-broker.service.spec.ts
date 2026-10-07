@@ -101,6 +101,7 @@ const baseInput: CredentialBrokerInvokeInput = {
   actionId: 'search-events',
   resource: 'host-1',
   params: {},
+  decisionId: 'decision-1',
 };
 
 function makeService(options: {
@@ -459,6 +460,50 @@ describe('CredentialBrokerService audit-before-side-effect (R2)', () => {
     expect(resolveSecret).not.toHaveBeenCalled();
     expect(invokeHttp).not.toHaveBeenCalled();
   });
+});
+
+describe('CredentialBrokerService links execution to its decision (ADR-003)', () => {
+  it.each([
+    [{ success: true, data: {} }, 'SUCCESS'],
+    [{ success: false, errorMessage: 'HTTP 500' }, 'FAILURE'],
+    [
+      { success: false, outcomeUnknown: true, errorMessage: 'timeout' },
+      'UNKNOWN',
+    ],
+  ] as [ToolInvocationResult, string][])(
+    'the ToolInvocation row and the audit events carry the decision id (%o -> %s)',
+    async (toolResult, status) => {
+      const record = vi.fn().mockResolvedValue({});
+      const { service, recordSafely } = makeService({ toolResult, record });
+      const { tenantClient } = fakeTenantClient();
+      const toolInvocationCreate = vi.spyOn(
+        tenantClient.toolInvocation,
+        'create',
+      );
+
+      await service.invoke(tenantClient, baseInput);
+
+      expect(toolInvocationCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          decisionId: 'decision-1',
+          status,
+        }) as unknown,
+      });
+      expect(record).toHaveBeenCalledWith(
+        tenantClient,
+        'tenant-1',
+        expect.objectContaining({
+          eventType: AUDIT_EVENT_TYPES.TOOL_INVOCATION_STARTED,
+          data: expect.objectContaining({
+            decisionId: 'decision-1',
+          }) as unknown,
+        }),
+      );
+      for (const [, , event] of recordSafely.mock.calls) {
+        expect(event.data).toMatchObject({ decisionId: 'decision-1' });
+      }
+    },
+  );
 });
 
 describe('CredentialBrokerService protocol dispatch', () => {

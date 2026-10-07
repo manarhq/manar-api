@@ -37,7 +37,7 @@ export class ToolInvokeController {
     @Res({ passthrough: true }) reply: FastifyReply,
   ) {
     const input = parseBodyOrThrow(ToolInvokeRequestSchema, body);
-    const outcome = await this.toolInvocation.invoke(agent, input);
+    const outcome = await this.toolInvocation.invoke(agent, input, 'REST');
     if (isPendingApproval(outcome)) reply.status(202);
     return outcome;
   }
