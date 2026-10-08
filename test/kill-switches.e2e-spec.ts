@@ -30,6 +30,8 @@ import {
   getUserToken,
 } from './support/keycloak-test-helpers';
 import { HttpFixtureServer } from './support/http-fixture-server';
+import { ensureManarConnector } from '../src/cli/commands/manar-connector-register.command';
+import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
 
 /**
  * Kill Switches (all five scopes) — every mandatory scenario from the
@@ -1019,4 +1021,314 @@ describe('Kill Switches (e2e)', () => {
       decisionId: expect.any(String) as string,
     });
   }, 30_000);
+
+  // ---------------------------------------------------------------------
+  // ADR-0009: quarantine and the watcher (Manar's built-in connector).
+  // AI may tighten on its own; loosening always needs a human.
+  // ---------------------------------------------------------------------
+
+  /** A watcher: an agent whose task grants only the two restriction-only Manar actions. */
+  async function createWatcher(
+    token: string = adminToken,
+    tenantId = tenant.id,
+  ) {
+    await ensureManarConnector(await tenantDatabaseManager.getClient(tenantId));
+    const watcher = await createEnrolledAgent('watcher', token);
+    const task = await createTask(
+      {
+        assignedAgentId: watcher.agentId,
+        allowedToolActions: [
+          { toolId: 'manar', actionId: 'manar.activity.read' },
+          { toolId: 'manar', actionId: 'manar.agent.quarantine' },
+        ],
+        allowedResourceSelectors: [{ toolId: 'manar', pattern: '*' }],
+        riskCeiling: 30,
+      },
+      token,
+    );
+    const invoke = (actionId: string, resource: string, params: unknown) =>
+      invokeToolOverMtls(watcher.identity, {
+        taskId: task.id,
+        toolId: 'manar',
+        actionId,
+        resource,
+        params,
+      });
+    return { ...watcher, taskId: task.id, invoke };
+  }
+
+  async function releaseQuarantine(
+    agentId: string,
+    token: string = adminToken,
+  ) {
+    return request(humanApp.getHttpServer() as App)
+      .post(`/agents/${agentId}/quarantine/release`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ note: 'checked by a human' });
+  }
+
+  it('8. watcher quarantine: reads metadata only, quarantines without approval, blocks the target, only a human releases', async () => {
+    const watcher = await createWatcher();
+    const target = await createEnrolledAgent('quarantine-target');
+    const task = await createTask({
+      assignedAgentId: target.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    });
+    const SECRET_RESOURCE = `customer-${randomUUID()}`;
+    const targetRequest = {
+      taskId: task.id,
+      toolId: 'fs',
+      actionId: 'read',
+      resource: SECRET_RESOURCE,
+    };
+    expect((await target.manar.authorize(targetRequest)).decision).toBe(
+      'ALLOW',
+    );
+
+    // Activity: metadata and counts, the resource only as a hash.
+    const activity = await watcher.invoke('manar.activity.read', 'tenant', {
+      windowSeconds: 300,
+    });
+    expect(activity.status).toBe(200);
+    const activityData = (
+      activity.body as {
+        success: boolean;
+        data: { decisions: { agentId: string; resourceRef: string }[] };
+      }
+    ).data;
+    expect(
+      activityData.decisions.some((d) => d.agentId === target.agentId),
+    ).toBe(true);
+    expect(JSON.stringify(activity.body)).not.toContain(SECRET_RESOURCE);
+
+    // Quarantine: ALLOW (no approval), recorded as a Decision and audited
+    // with the watcher as actor.
+    const quarantined = await watcher.invoke(
+      'manar.agent.quarantine',
+      target.agentId,
+      { reason: 'e2e burst', detector: 'deny_burst', evidence: ['d-1'] },
+    );
+    expect(quarantined.status).toBe(200);
+    expect(quarantined.body).toMatchObject({
+      success: true,
+      data: { result: 'quarantined', agentId: target.agentId },
+    });
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    const decision = await tenantClient.decision.findFirstOrThrow({
+      where: { agentId: watcher.agentId, actionId: 'manar.agent.quarantine' },
+    });
+    expect(decision.outcome).toBe('ALLOW');
+    const quarantineEvents = await tenantClient.auditEvent.findMany({
+      where: { eventType: AUDIT_EVENT_TYPES.AGENT_QUARANTINED },
+    });
+    const ours = quarantineEvents.filter(
+      (e) =>
+        (e.data as { targetAgentId: string }).targetAgentId === target.agentId,
+    );
+    expect(ours).toHaveLength(1);
+    expect(ours[0]!.actor).toEqual({ type: 'agent', id: watcher.agentId });
+
+    // Idempotent: a second call changes nothing and audits nothing.
+    const again = await watcher.invoke(
+      'manar.agent.quarantine',
+      target.agentId,
+      {
+        reason: 'again',
+      },
+    );
+    expect(again.body).toMatchObject({
+      data: { result: 'already_quarantined' },
+    });
+
+    // The target is stopped everywhere, fail closed, but its identity works
+    // so it can read why.
+    const denied = await target.manar.authorize(targetRequest);
+    expect(denied).toMatchObject({
+      decision: 'DENY',
+      reason: 'agent_quarantined',
+    });
+    const manifest = await mtlsRequest(
+      target.identity,
+      'GET',
+      `/agent/v1/tasks/${task.id}/tool-manifest`,
+    );
+    expect(manifest.status).toBe(403);
+    expect(manifest.body).toMatchObject({ reason: 'agent_quarantined' });
+    expect(
+      (await mtlsRequest(target.identity, 'GET', '/agent/v1/whoami')).status,
+    ).toBe(200);
+
+    // The watcher cannot loosen anything.
+    // (a) no release action exists, and none can be granted.
+    const releaseAttempt = await watcher.invoke(
+      'manar.agent.release',
+      target.agentId,
+      {},
+    );
+    expect(releaseAttempt.status).toBe(403);
+    expect(releaseAttempt.body).toMatchObject({ decision: 'DENY' });
+    await request(humanApp.getHttpServer() as App)
+      .post('/tasks')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        name: 'release capability',
+        assignedAgentId: watcher.agentId,
+        allowedToolActions: [
+          { toolId: 'manar', actionId: 'manar.agent.release' },
+        ],
+        allowedResourceSelectors: [{ toolId: 'manar', pattern: '*' }],
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      })
+      .expect(400);
+    // (b) its mTLS identity reaches no human route: release, kill-switch
+    // deactivation and approval decisions do not exist on the agent listener...
+    for (const path of [
+      `/agent/v1/agents/${target.agentId}/quarantine/release`,
+      `/agents/${target.agentId}/quarantine/release`,
+      `/agents/${target.agentId}/kill-switch/deactivate`,
+      '/tenants/kill-switch/deactivate',
+      `/agent/v1/approvals/${randomUUID()}/decide`,
+      `/approvals/${randomUUID()}/decide`,
+    ]) {
+      expect(
+        (await mtlsRequest(watcher.identity, 'POST', path, {})).status,
+      ).toBe(404);
+    }
+    // ...and the human app refuses anything without a human JWT.
+    for (const path of [
+      `/agents/${target.agentId}/quarantine/release`,
+      `/agents/${target.agentId}/kill-switch/deactivate`,
+      `/approvals/${randomUUID()}/decide`,
+    ]) {
+      await request(humanApp.getHttpServer() as App)
+        .post(path)
+        .send({})
+        .expect(401);
+    }
+    // (c) smuggled params are refused.
+    const smuggled = await watcher.invoke(
+      'manar.agent.quarantine',
+      target.agentId,
+      { reason: 'x', active: false },
+    );
+    expect(smuggled.body).toMatchObject({
+      success: false,
+      errorMessage: 'invalid_params',
+    });
+    expect((await target.manar.authorize(targetRequest)).decision).toBe('DENY');
+
+    // A human releases; audited with the human.
+    const released = await releaseQuarantine(target.agentId);
+    expect(released.status).toBe(201);
+    expect(released.body).toMatchObject({
+      active: false,
+      releasedBy: expect.any(String) as string,
+      releaseNote: 'checked by a human',
+    });
+    const releaseEvent = await tenantClient.auditEvent.findFirstOrThrow({
+      where: { eventType: AUDIT_EVENT_TYPES.AGENT_QUARANTINE_RELEASED },
+      orderBy: { timestamp: 'desc' },
+    });
+    expect(releaseEvent.actor).toMatchObject({ type: 'human' });
+    expect(releaseEvent.data).toMatchObject({ targetAgentId: target.agentId });
+    expect((await target.manar.authorize(targetRequest)).decision).toBe(
+      'ALLOW',
+    );
+    // Nothing left to release.
+    expect((await releaseQuarantine(target.agentId)).status).toBe(404);
+  }, 60_000);
+
+  it('9. watcher cannot reach another tenant: its agents are not found, not quarantined', async () => {
+    const watcher = await createWatcher();
+    const foreign = await createEnrolledAgent('foreign-agent', adminToken2);
+    const foreignTask = await createTask(
+      {
+        assignedAgentId: foreign.agentId,
+        allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+        allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+      },
+      adminToken2,
+    );
+    const foreignRequest = {
+      taskId: foreignTask.id,
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
+    };
+    expect((await foreign.manar.authorize(foreignRequest)).decision).toBe(
+      'ALLOW',
+    );
+
+    const attempt = await watcher.invoke(
+      'manar.agent.quarantine',
+      foreign.agentId,
+      {
+        reason: 'cross-tenant attempt',
+      },
+    );
+    expect(attempt.body).toMatchObject({
+      success: false,
+      errorMessage: 'agent_not_found',
+    });
+    const activity = await watcher.invoke('manar.activity.read', 'tenant', {});
+    expect(JSON.stringify(activity.body)).not.toContain(foreign.agentId);
+    expect((await foreign.manar.authorize(foreignRequest)).decision).toBe(
+      'ALLOW',
+    );
+  }, 30_000);
+
+  it('10. grant redemption: an approved, unused grant is refused while its agent is quarantined', async () => {
+    const fixture = new HttpFixtureServer();
+    const baseEndpoint = await fixture.start();
+    try {
+      const watcher = await createWatcher();
+      const tool = await registerTool(tenant.id, {
+        name: uniqueSlug('quarantine-redemption-tool'),
+        baseEndpoint,
+      });
+      await registerToolAction(tenant.id, { toolId: tool.id, name: 'lookup' });
+      const agent = await createEnrolledAgent('quarantine-redemption');
+      const task = await createTask({
+        assignedAgentId: agent.agentId,
+        allowedToolActions: [{ toolId: tool.name, actionId: 'lookup' }],
+        allowedResourceSelectors: [{ toolId: tool.name, pattern: '*' }],
+        riskCeiling: 5,
+      });
+      const call = {
+        taskId: task.id,
+        toolId: tool.name,
+        actionId: 'lookup',
+        resource: 'quarantine-redemption-1',
+        params: {},
+      };
+      const pending = await invokeToolOverMtls(agent.identity, call);
+      expect(pending.status).toBe(202);
+      const { approvalId } = pending.body as { approvalId: string };
+      await decideApproval(approvalId, 'APPROVE');
+      const approved = await waitForApprovalStatus(agent.identity, approvalId);
+      expect(approved.status).toBe('APPROVED');
+
+      await watcher.invoke('manar.agent.quarantine', agent.agentId, {
+        reason: 'e2e redemption',
+      });
+      const refused = await invokeToolOverMtls(agent.identity, {
+        ...call,
+        grantToken: approved.grantToken,
+      });
+      expect(refused.status).toBe(403);
+      expect(refused.body).toMatchObject({ reason: 'agent_quarantined' });
+      expect(fixture.requests).toHaveLength(0);
+
+      expect((await releaseQuarantine(agent.agentId)).status).toBe(201);
+      const used = await invokeToolOverMtls(agent.identity, {
+        ...call,
+        grantToken: approved.grantToken,
+      });
+      expect(used.status).toBe(200);
+      expect(fixture.requests).toHaveLength(1);
+    } finally {
+      await fixture.stop();
+    }
+  }, 45_000);
 });
