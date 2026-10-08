@@ -177,3 +177,18 @@ describe('DelegationService limits (R3)', () => {
     ]);
   });
 });
+
+describe('Delegation never hands out a Manar connector action (ADR-0009, finding 3)', () => {
+  for (const actionId of ['manar.agent.quarantine', 'manar.activity.read']) {
+    it(`rejects ${actionId} in a child grant`, () => {
+      expect(
+        DelegateTaskRequestSchema.safeParse({
+          childAgentSlug: 'child',
+          name: 'child',
+          allowedToolActions: [{ toolId: 'manar', actionId }],
+          allowedResourceSelectors: [{ toolId: 'manar', pattern: '*' }],
+        }).success,
+      ).toBe(false);
+    });
+  }
+});
