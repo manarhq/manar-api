@@ -6,6 +6,9 @@
 #
 # Per deployment, set up once in GitLab (Settings > CI/CD), scoped to the environment
 # `fleet/<deployment name>` and protected: FLEET_KUBECONFIG (file variable) for that cluster.
+# Only protected refs may use it; manar-fleet triggers on the protected default branch.
+# The pipeline trigger token is held only by manar-fleet (its GITLAB_TRIGGER_TOKEN env); anyone
+# with it can start these jobs, so it is never shared, logged or committed.
 # Optional non-secret values files: deploy/environments/<deployment name>/{manar-api,manar-api-worker}.yaml.
 # Secrets stay out of git (External Secrets or OpenBao sync, as in docs/kubernetes.md).
 #
@@ -21,10 +24,9 @@
     - apk add --no-cache bash curl git >/dev/null
     - test -n "$FLEET_KUBECONFIG" || { echo "FLEET_KUBECONFIG is not set for this environment"; exit 1; }
     - export KUBECONFIG="$FLEET_KUBECONFIG"
-    # Inputs come from manar-fleet; reject anything that is not a plain tag or namespace.
-    - echo "$FLEET_TARGET_VERSION" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$'
-    - echo "$FLEET_NAMESPACE" | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
-    - echo "$FLEET_DEPLOYMENT_NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'
+    # Inputs come from manar-fleet. Whole-value checks (see validate-fleet-inputs.sh): reject,
+    # never sanitise. manar-fleet applies the same rules before it triggers.
+    - sh deploy/ci/validate-fleet-inputs.sh
     - ENVDIR="deploy/environments/$FLEET_DEPLOYMENT_NAME"
     - API_VALUES=""; [ -f "$ENVDIR/manar-api.yaml" ] && API_VALUES="-f $ENVDIR/manar-api.yaml"
     - WORKER_VALUES=""; [ -f "$ENVDIR/manar-api-worker.yaml" ] && WORKER_VALUES="-f $ENVDIR/manar-api-worker.yaml"
@@ -35,6 +37,17 @@
   variables:
     GIT_DEPTH: 1
     HELM_DIFF_VERSION: v3.13.1
+
+# Shell test of the input checks: newline, comma, space and overlong values must be rejected.
+fleet-inputs:test:
+  stage: lint
+  image:
+    name: alpine/helm:4.2.3
+    entrypoint: ['']
+  before_script: []
+  rules: !reference [.ci-rules, rules]
+  script:
+    - sh deploy/ci/validate-fleet-inputs.test.sh
 
 fleet:dry-run:
   extends: .fleet-deploy
@@ -47,8 +60,8 @@ fleet:dry-run:
     - helm plugin install https://github.com/databus23/helm-diff --version "$HELM_DIFF_VERSION"
     # manar-fleet stores the text between these two marker lines as the dry-run diff.
     - echo FLEET-HELM-DIFF-BEGIN
-    - helm diff upgrade manar-api deploy/helm/manar-api -n "$FLEET_NAMESPACE" --allow-unreleased --no-color --set image.tag="$FLEET_TARGET_VERSION" $API_VALUES
-    - helm diff upgrade manar-api-worker deploy/helm/manar-api-worker -n "$FLEET_NAMESPACE" --allow-unreleased --no-color --set image.tag="$FLEET_TARGET_VERSION" $WORKER_VALUES
+    - helm diff upgrade manar-api deploy/helm/manar-api -n "$FLEET_NAMESPACE" --allow-unreleased --no-color --set-string image.tag="$FLEET_TARGET_VERSION" $API_VALUES
+    - helm diff upgrade manar-api-worker deploy/helm/manar-api-worker -n "$FLEET_NAMESPACE" --allow-unreleased --no-color --set-string image.tag="$FLEET_TARGET_VERSION" $WORKER_VALUES
     - echo FLEET-HELM-DIFF-END
 
 fleet:apply:
@@ -56,8 +69,8 @@ fleet:apply:
   rules:
     - if: $CI_PIPELINE_SOURCE == "trigger" && $FLEET_MODE == "apply"
   script:
-    - helm upgrade --install manar-api deploy/helm/manar-api -n "$FLEET_NAMESPACE" --atomic --wait --timeout 10m --set image.tag="$FLEET_TARGET_VERSION" $API_VALUES
-    - helm upgrade --install manar-api-worker deploy/helm/manar-api-worker -n "$FLEET_NAMESPACE" --atomic --wait --timeout 10m --set image.tag="$FLEET_TARGET_VERSION" $WORKER_VALUES
+    - helm upgrade --install manar-api deploy/helm/manar-api -n "$FLEET_NAMESPACE" --atomic --wait --timeout 10m --set-string image.tag="$FLEET_TARGET_VERSION" $API_VALUES
+    - helm upgrade --install manar-api-worker deploy/helm/manar-api-worker -n "$FLEET_NAMESPACE" --atomic --wait --timeout 10m --set-string image.tag="$FLEET_TARGET_VERSION" $WORKER_VALUES
 
 fleet:rollback:
   extends: .fleet-deploy
