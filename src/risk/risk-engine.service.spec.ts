@@ -142,6 +142,7 @@ describe('RiskEngine', () => {
     {
       recordSafely: () => Promise.resolve(undefined),
     } as unknown as AuditService,
+    {} as never,
   );
   const toolRegistry = new ToolRegistryService();
 

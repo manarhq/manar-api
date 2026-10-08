@@ -303,6 +303,36 @@ export class KillSwitchService {
   }
 
   /**
+   * ADR-0009: every per-agent stop condition for an agent that is not the
+   * caller (an ancestor in a delegation chain): the agent itself must be
+   * ACTIVE (not revoked, killed or pending; the mTLS guard enforces this for
+   * the caller), then everything `checkAll` enforces (kill switches at every
+   * scope, quarantine, AI-system SUSPENDED/RETIRED). One definition, so a
+   * stop condition added to `checkAll` later cascades too. Throws on a
+   * lookup failure; callers fail closed.
+   */
+  async checkAgent(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    agentId: string,
+  ): Promise<KillSwitchCheckResult> {
+    const agent = await tenantClient.agent.findUnique({
+      where: { id: agentId },
+      select: { status: true },
+    });
+    if (!agent)
+      return { killed: true, scope: 'AGENT', reason: 'agent_not_found' };
+    if (agent.status !== 'ACTIVE') {
+      return {
+        killed: true,
+        scope: 'AGENT',
+        reason: `agent_status_${agent.status.toLowerCase()}`,
+      };
+    }
+    return this.checkAll(tenantClient, tenantId, { agentId });
+  }
+
+  /**
    * `GET /kill-switches` (Phase 11b Part 1) — cursor-paginated, newest
    * first, with the two filters a kill-switch admin table actually needs
    * (`scope`, `active` — Section 66's kill-switch surface is "show me

@@ -100,10 +100,13 @@ export class DelegationService {
     // its spirit: Section 20's non-amplification invariant would be
     // meaningless if a revoked/expired task could still mint fresh
     // sub-tasks.
-    const liveness = await this.tasksService.evaluateFullLiveness(
-      tenantClient,
-      parentTask,
-      new Date(),
+    const liveness = await failClosed('tenant-db', () =>
+      this.tasksService.evaluateFullLiveness(
+        tenantClient,
+        tenantId,
+        parentTask,
+        new Date(),
+      ),
     );
     if (!liveness.ok) {
       throw new DelegationTaskNotLiveError(

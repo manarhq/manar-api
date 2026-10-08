@@ -343,6 +343,7 @@ export class GrantService {
 
     const liveness = await this.tasksService.evaluateFullLiveness(
       tenantClient,
+      tenantId,
       task,
       new Date(),
     );

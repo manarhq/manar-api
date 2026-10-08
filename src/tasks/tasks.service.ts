@@ -12,6 +12,7 @@ import { TaskGrantSyncService } from '../authorization/task-grant-sync.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type { AuditActor } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import {
   CursorPage,
   DecodedCursor,
@@ -111,6 +112,7 @@ export class TasksService {
   constructor(
     private readonly grantSync: TaskGrantSyncService,
     private readonly auditService: AuditService,
+    private readonly killSwitchService: KillSwitchService,
   ) {}
 
   /**
@@ -317,6 +319,7 @@ export class TasksService {
    */
   async evaluateFullLiveness(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
     task: TaskRecord,
     now: Date,
     options: {
@@ -335,31 +338,23 @@ export class TasksService {
         return { ok: false, reason: `ancestor_${liveness.reason}` };
       }
     }
-    // ADR-0009: an agent that is quarantined or AGENT-killed stops acting
-    // through the children it delegated too, not only on its own calls.
-    // The task's own agent is checked by `KillSwitchService.checkAll`.
+    // ADR-0009: an ancestor's agent that is stopped in any way (the same
+    // per-agent gate the caller gets) stops its descendants too. The task's
+    // own agent is checked by the caller's gate. Lookup errors throw; every
+    // caller fails closed.
+    // ponytail: one checkAgent per distinct ancestor agent (chains are a few
+    // hops, MAX_ANCESTOR_DEPTH bounds them); batch if chains get long.
     const ancestorAgentIds = [
       ...new Set(ancestors.map((a) => a.assignedAgentId)),
     ].filter((id) => id !== task.assignedAgentId);
-    if (ancestorAgentIds.length > 0) {
-      const [quarantined, killed] = await Promise.all([
-        tenantClient.agentQuarantine.findFirst({
-          where: { agentId: { in: ancestorAgentIds }, active: true },
-          select: { id: true },
-        }),
-        tenantClient.killSwitch.findFirst({
-          where: {
-            scope: 'AGENT',
-            targetId: { in: ancestorAgentIds },
-            active: true,
-          },
-          select: { id: true },
-        }),
-      ]);
-      if (quarantined)
-        return { ok: false, reason: 'ancestor_agent_quarantined' };
-      if (killed) {
-        return { ok: false, reason: 'ancestor_agent_kill_switch_active' };
+    for (const agentId of ancestorAgentIds) {
+      const stopped = await this.killSwitchService.checkAgent(
+        tenantClient,
+        tenantId,
+        agentId,
+      );
+      if (stopped.killed) {
+        return { ok: false, reason: `ancestor_${stopped.reason}` };
       }
     }
     return this.evaluateLiveness(

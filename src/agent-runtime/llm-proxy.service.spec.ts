@@ -80,7 +80,7 @@ function setup(
   const access = new AgentTaskAccessService(
     tenantDatabaseManager,
     killSwitchService,
-    new TasksService(null as never, null as never),
+    new TasksService(null as never, null as never, killSwitchService),
   );
   const budget = {
     used: vi.fn().mockResolvedValue(opts.used ?? 0),

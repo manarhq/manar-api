@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import type { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { TasksService, type TaskRecord } from './tasks.service';
 
 /**
@@ -33,78 +34,77 @@ const parent: TaskRecord = {
   assignedAgentId: 'agent-parent',
 };
 
-const inList = (ids: string[], where: { in: string[] }) =>
-  where.in.some((id) => ids.includes(id));
-
-function client(state: { quarantined?: string[]; killed?: string[] }) {
-  const quarantineLookup = vi.fn(
-    ({ where }: { where: { agentId: { in: string[] } } }) =>
-      Promise.resolve(
-        inList(state.quarantined ?? [], where.agentId) ? { id: 'q' } : null,
-      ),
-  );
-  const c = {
+function client() {
+  return {
     task: {
       findUnique: vi.fn(({ where }: { where: { id: string } }) =>
         Promise.resolve(where.id === 'parent' ? parent : null),
       ),
     },
-    agentQuarantine: { findFirst: quarantineLookup },
-    killSwitch: {
-      findFirst: vi.fn(
-        ({ where }: { where: { scope: string; targetId: { in: string[] } } }) =>
-          Promise.resolve(
-            where.scope === 'AGENT' &&
-              inList(state.killed ?? [], where.targetId)
-              ? { id: 'k' }
-              : null,
-          ),
-      ),
-    },
   } as unknown as TenantPrismaClient;
-  return Object.assign(c, { quarantineLookup });
 }
 
-const service = new TasksService({} as never, {} as never);
+/** The real per-agent gate is `KillSwitchService.checkAgent`; this fake answers per agent id. */
+function serviceWith(stopped: Record<string, string>) {
+  const checkAgent = vi.fn((_c: unknown, _t: string, agentId: string) =>
+    Promise.resolve(
+      stopped[agentId]
+        ? { killed: true, reason: stopped[agentId] }
+        : { killed: false },
+    ),
+  );
+  const service = new TasksService(
+    {} as never,
+    {} as never,
+    {
+      checkAgent,
+    } as unknown as KillSwitchService,
+  );
+  return { service, checkAgent };
+}
+
 const now = new Date('2026-10-09T00:00:00Z');
 
 describe('evaluateFullLiveness: the agents of ancestor tasks', () => {
-  it('denies a child whose parent agent is quarantined', async () => {
-    await expect(
-      service.evaluateFullLiveness(
-        client({ quarantined: ['agent-parent'] }),
-        base,
-        now,
-      ),
-    ).resolves.toEqual({ ok: false, reason: 'ancestor_agent_quarantined' });
-  });
-
-  it('denies a child whose parent agent has an AGENT kill switch', async () => {
-    await expect(
-      service.evaluateFullLiveness(
-        client({ killed: ['agent-parent'] }),
-        base,
-        now,
-      ),
-    ).resolves.toEqual({
-      ok: false,
-      reason: 'ancestor_agent_kill_switch_active',
+  for (const reason of [
+    'agent_quarantined',
+    'agent_kill_switch_active',
+    'ai_system_suspended',
+    'agent_status_revoked',
+  ]) {
+    it(`denies a child whose parent agent is stopped (${reason})`, async () => {
+      const { service } = serviceWith({ 'agent-parent': reason });
+      await expect(
+        service.evaluateFullLiveness(client(), 't', base, now),
+      ).resolves.toEqual({ ok: false, reason: `ancestor_${reason}` });
     });
-  });
+  }
 
   it('allows the child when no ancestor agent is stopped', async () => {
+    const { service, checkAgent } = serviceWith({
+      someone: 'agent_quarantined',
+    });
     await expect(
-      service.evaluateFullLiveness(
-        client({ quarantined: ['someone-else'] }),
-        base,
-        now,
-      ),
+      service.evaluateFullLiveness(client(), 't', base, now),
     ).resolves.toEqual({ ok: true });
+    expect(checkAgent).toHaveBeenCalledWith(
+      expect.anything(),
+      't',
+      'agent-parent',
+    );
   });
 
-  it('a root task makes no ancestor-agent query', async () => {
-    const c = client({});
-    await service.evaluateFullLiveness(c, parent, now);
-    expect(c.quarantineLookup).not.toHaveBeenCalled();
+  it('a lookup failure propagates (callers fail closed)', async () => {
+    const { service, checkAgent } = serviceWith({});
+    checkAgent.mockRejectedValueOnce(new Error('db down'));
+    await expect(
+      service.evaluateFullLiveness(client(), 't', base, now),
+    ).rejects.toThrow('db down');
+  });
+
+  it('a root task checks no other agent', async () => {
+    const { service, checkAgent } = serviceWith({});
+    await service.evaluateFullLiveness(client(), 't', parent, now);
+    expect(checkAgent).not.toHaveBeenCalled();
   });
 });
