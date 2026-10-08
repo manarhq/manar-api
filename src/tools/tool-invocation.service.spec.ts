@@ -53,6 +53,8 @@ function setup(
       | null
       | Error;
     workflowStartFails?: boolean;
+    /** What `ApprovalRequestService.expireIfPending` answers. */
+    expireResult?: { expired: boolean; status: string | null };
   } = {},
 ) {
   const h = makeDecisionHarness(options);
@@ -79,7 +81,11 @@ function setup(
       ? Promise.reject(new Error('temporal unavailable'))
       : Promise.resolve(undefined),
   );
-  const expireIfPending = vi.fn().mockResolvedValue(true);
+  const expireIfPending = vi
+    .fn()
+    .mockResolvedValue(
+      options.expireResult ?? { expired: true, status: 'EXPIRED' },
+    );
   const auditRecordSafely = vi.fn().mockResolvedValue(undefined);
   const service = new ToolInvocationService(
     h.service,
@@ -369,6 +375,31 @@ describe('ToolInvocationService: the MCP door completes an approved action (ADR-
         data: expect.objectContaining({
           approvalRequestId: 'approval-open',
           decisionId: 'decision-1',
+        }) as unknown,
+      }),
+    );
+  });
+
+  it('a person approved the open request before it could be superseded: the lost supersede is audited', async () => {
+    const { service, createApproval, auditRecordSafely } = setup({
+      ...NEEDS_APPROVAL,
+      riskScore: 90,
+      pendingMatch: { ...OPEN, riskScore: 40 },
+      expireResult: { expired: false, status: 'APPROVED' },
+    });
+
+    await service.invoke(AGENT, INPUT, 'MCP');
+
+    expect(createApproval).toHaveBeenCalledOnce();
+    expect(auditRecordSafely).toHaveBeenCalledWith(
+      expect.anything(),
+      'tenant-1',
+      expect.objectContaining({
+        eventType: 'approval.superseded',
+        data: expect.objectContaining({
+          approvalRequestId: 'approval-open',
+          supersedeLost: true,
+          statusFound: 'APPROVED',
         }) as unknown,
       }),
     );

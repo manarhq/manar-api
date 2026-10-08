@@ -163,13 +163,14 @@ describe('ApprovalRequestService.findPendingMatch (ADR-0007)', () => {
 describe('ApprovalRequestService.expireIfPending (ADR-0007)', () => {
   it('expires only a request that is still PENDING, so a decision that landed first wins', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const findUnique = vi.fn().mockResolvedValue({ status: 'APPROVED' });
     const tenantClient = {
-      approvalRequest: { updateMany },
+      approvalRequest: { updateMany, findUnique },
     } as unknown as TenantPrismaClient;
 
     await expect(
       new ApprovalRequestService().expireIfPending(tenantClient, 'a-1'),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ expired: false, status: 'APPROVED' });
     expect(updateMany).toHaveBeenCalledWith({
       where: { id: 'a-1', status: 'PENDING' },
       data: { status: 'EXPIRED' },

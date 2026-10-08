@@ -292,7 +292,9 @@ export class ToolInvocationService {
       return open.id;
     }
 
-    await failClosed('tenant-db', () =>
+    // A decision that landed first wins (ADR-0006 then applies to that
+    // exact, already-approved request); the lost supersede is audited.
+    const superseded = await failClosed('tenant-db', () =>
       this.approvalRequestService.expireIfPending(tenantClient, open.id),
     );
     await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
@@ -307,6 +309,9 @@ export class ToolInvocationService {
         policyVersionId: decision.policyVersionId,
         previousRequiredReason: open.requiredReason,
         requiredReason: decision.reason,
+        ...(superseded.expired
+          ? {}
+          : { supersedeLost: true, statusFound: superseded.status }),
       },
     });
     return null;

@@ -155,12 +155,17 @@ export class ApprovalRequestService {
   async expireIfPending(
     tenantClient: TenantPrismaClient,
     id: string,
-  ): Promise<boolean> {
+  ): Promise<{ expired: boolean; status: string | null }> {
     const { count } = await tenantClient.approvalRequest.updateMany({
       where: { id, status: 'PENDING' },
       data: { status: 'EXPIRED' },
     });
-    return count === 1;
+    if (count === 1) return { expired: true, status: 'EXPIRED' };
+    const current = await tenantClient.approvalRequest.findUnique({
+      where: { id },
+      select: { status: true },
+    });
+    return { expired: false, status: current?.status ?? null };
   }
 
   /** Includes the issued `AuthorizationGrant`, if any (`GET /agent/v1/approvals/:id`'s own use case — no grant exists until `status` is `APPROVED`). */
