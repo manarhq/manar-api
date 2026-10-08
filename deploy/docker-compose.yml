@@ -94,37 +94,48 @@ services:
       retries: 20
       start_period: 30s
 
-  # PKI backend for Phase 4 (Agent Identity & Enrollment). `-dev` mode boots
-  # an in-memory, auto-unsealed OpenBao server with no secrets engines
-  # configured — unlike Postgres/Keycloak there is no automatic bootstrap
-  # here: run `node deploy/openbao-init.mjs` once this container is healthy
-  # to enable the PKI secrets engine, generate the root CA, generate and
-  # sign an intermediate CA, mount it as the online issuer (root stays
-  # unused for issuance — standard practice), and create the agent signing
-  # role. See docs/agent-identity.md.
+  # PKI backend for Phase 4 (Agent Identity & Enrollment) and the KV v2 store
+  # for tool credentials (Phase 7b). Persistent file storage on a named volume,
+  # not `-dev` mode: a restart keeps the CA and the `secret/tools/*` values.
+  # deploy/openbao-entrypoint.sh initializes it on first start (1 key share),
+  # unseals it on every start and creates the well-known dev token below, so
+  # apps and tests keep using OPENBAO_TOKEN=manar-dev-root-token. The unseal key
+  # and initial root token live on the host in ~/.manar-openbao (0700/0600,
+  # override with MANAR_OPENBAO_HOME), never in this repo. CI keeps `-dev`
+  # mode (.gitlab-ci.yml services). After the first start, run
+  # `node deploy/openbao-init.mjs` (`pnpm infra:openbao-init`) to enable the
+  # PKI engines, generate the root and intermediate CA (skipped when they
+  # exist) and create the agent signing role. See docs/agent-identity.md.
+  # Start over (wipes OpenBao): `docker compose -f deploy/docker-compose.yml
+  # rm -sf openbao && docker volume rm deploy_manar-openbao-data`.
   openbao:
     image: openbao/openbao:2.6.1
     container_name: manar-openbao
     restart: unless-stopped
     # Required by OpenBao's own docs for the mlock() syscall it uses to
-    # prevent secrets from being swapped to disk, even in -dev mode.
+    # prevent secrets from being swapped to disk.
     cap_add:
       - IPC_LOCK
+    # The entrypoint starts as root only to read the host-owned 0600 key files;
+    # the server itself runs as the image's `openbao` user (su-exec).
+    user: root
+    entrypoint:
+      ['/usr/bin/dumb-init', '/bin/sh', '/manar/openbao-entrypoint.sh']
     environment:
-      BAO_DEV_ROOT_TOKEN_ID: manar-dev-root-token
-      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-      # Also read by the `bao` CLI the healthcheck below invokes inside the
-      # container — without it, `bao status` defaults to https://127.0.0.1:8200.
+      # Read by the `bao` CLI inside the container (healthcheck, entrypoint,
+      # `docker exec manar-openbao bao kv get ...`).
       BAO_ADDR: http://127.0.0.1:8200
-    command: ['server', '-dev']
+      BAO_TOKEN: manar-dev-root-token
+    volumes:
+      - manar-openbao-data:/openbao/file
+      - ./openbao-entrypoint.sh:/manar/openbao-entrypoint.sh:ro
+      - ${MANAR_OPENBAO_HOME:-${HOME}/.manar-openbao}:/manar/keys
     ports:
       # Default OpenBao/Vault port — unlike Postgres/Keycloak above, this one
       # isn't commonly bound by other local services, so no need to remap.
       - '8200:8200'
     healthcheck:
-      # Unlike Keycloak's image, openbao/openbao ships its own `bao` CLI, so
-      # no /dev/tcp workaround is needed — `bao status` exits 0 once the dev
-      # server is up (dev mode auto-unseals on boot).
+      # `bao status` exits 0 only once the server is initialized and unsealed.
       test: ['CMD', 'bao', 'status']
       interval: 5s
       timeout: 5s
@@ -620,6 +631,7 @@ services:
 
 volumes:
   manar-postgres-data:
+  manar-openbao-data:
   manar-keycloak-data:
   manar-kafka-data:
   manar-opensearch-data:
