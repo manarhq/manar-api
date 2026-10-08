@@ -95,10 +95,16 @@ answers (TLS refuses the handshake; a revoked agent gets 401 from `AgentMtlsGuar
 - If redemption is refused (for example a kill switch engaged after approval), the grant stays
   unconsumed until it expires (`APPROVAL_GRANT_TTL_MS`, 5 minutes), as on the REST door; a retry
   after the switch is released re-decides from scratch.
-- A person who approves the old request in the moment between the reuse check and its expiry wins
-  that race (the expiry only applies to a PENDING row); the grant then carries the risk the
-  approver saw. This is the same position ADR-0006 takes on risk that rises after approval: a kill
-  switch, not the risk ceiling, is the control for it.
+- Supersede and approval race on the request's status, and exactly one wins. Every status change
+  is conditional on PENDING: the supersede, the workflow timeout (`GrantService.expire`), and
+  `GrantService.finalizeDecision`, whose PENDING -> APPROVED claim, execution count and grant
+  commit in one transaction. If the supersede wins, the approval gets no grant and returns
+  EXPIRED. If the approval wins, the supersede audit records `supersedeLost: true` with the
+  status found. The grant then covers the exact request the person approved, at the risk they
+  saw, and a rise in risk after approval is ADR-0006's position: a kill switch, not the risk
+  ceiling, is the control for it. Evidence: `src/approvals/grant.service.finalize-race.spec.ts`
+  (unit level with a transaction mock; the window between two awaits cannot be hit
+  deterministically on the real stack).
 - Each status poll is one lookup by primary key every 2 s at most, and no `Decision` row
   (it is not an action request). The pending-match lookup scans the task's approvals for the tool
   and resource without a dedicated index; acceptable at today's volumes.
