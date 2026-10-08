@@ -29,6 +29,8 @@ import { WebhookDeliveryConsumerModule } from './webhooks/webhook-delivery-consu
 import { IdempotencyModule } from './idempotency/idempotency.module';
 import { ToolsHttpModule } from './tools/tools-http.module';
 import { TenantsModule } from './tenants/tenants.module';
+import { PlatformModule } from './platform/platform.module';
+import { FleetHeartbeatModule } from './fleet-heartbeat/fleet-heartbeat.module';
 import { UsersModule } from './users/users.module';
 import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
@@ -63,6 +65,8 @@ import { AiSystemsModule } from './ai-systems/ai-systems.module';
     IdempotencyModule,
     ToolsHttpModule,
     TenantsModule,
+    PlatformModule,
+    FleetHeartbeatModule,
     // Phase 14: UsersService needs KeycloakAdminClient at runtime (role
     // grant/revoke keeps Keycloak's realm role mappings in sync -- see
     // KeycloakModule's own doc comment for why this module, previously

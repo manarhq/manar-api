@@ -211,3 +211,82 @@ export async function deleteRealm(realm: string): Promise<void> {
     // failed test run doesn't affect other tests (unique realm names).
   }
 }
+
+/**
+ * ADR-0010: a confidential client-credentials client in the master realm, as manar-fleet uses
+ * for /platform/v1. Optionally grants `role` (a master realm role, created if missing) to its
+ * service account. Returns the client secret (test-only, never logged).
+ */
+export async function createPlatformClient(
+  clientId: string,
+  role: string | null,
+): Promise<{ uuid: string; secret: string }> {
+  if (role) {
+    await adminFetch('/admin/realms/master/roles', {
+      method: 'POST',
+      body: JSON.stringify({ name: role }),
+    }).catch(() => undefined); // already exists
+  }
+  const created = await adminFetch('/admin/realms/master/clients', {
+    method: 'POST',
+    body: JSON.stringify({
+      clientId,
+      protocol: 'openid-connect',
+      publicClient: false,
+      serviceAccountsEnabled: true,
+      standardFlowEnabled: false,
+      directAccessGrantsEnabled: false,
+    }),
+  });
+  const uuid = created.headers.get('location')?.split('/').pop();
+  if (!uuid)
+    throw new Error(`Keycloak did not return a client id for "${clientId}"`);
+  const secret = (
+    (await (
+      await adminFetch(`/admin/realms/master/clients/${uuid}/client-secret`)
+    ).json()) as { value: string }
+  ).value;
+  if (role) {
+    const sa = (await (
+      await adminFetch(
+        `/admin/realms/master/clients/${uuid}/service-account-user`,
+      )
+    ).json()) as { id: string };
+    await assignRealmRole('master', sa.id, role);
+  }
+  return { uuid, secret };
+}
+
+export async function deletePlatformClient(
+  uuid: string,
+  role?: string,
+): Promise<void> {
+  await adminFetch(`/admin/realms/master/clients/${uuid}`, {
+    method: 'DELETE',
+  }).catch(() => undefined);
+  if (role)
+    await adminFetch(`/admin/realms/master/roles/${encodeURIComponent(role)}`, {
+      method: 'DELETE',
+    }).catch(() => undefined);
+}
+
+export async function getClientCredentialsToken(
+  clientId: string,
+  secret: string,
+): Promise<string> {
+  const response = await fetch(
+    `${baseUrl}/realms/master/protocol/openid-connect/token`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: clientId,
+        client_secret: secret,
+      }),
+    },
+  );
+  if (!response.ok)
+    throw new Error(`client_credentials failed: HTTP ${response.status}`);
+  return ((await response.json()) as { access_token: string }).access_token;
+}

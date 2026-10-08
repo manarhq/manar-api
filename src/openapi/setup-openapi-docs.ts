@@ -57,6 +57,16 @@ export function setupOpenApiDocs(
       },
       'jwt',
     )
+    .addBearerAuth(
+      {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+        description:
+          'A client-credentials token from the platform realm for manar-fleet (ADR-0010). Only /platform/v1/*.',
+      },
+      'platform',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);

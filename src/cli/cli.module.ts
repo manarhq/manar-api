@@ -7,6 +7,9 @@ import { TenantCreateCommand } from './commands/tenant-create.command';
 import { AuditReindexCommand } from './commands/audit-reindex.command';
 import { DemoSeedCommand } from './commands/demo-seed.command';
 import { TenantsMigrateCommand } from './commands/tenants-migrate.command';
+import { FleetKeygenCommand } from './commands/fleet-keygen.command';
+import { FleetReportCommand } from './commands/fleet-report.command';
+import { FleetHeartbeatModule } from '../fleet-heartbeat/fleet-heartbeat.module';
 
 /**
  * Root module for the `pnpm manar` CLI (see src/cli.ts). Deliberately
@@ -34,12 +37,15 @@ import { TenantsMigrateCommand } from './commands/tenants-migrate.command';
     DatabaseModule,
     KeycloakModule,
     OpenSearchIndexModule,
+    FleetHeartbeatModule,
   ],
   providers: [
     TenantCreateCommand,
     AuditReindexCommand,
     DemoSeedCommand,
     TenantsMigrateCommand,
+    FleetKeygenCommand,
+    FleetReportCommand,
   ],
 })
 export class CliModule {}

@@ -16,6 +16,7 @@ import {
 } from './secret-provider';
 import type { SecretProvider } from './secret-provider';
 import {
+  TenantLifecycleConflictError,
   TenantNotFoundError,
   TenantProvisioningError,
   TenantSlugConflictError,
@@ -254,6 +255,35 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       migrated.push({ tenantId: tenant.id, version });
     }
     return migrated;
+  }
+
+  /**
+   * Suspends an ACTIVE tenant (platform API, ADR-0010): status SUSPENDED and the cached client
+   * evicted. Human tokens then fail issuer resolution (`KnownIssuerRegistry` needs ACTIVE), agent
+   * mTLS requests fail the tenant status check, and `getClient` refuses the tenant. Data and the
+   * database binding are untouched, so `resumeTenant` restores access.
+   */
+  async suspendTenant(tenantId: string): Promise<void> {
+    await this.setLifecycleStatus(tenantId, 'ACTIVE', 'SUSPENDED');
+  }
+
+  async resumeTenant(tenantId: string): Promise<void> {
+    await this.setLifecycleStatus(tenantId, 'SUSPENDED', 'ACTIVE');
+  }
+
+  private async setLifecycleStatus(
+    tenantId: string,
+    from: 'ACTIVE' | 'SUSPENDED',
+    to: 'ACTIVE' | 'SUSPENDED',
+  ): Promise<void> {
+    const result = await this.control.tenant.updateMany({
+      where: { id: tenantId, status: from },
+      data: { status: to },
+    });
+    if (result.count !== 1) {
+      throw new TenantLifecycleConflictError(tenantId, from);
+    }
+    await this.evict(tenantId);
   }
 
   /**
