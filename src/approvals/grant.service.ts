@@ -237,6 +237,36 @@ export class GrantService {
   }
 
   /**
+   * The MCP door's redemption (ADR-0007): an MCP `tools/call` cannot carry a
+   * grant token, so the server finds the grant itself. Returns the signed
+   * token of the newest unconsumed, unrevoked, unexpired grant issued for
+   * exactly this agent, task, tool, action, resource and parameter hash, or
+   * null. The token never leaves the server: the caller hands it to
+   * `verifyGrant` and `authorizeRedemption` exactly as if the agent had sent
+   * it, so single use and full revalidation (ADR-0006) are unchanged.
+   */
+  async findRedeemableGrantToken(
+    tenantClient: TenantPrismaClient,
+    input: Omit<ValidateGrantInput, 'grantToken'>,
+  ): Promise<string | null> {
+    const grant = await tenantClient.authorizationGrant.findFirst({
+      where: {
+        agentId: input.agentId,
+        taskId: input.taskId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        parameterHash: computeParameterHash(input),
+        consumedAt: null,
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { issuedAt: 'desc' },
+    });
+    return grant ? this.signGrantTokenFor(input.tenantId, grant) : null;
+  }
+
+  /**
    * `POST /agent/v1/tools/invoke`'s `grantToken` retry path (Section 80),
    * first half: is this the grant for *this exact request*? Verifies
    * signature and expiry, then that the decoded claims match this request's

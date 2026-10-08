@@ -91,6 +91,43 @@ export class ApprovalRequestService {
     });
   }
 
+  /**
+   * The newest unexpired PENDING request for exactly this agent, task, tool,
+   * action, resource and parameters (by `computeParameterHash`), or null.
+   * The MCP door (ADR-0007) answers a repeated call while a person has not
+   * decided yet with this request instead of opening a second one.
+   */
+  async findPendingMatch(
+    tenantClient: TenantPrismaClient,
+    input: Pick<
+      CreateApprovalRequestInput,
+      'taskId' | 'agentId' | 'toolId' | 'actionId' | 'resource' | 'params'
+    >,
+  ): Promise<{ id: string } | null> {
+    const parameterHash = computeParameterHash(input);
+    // ponytail: no index on approval_requests(taskId, agentId); a task holds a
+    // handful of approvals. Add one if a task ever carries thousands.
+    const rows = await tenantClient.approvalRequest.findMany({
+      where: {
+        taskId: input.taskId,
+        agentId: input.agentId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        status: 'PENDING',
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { requestedAt: 'desc' },
+      select: { id: true, params: true },
+    });
+    const match = rows.find(
+      (row) =>
+        computeParameterHash({ ...input, params: row.params }) ===
+        parameterHash,
+    );
+    return match ? { id: match.id } : null;
+  }
+
   /** Includes the issued `AuthorizationGrant`, if any (`GET /agent/v1/approvals/:id`'s own use case — no grant exists until `status` is `APPROVED`). */
   async getOrThrow(tenantClient: TenantPrismaClient, id: string) {
     const row = await tenantClient.approvalRequest.findUnique({
