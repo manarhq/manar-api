@@ -1097,12 +1097,14 @@ describe('Kill Switches (e2e)', () => {
     const activityData = (
       activity.body as {
         success: boolean;
-        data: { decisions: { agentId: string; resourceRef: string }[] };
+        data: { agents: { id: string; decisions: number }[] };
       }
     ).data;
     expect(
-      activityData.decisions.some((d) => d.agentId === target.agentId),
-    ).toBe(true);
+      activityData.agents.find((a) => a.id === target.agentId),
+    ).toMatchObject({
+      decisions: 1,
+    });
     expect(JSON.stringify(activity.body)).not.toContain(SECRET_RESOURCE);
 
     // Quarantine: ALLOW (no approval), recorded as a Decision and audited
@@ -1240,6 +1242,19 @@ describe('Kill Switches (e2e)', () => {
     );
     // Nothing left to release.
     expect((await releaseQuarantine(target.agentId)).status).toBe(404);
+
+    // After the release the target's window starts afresh: only the one
+    // ALLOW since, none of the denials that led to the quarantine.
+    const after = await watcher.invoke('manar.activity.read', 'tenant', {});
+    expect(
+      (
+        after.body as {
+          data: {
+            agents: { id: string; decisions: number; stopped: number }[];
+          };
+        }
+      ).data.agents.find((a) => a.id === target.agentId),
+    ).toMatchObject({ decisions: 1, stopped: 0 });
   }, 60_000);
 
   it('9. watcher cannot reach another tenant: its agents are not found, not quarantined', async () => {

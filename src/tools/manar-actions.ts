@@ -45,7 +45,7 @@ export const MANAR_ACTIONS: readonly ManarActionDefinition[] = [
   {
     name: MANAR_ACTIVITY_READ,
     description:
-      'Read recent activity of agents in this tenant: decisions, approvals and tool invocations as metadata and counts. No parameters, payloads or secrets. Resource: any string (use "tenant").',
+      'Per-agent activity aggregates for the window (decisions by outcome, denials not caused by Manar stopping the agent, mutating and destructive counts, distinct targets of changes, per-action first and last times and first-ever time, 24 h baseline, approval and invocation counts, up to 20 evidence decision ids). Most recently active agents first, at most 200 (truncated says so). No parameters, payloads, resources or secrets. An agent\'s window starts after its last quarantine release. Resource: any string (use "tenant").',
     riskBaseScore: 0,
     mutating: false,
     destructive: false,
@@ -54,7 +54,6 @@ export const MANAR_ACTIONS: readonly ManarActionDefinition[] = [
       additionalProperties: false,
       properties: {
         windowSeconds: { type: 'integer', minimum: 10, maximum: 3600 },
-        limit: { type: 'integer', minimum: 1, maximum: 1000 },
       },
     },
   },

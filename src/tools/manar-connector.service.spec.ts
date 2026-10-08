@@ -403,79 +403,95 @@ describe('Manar connector: no agent can be granted a loosening capability', () =
   });
 });
 
-describe('Manar connector: manar.activity.read returns metadata only', () => {
-  it('hashes resources and returns no parameters', async () => {
-    const decisions = [
-      {
-        id: 'd-1',
-        agentId: 'a-1',
-        taskId: 't-1',
-        toolId: 'iam',
-        actionId: 'disable-user',
-        resource: 'alice@example.test',
-        outcome: 'DENY',
-        reasonCodes: ['policy_denied'],
-        stage: 'REQUEST',
-        createdAt: new Date(),
-      },
-    ];
-    const findMany = (rows: unknown[]) => vi.fn().mockResolvedValue(rows);
-    const decisionFindMany = vi.fn<
-      (query: { select: Row }) => Promise<typeof decisions>
-    >(() => Promise.resolve(decisions));
+describe('Manar connector: manar.activity.read returns per-agent aggregates only', () => {
+  const t = (s: number) => new Date(Date.now() - s * 1000);
+  const action = {
+    agentId: 'a-1',
+    toolId: 'iam',
+    actionId: 'disable-user',
+    decisions: 6,
+    allowed: 0,
+    denied: 5,
+    stopped: 1,
+    approvalRequired: 0,
+    mutating: true,
+    destructive: true,
+    distinctResources: 6,
+    firstSeenAt: t(30),
+    lastSeenAt: t(5),
+    firstEverAt: t(30),
+  };
+  function fake() {
+    const queryRaw = vi
+      .fn()
+      .mockResolvedValueOnce([action]) // per-action aggregates
+      .mockResolvedValueOnce([{ agentId: 'a-1', n: 6 }]) // distinct targets
+      .mockResolvedValueOnce([{ agentId: 'a-1', id: 'd-1' }]); // evidence
     const client = {
-      decision: {
-        findMany: decisionFindMany,
-        groupBy: vi.fn().mockResolvedValue([]),
-      },
-      approvalRequest: { findMany: findMany([]) },
-      toolInvocation: { findMany: findMany([]) },
-      agent: { findMany: findMany([]) },
-      toolAction: {
-        findMany: findMany([
+      $queryRaw: queryRaw,
+      agent: {
+        findMany: vi.fn().mockResolvedValue([
           {
-            name: 'disable-user',
-            mutating: true,
-            destructive: true,
-            tool: { name: 'iam' },
+            id: 'a-1',
+            slug: 'rogue',
+            displayName: 'Rogue',
+            status: 'ACTIVE',
+            quarantine: null,
           },
         ]),
       },
+      decision: { groupBy: vi.fn().mockResolvedValue([]) },
+      approvalRequest: { groupBy: vi.fn().mockResolvedValue([]) },
+      toolInvocation: { groupBy: vi.fn().mockResolvedValue([]) },
     } as unknown as TenantPrismaClient;
-    const connector = new ManarConnectorService({} as AgentQuarantineService);
-    const result = await connector.invoke(client, {
+    return { client, queryRaw };
+  }
+  const read = (client: TenantPrismaClient, params: unknown) =>
+    new ManarConnectorService({} as AgentQuarantineService).invoke(client, {
       tenantId: 'tenant-1',
       taskId: 'task-w',
       agentId: 'watcher-1',
       actionId: 'manar.activity.read',
       resource: 'tenant',
-      params: { windowSeconds: 60 },
+      params,
       decisionId: 'decision-1',
     });
+
+  it('returns counts per agent, no resources at all, not even hashed', async () => {
+    const { client } = fake();
+    const result = await read(client, { windowSeconds: 60 });
     expect(result.success).toBe(true);
-    const text = JSON.stringify(result.data);
-    expect(text).not.toContain('alice@example.test');
-    expect(text).not.toContain('params');
-    expect((result.data as { decisions: Row[] }).decisions[0]).toMatchObject({
-      actionId: 'disable-user',
-      outcome: 'DENY',
-      reason: 'policy_denied',
-      destructive: true,
-      resourceRef: expect.stringMatching(/^[0-9a-f]{16}$/) as string,
+    const [agent] = (result.data as { agents: Row[] }).agents;
+    expect(agent).toMatchObject({
+      slug: 'rogue',
+      decisions: 6,
+      denied: 5,
+      stopped: 1,
+      destructive: 6,
+      distinctMutatingTargets: 6,
+      evidence: ['d-1'],
     });
-    // The select never asks for inputsHash or params.
-    const select = decisionFindMany.mock.calls[0]![0].select;
-    expect(Object.keys(select)).not.toContain('inputsHash');
-    expect(
-      await connector.invoke(client, {
-        tenantId: 'tenant-1',
-        taskId: 'task-w',
-        agentId: 'watcher-1',
-        actionId: 'manar.activity.read',
-        resource: 'tenant',
-        params: { windowSeconds: 999_999 },
-        decisionId: 'decision-1',
-      }),
-    ).toEqual({ success: false, errorMessage: 'invalid_params' });
+    const text = JSON.stringify(result.data);
+    expect(text).not.toMatch(/"resource"|resourceRef|inputsHash|params/);
+  });
+
+  it('the aggregate query excludes decisions before the last release and counts stop-denials apart', async () => {
+    const { client, queryRaw } = fake();
+    await read(client, {});
+    const sql = (queryRaw.mock.calls[0]![0] as string[]).join('?');
+    expect(sql).toContain(
+      'q."releasedAt" IS NULL OR d."createdAt" > q."releasedAt"',
+    );
+    expect(sql).toContain('AS stopped');
+  });
+
+  it('rejects unknown or out-of-range params', async () => {
+    const { client } = fake();
+    for (const params of [{ windowSeconds: 999_999 }, { limit: 10 }]) {
+      expect(await read(client, params)).toEqual({
+        success: false,
+        errorMessage: 'invalid_params',
+      });
+    }
   });
 });
