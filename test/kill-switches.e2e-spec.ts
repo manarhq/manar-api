@@ -408,6 +408,7 @@ describe('Kill Switches (e2e)', () => {
     method: 'GET' | 'POST',
     path: string,
     body?: unknown,
+    extraHeaders: Record<string, string> = {},
   ): Promise<RawResponse> {
     const bodyText = body !== undefined ? JSON.stringify(body) : undefined;
     return new Promise((resolve, reject) => {
@@ -425,9 +426,11 @@ describe('Kill Switches (e2e)', () => {
           headers: bodyText
             ? {
                 'Content-Type': 'application/json',
+                Accept: 'application/json, text/event-stream',
                 'Content-Length': Buffer.byteLength(bodyText),
+                ...extraHeaders,
               }
-            : undefined,
+            : extraHeaders,
         },
         (res) => {
           let data = '';
@@ -1331,4 +1334,132 @@ describe('Kill Switches (e2e)', () => {
       await fixture.stop();
     }
   }, 45_000);
+
+  it('11. a stopped agent cannot delegate, and its children stop with it (quarantine and AGENT kill switch)', async () => {
+    const watcher = await createWatcher();
+    const parent = await createEnrolledAgent('deleg-parent');
+    const parentTask = await createTask({
+      assignedAgentId: parent.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    });
+    const delegate = (slug: string) =>
+      mtlsRequest(
+        parent.identity,
+        'POST',
+        `/agent/v1/tasks/${parentTask.id}/delegate`,
+        {
+          childAgentSlug: shortSlug(slug),
+          name: 'child',
+          allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+          allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+        },
+      );
+    // A child delegated before anything happens.
+    const delegated = await delegate('child');
+    expect(delegated.status).toBe(201);
+    const d = delegated.body as {
+      childTask: { id: string };
+      enrollmentToken: { token: string };
+    };
+    const child = new ManarAgent({
+      endpoint: humanEndpoint,
+      mtlsEndpoint: agentMtlsEndpoint,
+      identityStore: new FileIdentityStore(
+        `/tmp/manar-sdk-test-${randomUUID()}.identity`,
+        'test-passphrase-not-for-production',
+      ),
+    });
+    await child.enroll(d.enrollmentToken.token);
+    const childRequest = {
+      taskId: d.childTask.id,
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
+    };
+    expect((await child.authorize(childRequest)).decision).toBe('ALLOW');
+
+    // Quarantine the parent: it cannot delegate, and its existing child stops.
+    await watcher.invoke('manar.agent.quarantine', parent.agentId, {
+      reason: 'e2e delegation escape',
+    });
+    const refused = await delegate('escape');
+    expect(refused.status).toBe(403);
+    expect(refused.body).toMatchObject({
+      decision: 'DENY',
+      reason: 'agent_quarantined',
+    });
+    expect(await child.authorize(childRequest)).toMatchObject({
+      decision: 'DENY',
+      reason: 'ancestor_agent_quarantined',
+    });
+    expect((await releaseQuarantine(parent.agentId)).status).toBe(201);
+    expect((await child.authorize(childRequest)).decision).toBe('ALLOW');
+
+    // Same for an AGENT kill switch on the parent.
+    await activateAgentKillSwitch(adminToken, parent.agentId, 'e2e delegation');
+    try {
+      const killed = await delegate('escape-2');
+      expect(killed.status).toBe(403);
+      expect(killed.body).toMatchObject({ reason: 'agent_kill_switch_active' });
+      expect(await child.authorize(childRequest)).toMatchObject({
+        decision: 'DENY',
+        reason: 'ancestor_agent_kill_switch_active',
+      });
+    } finally {
+      await deactivateAgentKillSwitch(adminToken, parent.agentId);
+    }
+    expect((await child.authorize(childRequest)).decision).toBe('ALLOW');
+  }, 60_000);
+
+  it('12. a quarantined agent is refused at the LLM proxy and at MCP tools/call', async () => {
+    const watcher = await createWatcher();
+    const agent = await createEnrolledAgent('quarantine-runtime');
+    const task = await createTask({
+      assignedAgentId: agent.agentId,
+      allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+      allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+    });
+    await watcher.invoke('manar.agent.quarantine', agent.agentId, {
+      reason: 'e2e runtime',
+    });
+    try {
+      const llm = await mtlsRequest(
+        agent.identity,
+        'POST',
+        '/agent/v1/llm/chat/completions',
+        { messages: [{ role: 'user', content: 'hello' }] },
+        { 'X-Manar-Task-Id': task.id },
+      );
+      expect(llm.status).toBe(403);
+      expect(llm.body).toMatchObject({
+        decision: 'DENY',
+        reason: 'agent_quarantined',
+      });
+      const mcp = await mtlsRequest(
+        agent.identity,
+        'POST',
+        `/agent/v1/tasks/${task.id}/mcp`,
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'fs__read',
+            arguments: { resource: 'anything', params: {} },
+          },
+        },
+      );
+      // The MCP door answers a refusal as a tool result, not an HTTP error.
+      expect(mcp.status).toBe(200);
+      expect(mcp.body).toMatchObject({
+        result: {
+          isError: true,
+          structuredContent: { status: 'DENIED', reason: 'agent_quarantined' },
+        },
+      });
+    } finally {
+      await releaseQuarantine(agent.agentId);
+    }
+  }, 30_000);
 });

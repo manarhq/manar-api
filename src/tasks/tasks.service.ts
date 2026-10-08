@@ -335,6 +335,33 @@ export class TasksService {
         return { ok: false, reason: `ancestor_${liveness.reason}` };
       }
     }
+    // ADR-0009: an agent that is quarantined or AGENT-killed stops acting
+    // through the children it delegated too, not only on its own calls.
+    // The task's own agent is checked by `KillSwitchService.checkAll`.
+    const ancestorAgentIds = [
+      ...new Set(ancestors.map((a) => a.assignedAgentId)),
+    ].filter((id) => id !== task.assignedAgentId);
+    if (ancestorAgentIds.length > 0) {
+      const [quarantined, killed] = await Promise.all([
+        tenantClient.agentQuarantine.findFirst({
+          where: { agentId: { in: ancestorAgentIds }, active: true },
+          select: { id: true },
+        }),
+        tenantClient.killSwitch.findFirst({
+          where: {
+            scope: 'AGENT',
+            targetId: { in: ancestorAgentIds },
+            active: true,
+          },
+          select: { id: true },
+        }),
+      ]);
+      if (quarantined)
+        return { ok: false, reason: 'ancestor_agent_quarantined' };
+      if (killed) {
+        return { ok: false, reason: 'ancestor_agent_kill_switch_active' };
+      }
+    }
     return this.evaluateLiveness(
       options.executionAlreadyCounted
         ? { ...task, executionCount: task.executionCount - 1 }

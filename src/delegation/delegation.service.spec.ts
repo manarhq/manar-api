@@ -7,7 +7,11 @@ import type {
   TaskRecord,
   TasksService,
 } from '../tasks/tasks.service';
-import { DelegationExceedsParentLimitsError } from './delegation.errors';
+import type { KillSwitchService } from '../kill-switches/kill-switch.service';
+import {
+  DelegationDeniedError,
+  DelegationExceedsParentLimitsError,
+} from './delegation.errors';
 import { DelegationService } from './delegation.service';
 import { DelegateTaskRequestSchema } from './delegation.validation';
 
@@ -37,7 +41,10 @@ const PARENT: TaskRecord = {
   createdAt: new Date('2026-01-01T00:00:00Z'),
 };
 
-function setup(parent: Partial<TaskRecord> = {}) {
+function setup(
+  parent: Partial<TaskRecord> = {},
+  killSwitch: { killed: boolean; reason?: string } = { killed: false },
+) {
   const created: CreateTaskInput[] = [];
   const agentsCreated: unknown[] = [];
   const audited: { data: Record<string, unknown> }[] = [];
@@ -73,6 +80,9 @@ function setup(parent: Partial<TaskRecord> = {}) {
     tasksService,
     agentsService,
     auditService,
+    {
+      checkAll: () => Promise.resolve(killSwitch),
+    } as unknown as KillSwitchService,
   );
   const delegate = (body: Record<string, unknown>) =>
     service.delegate(
@@ -89,6 +99,23 @@ function setup(parent: Partial<TaskRecord> = {}) {
     );
   return { delegate, created, agentsCreated, audited };
 }
+
+describe('DelegationService refuses a stopped caller (ADR-0009, finding 1)', () => {
+  for (const reason of ['agent_quarantined', 'agent_kill_switch_active']) {
+    it(`${reason}: no child agent, no child task`, async () => {
+      const { delegate, created, agentsCreated } = setup(
+        {},
+        { killed: true, reason },
+      );
+      await expect(delegate({})).rejects.toMatchObject({
+        constructor: DelegationDeniedError,
+        reason,
+      });
+      expect(agentsCreated).toHaveLength(0);
+      expect(created).toHaveLength(0);
+    });
+  }
+});
 
 describe('DelegationService limits (R3)', () => {
   it('rejects a riskCeiling above the parent and writes nothing', async () => {

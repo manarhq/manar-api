@@ -8,6 +8,14 @@ export class DelegationNotAssignedAgentError extends Error {
   }
 }
 
+/** ADR-0009: the delegating agent itself is stopped (quarantine, kill switch, AI-system state). Maps to 403 `{ decision: 'DENY', reason }`. */
+export class DelegationDeniedError extends Error {
+  constructor(public readonly reason: string) {
+    super(`Delegation denied: ${reason}`);
+    this.name = 'DelegationDeniedError';
+  }
+}
+
 /** Thrown when the parent task (or any of its ancestors) is not fully live — a task that can't currently authorize its own actions can't hand out any of them either. */
 export class DelegationTaskNotLiveError extends Error {
   constructor(
