@@ -47,6 +47,8 @@ export const AUDIT_EVENT_TYPES = {
 
   /** One call through the LLM proxy (ADR-0002): metadata only, never prompt or completion content. */
   LLM_REQUEST: 'llm.request',
+  /** One question to the console assistant (manar-api ADR-0008): metadata only, never question, answer or tool output. */
+  ASSISTANT_REQUEST: 'assistant.request',
 
   // Kill-switch phase (Section 32) — see docs/kill-switches.md.
   /** A kill switch (any of the five scopes) was activated — see `src/kill-switches/`. */

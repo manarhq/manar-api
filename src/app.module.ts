@@ -35,6 +35,7 @@ import { KeycloakModule } from './keycloak/keycloak.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { IncidentsModule } from './incidents/incidents.module';
 import { AiSystemsModule } from './ai-systems/ai-systems.module';
+import { AssistantModule } from './assistant/assistant.module';
 
 @Module({
   imports: [
@@ -77,6 +78,8 @@ import { AiSystemsModule } from './ai-systems/ai-systems.module';
     // inventory — the record findings, investigations, assessments, and
     // evidence attach to.
     AiSystemsModule,
+    // Read-only console assistant (ADR-0008); never on the decision path.
+    AssistantModule,
   ],
   controllers: [AppController],
   providers: [
