@@ -48,15 +48,47 @@ function fakeTenant(agentIds: string[]) {
       findUniqueOrThrow: vi.fn(({ where }: { where: Row }) =>
         Promise.resolve(rows.find((r) => matches(r, where))),
       ),
-      count: vi.fn(({ where }: { where: Row }) =>
-        Promise.resolve(rows.filter((r) => matches(r, where)).length),
+      findUnique: vi.fn(({ where }: { where: Row }) =>
+        Promise.resolve(rows.find((r) => matches(r, where)) ?? null),
       ),
+      count: vi.fn(async ({ where }: { where: Row }) => {
+        const n = rows.filter((r) => matches(r, where)).length;
+        await new Promise((r) => setTimeout(r, 2)); // let concurrent calls interleave
+        return n;
+      }),
       update: vi.fn(({ where, data }: { where: Row; data: Row }) => {
         const row = rows.find((r) => matches(r, where))!;
         return Promise.resolve(Object.assign(row, data));
       }),
     },
   } as unknown as TenantPrismaClient;
+  // Interactive transactions run against the same in-memory state; a
+  // `pg_advisory_xact_lock(hashtext(key))` is a per-key mutex held until the
+  // transaction callback settles, as in PostgreSQL.
+  const locks = new Map<string, Promise<void>>();
+  (client as unknown as { $transaction: unknown }).$transaction = async (
+    fn: (tx: TenantPrismaClient) => Promise<unknown>,
+  ) => {
+    const releases: (() => void)[] = [];
+    const tx = Object.create(client) as Record<string, unknown>;
+    tx.$queryRaw = async (_strings: TemplateStringsArray, key: string) => {
+      const previous = locks.get(key) ?? Promise.resolve();
+      let release!: () => void;
+      const mine = new Promise<void>((r) => (release = r));
+      locks.set(
+        key,
+        previous.then(() => mine),
+      );
+      await previous;
+      releases.push(release);
+      return [{ '?column?': 1 }];
+    };
+    try {
+      return await fn(tx as unknown as TenantPrismaClient);
+    } finally {
+      releases.forEach((r) => r());
+    }
+  };
   return { client, rows };
 }
 
@@ -193,6 +225,35 @@ describe('Manar connector: manar.agent.quarantine (ADR-0009)', () => {
     ).toMatchObject({
       data: { result: 'already_quarantined', explanationAttached: false },
     });
+  });
+
+  it('the cap holds under concurrency: cap + 3 parallel calls, exactly cap land', async () => {
+    const targets = ['t-1', 't-2', 't-3', 't-4', 't-5'];
+    const h = harness([...targets, 'watcher-1'], {
+      QUARANTINE_MAX_PER_AGENT: 2,
+    });
+    const results = await Promise.all(
+      targets.map((t) =>
+        h.call('manar.agent.quarantine', t, { reason: 'parallel' }),
+      ),
+    );
+    expect(results.filter((r) => r.success)).toHaveLength(2);
+    expect(
+      results.filter((r) => r.errorMessage === 'quarantine_rate_exceeded'),
+    ).toHaveLength(3);
+  });
+
+  it('parallel calls on one target: one quarantine, one audit event', async () => {
+    const h = harness();
+    const results = await Promise.all(
+      [1, 2, 3].map(() =>
+        h.call('manar.agent.quarantine', 'target-1', { reason: 'same' }),
+      ),
+    );
+    expect(
+      results.map((r) => (r.data as { result: string }).result).sort(),
+    ).toEqual(['already_quarantined', 'already_quarantined', 'quarantined']);
+    expect(h.recordSafely).toHaveBeenCalledTimes(1);
   });
 
   it('caps how many agents one agent can quarantine per window (finding 3)', async () => {

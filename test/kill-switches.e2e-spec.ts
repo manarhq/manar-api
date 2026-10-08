@@ -1569,4 +1569,67 @@ describe('Kill Switches (e2e)', () => {
       reason: expect.stringMatching(/^ancestor_/) as string,
     });
   }, 60_000);
+
+  it('14. the quarantine cap and idempotency hold under concurrency', async () => {
+    const CAP = 5; // default QUARANTINE_MAX_PER_AGENT
+    const newAgent = async (label: string) =>
+      (
+        (
+          await request(humanApp.getHttpServer())
+            .post('/agents')
+            .set('Authorization', `Bearer ${adminToken}`)
+            .send({ slug: shortSlug(label), displayName: label })
+            .expect(201)
+        ).body as { id: string }
+      ).id;
+
+    // cap + 3 different targets at once from one watcher: exactly cap land.
+    const watcher = await createWatcher();
+    const targets = await Promise.all(
+      Array.from({ length: CAP + 3 }, (_, i) => newAgent(`cap-${i}`)),
+    );
+    const results = await Promise.all(
+      targets.map((id) =>
+        watcher.invoke('manar.agent.quarantine', id, { reason: 'e2e cap' }),
+      ),
+    );
+    const bodies = results.map(
+      (r) => r.body as { success: boolean; errorMessage?: string },
+    );
+    expect(bodies.filter((b) => b.success)).toHaveLength(CAP);
+    expect(
+      bodies.filter((b) => b.errorMessage === 'quarantine_rate_exceeded'),
+    ).toHaveLength(3);
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    expect(
+      await tenantClient.agentQuarantine.count({
+        where: { quarantinedByAgentId: watcher.agentId, active: true },
+      }),
+    ).toBe(CAP);
+
+    // Three at once on one target: one quarantine, one audit event.
+    const second = await createWatcher();
+    const target = await newAgent('same-target');
+    const same = await Promise.all(
+      [1, 2, 3].map(() =>
+        second.invoke('manar.agent.quarantine', target, { reason: 'e2e same' }),
+      ),
+    );
+    const outcomes = same
+      .map((r) => (r.body as { data: { result: string } }).data.result)
+      .sort();
+    expect(outcomes).toEqual([
+      'already_quarantined',
+      'already_quarantined',
+      'quarantined',
+    ]);
+    const events = await tenantClient.auditEvent.findMany({
+      where: { eventType: AUDIT_EVENT_TYPES.AGENT_QUARANTINED },
+    });
+    expect(
+      events.filter(
+        (e) => (e.data as { targetAgentId: string }).targetAgentId === target,
+      ),
+    ).toHaveLength(1);
+  }, 60_000);
 });

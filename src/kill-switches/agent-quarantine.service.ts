@@ -57,22 +57,10 @@ export class AgentQuarantineService {
     if (!agent) return { result: 'agent_not_found' };
 
     const now = new Date();
-    // Server-side cap on how many agents one agent can stop (a buggy or
-    // hijacked watcher): agents it quarantined within the window, active or
-    // released. Re-asking for one already active does not count again.
     const windowMs =
       this.config.get('QUARANTINE_WINDOW_MS', { infer: true }) ?? 600_000;
-    const recent = await tenantClient.agentQuarantine.count({
-      where: {
-        quarantinedByAgentId: input.byAgentId,
-        quarantinedAt: { gt: new Date(now.getTime() - windowMs) },
-        NOT: { agentId: input.agentId, active: true },
-      },
-    });
     const cap =
       this.config.get('QUARANTINE_MAX_PER_AGENT', { infer: true }) ?? 5;
-    if (recent >= cap) return { result: 'quarantine_rate_exceeded' };
-
     const fresh = {
       active: true,
       reason: input.reason,
@@ -88,59 +76,70 @@ export class AgentQuarantineService {
       releaseNote: null,
     };
 
-    // Idempotent and race-safe: only an inactive (or missing) row flips to
-    // active, so two concurrent calls produce one quarantine and one audit.
-    const flipped = await tenantClient.agentQuarantine.updateMany({
-      where: { agentId: input.agentId, active: false },
-      data: fresh,
-    });
-    let created = flipped.count > 0;
-    if (!created) {
-      try {
-        await tenantClient.agentQuarantine.create({
-          data: { agentId: input.agentId, ...fresh },
-        });
-        created = true;
-      } catch (error) {
-        // P2002: a row exists (active, or a concurrent create won).
-        if ((error as { code?: string }).code !== 'P2002') throw error;
-      }
-    }
-
-    if (created) {
-      const row = await tenantClient.agentQuarantine.findUniqueOrThrow({
+    // One transaction, serialized per quarantining agent and per target
+    // (advisory locks, always taken in that order, so no deadlock): the
+    // cap count, the idempotency check and the write cannot interleave with
+    // a concurrent call, so N parallel calls cannot all pass the cap and two
+    // calls for one target produce one quarantine and one audit event.
+    const step = await tenantClient.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtext(${`quarantine-by:${tenantId}:${input.byAgentId}`}))`;
+      await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtext(${`quarantine-of:${tenantId}:${input.agentId}`}))`;
+      const existing = await tx.agentQuarantine.findUnique({
         where: { agentId: input.agentId },
       });
-      // Tightening is never held back by an audit failure; the row is the
-      // control and the decision is already recorded.
-      await this.auditService.recordSafely(tenantClient, tenantId, {
-        eventType: AUDIT_EVENT_TYPES.AGENT_QUARANTINED,
-        actor: { type: 'agent', id: input.byAgentId },
-        data: {
-          quarantineId: row.id,
-          targetAgentId: input.agentId,
-          reason: input.reason,
-          detector: input.detector ?? null,
-          evidence: input.evidence,
-          explanation: input.explanation ?? null,
-          decisionId: input.decisionId,
-          taskId: input.taskId,
+      if (existing?.active) {
+        return { result: 'already_quarantined' as const, row: existing };
+      }
+      // Server-side cap on how many agents one agent can stop (a buggy or
+      // hijacked watcher): those it quarantined within the window, active
+      // or released.
+      const recent = await tx.agentQuarantine.count({
+        where: {
+          quarantinedByAgentId: input.byAgentId,
+          quarantinedAt: { gt: new Date(now.getTime() - windowMs) },
         },
       });
+      if (recent >= cap) return { result: 'quarantine_rate_exceeded' as const };
+      const row = existing
+        ? await tx.agentQuarantine.update({
+            where: { agentId: input.agentId },
+            data: fresh,
+          })
+        : await tx.agentQuarantine.create({
+            data: { agentId: input.agentId, ...fresh },
+          });
+      return { result: 'quarantined' as const, row };
+    });
+
+    if (step.result === 'quarantine_rate_exceeded') return step;
+    if (step.result === 'already_quarantined') {
       return {
-        result: 'quarantined',
-        quarantine: row,
-        explanationAttached: input.explanation !== undefined,
+        result: 'already_quarantined',
+        quarantine: step.row,
+        explanationAttached: false,
       };
     }
-
-    const row = await tenantClient.agentQuarantine.findUniqueOrThrow({
-      where: { agentId: input.agentId },
+    const row = step.row;
+    // Tightening is never held back by an audit failure; the row is the
+    // control and the decision is already recorded.
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.AGENT_QUARANTINED,
+      actor: { type: 'agent', id: input.byAgentId },
+      data: {
+        quarantineId: row.id,
+        targetAgentId: input.agentId,
+        reason: input.reason,
+        detector: input.detector ?? null,
+        evidence: input.evidence,
+        explanation: input.explanation ?? null,
+        decisionId: input.decisionId,
+        taskId: input.taskId,
+      },
     });
     return {
-      result: 'already_quarantined',
+      result: 'quarantined',
       quarantine: row,
-      explanationAttached: false,
+      explanationAttached: input.explanation !== undefined,
     };
   }
 
