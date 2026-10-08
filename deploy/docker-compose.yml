@@ -42,7 +42,7 @@ services:
     ports:
       # Host port 55432, not the default 5432: this machine already runs a
       # native PostgreSQL 17 service bound to 127.0.0.1:5432 outside Docker.
-      - '55432:5432'
+      - '127.0.0.1:55432:5432'
     volumes:
       # Postgres 18's image switched to storing data at /var/lib/postgresql
       # directly (pg_ctlcluster-style major-version subdirectories) instead
@@ -77,7 +77,7 @@ services:
       # Host port 8081, not the default 8080: keeps this consistent with
       # Postgres's non-default host port above and avoids clashing with
       # other local services that commonly bind 8080.
-      - '8081:8080'
+      - '127.0.0.1:8081:8080'
     volumes:
       - manar-keycloak-data:/opt/keycloak/data
     healthcheck:
@@ -133,7 +133,7 @@ services:
     ports:
       # Default OpenBao/Vault port — unlike Postgres/Keycloak above, this one
       # isn't commonly bound by other local services, so no need to remap.
-      - '8200:8200'
+      - '127.0.0.1:8200:8200'
     healthcheck:
       # `bao status` exits 0 only once the server is initialized and unsealed.
       test: ['CMD', 'bao', 'status']
@@ -201,10 +201,10 @@ services:
       OPENFGA_PLAYGROUND_ENABLED: 'true'
     ports:
       # Default OpenFGA HTTP API port — nothing else local binds it.
-      - '8080:8080'
+      - '127.0.0.1:8080:8080'
       # Host port 8082, not the default 8081: Keycloak's own host port
       # (8081, see above) already claims it on this machine.
-      - '8082:8081'
+      - '127.0.0.1:8082:8081'
       # Playground UI (3000) is deliberately NOT published to the host —
       # this machine's port 3000 is already used by other local projects
       # (e.g. manar-web's dev server), and the playground isn't needed for
@@ -258,7 +258,7 @@ services:
       # Postgres/Keycloak's non-default host ports above. The container's
       # own PORT stays 3100 (see `environment` above); only the host-side
       # mapping changes.
-      - '3101:3100'
+      - '127.0.0.1:3101:3100'
     healthcheck:
       test:
         [
@@ -299,7 +299,7 @@ services:
       POSTGRES_SEEDS: postgres
     ports:
       # Default Temporal frontend gRPC port — nothing else local binds it.
-      - '7233:7233'
+      - '127.0.0.1:7233:7233'
     healthcheck:
       # temporalio/auto-setup binds its own gRPC listener to the
       # container's own IP, not loopback — `--address localhost:7233`
@@ -332,7 +332,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_CORS_ORIGINS: http://localhost:3000
     ports:
-      - '8083:8080'
+      - '127.0.0.1:8083:8080'
 
   # Phase 9a (Tamper-Evident Audit Chain & Kafka Event Backbone): a
   # single-node, combined broker+controller KRaft cluster — the current
@@ -362,7 +362,7 @@ services:
     container_name: manar-kafka
     restart: unless-stopped
     ports:
-      - '29092:29092'
+      - '127.0.0.1:29092:29092'
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -423,7 +423,7 @@ services:
     restart: unless-stopped
     ports:
       # Default Redis port — nothing else local binds it.
-      - '6379:6379'
+      - '127.0.0.1:6379:6379'
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
@@ -469,7 +469,7 @@ services:
         hard: 65536
     ports:
       # Default OpenSearch REST API port — nothing else local binds it.
-      - '9200:9200'
+      - '127.0.0.1:9200:9200'
     volumes:
       - manar-opensearch-data:/usr/share/opensearch/data
     healthcheck:
@@ -562,7 +562,7 @@ services:
       # Matches AiAdvisoryConfigSchema's AI_ADVISORY_GRPC_TARGET default
       # (localhost:50051) — every process that reads that config runs on
       # the host, never inside this compose network.
-      - '50051:50051'
+      - '127.0.0.1:50051:50051'
     healthcheck:
       # No standard gRPC health-checking protocol is registered by
       # app/grpc/server.py (out of scope for manar-ai's Phase 10a) and this
@@ -619,7 +619,7 @@ services:
       # only the host-side mapping changes. `manar-ai` never uses this
       # host-mapped port — it reaches this service over the compose
       # network at `ollama:11434` (see `OLLAMA_HOST` above).
-      - '11435:11434'
+      - '127.0.0.1:11435:11434'
     volumes:
       - manar-ollama-data:/root/.ollama
     healthcheck:
