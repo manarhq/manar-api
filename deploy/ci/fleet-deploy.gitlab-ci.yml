@@ -1,0 +1,69 @@
+# Deploy jobs started by manar-fleet through the pipeline trigger API (ADR-0010). They run only
+# in trigger pipelines that carry FLEET_MODE; every other job in .gitlab-ci.yml is skipped there.
+#
+# Variables from manar-fleet: FLEET_MODE (dry-run | apply | rollback), FLEET_DEPLOYMENT_ID,
+# FLEET_DEPLOYMENT_NAME, FLEET_NAMESPACE, FLEET_TARGET_VERSION (image tag), FLEET_UPGRADE_ID.
+#
+# Per deployment, set up once in GitLab (Settings > CI/CD), scoped to the environment
+# `fleet/<deployment name>` and protected: FLEET_KUBECONFIG (file variable) for that cluster.
+# Optional non-secret values files: deploy/environments/<deployment name>/{manar-api,manar-api-worker}.yaml.
+# Secrets stay out of git (External Secrets or OpenBao sync, as in docs/kubernetes.md).
+#
+# Not yet: database migrations. The charts have no pre-upgrade migration hook, so run
+# `prisma migrate deploy` and `pnpm manar tenants:migrate` before an apply (follow-up in ADR-0010).
+
+.fleet-deploy:
+  stage: deploy
+  image:
+    name: alpine/helm:4.2.3
+    entrypoint: ['']
+  before_script:
+    - apk add --no-cache bash curl git >/dev/null
+    - test -n "$FLEET_KUBECONFIG" || { echo "FLEET_KUBECONFIG is not set for this environment"; exit 1; }
+    - export KUBECONFIG="$FLEET_KUBECONFIG"
+    # Inputs come from manar-fleet; reject anything that is not a plain tag or namespace.
+    - echo "$FLEET_TARGET_VERSION" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$'
+    - echo "$FLEET_NAMESPACE" | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+    - echo "$FLEET_DEPLOYMENT_NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'
+    - ENVDIR="deploy/environments/$FLEET_DEPLOYMENT_NAME"
+    - API_VALUES=""; [ -f "$ENVDIR/manar-api.yaml" ] && API_VALUES="-f $ENVDIR/manar-api.yaml"
+    - WORKER_VALUES=""; [ -f "$ENVDIR/manar-api-worker.yaml" ] && WORKER_VALUES="-f $ENVDIR/manar-api-worker.yaml"
+  environment:
+    name: fleet/$FLEET_DEPLOYMENT_NAME
+  # One deploy at a time per deployment.
+  resource_group: fleet-$FLEET_DEPLOYMENT_ID
+  variables:
+    GIT_DEPTH: 1
+    HELM_DIFF_VERSION: v3.13.1
+
+fleet:dry-run:
+  extends: .fleet-deploy
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "trigger" && $FLEET_MODE == "dry-run"
+  environment:
+    name: fleet/$FLEET_DEPLOYMENT_NAME
+    action: verify
+  script:
+    - helm plugin install https://github.com/databus23/helm-diff --version "$HELM_DIFF_VERSION"
+    # manar-fleet stores the text between these two marker lines as the dry-run diff.
+    - echo FLEET-HELM-DIFF-BEGIN
+    - helm diff upgrade manar-api deploy/helm/manar-api -n "$FLEET_NAMESPACE" --allow-unreleased --no-color --set image.tag="$FLEET_TARGET_VERSION" $API_VALUES
+    - helm diff upgrade manar-api-worker deploy/helm/manar-api-worker -n "$FLEET_NAMESPACE" --allow-unreleased --no-color --set image.tag="$FLEET_TARGET_VERSION" $WORKER_VALUES
+    - echo FLEET-HELM-DIFF-END
+
+fleet:apply:
+  extends: .fleet-deploy
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "trigger" && $FLEET_MODE == "apply"
+  script:
+    - helm upgrade --install manar-api deploy/helm/manar-api -n "$FLEET_NAMESPACE" --atomic --wait --timeout 10m --set image.tag="$FLEET_TARGET_VERSION" $API_VALUES
+    - helm upgrade --install manar-api-worker deploy/helm/manar-api-worker -n "$FLEET_NAMESPACE" --atomic --wait --timeout 10m --set image.tag="$FLEET_TARGET_VERSION" $WORKER_VALUES
+
+fleet:rollback:
+  extends: .fleet-deploy
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "trigger" && $FLEET_MODE == "rollback"
+  script:
+    # Back to the previous Helm revision of each release (the version before the upgrade).
+    - helm rollback manar-api -n "$FLEET_NAMESPACE" --wait --timeout 10m
+    - helm rollback manar-api-worker -n "$FLEET_NAMESPACE" --wait --timeout 10m

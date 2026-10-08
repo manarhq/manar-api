@@ -48,6 +48,9 @@ RUN pnpm install --frozen-lockfile --prod --ignore-scripts \
 # ---- runtime: minimal image, no build toolchain, non-root user ----
 FROM node:24-alpine AS runtime
 ENV NODE_ENV=production
+# Reported in the manar-fleet heartbeat (ADR-0010). CI passes the commit sha.
+ARG MANAR_GIT_SHA=unknown
+ENV MANAR_GIT_SHA=${MANAR_GIT_SHA}
 WORKDIR /app
 
 RUN addgroup --system --gid 1001 nodejs \

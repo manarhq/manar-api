@@ -4,6 +4,17 @@ stages:
   - test
   - build
   - security
+  - deploy
+
+include:
+  - local: deploy/ci/fleet-deploy.gitlab-ci.yml
+
+# The ordinary jobs never run in a manar-fleet deploy pipeline (FLEET_MODE set).
+.ci-rules:
+  rules:
+    - if: $FLEET_MODE
+      when: never
+    - when: on_success
 
 variables:
   PNPM_HOME: '$CI_PROJECT_DIR/.pnpm'
@@ -30,16 +41,19 @@ cache:
     - .pnpm-store
 
 lint:
+  rules: !reference [.ci-rules, rules]
   stage: lint
   script:
     - pnpm lint
 
 typecheck:
+  rules: !reference [.ci-rules, rules]
   stage: typecheck
   script:
     - pnpm typecheck
 
 test:unit:
+  rules: !reference [.ci-rules, rules]
   stage: test
   # Phase 2's tenant-isolation tests run against a real Postgres (never
   # mocked — see docs/tenant-isolation.md), so this job needs a live
@@ -58,6 +72,7 @@ test:unit:
     - pnpm test
 
 test:e2e:
+  rules: !reference [.ci-rules, rules]
   stage: test
   # Phase 3's auth e2e suite (test/auth.e2e-spec.ts) provisions real
   # tenants — a real database via Postgres and a real Keycloak realm via
@@ -232,6 +247,7 @@ test:e2e:
     - pnpm test:e2e
 
 build:
+  rules: !reference [.ci-rules, rules]
   stage: build
   script:
     - pnpm build
@@ -264,6 +280,7 @@ build:
 # stage ordering guarantees the tarballs exist before `security` starts;
 # no existing stage was renamed/reordered/removed to add this.
 docker:build-images:
+  rules: !reference [.ci-rules, rules]
   stage: build
   image: docker:29
   services:
@@ -271,8 +288,8 @@ docker:build-images:
   variables:
     DOCKER_TLS_CERTDIR: '/certs'
   script:
-    - docker build --target runtime -t manar-api:ci .
-    - docker build --target worker -t manar-api-worker:ci .
+    - docker build --build-arg MANAR_GIT_SHA=$CI_COMMIT_SHORT_SHA --target runtime -t manar-api:ci .
+    - docker build --build-arg MANAR_GIT_SHA=$CI_COMMIT_SHORT_SHA --target worker -t manar-api-worker:ci .
     - docker build -t demo-soc-tools:ci -f packages/demo-soc-tools/Dockerfile .
     - docker save manar-api:ci -o manar-api.tar
     - docker save manar-api-worker:ci -o manar-api-worker.tar
@@ -291,6 +308,7 @@ docker:build-images:
 # already allowlisted — there is no acceptable severity tier for a
 # leaked credential.
 gitleaks:
+  rules: !reference [.ci-rules, rules]
   stage: security
   image:
     name: ghcr.io/gitleaks/gitleaks:v8.30.1
@@ -305,6 +323,7 @@ gitleaks:
 # tiers include a meaningful false-positive/style-opinion rate that would
 # otherwise make this gate noisy enough to get disabled.
 semgrep:
+  rules: !reference [.ci-rules, rules]
   stage: security
   image:
     name: semgrep/semgrep:1.172.0
@@ -327,6 +346,7 @@ semgrep:
 # HIGH/CRITICAL only (matches trivy-image's threshold — one policy, not
 # two different bars for the same tool).
 trivy-fs:
+  rules: !reference [.ci-rules, rules]
   stage: security
   image:
     name: aquasec/trivy:0.71.0
@@ -346,6 +366,7 @@ trivy-fs:
 # long tail of low-severity, often-unfixable-upstream findings that would
 # make a zero-tolerance gate impossible to keep green).
 trivy-image:
+  rules: !reference [.ci-rules, rules]
   stage: security
   image:
     name: aquasec/trivy:0.71.0
@@ -368,6 +389,7 @@ trivy-image:
 # SBOM generation (CycloneDX) for each of the three images — an artifact
 # job, not a gate: never fails the pipeline on its own.
 syft-sbom:
+  rules: !reference [.ci-rules, rules]
   stage: security
   image:
     name: anchore/syft:v1.51.0
@@ -389,6 +411,7 @@ syft-sbom:
 # kubeconform/kube-linter below can validate the manifests this phase
 # actually produced. Same Helm major version (v4) validated locally.
 k8s-manifests:render:
+  rules: !reference [.ci-rules, rules]
   stage: security
   image: alpine/helm:4.2.3
   script:
@@ -405,6 +428,7 @@ k8s-manifests:render:
 # violation (-strict rejects unknown fields too) — there's no acceptable
 # severity tier for "this isn't a valid Kubernetes object."
 kubeconform:
+  rules: !reference [.ci-rules, rules]
   stage: security
   image:
     name: ghcr.io/yannh/kubeconform:v0.8.0-alpine
@@ -421,6 +445,7 @@ kubeconform:
 # .kube-linter.yaml config needed, the built-in default checks are what
 # this chart set was written against and passes clean).
 kube-linter:
+  rules: !reference [.ci-rules, rules]
   stage: security
   image:
     name: stackrox/kube-linter:v0.8.3
