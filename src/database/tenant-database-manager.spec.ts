@@ -7,7 +7,11 @@ import { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from './control-prisma.service';
 import { EnvSecretProvider } from './env-secret-provider';
 import { TenantDatabaseManager } from './tenant-database-manager.service';
-import { TenantSlugConflictError } from './tenant-database.errors';
+import {
+  TenantNotFoundError,
+  TenantSlugConflictError,
+} from './tenant-database.errors';
+import { EnforcementDependencyUnavailableException } from '../common/fail-closed/fail-closed';
 
 /**
  * Mandatory tenant-isolation invariant tests (design spec's "Testing
@@ -32,6 +36,7 @@ function fakeConfigService(
     TENANT_DB_BASE_URL: process.env.TENANT_DB_BASE_URL ?? '',
     TENANT_DB_CLIENT_CACHE_MAX: 50,
     TENANT_DB_CLIENT_IDLE_TTL_MS: 10 * 60 * 1000,
+    TENANT_DB_CLIENT_REVALIDATE_MS: 5000,
     KEYCLOAK_BASE_URL: process.env.KEYCLOAK_BASE_URL ?? '',
     KEYCLOAK_ADMIN_USERNAME: process.env.KEYCLOAK_ADMIN_USERNAME ?? '',
     KEYCLOAK_ADMIN_PASSWORD: process.env.KEYCLOAK_ADMIN_PASSWORD ?? '',
@@ -286,6 +291,63 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     await manager.deprovisionTenant(tenantB.id);
     await expect(manager.getClient(tenantB.id)).rejects.toThrow();
   }, 20_000);
+
+  it('6. a client cached in one process stops serving a tenant suspended by another process once the revalidation TTL passes', async () => {
+    // Two managers = two processes (e.g. API replica and Temporal worker), sharing the control DB.
+    const worker = new TenantDatabaseManager(
+      control,
+      fakeConfigService({ TENANT_DB_CLIENT_REVALIDATE_MS: 50 }),
+      new EnvSecretProvider(),
+    );
+    const api = new TenantDatabaseManager(
+      control,
+      fakeConfigService(),
+      new EnvSecretProvider(),
+    );
+    try {
+      await worker.getClient(tenantA.id); // cached in the "worker"
+      await api.suspendTenant(tenantA.id); // evicts only in the "api" process
+      await new Promise((r) => setTimeout(r, 80));
+      await expect(worker.getClient(tenantA.id)).rejects.toBeInstanceOf(
+        TenantNotFoundError,
+      );
+      expect(
+        (worker as unknown as { cache: Map<string, unknown> }).cache.has(
+          tenantA.id,
+        ),
+      ).toBe(false);
+    } finally {
+      await api.resumeTenant(tenantA.id);
+      await worker.onModuleDestroy();
+      await api.onModuleDestroy();
+    }
+  }, 30_000);
+
+  it('7. if the control DB cannot be read on revalidation, the cached client is never returned', async () => {
+    let down = false;
+    const flakyControl = {
+      tenant: {
+        findUnique: (args: Parameters<typeof control.tenant.findUnique>[0]) =>
+          down
+            ? Promise.reject(new Error('connection refused'))
+            : control.tenant.findUnique(args),
+      },
+    } as unknown as ControlPrismaService;
+    const m = new TenantDatabaseManager(
+      flakyControl,
+      fakeConfigService({ TENANT_DB_CLIENT_REVALIDATE_MS: 0 }),
+      new EnvSecretProvider(),
+    );
+    try {
+      await m.getClient(tenantA.id);
+      down = true;
+      await expect(m.getClient(tenantA.id)).rejects.toBeInstanceOf(
+        EnforcementDependencyUnavailableException,
+      );
+    } finally {
+      await m.onModuleDestroy();
+    }
+  }, 30_000);
 
   it('5. re-provisioning an existing slug fails with a clear conflict error, not a duplicate database', async () => {
     const before = await control.$queryRaw<{ count: bigint }[]>`

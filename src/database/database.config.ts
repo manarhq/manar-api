@@ -32,6 +32,12 @@ export const DatabaseConfigSchema = z.object({
     .int()
     .positive()
     .default(10 * 60 * 1000),
+
+  /**
+   * How long a cached tenant client is trusted before its tenant's status is re-read from the
+   * control DB (ADR-0010: a suspend in one process must reach every process). 5 s by default.
+   */
+  TENANT_DB_CLIENT_REVALIDATE_MS: z.coerce.number().int().min(0).default(5000),
 });
 
 export type DatabaseConfig = z.infer<typeof DatabaseConfigSchema>;

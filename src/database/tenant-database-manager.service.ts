@@ -9,6 +9,7 @@ import { Client as PgClient } from 'pg';
 import { Prisma as ControlPrisma } from '../generated/control-client/client';
 import { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AppConfig } from '../config/env.validation';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import { ControlPrismaService } from './control-prisma.service';
 import {
   DEFAULT_TENANT_DB_SECRET_REFERENCE,
@@ -36,6 +37,8 @@ export interface ProvisionTenantInput {
 interface CachedClient {
   client: TenantPrismaClient;
   lastUsedAt: number;
+  /** When the tenant's status and binding were last confirmed ACTIVE in the control DB. */
+  validatedAt: number;
 }
 
 /**
@@ -56,6 +59,7 @@ export class TenantDatabaseManager implements OnModuleDestroy {
   private readonly cache = new Map<string, CachedClient>();
   private readonly maxCacheSize: number;
   private readonly idleTtlMs: number;
+  private readonly revalidateMs: number;
   private readonly idleSweepInterval: ReturnType<typeof setInterval>;
 
   constructor(
@@ -67,6 +71,9 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       infer: true,
     });
     this.idleTtlMs = configService.get('TENANT_DB_CLIENT_IDLE_TTL_MS', {
+      infer: true,
+    });
+    this.revalidateMs = configService.get('TENANT_DB_CLIENT_REVALIDATE_MS', {
       infer: true,
     });
 
@@ -120,6 +127,15 @@ export class TenantDatabaseManager implements OnModuleDestroy {
   async getClient(tenantId: string): Promise<TenantPrismaClient> {
     const cached = this.cache.get(tenantId);
     if (cached) {
+      // A cached client is only as good as the status it was created under: another process
+      // (an API replica, the Temporal worker) may have suspended or deleted the tenant since.
+      // Re-check the control DB once the entry is older than TENANT_DB_CLIENT_REVALIDATE_MS.
+      // ponytail: polling bounds the stale window to the TTL; upgrade path is a pub/sub
+      // eviction (Redis or Postgres LISTEN/NOTIFY) on every lifecycle change.
+      if (Date.now() - cached.validatedAt >= this.revalidateMs) {
+        await this.revalidate(tenantId);
+        cached.validatedAt = Date.now();
+      }
       // Move to the end of the Map to mark it most-recently-used.
       this.cache.delete(tenantId);
       cached.lastUsedAt = Date.now();
@@ -147,7 +163,11 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     await client.$connect();
 
     this.evictOverflowIfNeeded();
-    this.cache.set(tenantId, { client, lastUsedAt: Date.now() });
+    this.cache.set(tenantId, {
+      client,
+      lastUsedAt: Date.now(),
+      validatedAt: Date.now(),
+    });
 
     return client;
   }
@@ -348,6 +368,30 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     const client = await this.getClient(tenantId);
     await client.$queryRaw`SELECT 1`;
     return true;
+  }
+
+  /**
+   * Fails closed: if the control DB cannot be read the cached client is not returned
+   * (`enforcement_dependency_unavailable`); if the tenant is no longer ACTIVE it is evicted and
+   * the caller gets `TenantNotFoundError`.
+   */
+  private async revalidate(tenantId: string): Promise<void> {
+    const tenant = await failClosed('control-db', () =>
+      this.control.tenant.findUnique({
+        where: { id: tenantId },
+        select: {
+          status: true,
+          databaseBinding: { select: { provisioningStatus: true } },
+        },
+      }),
+    );
+    if (
+      tenant?.status !== 'ACTIVE' ||
+      tenant.databaseBinding?.provisioningStatus !== 'ACTIVE'
+    ) {
+      await this.evict(tenantId);
+      throw new TenantNotFoundError(tenantId);
+    }
   }
 
   private async evict(tenantId: string): Promise<void> {
