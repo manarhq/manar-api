@@ -206,6 +206,16 @@ export class KillSwitchService {
       };
     }
 
+    // ADR-0009: a quarantined agent is stopped like a killed one. Unique
+    // index on `agentId`, PostgreSQL only.
+    const quarantine = await tenantClient.agentQuarantine.findFirst({
+      where: { agentId: params.agentId, active: true },
+      select: { id: true },
+    });
+    if (quarantine) {
+      return { killed: true, scope: 'AGENT', reason: 'agent_quarantined' };
+    }
+
     const memberships = await tenantClient.agentGroupMembership.findMany({
       where: { agentId: params.agentId },
       select: { groupId: true },

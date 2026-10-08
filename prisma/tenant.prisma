@@ -203,6 +203,9 @@ model Agent {
   /// own `createdBy`/`capabilities` (see `AiSystemAgentLink`).
   aiSystemLinks AiSystemAgentLink[]
 
+  /// ADR-0009: present once this agent has ever been quarantined.
+  quarantine AgentQuarantine?
+
   @@map("agents")
 }
 
@@ -1444,6 +1447,49 @@ model KillSwitch {
   /// for this exact scope+target right now."
   @@index([scope, targetId, active])
   @@map("kill_switches")
+}
+
+/// ADR-0009 (watcher). A quarantined agent's every action is DENY
+/// `agent_quarantined`, at authorize, at grant redemption and at the
+/// agent-runtime gate (`KillSwitchService.checkAll`). Its mTLS identity keeps
+/// working so it can read the reason.
+///
+/// One row per agent, toggled in place like `KillSwitch` (history lives in
+/// the audit chain: `agent.quarantined` / `agent.quarantine_released`). An
+/// agent (the watcher, through `manar.agent.quarantine`) can only set
+/// `active = true`; only a human (`POST /agents/:id/quarantine/release`,
+/// JWT + role) sets it back to false.
+model AgentQuarantine {
+  id      String @id @default(uuid())
+  agentId String @unique
+  agent   Agent  @relation(fields: [agentId], references: [id])
+
+  active    Boolean
+  /// Short deterministic reason written by the detector that fired.
+  reason    String
+  detector  String?
+  /// Evidence references (decision ids, audit event ids). Ids only.
+  evidence  Json    @default("[]")
+  /// Plain-English and Arabic explanation written by the watcher's model
+  /// after the quarantine landed; set at most once per quarantine. Generated
+  /// text, labelled as such wherever it is shown.
+  explanationEn String?
+  explanationAr String?
+
+  /// The agent that quarantined (the watcher), and the ALLOW `Decision` it ran under.
+  quarantinedByAgentId String
+  decisionId           String?
+  quarantinedAt        DateTime
+
+  /// The human (`UserProfile.id`) who released it.
+  releasedBy  String?
+  releasedAt  DateTime?
+  releaseNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("agent_quarantines")
 }
 
 /// Phase 12a (Webhooks, Section 51). One registered subscriber URL per row

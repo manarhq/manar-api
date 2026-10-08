@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { AgentQuarantineService } from './agent-quarantine.service';
 import { KillSwitchService } from './kill-switch.service';
 import { PlatformKillSwitchService } from './platform-kill-switch.service';
 import { PlatformOperatorGuard } from './platform-operator.guard';
@@ -19,11 +20,13 @@ import { PlatformOperatorGuard } from './platform-operator.guard';
   providers: [
     PlatformKillSwitchService,
     KillSwitchService,
+    AgentQuarantineService,
     PlatformOperatorGuard,
   ],
   exports: [
     PlatformKillSwitchService,
     KillSwitchService,
+    AgentQuarantineService,
     PlatformOperatorGuard,
   ],
 })
