@@ -808,6 +808,7 @@ describe('LLM proxy and tool-result DLP classify identically', () => {
     ['UAE mobile', '+971 50 123 4567', CLEAN, '[REDACTED:UAE_MOBILE]'],
     [
       'JWT',
+      // nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token (synthetic DLP fixture, signature is "signature-value")
       'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl',
       CLEAN,
       'blocked',

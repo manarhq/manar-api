@@ -431,9 +431,9 @@ semgrep:
     GIT_DEPTH: 0
   script:
     # Full report (every severity) — always produced, never fails the job.
-    - semgrep scan --config auto --json --output semgrep-report.json || true
+    - semgrep scan --config auto --json --output semgrep-report.json . || true
     # Gate: ERROR severity only.
-    - semgrep scan --config auto --severity ERROR --error
+    - semgrep scan --config auto --severity ERROR --error .
   artifacts:
     when: always
     paths:
@@ -494,14 +494,14 @@ syft-sbom:
     default: false
   stage: security
   image:
-    name: anchore/syft:v1.51.0
+    name: anchore/syft:v1.51.0-debug
     entrypoint: ['']
   needs:
     - docker:build-images
   script:
     - >
       for img in manar-api manar-api-worker demo-soc-tools; do
-        syft "docker-archive:${img}.tar" -o "cyclonedx-json=sbom-${img}.json";
+        /syft "docker-archive:${img}.tar" -o "cyclonedx-json=sbom-${img}.json";
       done
   artifacts:
     paths:
@@ -555,9 +555,9 @@ kube-linter:
     default: false
   stage: security
   image:
-    name: stackrox/kube-linter:v0.8.3
+    name: stackrox/kube-linter:v0.8.3-alpine
     entrypoint: ['']
   needs:
     - k8s-manifests:render
   script:
-    - kube-linter lint rendered/
+    - /kube-linter lint rendered/
