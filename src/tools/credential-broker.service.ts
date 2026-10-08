@@ -19,6 +19,8 @@ import {
 import { HttpToolAdapter } from './http-tool.adapter';
 import { McpToolAdapter } from './mcp-tool.adapter';
 import { MicrosoftToolAdapter } from './microsoft-tool.adapter';
+import { ManarConnectorService } from './manar-connector.service';
+import { isManarBuiltin } from './manar-actions';
 import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
 import { failClosed } from '../common/fail-closed/fail-closed';
 import { ToolRegistryService } from './tool-registry.service';
@@ -218,6 +220,7 @@ export class CredentialBrokerService {
     private readonly aiAdvisoryClient: AiAdvisoryClient,
     private readonly microsoftAdapter: MicrosoftToolAdapter,
     configService: ConfigService<AppConfig, true>,
+    private readonly manarConnector: ManarConnectorService,
   ) {
     this.injectionBlockThreshold = configService.get(
       'PROMPT_INJECTION_BLOCK_THRESHOLD',
@@ -351,22 +354,28 @@ export class CredentialBrokerService {
     const startedAt = new Date();
     let result: ToolInvocationResult;
     try {
-      const credential = await this.secretProvider.resolve(
-        tool.credentialReference,
-      );
-      const adapter =
-        tool.protocol === 'MCP'
-          ? this.mcpAdapter
-          : tool.protocol === 'MICROSOFT'
-            ? this.microsoftAdapter
-            : this.httpAdapter;
-      result = await adapter.invoke(
-        tool,
-        action,
-        input.resource,
-        input.params,
-        credential,
-      );
+      if (isManarBuiltin(tool)) {
+        // ADR-0009: Manar's own connector runs in-process on this tenant's
+        // database and needs no credential.
+        result = await this.manarConnector.invoke(tenantClient, input);
+      } else {
+        const credential = await this.secretProvider.resolve(
+          tool.credentialReference,
+        );
+        const adapter =
+          tool.protocol === 'MCP'
+            ? this.mcpAdapter
+            : tool.protocol === 'MICROSOFT'
+              ? this.microsoftAdapter
+              : this.httpAdapter;
+        result = await adapter.invoke(
+          tool,
+          action,
+          input.resource,
+          input.params,
+          credential,
+        );
+      }
     } catch (error) {
       // Credential resolution or an adapter-internal throw (never expected
       // from either adapter's own contract, which always resolves to a
