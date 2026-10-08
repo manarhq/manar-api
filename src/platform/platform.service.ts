@@ -13,6 +13,7 @@ import {
   TenantSlugConflictError,
 } from '../database/tenant-database.errors';
 import { TenantProvisioningService } from '../keycloak/tenant-provisioning.service';
+import { PlatformSuspension } from './platform-suspension';
 import type { CreatePlatformTenant } from './platform.validation';
 
 const USAGE_WINDOW_DAYS = 30;
@@ -49,6 +50,7 @@ export class PlatformService {
     private readonly control: ControlPrismaService,
     private readonly tenants: TenantDatabaseManager,
     private readonly provisioning: TenantProvisioningService,
+    private readonly suspension: PlatformSuspension,
   ) {}
 
   async list() {
@@ -131,26 +133,54 @@ export class PlatformService {
     };
   }
 
+  /**
+   * Kill switch first, then the control status: every process denies on the decision path at
+   * once, and humans are refused as soon as the status flips. Residual window: work already past
+   * its kill-switch check when the switch lands (one in-flight request or activity).
+   */
   async suspend(id: string, caller: string) {
-    await this.tenantOr404(id);
+    const t = await this.tenantOr404(id);
+    if (t.status !== 'ACTIVE')
+      throw new ConflictException(`Tenant is not ACTIVE`);
+    const engaged = await this.suspension.engage(
+      await this.tenants.getClient(id),
+      id,
+      caller,
+    );
     await this.lifecycle(() => this.tenants.suspendTenant(id));
-    this.logger.log(`platform: tenant ${id} suspended by ${caller}`);
+    this.logger.log(
+      `platform: tenant ${id} suspended by ${caller} (kill switch ${engaged ? 'set' : 'already active'})`,
+    );
     return view(await this.tenantOr404(id));
   }
 
+  /** Control status first, then release only the platform's own kill switch. */
   async resume(id: string, caller: string) {
     await this.tenantOr404(id);
     await this.lifecycle(() => this.tenants.resumeTenant(id));
-    this.logger.log(`platform: tenant ${id} resumed by ${caller}`);
+    const released = await this.suspension.release(
+      await this.tenants.getClient(id),
+      id,
+      caller,
+    );
+    this.logger.log(
+      `platform: tenant ${id} resumed by ${caller} (kill switch ${released ? 'released' : 'not set by platform, left as is'})`,
+    );
     return view(await this.tenantOr404(id));
   }
 
-  /** Marks the tenant DELETED. The database and realm are kept; dropping them stays manual. */
+  /** Marks the tenant DELETED after setting its kill switch. The database and realm are kept. */
   async remove(id: string, caller: string) {
     const t = await this.tenantOr404(id);
     if (t.status === 'DELETED') return view(t);
     if (t.status === 'PROVISIONING')
       throw new ConflictException('Tenant is still provisioning');
+    if (t.status === 'ACTIVE')
+      await this.suspension.engage(
+        await this.tenants.getClient(id),
+        id,
+        caller,
+      );
     await this.tenants.deprovisionTenant(id);
     this.logger.log(`platform: tenant ${id} deleted by ${caller}`);
     return view(await this.tenantOr404(id));

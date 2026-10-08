@@ -24,10 +24,23 @@ manar-api stays the security control plane, so the addition has to be small and 
      `enforcement_dependency_unavailable`; any other check, 401 or 403. Tenant realm tokens never
      pass (different issuer), and this token is never accepted on tenant routes (its issuer is
      not a tenant).
-   - Suspend sets the tenant SUSPENDED and evicts its cached client. Humans are refused at once
-     (`KnownIssuerRegistry` needs ACTIVE), agents too (`AgentMtlsGuard` now checks the tenant
-     status), and `getClient` refuses the tenant. Resume reverses it. Delete marks DELETED and keeps
-     the database and realm (dropping them stays a manual, separate step).
+   - Suspend, in this order: (1) a TENANT-scope kill switch in the tenant database, owned by the
+     tenant-local profile `platform:manar-fleet` with reason `tenant_suspended`; every process
+     (API replicas, the Temporal worker) reads kill switches per decision, so agent requests and
+     grant redemption are denied at once everywhere; (2) the control status SUSPENDED, which
+     refuses humans at once (`KnownIssuerRegistry` and `AgentMtlsGuard` read it per request) and
+     evicts the caller's cached tenant client. Delete sets the same switch, then DELETED.
+   - Resume flips the status back first, then releases only the platform's own switch: a
+     tenant switch a human set (or re-set after the suspend) stays active. Both steps are written
+     to the tenant's audit chain as `kill_switch.activated` / `kill_switch.deactivated` with a
+     `system` actor.
+   - Cached tenant clients in other processes: `getClient` re-reads the tenant's status when a
+     cached entry is older than `TENANT_DB_CLIENT_REVALIDATE_MS` (default 5 s), refuses a tenant
+     that is no longer ACTIVE, fails closed if the control DB is unreadable, and on a cache miss
+     re-checks the status after connecting, before caching (the window starts at the read).
+   - Residual window: work already past its kill-switch check when the switch lands (one
+     in-flight request or activity) completes; anything that does not pass through the decision
+     path keeps a cached client for at most the revalidation TTL. Upgrade path: pub/sub eviction.
    - The summary returns admin contacts (TENANT_OWNER and SECURITY_ADMIN display name and email),
      tool names, agent counts and 30-day counts of tasks, tool invocations and approval requests:
      no tenant business data.
@@ -44,7 +57,10 @@ manar-api stays the security control plane, so the addition has to be small and 
 3. **Deploy jobs** in `deploy/ci/fleet-deploy.gitlab-ci.yml`, started by manar-fleet through the
    pipeline trigger API with `FLEET_MODE` dry-run (helm diff between marker lines), apply (helm
    upgrade --atomic) or rollback (helm rollback). All other jobs are skipped in those pipelines.
-   Kubeconfig per deployment is a protected, environment-scoped CI file variable.
+   Every FLEET_* input is validated as a whole value (`deploy/ci/validate-fleet-inputs.sh`, with
+   a shell test in the lint stage) and manar-fleet applies the same rules before triggering; the
+   tag goes through `--set-string`. The trigger token is held only by manar-fleet. Kubeconfig per
+   deployment is a protected, environment-scoped CI file variable.
 
 ## Alternatives considered
 

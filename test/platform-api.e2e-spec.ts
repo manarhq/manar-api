@@ -11,7 +11,12 @@ import {
 } from '@nestjs/platform-fastify';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
+import { randomUUID } from 'node:crypto';
+import { ConfigService } from '@nestjs/config';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
+import { EnvSecretProvider } from '../src/database/env-secret-provider';
+import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
+import { KillSwitchService } from '../src/kill-switches/kill-switch.service';
 import {
   assignRealmRole,
   createPlatformClient,
@@ -192,36 +197,89 @@ describe('Platform API for manar-fleet (e2e)', () => {
     expect(Array.isArray(body(res).tools)).toBe(true);
   });
 
-  it('suspend cuts the tenant off at once; resume restores it', async () => {
-    const s = await http()
-      .post(`/platform/v1/tenants/${tenantId}/suspend`)
-      .set('Authorization', `Bearer ${platformToken}`)
-      .expect(200);
-    expect(body(s).status).toBe('SUSPENDED');
-    await http()
-      .get('/users')
-      .set('Authorization', `Bearer ${ownerToken}`)
-      .expect(401);
-    await http()
-      .post(`/platform/v1/tenants/${tenantId}/suspend`)
-      .set('Authorization', `Bearer ${platformToken}`)
-      .expect(409);
-    const summary = await http()
-      .get(`/platform/v1/tenants/${tenantId}`)
-      .set('Authorization', `Bearer ${platformToken}`)
-      .expect(200);
-    expect(body(summary).status).toBe('SUSPENDED');
-    expect(body(summary).agents).toBeUndefined();
+  it('suspend denies on the decision path in another process at once (kill switch); resume restores it', async () => {
+    // A second TenantDatabaseManager stands in for another process (API replica or the worker)
+    // that already holds a cached client for this tenant.
+    const other = new TenantDatabaseManager(
+      control,
+      app.get(ConfigService),
+      new EnvSecretProvider(),
+    );
+    const killSwitches = app.get(KillSwitchService);
+    const otherClient = await other.getClient(tenantId!);
+    const agentId = randomUUID();
+    try {
+      expect(
+        (await killSwitches.checkAll(otherClient, tenantId!, { agentId }))
+          .killed,
+      ).toBe(false);
 
-    const r = await http()
+      const s = await http()
+        .post(`/platform/v1/tenants/${tenantId}/suspend`)
+        .set('Authorization', `Bearer ${platformToken}`)
+        .expect(200);
+      expect(body(s).status).toBe('SUSPENDED');
+      // No revalidation wait: the TENANT kill switch is read per decision.
+      expect(
+        await killSwitches.checkAll(otherClient, tenantId!, { agentId }),
+      ).toMatchObject({ killed: true, scope: 'TENANT' });
+      await http()
+        .get('/users')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .expect(401);
+      await http()
+        .post(`/platform/v1/tenants/${tenantId}/suspend`)
+        .set('Authorization', `Bearer ${platformToken}`)
+        .expect(409);
+      const summary = await http()
+        .get(`/platform/v1/tenants/${tenantId}`)
+        .set('Authorization', `Bearer ${platformToken}`)
+        .expect(200);
+      expect(body(summary).status).toBe('SUSPENDED');
+      expect(body(summary).agents).toBeUndefined();
+
+      const r = await http()
+        .post(`/platform/v1/tenants/${tenantId}/resume`)
+        .set('Authorization', `Bearer ${platformToken}`)
+        .expect(200);
+      expect(body(r).status).toBe('ACTIVE');
+      expect(
+        (await killSwitches.checkAll(otherClient, tenantId!, { agentId }))
+          .killed,
+      ).toBe(false);
+      await http()
+        .get('/users')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .expect(200);
+    } finally {
+      await other.onModuleDestroy();
+    }
+  });
+
+  it('resume never releases a tenant kill switch a human set', async () => {
+    await http()
+      .post('/tenants/kill-switch')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ reason: 'incident' })
+      .expect(201);
+    await http()
+      .post(`/platform/v1/tenants/${tenantId}/suspend`)
+      .set('Authorization', `Bearer ${platformToken}`)
+      .expect(200);
+    await http()
       .post(`/platform/v1/tenants/${tenantId}/resume`)
       .set('Authorization', `Bearer ${platformToken}`)
       .expect(200);
-    expect(body(r).status).toBe('ACTIVE');
+    const db = await app.get(TenantDatabaseManager).getClient(tenantId!);
+    const sw = await db.killSwitch.findFirst({
+      where: { scope: 'TENANT', targetId: null },
+    });
+    expect(sw).toMatchObject({ active: true, reason: 'incident' });
     await http()
-      .get('/users')
+      .post('/tenants/kill-switch/deactivate')
       .set('Authorization', `Bearer ${ownerToken}`)
-      .expect(200);
+      .send({})
+      .expect(201);
   });
 
   it('delete marks the tenant DELETED and its users are refused', async () => {

@@ -133,8 +133,9 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       // ponytail: polling bounds the stale window to the TTL; upgrade path is a pub/sub
       // eviction (Redis or Postgres LISTEN/NOTIFY) on every lifecycle change.
       if (Date.now() - cached.validatedAt >= this.revalidateMs) {
+        const readAt = Date.now();
         await this.revalidate(tenantId);
-        cached.validatedAt = Date.now();
+        cached.validatedAt = readAt;
       }
       // Move to the end of the Map to mark it most-recently-used.
       this.cache.delete(tenantId);
@@ -143,6 +144,8 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       return cached.client;
     }
 
+    // The stale window starts when the status is read, not when the client is ready.
+    const readAt = Date.now();
     const tenant = await this.resolveTenant(tenantId);
 
     if (
@@ -162,11 +165,20 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     });
     await client.$connect();
 
+    // A suspend can land while connecting; re-check once before the client is cached or used.
+    const recheckAt = Date.now();
+    try {
+      await this.assertActive(tenantId);
+    } catch (error) {
+      await client.$disconnect();
+      throw error;
+    }
+
     this.evictOverflowIfNeeded();
     this.cache.set(tenantId, {
       client,
       lastUsedAt: Date.now(),
-      validatedAt: Date.now(),
+      validatedAt: Math.max(readAt, recheckAt),
     });
 
     return client;
@@ -376,6 +388,15 @@ export class TenantDatabaseManager implements OnModuleDestroy {
    * the caller gets `TenantNotFoundError`.
    */
   private async revalidate(tenantId: string): Promise<void> {
+    try {
+      await this.assertActive(tenantId);
+    } catch (error) {
+      if (error instanceof TenantNotFoundError) await this.evict(tenantId);
+      throw error;
+    }
+  }
+
+  private async assertActive(tenantId: string): Promise<void> {
     const tenant = await failClosed('control-db', () =>
       this.control.tenant.findUnique({
         where: { id: tenantId },
@@ -389,7 +410,6 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       tenant?.status !== 'ACTIVE' ||
       tenant.databaseBinding?.provisioningStatus !== 'ACTIVE'
     ) {
-      await this.evict(tenantId);
       throw new TenantNotFoundError(tenantId);
     }
   }

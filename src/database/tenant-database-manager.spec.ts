@@ -349,6 +349,37 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     }
   }, 30_000);
 
+  it('8. a suspend that lands while a new client is connecting is caught before the client is cached', async () => {
+    let reads = 0;
+    const racyControl = {
+      tenant: {
+        findUnique: async (
+          args: Parameters<typeof control.tenant.findUnique>[0],
+        ) => {
+          reads++;
+          const real = await control.tenant.findUnique(args);
+          // First read (resolve) sees ACTIVE; the post-connect re-check sees the suspend.
+          return reads === 1 || !real ? real : { ...real, status: 'SUSPENDED' };
+        },
+      },
+    } as unknown as ControlPrismaService;
+    const m = new TenantDatabaseManager(
+      racyControl,
+      fakeConfigService(),
+      new EnvSecretProvider(),
+    );
+    try {
+      await expect(m.getClient(tenantA.id)).rejects.toBeInstanceOf(
+        TenantNotFoundError,
+      );
+      expect((m as unknown as { cache: Map<string, unknown> }).cache.size).toBe(
+        0,
+      );
+    } finally {
+      await m.onModuleDestroy();
+    }
+  }, 30_000);
+
   it('5. re-provisioning an existing slug fails with a clear conflict error, not a duplicate database', async () => {
     const before = await control.$queryRaw<{ count: bigint }[]>`
       SELECT count(*)::bigint AS count FROM pg_database WHERE datname = ${tenantA.databaseBinding!.databaseName}
