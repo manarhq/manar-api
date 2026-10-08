@@ -17,7 +17,7 @@ export interface FinalizeApprovalDecisionInput {
 }
 
 export interface FinalizeApprovalDecisionResult {
-  status: 'APPROVED' | 'DENIED';
+  status: 'APPROVED' | 'DENIED' | 'EXPIRED';
   /** Present only when `status` is `APPROVED`. */
   grantId?: string;
 }
