@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -83,6 +84,8 @@ export function isPendingApproval(
  */
 @Injectable()
 export class ToolInvocationService {
+  private readonly logger = new Logger(ToolInvocationService.name);
+
   constructor(
     private readonly authorizationService: AuthorizationService,
     private readonly credentialBroker: CredentialBrokerService,
@@ -398,17 +401,30 @@ export class ToolInvocationService {
       },
     );
 
-    await this.temporalClient.workflow.start(ApprovalWorkflow, {
-      workflowId: temporalWorkflowId,
-      taskQueue: this.temporalClient.taskQueue,
-      args: [
-        {
-          tenantId: agent.tenant.id,
-          approvalRequestId: approvalRequest.id,
-          expiresAtEpochMs: expiresAt.getTime(),
-        },
-      ],
-    });
+    try {
+      await this.temporalClient.workflow.start(ApprovalWorkflow, {
+        workflowId: temporalWorkflowId,
+        taskQueue: this.temporalClient.taskQueue,
+        args: [
+          {
+            tenantId: agent.tenant.id,
+            approvalRequestId: approvalRequest.id,
+            expiresAtEpochMs: expiresAt.getTime(),
+          },
+        ],
+      });
+    } catch (error) {
+      // ADR-0007: a request with no workflow can never be decided. Expire it
+      // so a repeated call opens a fresh one instead of waiting out the TTL.
+      await this.approvalRequestService
+        .expireIfPending(tenantClient, approvalRequest.id)
+        .catch((expireError: unknown) =>
+          this.logger.warn(
+            `ApprovalRequest "${approvalRequest.id}" has no workflow and could not be expired: ${String(expireError)}`,
+          ),
+        );
+      throw error;
+    }
 
     await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
       eventType: AUDIT_EVENT_TYPES.APPROVAL_REQUESTED,

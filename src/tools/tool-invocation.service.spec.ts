@@ -389,6 +389,21 @@ describe('ToolInvocationService: the MCP door completes an approved action (ADR-
     expect(createApproval).toHaveBeenCalledOnce();
   });
 
+  it('the approval workflow fails to start: the new request is expired so a repeated call is not stuck on it', async () => {
+    const { service, expireIfPending } = setup({
+      ...NEEDS_APPROVAL,
+      workflowStartFails: true,
+    });
+
+    await expect(service.invoke(AGENT, INPUT, 'MCP')).rejects.toThrow(
+      'temporal unavailable',
+    );
+    expect(expireIfPending).toHaveBeenCalledWith(
+      expect.anything(),
+      'approval-1',
+    );
+  });
+
   it('an approval-store failure during the pending lookup fails closed (503)', async () => {
     const { service, createApproval } = setup({
       ...NEEDS_APPROVAL,
