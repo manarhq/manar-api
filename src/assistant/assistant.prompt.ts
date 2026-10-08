@@ -49,10 +49,12 @@ export function systemPrompt(input: {
   ].join('\n');
 }
 
-/** Removes reasoning blocks and dashes the model added despite rule 6. */
+/** Removes reasoning blocks, markdown and dashes the model added despite rules 5 and 6. The console renders plain text. */
 export function cleanAnswer(text: string): string {
   return text
     .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/\*\*|__|`/g, '')
+    .replace(/^\s{0,3}(#{1,6}|>)\s?/gm, '')
     .replace(/(\d)\s*[\u2013\u2014]\s*(\d)/g, '$1-$2')
     .replace(/\s*[\u2013\u2014]\s*/g, ', ')
     .trim()

@@ -246,7 +246,7 @@ describe('AssistantService', () => {
         { tool_calls: [call('list_pending_approvals', {})] },
         {
           content:
-            'The riskiest is the second one [1] [7]. Use a period \u2014 not a dash.',
+            '### The **riskiest** is the second one [1] [7]. Use a period \u2014 not a dash.',
         },
       ],
     });
@@ -260,6 +260,7 @@ describe('AssistantService', () => {
       }),
     ]);
     expect(res.answer).not.toMatch(/[\u2013\u2014]/);
+    expect(res.answer).not.toMatch(/\*\*|###/);
     // [7] points at nothing that was read, so it is dropped.
     expect(res.answer).not.toContain('[7]');
   });

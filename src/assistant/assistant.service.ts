@@ -296,7 +296,7 @@ export class AssistantService {
       messages,
       ...(tools ? { tools, tool_choice: 'auto' } : {}),
       // Small local models answer faster and stay on task without a thinking pass.
-      ...(ollama ? { reasoning_effort: 'none' } : {}),
+      ...(ollama ? { reasoning_effort: 'none', temperature: 0.2 } : {}),
     });
     const choices = response.body.choices as
       { message?: ModelMessage }[] | undefined;

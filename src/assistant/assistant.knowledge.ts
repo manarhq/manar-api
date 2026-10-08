@@ -101,6 +101,10 @@ export const REASON_CODES: Readonly<Record<string, Bilingual>> = {
     en: 'The AI system this agent belongs to is retired, so its agents are blocked.',
     ar: 'نظام الذكاء الاصطناعي الذي ينتمي إليه الوكيل متقاعد، فوكلاؤه محظورون.',
   },
+  agent_quarantined: {
+    en: 'The agent is quarantined, so its actions are refused until a person releases it.',
+    ar: 'الوكيل في الحجر، لذلك تُرفض إجراءاته حتى يفرج عنه شخص.',
+  },
   agent_not_active: {
     en: 'The agent is not active (for example still pending enrollment).',
     ar: 'الوكيل غير فعال (مثلا ما زال بانتظار التسجيل).',
