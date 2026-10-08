@@ -208,23 +208,12 @@ export class ToolInvocationService {
       });
     }
     if (decision.decision === 'APPROVAL_REQUIRED') {
-      // ADR-0007: an MCP client repeats the call while it waits; answer with
-      // the request a person is already looking at rather than a second one.
-      const open =
+      const reused =
         channel === 'MCP'
-          ? await failClosed('tenant-db', () =>
-              this.approvalRequestService.findPendingMatch(tenantClient, {
-                taskId: input.taskId,
-                agentId: agent.agent.id,
-                toolId: input.toolId,
-                actionId: input.actionId,
-                resource: input.resource,
-                params: input.params,
-              }),
-            )
+          ? await this.reuseOpenApproval(tenantClient, agent, input, decision)
           : null;
       const approvalId =
-        open?.id ??
+        reused ??
         (await this.startApproval(tenantClient, agent, input, {
           riskScore: decision.riskScore,
           policyVersionId: decision.policyVersionId,
@@ -254,6 +243,70 @@ export class ToolInvocationService {
       input,
       decision.decisionId,
     );
+  }
+
+  /**
+   * ADR-0007: an MCP client repeats the call while it waits. Answer with the
+   * request a person is already looking at, but only if it shows at least the
+   * risk this fresh decision computed, under the same policy version and
+   * reason: redemption does not re-check the risk ceiling (ADR-0006), so the
+   * approver must have seen it. Otherwise the open request is expired
+   * (superseded) and the caller opens a new one. Returns the reused id or null.
+   */
+  private async reuseOpenApproval(
+    tenantClient: TenantClient,
+    agent: AgentContext,
+    input: ToolInvokeRequest,
+    decision: {
+      decisionId: string;
+      riskScore: number;
+      policyVersionId: string | null;
+      reason: string;
+    },
+  ): Promise<string | null> {
+    const open = await failClosed('tenant-db', () =>
+      this.approvalRequestService.findPendingMatch(tenantClient, {
+        taskId: input.taskId,
+        agentId: agent.agent.id,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        params: input.params,
+      }),
+    );
+    if (!open) return null;
+
+    const stillAccurate =
+      open.riskScore >= decision.riskScore &&
+      open.policyVersionId === decision.policyVersionId &&
+      open.requiredReason === decision.reason;
+    if (stillAccurate) {
+      await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_REUSED,
+        actor: { type: 'agent', id: agent.agent.id },
+        data: { decisionId: decision.decisionId, approvalRequestId: open.id },
+      });
+      return open.id;
+    }
+
+    await failClosed('tenant-db', () =>
+      this.approvalRequestService.expireIfPending(tenantClient, open.id),
+    );
+    await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
+      eventType: AUDIT_EVENT_TYPES.APPROVAL_SUPERSEDED,
+      actor: { type: 'agent', id: agent.agent.id },
+      data: {
+        approvalRequestId: open.id,
+        decisionId: decision.decisionId,
+        previousRiskScore: open.riskScore,
+        riskScore: decision.riskScore,
+        previousPolicyVersionId: open.policyVersionId,
+        policyVersionId: decision.policyVersionId,
+        previousRequiredReason: open.requiredReason,
+        requiredReason: decision.reason,
+      },
+    });
+    return null;
   }
 
   private async invokeViaBroker(

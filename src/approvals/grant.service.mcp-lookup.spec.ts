@@ -107,7 +107,7 @@ describe('GrantService.findRedeemableGrantToken (ADR-0007)', () => {
 });
 
 describe('ApprovalRequestService.findPendingMatch (ADR-0007)', () => {
-  function over(rows: { id: string; params: unknown }[]) {
+  function over(rows: Record<string, unknown>[]) {
     const findMany = vi.fn().mockResolvedValue(rows);
     const tenantClient = {
       approvalRequest: { findMany },
@@ -118,12 +118,24 @@ describe('ApprovalRequestService.findPendingMatch (ADR-0007)', () => {
   it('matches the open request with the same parameters, whatever their key order', async () => {
     const { findMany, tenantClient } = over([
       { id: 'other-params', params: { reason: 'compromised', ticket: 8 } },
-      { id: 'same', params: { ticket: 7, reason: 'compromised' } },
+      {
+        id: 'same',
+        params: { ticket: 7, reason: 'compromised' },
+        riskScore: 40,
+        policyVersionId: 'pv-1',
+        requiredReason: 'policy_requires_approval',
+      },
     ]);
 
+    // The caller needs what the approver saw, to decide reuse vs supersede.
     await expect(
       new ApprovalRequestService().findPendingMatch(tenantClient, CALL),
-    ).resolves.toEqual({ id: 'same' });
+    ).resolves.toStrictEqual({
+      id: 'same',
+      riskScore: 40,
+      policyVersionId: 'pv-1',
+      requiredReason: 'policy_requires_approval',
+    });
     expect(
       (findMany.mock.calls[0]![0] as { where: Record<string, unknown> }).where,
     ).toMatchObject({
@@ -145,5 +157,22 @@ describe('ApprovalRequestService.findPendingMatch (ADR-0007)', () => {
     await expect(
       new ApprovalRequestService().findPendingMatch(tenantClient, CALL),
     ).resolves.toBeNull();
+  });
+});
+
+describe('ApprovalRequestService.expireIfPending (ADR-0007)', () => {
+  it('expires only a request that is still PENDING, so a decision that landed first wins', async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const tenantClient = {
+      approvalRequest: { updateMany },
+    } as unknown as TenantPrismaClient;
+
+    await expect(
+      new ApprovalRequestService().expireIfPending(tenantClient, 'a-1'),
+    ).resolves.toBe(false);
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: 'a-1', status: 'PENDING' },
+      data: { status: 'EXPIRED' },
+    });
   });
 });

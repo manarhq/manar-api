@@ -95,7 +95,9 @@ export class ApprovalRequestService {
    * The newest unexpired PENDING request for exactly this agent, task, tool,
    * action, resource and parameters (by `computeParameterHash`), or null.
    * The MCP door (ADR-0007) answers a repeated call while a person has not
-   * decided yet with this request instead of opening a second one.
+   * decided yet with this request instead of opening a second one, if what
+   * the approver sees is still accurate (the caller compares risk, policy
+   * version and reason).
    */
   async findPendingMatch(
     tenantClient: TenantPrismaClient,
@@ -103,7 +105,12 @@ export class ApprovalRequestService {
       CreateApprovalRequestInput,
       'taskId' | 'agentId' | 'toolId' | 'actionId' | 'resource' | 'params'
     >,
-  ): Promise<{ id: string } | null> {
+  ): Promise<{
+    id: string;
+    riskScore: number;
+    policyVersionId: string | null;
+    requiredReason: string | null;
+  } | null> {
     const parameterHash = computeParameterHash(input);
     // ponytail: no index on approval_requests(taskId, agentId); a task holds a
     // handful of approvals. Add one if a task ever carries thousands.
@@ -118,14 +125,42 @@ export class ApprovalRequestService {
         expiresAt: { gt: new Date() },
       },
       orderBy: { requestedAt: 'desc' },
-      select: { id: true, params: true },
+      select: {
+        id: true,
+        params: true,
+        riskScore: true,
+        policyVersionId: true,
+        requiredReason: true,
+      },
     });
     const match = rows.find(
       (row) =>
         computeParameterHash({ ...input, params: row.params }) ===
         parameterHash,
     );
-    return match ? { id: match.id } : null;
+    if (!match) return null;
+    return {
+      id: match.id,
+      riskScore: match.riskScore,
+      policyVersionId: match.policyVersionId,
+      requiredReason: match.requiredReason,
+    };
+  }
+
+  /**
+   * PENDING -> EXPIRED, only if still PENDING (a decision that landed first
+   * wins). ADR-0007: a superseded request, or one whose workflow never
+   * started. The workflow's own timeout `expire` is a no-op afterwards.
+   */
+  async expireIfPending(
+    tenantClient: TenantPrismaClient,
+    id: string,
+  ): Promise<boolean> {
+    const { count } = await tenantClient.approvalRequest.updateMany({
+      where: { id, status: 'PENDING' },
+      data: { status: 'EXPIRED' },
+    });
+    return count === 1;
   }
 
   /** Includes the issued `AuthorizationGrant`, if any (`GET /agent/v1/approvals/:id`'s own use case — no grant exists until `status` is `APPROVED`). */

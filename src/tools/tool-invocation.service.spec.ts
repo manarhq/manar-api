@@ -43,7 +43,16 @@ function setup(
     /** What `GrantService.findRedeemableGrantToken` answers (MCP door). */
     storedGrantToken?: string | null | Error;
     /** What `ApprovalRequestService.findPendingMatch` answers (MCP door). */
-    pendingMatch?: { id: string } | null | Error;
+    pendingMatch?:
+      | {
+          id: string;
+          riskScore: number;
+          policyVersionId: string | null;
+          requiredReason: string;
+        }
+      | null
+      | Error;
+    workflowStartFails?: boolean;
   } = {},
 ) {
   const h = makeDecisionHarness(options);
@@ -65,7 +74,12 @@ function setup(
   );
   const findPendingMatch = vi.fn(() => answer(options.pendingMatch ?? null));
   const createApproval = vi.fn().mockResolvedValue({ id: 'approval-1' });
-  const workflowStart = vi.fn().mockResolvedValue(undefined);
+  const workflowStart = vi.fn(() =>
+    options.workflowStartFails
+      ? Promise.reject(new Error('temporal unavailable'))
+      : Promise.resolve(undefined),
+  );
+  const expireIfPending = vi.fn().mockResolvedValue(true);
   const auditRecordSafely = vi.fn().mockResolvedValue(undefined);
   const service = new ToolInvocationService(
     h.service,
@@ -76,6 +90,7 @@ function setup(
     {
       create: createApproval,
       findPendingMatch,
+      expireIfPending,
     } as unknown as ApprovalRequestService,
     { verifyGrant, findRedeemableGrantToken } as unknown as GrantService,
     {
@@ -95,6 +110,7 @@ function setup(
     findPendingMatch,
     createApproval,
     workflowStart,
+    expireIfPending,
   };
 }
 
@@ -277,10 +293,25 @@ describe('ToolInvocationService: the MCP door completes an approved action (ADR-
     expect(brokerInvoke).not.toHaveBeenCalled();
   });
 
-  it('still waiting: a repeated call returns the open approval instead of opening a second one', async () => {
-    const { h, service, createApproval, workflowStart, brokerInvoke } = setup({
+  const OPEN = {
+    id: 'approval-open',
+    riskScore: 10,
+    policyVersionId: 'pv-1',
+    requiredReason: 'policy_requires_approval',
+  };
+
+  it('still waiting: a repeated call returns the open approval instead of opening a second one, and audits the reuse', async () => {
+    const {
+      h,
+      service,
+      createApproval,
+      workflowStart,
+      brokerInvoke,
+      expireIfPending,
+      auditRecordSafely,
+    } = setup({
       ...NEEDS_APPROVAL,
-      pendingMatch: { id: 'approval-open' },
+      pendingMatch: OPEN,
     });
 
     const outcome = await service.invoke(AGENT, INPUT, 'MCP');
@@ -295,7 +326,67 @@ describe('ToolInvocationService: the MCP door completes an approved action (ADR-
     });
     expect(createApproval).not.toHaveBeenCalled();
     expect(workflowStart).not.toHaveBeenCalled();
+    expect(expireIfPending).not.toHaveBeenCalled();
     expect(brokerInvoke).not.toHaveBeenCalled();
+    expect(auditRecordSafely).toHaveBeenCalledWith(
+      h.tenantClient,
+      'tenant-1',
+      expect.objectContaining({
+        eventType: 'approval.reused',
+        data: { decisionId: 'decision-1', approvalRequestId: 'approval-open' },
+      }),
+    );
+  });
+
+  it('the fresh decision scores higher than the open approval: the open one is superseded and a new approval shows the new risk', async () => {
+    const { service, createApproval, expireIfPending, auditRecordSafely } =
+      setup({
+        ...NEEDS_APPROVAL,
+        riskScore: 90,
+        pendingMatch: { ...OPEN, riskScore: 40 },
+      });
+
+    const outcome = await service.invoke(AGENT, INPUT, 'MCP');
+
+    expect(expireIfPending).toHaveBeenCalledWith(
+      expect.anything(),
+      'approval-open',
+    );
+    expect(createApproval).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ riskScore: 90 }),
+    );
+    expect(outcome).toMatchObject({
+      status: 'PENDING',
+      approvalId: 'approval-1',
+      riskScore: 90,
+    });
+    expect(auditRecordSafely).toHaveBeenCalledWith(
+      expect.anything(),
+      'tenant-1',
+      expect.objectContaining({
+        eventType: 'approval.superseded',
+        data: expect.objectContaining({
+          approvalRequestId: 'approval-open',
+          decisionId: 'decision-1',
+        }) as unknown,
+      }),
+    );
+  });
+
+  it('same risk under another policy version: superseded, not reused', async () => {
+    const { service, createApproval, expireIfPending } = setup({
+      ...NEEDS_APPROVAL,
+      pendingMatch: { ...OPEN, policyVersionId: 'pv-0' },
+    });
+
+    await service.invoke(AGENT, INPUT, 'MCP');
+
+    expect(expireIfPending).toHaveBeenCalledWith(
+      expect.anything(),
+      'approval-open',
+    );
+    expect(createApproval).toHaveBeenCalledOnce();
   });
 
   it('an approval-store failure during the pending lookup fails closed (503)', async () => {
