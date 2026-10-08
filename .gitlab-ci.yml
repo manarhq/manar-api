@@ -14,7 +14,8 @@ include:
   rules:
     - if: $FLEET_MODE
       when: never
-    - when: on_success
+    # Same as before rules existed: branch pipelines only, no duplicate merge request pipelines.
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
 
 variables:
   PNPM_HOME: '$CI_PROJECT_DIR/.pnpm'
