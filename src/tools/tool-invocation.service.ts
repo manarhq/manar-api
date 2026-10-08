@@ -66,7 +66,8 @@ export function isPendingApproval(
  *         riskScore, approvalId }` — no tool call is ever attempted.
  *       - `ALLOW` -> `CredentialBrokerService.invoke(...)`.
  *   - **`grantToken` present** (the retry after `GET /agent/v1/approvals/:id`
- *     reported `APPROVED`): `GrantService.verifyGrant` checks the grant is
+ *     reported `APPROVED`; on the MCP door, the token of a matching approved
+ *     grant the server found itself, ADR-0007): `GrantService.verifyGrant` checks the grant is
  *     for *this exact request* (signature, expiry, revocation, single use,
  *     parameter hash), then `AuthorizationService.authorizeRedemption`
  *     re-runs the full decision against current state (S6/F7) and consumes
@@ -102,8 +103,27 @@ export class ToolInvocationService {
       this.tenantDatabaseManager.getClient(agent.tenant.id),
     );
 
-    if (input.grantToken) {
-      const grantToken = input.grantToken;
+    // ADR-0007: an MCP `tools/call` cannot carry a grant token, so on the MCP
+    // door the server looks for the grant a person approved for exactly this
+    // agent, task, tool, action, resource and parameter hash, and redeems it
+    // through the same path as a token sent over REST.
+    const grantToken =
+      input.grantToken ??
+      (channel === 'MCP'
+        ? await failClosed('grant-store', () =>
+            this.grantService.findRedeemableGrantToken(tenantClient, {
+              tenantId: agent.tenant.id,
+              agentId: agent.agent.id,
+              taskId: input.taskId,
+              toolId: input.toolId,
+              actionId: input.actionId,
+              resource: input.resource,
+              params: input.params,
+            }),
+          )
+        : null);
+
+    if (grantToken) {
       // S6/F7: verify the grant is for this exact request (signature,
       // expiry, revocation, single use, parameter binding), then re-run the
       // full decision against current state. Only a still-allowed decision
@@ -188,21 +208,38 @@ export class ToolInvocationService {
       });
     }
     if (decision.decision === 'APPROVAL_REQUIRED') {
-      const approvalId = await this.startApproval(tenantClient, agent, input, {
-        riskScore: decision.riskScore,
-        policyVersionId: decision.policyVersionId,
-        deterministicRiskScore: decision.deterministicRiskScore,
-        // ADR-004: the advisory is not a decision input, so nothing is known
-        // about it here. `ApprovalWorkflow` fetches it off the decision path
-        // for the human approver; until then the approval records that no
-        // advisory is attached rather than implying a low one.
-        aiAdvisoryScore: null,
-        advisoryUnavailable: true,
-        riskReasonCodes: decision.riskReasonCodes,
-        riskCeiling: decision.riskCeiling,
-        requiredReason: decision.reason,
-        decisionId: decision.decisionId,
-      });
+      // ADR-0007: an MCP client repeats the call while it waits; answer with
+      // the request a person is already looking at rather than a second one.
+      const open =
+        channel === 'MCP'
+          ? await failClosed('tenant-db', () =>
+              this.approvalRequestService.findPendingMatch(tenantClient, {
+                taskId: input.taskId,
+                agentId: agent.agent.id,
+                toolId: input.toolId,
+                actionId: input.actionId,
+                resource: input.resource,
+                params: input.params,
+              }),
+            )
+          : null;
+      const approvalId =
+        open?.id ??
+        (await this.startApproval(tenantClient, agent, input, {
+          riskScore: decision.riskScore,
+          policyVersionId: decision.policyVersionId,
+          deterministicRiskScore: decision.deterministicRiskScore,
+          // ADR-004: the advisory is not a decision input, so nothing is known
+          // about it here. `ApprovalWorkflow` fetches it off the decision path
+          // for the human approver; until then the approval records that no
+          // advisory is attached rather than implying a low one.
+          aiAdvisoryScore: null,
+          advisoryUnavailable: true,
+          riskReasonCodes: decision.riskReasonCodes,
+          riskCeiling: decision.riskCeiling,
+          requiredReason: decision.reason,
+          decisionId: decision.decisionId,
+        }));
       return {
         status: 'PENDING',
         reason: decision.reason,
