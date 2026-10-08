@@ -1462,4 +1462,111 @@ describe('Kill Switches (e2e)', () => {
       await releaseQuarantine(agent.agentId);
     }
   }, 30_000);
+
+  it('13. children stop when their parent agent is stopped any other way: AI system suspended, agent revoked', async () => {
+    const http = () => request(humanApp.getHttpServer());
+    const parentWithChild = async (label: string) => {
+      const parent = await createEnrolledAgent(label);
+      const parentTask = await createTask({
+        assignedAgentId: parent.agentId,
+        allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+        allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+      });
+      const delegation = await parent.manar.delegateTask(parentTask.id, {
+        childAgentSlug: shortSlug(`${label}-c`),
+        name: 'child',
+        allowedToolActions: [{ toolId: 'fs', actionId: 'read' }],
+        allowedResourceSelectors: [{ toolId: 'fs', pattern: '*' }],
+      });
+      const child = new ManarAgent({
+        endpoint: humanEndpoint,
+        mtlsEndpoint: agentMtlsEndpoint,
+        identityStore: new FileIdentityStore(
+          `/tmp/manar-sdk-test-${randomUUID()}.identity`,
+          'test-passphrase-not-for-production',
+        ),
+      });
+      await child.enroll(delegation.enrollmentToken.token);
+      const req = {
+        taskId: delegation.childTask.id,
+        toolId: 'fs',
+        actionId: 'read',
+        resource: 'anything',
+      };
+      expect((await child.authorize(req)).decision).toBe('ALLOW');
+      return { parent, child, req };
+    };
+
+    // (a) The parent's AI system is suspended.
+    const a = await parentWithChild('ais-parent');
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    const owner = await tenantClient.userProfile.findFirstOrThrow();
+    const system = (
+      await http()
+        .post('/ai-systems')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          slug: shortSlug('ais'),
+          name: 'Parent system',
+          businessPurpose: 'e2e',
+          ownerId: owner.id,
+          businessUnit: 'e2e',
+          environment: 'DEVELOPMENT',
+          riskRationale: 'e2e',
+        })
+        .expect(201)
+    ).body as { id: string };
+    await http()
+      .post(`/ai-systems/${system.id}/agents`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ agentId: a.parent.agentId })
+      .expect(201);
+    // REVIEW -> ACTIVE needs a second person.
+    const reviewerName = shortSlug('reviewer');
+    const reviewerId = await createRealmUser(tenant.keycloakRealm!, {
+      username: reviewerName,
+      email: `${reviewerName}@example.test`,
+      password: USER_PASSWORD,
+    });
+    await assignRealmRole(tenant.keycloakRealm!, reviewerId, 'SECURITY_ADMIN');
+    const reviewerToken = await getUserToken({
+      realm: tenant.keycloakRealm!,
+      clientId: tenant.keycloakClientId!,
+      clientSecret: (
+        await control.secretReference.findFirstOrThrow({
+          where: { tenantId: tenant.id, kind: 'KEYCLOAK_CLIENT_SECRET' },
+        })
+      ).reference,
+      username: reviewerName,
+      password: USER_PASSWORD,
+    });
+    for (const [toState, token] of [
+      ['REVIEW', adminToken],
+      ['ACTIVE', reviewerToken],
+      ['SUSPENDED', adminToken],
+    ] as const) {
+      await http()
+        .post(`/ai-systems/${system.id}/transitions`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ toState, reason: 'e2e' })
+        .expect(201);
+    }
+    expect(await a.child.authorize(a.req)).toMatchObject({
+      decision: 'DENY',
+      reason: 'ancestor_ai_system_suspended',
+    });
+
+    // (b) The parent agent is revoked.
+    const b = await parentWithChild('rev-parent');
+    await http()
+      .post(`/agents/${b.parent.agentId}/revoke`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ reason: 'e2e cascade' })
+      .expect(201);
+    const denied = await b.child.authorize(b.req);
+    expect(denied.decision).toBe('DENY');
+    expect(denied).toMatchObject({
+      reason: expect.stringMatching(/^ancestor_/) as string,
+    });
+  }, 60_000);
 });
