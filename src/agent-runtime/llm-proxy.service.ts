@@ -32,6 +32,10 @@ export const ChatCompletionRequestSchema = z.object({
   tool_choice: z.unknown().optional(),
   temperature: z.number().min(0).max(2).optional(),
   max_tokens: z.number().int().positive().optional(),
+  /** How hard a reasoning model thinks. `none` turns thinking off where the provider can. */
+  reasoning_effort: z
+    .enum(['none', 'minimal', 'low', 'medium', 'high'])
+    .optional(),
   stream: z.literal(false).optional(),
 });
 export type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;
@@ -150,6 +154,9 @@ export class LlmProxyService {
             : {}),
           ...(request.max_tokens !== undefined
             ? { max_tokens: request.max_tokens }
+            : {}),
+          ...(request.reasoning_effort !== undefined
+            ? { reasoning_effort: request.reasoning_effort }
             : {}),
         });
       } catch (error) {

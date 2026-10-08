@@ -8,6 +8,7 @@ export interface UpstreamChatRequest {
   tool_choice?: unknown;
   temperature?: number;
   max_tokens?: number;
+  reasoning_effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
 }
 
 export interface UpstreamChatResponse {
@@ -69,6 +70,10 @@ export class LlmUpstreamClient {
       url = `${endpoint.replace(/\/+$/, '')}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
       model = deployment;
       headers['api-key'] = key;
+      // gpt-5-mini's lowest setting is `minimal`; it rejects `none`.
+      if (request.reasoning_effort === 'none') {
+        request = { ...request, reasoning_effort: 'minimal' };
+      }
     } else {
       url = `${this.config.get('LLM_OLLAMA_BASE_URL', { infer: true }).replace(/\/+$/, '')}/chat/completions`;
       model = this.config.get('LLM_MODEL', { infer: true });
