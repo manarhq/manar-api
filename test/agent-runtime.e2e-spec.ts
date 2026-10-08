@@ -414,11 +414,20 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
       MCP_HEADERS,
     );
   }
-  async function callTool(name: string, args: Record<string, unknown>) {
-    const res = await mcp(agentA, task.id, 'tools/call', {
-      name,
-      arguments: args,
-    });
+  async function callTool(
+    name: string,
+    args: Record<string, unknown>,
+    on: { identity?: Identity; taskId?: string } = {},
+  ) {
+    const res = await mcp(
+      on.identity ?? agentA,
+      on.taskId ?? task.id,
+      'tools/call',
+      {
+        name,
+        arguments: args,
+      },
+    );
     expect(res.status).toBe(200);
     return (
       res.body as {
@@ -646,6 +655,7 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
         'microsoft-graph__entra.user.disable',
         'microsoft-graph__entra.user.get',
         'microsoft-graph__security.incident.get',
+        'manar_approval_status',
       ]);
       expect(tools[0]?.inputSchema).toMatchObject({
         type: 'object',
@@ -818,6 +828,303 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
         reasonCodes: ['grant_already_consumed'],
       });
     });
+  });
+
+  /**
+   * ADR-0007: an MCP client finishes an approved action with MCP only. Call,
+   * wait with `manar_approval_status`, call the same tool again; the server
+   * redeems the single-use grant itself and re-runs the whole decision.
+   */
+  describe('approved actions over MCP only (ADR-0007)', () => {
+    const DISABLE = 'microsoft-graph__entra.user.disable';
+    const ISOLATE = 'microsoft-defender__defender.machine.isolate';
+    const disableArgs = { resource: userId, params: {} };
+
+    const approve = (approvalId: string) =>
+      http()
+        .post(`/approvals/${approvalId}/decide`)
+        .set('Authorization', `Bearer ${approverToken}`)
+        .send({ decision: 'APPROVE', reason: 'MCP e2e (fixture)' })
+        .expect(201);
+
+    const status = (
+      approvalId: string,
+      waitSeconds: number,
+      on: { identity?: Identity; taskId?: string } = {},
+    ) => callTool('manar_approval_status', { approvalId, waitSeconds }, on);
+
+    async function approvedVia(name: string, args: Record<string, unknown>) {
+      const pending = await callTool(name, args);
+      expect(pending.structuredContent).toMatchObject({ status: 'PENDING' });
+      const approvalId = pending.structuredContent.approvalId as string;
+      await approve(approvalId);
+      const decided = await status(approvalId, 30);
+      expect(decided.structuredContent).toMatchObject({
+        approvalId,
+        status: 'APPROVED',
+      });
+      return approvalId;
+    }
+
+    it('request -> PENDING -> approve -> same MCP call executes once, recorded as a redemption decision', async () => {
+      const pending = await callTool(DISABLE, disableArgs);
+      expect(pending.isError).toBe(false);
+      expect(pending.structuredContent).toMatchObject({
+        status: 'PENDING',
+        reason: 'policy_requires_approval',
+        nextStep: expect.stringContaining('manar_approval_status') as unknown,
+      });
+      const approvalId = pending.structuredContent.approvalId as string;
+
+      // Calling again while a person has not decided: same approval, not a second one.
+      const again = await callTool(DISABLE, disableArgs);
+      expect(again.structuredContent).toMatchObject({
+        status: 'PENDING',
+        approvalId,
+      });
+      expect(
+        await tenantClientRef.approvalRequest.count({
+          where: { taskId: task.id, actionId: 'entra.user.disable' },
+        }),
+      ).toBe(1);
+      const waiting = await status(approvalId, 0);
+      expect(waiting.structuredContent).toMatchObject({
+        status: 'PENDING',
+        tool: DISABLE,
+        resource: userId,
+      });
+      expect(waiting.structuredContent).not.toHaveProperty('grantToken');
+      expect(
+        (await fixtureState()).users.find((u) => u.id === userId)
+          ?.accountEnabled,
+      ).toBe(true);
+
+      await approve(approvalId);
+      const approved = await status(approvalId, 30);
+      expect(approved.structuredContent).toMatchObject({
+        status: 'APPROVED',
+        nextStep: expect.stringContaining(DISABLE) as unknown,
+      });
+      expect(approved.structuredContent).not.toHaveProperty('grantToken');
+
+      const done = await callTool(DISABLE, disableArgs);
+      expect(done).toMatchObject({
+        isError: false,
+        structuredContent: { status: 'EXECUTED', outcome: 'SUCCESS' },
+      });
+      expect(
+        (await fixtureState()).users.find((u) => u.id === userId)
+          ?.accountEnabled,
+      ).toBe(false);
+
+      const grant = await tenantClientRef.authorizationGrant.findUniqueOrThrow({
+        where: { approvalRequestId: approvalId },
+      });
+      expect(grant.consumedAt).not.toBeNull();
+      const redemption = await tenantClientRef.decision.findFirstOrThrow({
+        where: { grantId: grant.id },
+        include: { toolInvocations: true },
+      });
+      expect(redemption).toMatchObject({
+        outcome: 'ALLOW',
+        stage: 'GRANT_REDEMPTION',
+        channel: 'MCP',
+        actionId: 'entra.user.disable',
+        resource: userId,
+      });
+      expect(redemption.toolInvocations[0]?.status).toBe('SUCCESS');
+
+      // Second use: the grant is spent, so the same call asks a person again
+      // and nothing runs.
+      const before = (await fixtureRequests()).length;
+      const second = await callTool(DISABLE, disableArgs);
+      expect(second.structuredContent).toMatchObject({ status: 'PENDING' });
+      expect(second.structuredContent.approvalId).not.toBe(approvalId);
+      expect((await fixtureRequests()).length).toBe(before);
+      const used = await status(approvalId, 0);
+      expect(used.structuredContent).toMatchObject({
+        status: 'APPROVED',
+        nextStep: expect.stringContaining('already used') as unknown,
+      });
+    }, 90_000);
+
+    it('changed parameters after approval: not redeemed, a new approval is asked for, nothing runs', async () => {
+      const approvalId = await approvedVia(ISOLATE, {
+        resource: machineId,
+        params: { comment: 'approved wording' },
+      });
+      const before = (await fixtureRequests()).length;
+
+      const changed = await callTool(ISOLATE, {
+        resource: machineId,
+        params: { comment: 'different wording' },
+      });
+
+      expect(changed.structuredContent).toMatchObject({ status: 'PENDING' });
+      expect(changed.structuredContent.approvalId).not.toBe(approvalId);
+      expect((await fixtureRequests()).length).toBe(before);
+      const grant = await tenantClientRef.authorizationGrant.findUniqueOrThrow({
+        where: { approvalRequestId: approvalId },
+      });
+      expect(grant.consumedAt).toBeNull();
+    }, 90_000);
+
+    it("kill switch after approval refuses the redemption; another task's session cannot use the grant; the grant survives for its own task", async () => {
+      const approvalId = await approvedVia(DISABLE, disableArgs);
+      const grant = await tenantClientRef.authorizationGrant.findUniqueOrThrow({
+        where: { approvalRequestId: approvalId },
+      });
+      const before = (await fixtureRequests()).length;
+
+      await http()
+        .post(`/agents/${agentAId}/kill-switch`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ reason: 'MCP e2e: kill after approval' })
+        .expect(201);
+      try {
+        const killed = await callTool(DISABLE, disableArgs);
+        expect(killed).toMatchObject({
+          isError: true,
+          structuredContent: {
+            status: 'DENIED',
+            reason: 'agent_kill_switch_active',
+          },
+        });
+        const refusal = await tenantClientRef.decision.findFirstOrThrow({
+          where: { grantId: grant.id, outcome: 'DENY' },
+        });
+        expect(refusal).toMatchObject({
+          stage: 'GRANT_REDEMPTION',
+          channel: 'MCP',
+          reasonCodes: ['agent_kill_switch_active'],
+        });
+      } finally {
+        await http()
+          .post(`/agents/${agentAId}/kill-switch/deactivate`)
+          .set('Authorization', `Bearer ${ownerToken}`)
+          .expect(201);
+      }
+      expect((await fixtureRequests()).length).toBe(before);
+
+      // G15: a session is bound to its task. Same agent, same tool, same
+      // arguments on another task: the first task's grant is not used and its
+      // approval is invisible.
+      const otherTask = await createTask({
+        allowedToolActions: [
+          { toolId: MICROSOFT_GRAPH_TOOL, actionId: 'entra.user.disable' },
+        ],
+        allowedResourceSelectors: [
+          { toolId: MICROSOFT_GRAPH_TOOL, pattern: userId },
+        ],
+      });
+      const elsewhere = await callTool(DISABLE, disableArgs, {
+        taskId: otherTask.id,
+      });
+      expect(elsewhere.structuredContent).toMatchObject({ status: 'PENDING' });
+      expect(elsewhere.structuredContent.approvalId).not.toBe(approvalId);
+      expect(
+        await status(approvalId, 0, { taskId: otherTask.id }),
+      ).toMatchObject({
+        isError: true,
+        structuredContent: { status: 'DENIED', reason: 'approval_not_found' },
+      });
+      // A tool of the first task that the other task was never given.
+      expect(
+        await callTool(
+          ISOLATE,
+          { resource: machineId, params: { comment: 'x' } },
+          { taskId: otherTask.id },
+        ),
+      ).toMatchObject({
+        isError: true,
+        structuredContent: { status: 'DENIED', reason: 'not_authorized' },
+      });
+      // Another agent on the first task's session: refused, approval invisible.
+      expect(
+        await callTool(DISABLE, disableArgs, { identity: agentB }),
+      ).toMatchObject({
+        isError: true,
+        structuredContent: { status: 'DENIED' },
+      });
+      expect(await status(approvalId, 0, { identity: agentB })).toMatchObject({
+        isError: true,
+        structuredContent: { status: 'DENIED', reason: 'not_assigned_agent' },
+      });
+      expect((await fixtureRequests()).length).toBe(before);
+      expect(
+        (
+          await tenantClientRef.authorizationGrant.findUniqueOrThrow({
+            where: { id: grant.id },
+          })
+        ).consumedAt,
+      ).toBeNull();
+
+      // Kill switch released: the same call on its own task re-decides and runs once.
+      const redeemed = await callTool(DISABLE, disableArgs);
+      expect(redeemed.structuredContent).toMatchObject({ status: 'EXECUTED' });
+      expect(
+        await tenantClientRef.decision.count({
+          where: { grantId: grant.id, outcome: 'ALLOW' },
+        }),
+      ).toBe(1);
+    }, 120_000);
+
+    it('G16: no MCP method answers without a valid agent identity', async () => {
+      const body = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+      });
+      const noCert = await new Promise<
+        { status?: number; text: string } | Error
+      >((resolve) => {
+        const req = https.request(
+          {
+            host: '127.0.0.1',
+            port: agentMtlsPort,
+            path: `/agent/v1/tasks/${task.id}/mcp`,
+            method: 'POST',
+            ca: fullCaChainPem,
+            headers: {
+              ...MCP_HEADERS,
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(body),
+            },
+          },
+          (res) => {
+            let text = '';
+            res.on('data', (c: Buffer) => (text += c.toString('utf8')));
+            res.on('end', () => resolve({ status: res.statusCode, text }));
+          },
+        );
+        req.on('error', (error) => resolve(error));
+        req.end(body);
+      });
+      if (!(noCert instanceof Error)) {
+        expect(noCert.status).toBe(401);
+        expect(noCert.text).not.toContain('microsoft');
+      }
+
+      const revoked = await enrollAgent('agent-revoked');
+      await http()
+        .post(`/agents/${revoked.id}/revoke`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ reason: 'MCP e2e: G16' })
+        .expect(201);
+      for (const method of ['initialize', 'tools/list', 'tools/call']) {
+        const res = await mcp(revoked.identity, task.id, method, {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'e2e', version: '0' },
+          name: 'manar_approval_status',
+          arguments: { approvalId: 'x' },
+        });
+        expect(res.status).toBe(401);
+        expect(JSON.stringify(res.body)).not.toMatch(
+          /microsoft|manar_approval_status|manar-governed-mcp/,
+        );
+      }
+    }, 60_000);
   });
 
   describe('LLM proxy', () => {
