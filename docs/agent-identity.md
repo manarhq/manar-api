@@ -11,8 +11,9 @@ allowed to say.
 ## Local infra: OpenBao
 
 `deploy/docker-compose.yml` adds an `openbao` service
-(`openbao/openbao:2.6.1`, `-dev` mode — an in-memory, auto-unsealed server,
-never used in production). Unlike Postgres/Keycloak, this boots with **no
+(`openbao/openbao:2.6.1`, file storage on a named volume, initialized once and
+unsealed on every start by `deploy/openbao-entrypoint.sh`; local dev only, CI
+uses `-dev` mode). Unlike Postgres/Keycloak, a fresh volume boots with **no
 PKI configured** — run `pnpm infra:openbao-init`
 (`deploy/openbao-init.mjs`) once the container is healthy. That script
 drives OpenBao's HTTP API directly (no `vault`/`bao` CLI dependency, so it
