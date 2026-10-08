@@ -49,14 +49,34 @@ test:unit:
   # mocked — see docs/tenant-isolation.md), so this job needs a live
   # database service, unlike lint/typecheck/build which only need the
   # generated Prisma clients (codegen, no live connection required).
+  # The rate-limit storage spec runs against a real Redis too.
   services:
-    - postgres:18.6-alpine
+    # Throwaway CI database: no fsync. Tenant provisioning (CREATE DATABASE
+    # plus every tenant migration) is fsync-bound and stalled past its 60 s
+    # hook timeout on the shared runner host.
+    - &postgres-service
+      name: postgres:18.6-alpine
+      alias: postgres
+      command:
+        [
+          'postgres',
+          '-c',
+          'fsync=off',
+          '-c',
+          'synchronous_commit=off',
+          '-c',
+          'full_page_writes=off',
+        ]
+    - &redis-service
+      name: redis:8.10-alpine
+      alias: redis
   variables:
     POSTGRES_USER: manar
     POSTGRES_PASSWORD: manar
     POSTGRES_DB: manar_control
     CONTROL_DATABASE_URL: postgresql://manar:manar@postgres:5432/manar_control
     TENANT_DB_BASE_URL: postgresql://manar:manar@postgres:5432/postgres
+    REDIS_URL: redis://redis:6379
   script:
     - pnpm db:migrate:control:deploy
     - pnpm test
