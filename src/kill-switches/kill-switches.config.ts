@@ -17,6 +17,9 @@ export const KillSwitchesConfigSchema = z.object({
    * `ApprovalsConfigSchema.APPROVAL_GRANT_SIGNING_SECRET`).
    */
   PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: z.string().min(16),
+  /** ADR-0009: at most this many agents quarantined by one agent per window, server side (defaults 5 per 10 min, in `AgentQuarantineService`). */
+  QUARANTINE_MAX_PER_AGENT: z.coerce.number().int().positive().optional(),
+  QUARANTINE_WINDOW_MS: z.coerce.number().int().positive().optional(),
 });
 
 export type KillSwitchesConfig = z.infer<typeof KillSwitchesConfigSchema>;

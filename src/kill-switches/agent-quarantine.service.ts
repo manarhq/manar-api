@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { AppConfig } from '../config/env.validation';
 import type {
   AgentQuarantine,
   PrismaClient as TenantPrismaClient,
@@ -21,6 +23,7 @@ export interface QuarantineInput {
 
 export type QuarantineOutcome =
   | { result: 'agent_not_found' }
+  | { result: 'quarantine_rate_exceeded' }
   | {
       result: 'quarantined' | 'already_quarantined';
       quarantine: AgentQuarantine;
@@ -29,13 +32,17 @@ export type QuarantineOutcome =
 
 /**
  * ADR-0009. Quarantine only ever goes one way from an agent: `quarantine`
- * sets `active = true` (and may attach the model's explanation once);
+ * sets `active = true`; `attachExplanation` adds the model's text to a
+ * still-active quarantine once;
  * `release`, the only way back, is called from the human-only controller.
  * `KillSwitchService.checkAll` reads the row on every decision.
  */
 @Injectable()
 export class AgentQuarantineService {
-  constructor(private readonly auditService: AuditService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly config: ConfigService<AppConfig, true>,
+  ) {}
 
   async quarantine(
     tenantClient: TenantPrismaClient,
@@ -50,6 +57,22 @@ export class AgentQuarantineService {
     if (!agent) return { result: 'agent_not_found' };
 
     const now = new Date();
+    // Server-side cap on how many agents one agent can stop (a buggy or
+    // hijacked watcher): agents it quarantined within the window, active or
+    // released. Re-asking for one already active does not count again.
+    const windowMs =
+      this.config.get('QUARANTINE_WINDOW_MS', { infer: true }) ?? 600_000;
+    const recent = await tenantClient.agentQuarantine.count({
+      where: {
+        quarantinedByAgentId: input.byAgentId,
+        quarantinedAt: { gt: new Date(now.getTime() - windowMs) },
+        NOT: { agentId: input.agentId, active: true },
+      },
+    });
+    const cap =
+      this.config.get('QUARANTINE_MAX_PER_AGENT', { infer: true }) ?? 5;
+    if (recent >= cap) return { result: 'quarantine_rate_exceeded' };
+
     const fresh = {
       active: true,
       reason: input.reason,
@@ -111,43 +134,60 @@ export class AgentQuarantineService {
       };
     }
 
-    // Already active: the only change an agent may make is attaching the
-    // explanation, once (`explanation IS NULL`), never rewriting it.
-    let explanationAttached = false;
-    if (input.explanation) {
-      const attached = await tenantClient.agentQuarantine.updateMany({
-        where: {
-          agentId: input.agentId,
-          active: true,
-          explanationEn: null,
-        },
-        data: {
-          explanationEn: input.explanation.en,
-          explanationAr: input.explanation.ar,
-        },
-      });
-      explanationAttached = attached.count > 0;
-      if (explanationAttached) {
-        await this.auditService.recordSafely(tenantClient, tenantId, {
-          eventType: AUDIT_EVENT_TYPES.AGENT_QUARANTINE_EXPLAINED,
-          actor: { type: 'agent', id: input.byAgentId },
-          data: {
-            targetAgentId: input.agentId,
-            explanation: input.explanation,
-            decisionId: input.decisionId,
-            taskId: input.taskId,
-          },
-        });
-      }
-    }
     const row = await tenantClient.agentQuarantine.findUniqueOrThrow({
       where: { agentId: input.agentId },
     });
     return {
       result: 'already_quarantined',
       quarantine: row,
-      explanationAttached,
+      explanationAttached: false,
     };
+  }
+
+  /**
+   * Attach the model's explanation to one specific quarantine, once. Only
+   * the agent that quarantined, only while that quarantine is still active,
+   * only if none is attached yet. Never creates or reactivates anything, so
+   * a human release that lands first stays released.
+   */
+  async attachExplanation(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    input: {
+      quarantineId: string;
+      agentId: string;
+      byAgentId: string;
+      explanation: { en: string; ar: string };
+      decisionId: string;
+      taskId: string;
+    },
+  ): Promise<boolean> {
+    const attached = await tenantClient.agentQuarantine.updateMany({
+      where: {
+        id: input.quarantineId,
+        agentId: input.agentId,
+        active: true,
+        explanationEn: null,
+        quarantinedByAgentId: input.byAgentId,
+      },
+      data: {
+        explanationEn: input.explanation.en,
+        explanationAr: input.explanation.ar,
+      },
+    });
+    if (attached.count === 0) return false;
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.AGENT_QUARANTINE_EXPLAINED,
+      actor: { type: 'agent', id: input.byAgentId },
+      data: {
+        quarantineId: input.quarantineId,
+        targetAgentId: input.agentId,
+        explanation: input.explanation,
+        decisionId: input.decisionId,
+        taskId: input.taskId,
+      },
+    });
+    return true;
   }
 
   /**

@@ -12,8 +12,14 @@ type Row = Record<string, unknown>;
 /** In-memory `agent` + `agentQuarantine` honouring the WHERE clauses the service uses. */
 function fakeTenant(agentIds: string[]) {
   const rows: Row[] = [];
-  const matches = (row: Row, where: Row) =>
-    Object.entries(where).every(([k, v]) => row[k] === v);
+  const matches = (row: Row, where: Row): boolean =>
+    Object.entries(where).every(([k, v]) => {
+      if (k === 'NOT') return !matches(row, v as Row);
+      if (v && typeof v === 'object' && 'gt' in v) {
+        return (row[k] as Date) > (v as { gt: Date }).gt;
+      }
+      return row[k] === v;
+    });
   const client = {
     agent: {
       findUnique: vi.fn(({ where }: { where: { id: string } }) =>
@@ -32,12 +38,18 @@ function fakeTenant(agentIds: string[]) {
             Object.assign(new Error('dup'), { code: 'P2002' }),
           );
         }
-        const row = { id: `q-${rows.length + 1}`, ...data };
+        const row = {
+          id: `00000000-0000-4000-8000-00000000000${rows.length + 1}`,
+          ...data,
+        };
         rows.push(row);
         return Promise.resolve(row);
       }),
       findUniqueOrThrow: vi.fn(({ where }: { where: Row }) =>
         Promise.resolve(rows.find((r) => matches(r, where))),
+      ),
+      count: vi.fn(({ where }: { where: Row }) =>
+        Promise.resolve(rows.filter((r) => matches(r, where)).length),
       ),
       update: vi.fn(({ where, data }: { where: Row; data: Row }) => {
         const row = rows.find((r) => matches(r, where))!;
@@ -48,18 +60,28 @@ function fakeTenant(agentIds: string[]) {
   return { client, rows };
 }
 
-function harness(agentIds = ['target-1', 'watcher-1']) {
+function harness(
+  agentIds = ['target-1', 'watcher-1'],
+  config: Record<string, unknown> = {},
+) {
   const recordSafely = vi.fn().mockResolvedValue(undefined);
   const record = vi.fn().mockResolvedValue({});
   const audit = { recordSafely, record } as unknown as AuditService;
-  const quarantine = new AgentQuarantineService(audit);
+  const quarantine = new AgentQuarantineService(audit, {
+    get: (key: string) => config[key],
+  } as never);
   const connector = new ManarConnectorService(quarantine);
   const tenant = fakeTenant(agentIds);
-  const call = (actionId: string, resource: string, params: unknown) =>
+  const call = (
+    actionId: string,
+    resource: string,
+    params: unknown,
+    agentId = 'watcher-1',
+  ) =>
     connector.invoke(tenant.client, {
       tenantId: 'tenant-1',
       taskId: 'task-w',
-      agentId: 'watcher-1',
+      agentId,
       actionId,
       resource,
       params,
@@ -104,27 +126,99 @@ describe('Manar connector: manar.agent.quarantine (ADR-0009)', () => {
     });
   });
 
-  it('attaches the explanation once and never rewrites it', async () => {
-    const h = harness();
-    await h.call('manar.agent.quarantine', 'target-1', { reason: 'r' });
+  it('attach-only mode: once, by the quarantining agent, never rewritten', async () => {
+    const h = harness(['target-1', 'watcher-1', 'other-watcher']);
+    const first = await h.call('manar.agent.quarantine', 'target-1', {
+      reason: 'r',
+    });
+    const quarantineId = (first.data as { quarantineId: string }).quarantineId;
     const explanation = {
       en: 'It disabled many users.',
       ar: 'عطّل مستخدمين كثيرين.',
     };
-    const attach = await h.call('manar.agent.quarantine', 'target-1', {
-      reason: 'r',
-      explanation,
-    });
-    expect(attach).toMatchObject({ data: { explanationAttached: true } });
-    const rewrite = await h.call('manar.agent.quarantine', 'target-1', {
-      reason: 'r',
-      explanation: { en: 'something else', ar: 'شيء آخر' },
-    });
-    expect(rewrite).toMatchObject({ data: { explanationAttached: false } });
+    // Another agent cannot attach to this quarantine.
+    expect(
+      await h.call(
+        'manar.agent.quarantine',
+        'target-1',
+        { quarantineId, explanation },
+        'other-watcher',
+      ),
+    ).toMatchObject({ data: { result: 'not_attached' } });
+    expect(
+      await h.call('manar.agent.quarantine', 'target-1', {
+        quarantineId,
+        explanation,
+      }),
+    ).toMatchObject({ data: { result: 'explanation_attached' } });
+    expect(
+      await h.call('manar.agent.quarantine', 'target-1', {
+        quarantineId,
+        explanation: { en: 'something else', ar: 'شيء آخر' },
+      }),
+    ).toMatchObject({ data: { result: 'not_attached' } });
     expect(h.tenant.rows[0]).toMatchObject({
       explanationEn: explanation.en,
       explanationAr: explanation.ar,
     });
+  });
+
+  it('an explanation arriving after a human release does not re-quarantine (finding 2)', async () => {
+    const h = harness();
+    const first = await h.call('manar.agent.quarantine', 'target-1', {
+      reason: 'r',
+    });
+    const quarantineId = (first.data as { quarantineId: string }).quarantineId;
+    await h.quarantine.release(h.tenant.client, 'tenant-1', {
+      agentId: 'target-1',
+      releasedBy: 'human-1',
+    });
+    const late = await h.call('manar.agent.quarantine', 'target-1', {
+      quarantineId,
+      explanation: { en: 'late', ar: 'متأخر' },
+    });
+    expect(late).toMatchObject({ data: { result: 'not_attached' } });
+    expect(h.tenant.rows[0]).toMatchObject({
+      active: false,
+      releasedBy: 'human-1',
+    });
+    // The old combined form (reason + explanation) is no longer an attach:
+    // a plain quarantine call never edits an active one.
+    await h.call('manar.agent.quarantine', 'target-1', { reason: 'again' });
+    expect(
+      await h.call('manar.agent.quarantine', 'target-1', {
+        reason: 'r',
+        explanation: { en: 'x', ar: 'س' },
+      }),
+    ).toMatchObject({
+      data: { result: 'already_quarantined', explanationAttached: false },
+    });
+  });
+
+  it('caps how many agents one agent can quarantine per window (finding 3)', async () => {
+    const targets = ['t-1', 't-2', 't-3'];
+    const h = harness([...targets, 'watcher-1'], {
+      QUARANTINE_MAX_PER_AGENT: 2,
+    });
+    expect(
+      await h.call('manar.agent.quarantine', 't-1', { reason: 'r' }),
+    ).toMatchObject({ success: true });
+    expect(
+      await h.call('manar.agent.quarantine', 't-2', { reason: 'r' }),
+    ).toMatchObject({ success: true });
+    expect(
+      await h.call('manar.agent.quarantine', 't-3', { reason: 'r' }),
+    ).toEqual({
+      success: false,
+      errorMessage: 'quarantine_rate_exceeded',
+    });
+    // Re-asking for one already quarantined is not a new one.
+    expect(
+      await h.call('manar.agent.quarantine', 't-1', { reason: 'r' }),
+    ).toMatchObject({
+      data: { result: 'already_quarantined' },
+    });
+    expect(h.tenant.rows.filter((r) => r.active)).toHaveLength(2);
   });
 
   it('cannot target an agent outside this tenant database', async () => {

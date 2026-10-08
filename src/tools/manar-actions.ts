@@ -1,6 +1,6 @@
 /**
- * ADR-0009: the catalog of Manar's own built-in connector (`ToolProtocol
- * MANAR`, tool name `manar`). Pure data, no imports: task validation on the
+ * ADR-0009: the catalog of Manar's own built-in connector (the tool row
+ * named `manar` at `MANAR_BUILTIN_ENDPOINT`). Pure data, no imports: task validation on the
  * decision path reads it.
  *
  * Restriction only. There is no release, deactivate, approve, grant or
@@ -64,14 +64,13 @@ export const MANAR_ACTIONS: readonly ManarActionDefinition[] = [
     // runs it without approval.
     name: MANAR_AGENT_QUARANTINE,
     description:
-      'Quarantine an agent in this tenant: every action it requests is denied (agent_quarantined) until a human releases it. Resource: the agent id. Idempotent; a second call on an active quarantine may attach the explanation once.',
+      'Quarantine an agent in this tenant: every action it requests is denied (agent_quarantined) until a human releases it. Resource: the agent id. Idempotent. Attach-only mode: params {quarantineId, explanation} adds the explanation once to that still-active quarantine and never creates or reactivates one. At most QUARANTINE_MAX_PER_AGENT agents per caller per QUARANTINE_WINDOW_MS (quarantine_rate_exceeded).',
     riskBaseScore: 0,
     mutating: true,
     destructive: false,
     inputSchema: {
       type: 'object',
       additionalProperties: false,
-      required: ['reason'],
       properties: {
         reason: { type: 'string', minLength: 1, maxLength: 500 },
         detector: { type: 'string', maxLength: 64 },
@@ -80,6 +79,7 @@ export const MANAR_ACTIONS: readonly ManarActionDefinition[] = [
           maxItems: 50,
           items: { type: 'string', maxLength: 128 },
         },
+        quarantineId: { type: 'string', format: 'uuid' },
         explanation: {
           type: 'object',
           additionalProperties: false,

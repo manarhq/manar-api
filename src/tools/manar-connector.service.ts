@@ -26,6 +26,18 @@ const ActivityReadParams = z
   })
   .strict();
 
+const AttachParams = z
+  .object({
+    quarantineId: z.string().uuid(),
+    explanation: z
+      .object({
+        en: z.string().trim().min(1).max(1500),
+        ar: z.string().trim().min(1).max(1500),
+      })
+      .strict(),
+  })
+  .strict();
+
 const QuarantineParams = z
   .object({
     reason: z.string().trim().min(1).max(500),
@@ -79,6 +91,34 @@ export class ManarConnectorService {
         data: await this.readActivity(tenantClient, params.data),
       };
     }
+    const attachId = (call.params as { quarantineId?: unknown } | null)
+      ?.quarantineId;
+    if (call.actionId === MANAR_AGENT_QUARANTINE && attachId !== undefined) {
+      // Attach-only mode: never creates or reactivates a quarantine.
+      const params = AttachParams.safeParse(call.params);
+      if (!params.success) return fail('invalid_params');
+      const attached = await this.quarantineService.attachExplanation(
+        tenantClient,
+        call.tenantId,
+        {
+          quarantineId: params.data.quarantineId,
+          agentId: call.resource,
+          byAgentId: call.agentId,
+          explanation: params.data.explanation,
+          decisionId: call.decisionId,
+          taskId: call.taskId,
+        },
+      );
+      return {
+        success: true,
+        data: {
+          result: attached ? 'explanation_attached' : 'not_attached',
+          quarantineId: params.data.quarantineId,
+          agentId: call.resource,
+          explanationAttached: attached,
+        },
+      };
+    }
     if (call.actionId === MANAR_AGENT_QUARANTINE) {
       const params = QuarantineParams.safeParse(call.params ?? {});
       if (!params.success) return fail('invalid_params');
@@ -97,6 +137,9 @@ export class ManarConnectorService {
         },
       );
       if (outcome.result === 'agent_not_found') return fail('agent_not_found');
+      if (outcome.result === 'quarantine_rate_exceeded') {
+        return fail('quarantine_rate_exceeded');
+      }
       return {
         success: true,
         data: {
