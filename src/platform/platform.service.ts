@@ -142,15 +142,9 @@ export class PlatformService {
     const t = await this.tenantOr404(id);
     if (t.status !== 'ACTIVE')
       throw new ConflictException(`Tenant is not ACTIVE`);
-    const engaged = await this.suspension.engage(
-      await this.tenants.getClient(id),
-      id,
-      caller,
-    );
+    await this.suspension.engage(await this.tenants.getClient(id), id, caller);
     await this.lifecycle(() => this.tenants.suspendTenant(id));
-    this.logger.log(
-      `platform: tenant ${id} suspended by ${caller} (kill switch ${engaged ? 'set' : 'already active'})`,
-    );
+    this.logger.log(`platform: tenant ${id} suspended by ${caller}`);
     return view(await this.tenantOr404(id));
   }
 
@@ -164,7 +158,7 @@ export class PlatformService {
       caller,
     );
     this.logger.log(
-      `platform: tenant ${id} resumed by ${caller} (kill switch ${released ? 'released' : 'not set by platform, left as is'})`,
+      `platform: tenant ${id} resumed by ${caller} (platform kill switch ${released ? 'released' : 'was not active'})`,
     );
     return view(await this.tenantOr404(id));
   }

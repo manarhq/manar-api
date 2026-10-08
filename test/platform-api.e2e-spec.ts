@@ -17,6 +17,14 @@ import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { KillSwitchService } from '../src/kill-switches/kill-switch.service';
+import { AuditService } from '../src/audit/audit.service';
+import {
+  PLATFORM_SWITCH_TARGET,
+  PlatformSuspension,
+} from '../src/platform/platform-suspension';
+import { vi } from 'vitest';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient as TenantPrismaClient } from '../src/generated/tenant-client/client';
 import {
   assignRealmRole,
   createPlatformClient,
@@ -58,6 +66,25 @@ describe('Platform API for manar-fleet (e2e)', () => {
   let tenantId: string | undefined;
   let ownerToken: string;
   const http = () => request(app.getHttpServer());
+
+  /** Direct tenant DB access for the test, bypassing the ACTIVE check (the tenant is suspended). */
+  async function withTenantClient<T>(
+    fn: (db: TenantPrismaClient) => Promise<T>,
+  ): Promise<T> {
+    const binding = await control.tenantDatabaseBinding.findUniqueOrThrow({
+      where: { tenantId },
+    });
+    const url = new URL(process.env.TENANT_DB_BASE_URL!);
+    url.pathname = `/${binding.databaseName}`;
+    const db = new TenantPrismaClient({
+      adapter: new PrismaPg({ connectionString: url.toString() }),
+    });
+    try {
+      return await fn(db);
+    } finally {
+      await db.$disconnect();
+    }
+  }
 
   beforeAll(async () => {
     platformClient = await createPlatformClient(CLIENT_ID, ROLE);
@@ -256,30 +283,102 @@ describe('Platform API for manar-fleet (e2e)', () => {
     }
   });
 
-  it('resume never releases a tenant kill switch a human set', async () => {
-    await http()
-      .post('/tenants/kill-switch')
-      .set('Authorization', `Bearer ${ownerToken}`)
-      .send({ reason: 'incident' })
-      .expect(201);
+  it('a human stop pressed during a suspension survives resume', async () => {
+    const killSwitches = app.get(KillSwitchService);
+    const agentId = randomUUID();
     await http()
       .post(`/platform/v1/tenants/${tenantId}/suspend`)
       .set('Authorization', `Bearer ${platformToken}`)
       .expect(200);
+    // The console is closed to humans while suspended, so the stop goes in through the service,
+    // as the console would write it: the humans' row (targetId null).
+    const owner = await withTenantClient((t) =>
+      t.userProfile.findFirstOrThrow({
+        where: { email: `${OWNER}@example.test` },
+      }),
+    );
+    await withTenantClient((t) =>
+      killSwitches.activate(t, tenantId!, {
+        scope: 'TENANT',
+        targetId: null,
+        activatedBy: owner.id,
+        reason: 'incident',
+      }),
+    );
     await http()
       .post(`/platform/v1/tenants/${tenantId}/resume`)
       .set('Authorization', `Bearer ${platformToken}`)
       .expect(200);
-    const db = await app.get(TenantDatabaseManager).getClient(tenantId!);
-    const sw = await db.killSwitch.findFirst({
-      where: { scope: 'TENANT', targetId: null },
-    });
-    expect(sw).toMatchObject({ active: true, reason: 'incident' });
+    const t = await app.get(TenantDatabaseManager).getClient(tenantId!);
+    expect(
+      await killSwitches.checkAll(t, tenantId!, { agentId }),
+    ).toMatchObject({ killed: true, scope: 'TENANT' });
+    expect(
+      await t.killSwitch.findFirst({
+        where: { scope: 'TENANT', targetId: null },
+      }),
+    ).toMatchObject({ active: true, reason: 'incident' });
     await http()
       .post('/tenants/kill-switch/deactivate')
       .set('Authorization', `Bearer ${ownerToken}`)
       .send({})
       .expect(201);
+    expect(
+      (await killSwitches.checkAll(t, tenantId!, { agentId })).killed,
+    ).toBe(false);
+  });
+
+  it('a concurrent platform engage and human stop both stay effective', async () => {
+    const killSwitches = app.get(KillSwitchService);
+    const suspension = app.get(PlatformSuspension);
+    const t = await app.get(TenantDatabaseManager).getClient(tenantId!);
+    const owner = await t.userProfile.findFirstOrThrow({
+      where: { email: `${OWNER}@example.test` },
+    });
+    await Promise.all([
+      suspension.engage(t, tenantId!, 'test'),
+      killSwitches.activate(t, tenantId!, {
+        scope: 'TENANT',
+        targetId: null,
+        activatedBy: owner.id,
+        reason: 'race',
+      }),
+    ]);
+    const rows = await t.killSwitch.findMany({
+      where: { scope: 'TENANT', active: true },
+    });
+    expect(rows.map((r) => r.targetId).sort()).toEqual(
+      [PLATFORM_SWITCH_TARGET, null].sort(),
+    );
+    expect(await suspension.release(t, tenantId!, 'test')).toBe(true);
+    expect(
+      await killSwitches.checkAll(t, tenantId!, { agentId: randomUUID() }),
+    ).toMatchObject({ killed: true });
+    await killSwitches.deactivate(t, tenantId!, {
+      scope: 'TENANT',
+      targetId: null,
+      deactivatedBy: owner.id,
+    });
+  });
+
+  it('the platform switch and its audit event commit together: no event, no switch', async () => {
+    const suspension = app.get(PlatformSuspension);
+    const audit = app.get(AuditService);
+    const t = await app.get(TenantDatabaseManager).getClient(tenantId!);
+    const spy = vi
+      .spyOn(audit, 'recordInTransaction')
+      .mockRejectedValueOnce(new Error('audit down'));
+    try {
+      await expect(suspension.engage(t, tenantId!, 'test')).rejects.toThrow(
+        'audit down',
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    const row = await t.killSwitch.findUnique({
+      where: { id: 'platform-suspension' },
+    });
+    expect(row?.active ?? false).toBe(false);
   });
 
   it('delete marks the tenant DELETED and its users are refused', async () => {

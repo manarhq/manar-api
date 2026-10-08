@@ -24,16 +24,19 @@ manar-api stays the security control plane, so the addition has to be small and 
      `enforcement_dependency_unavailable`; any other check, 401 or 403. Tenant realm tokens never
      pass (different issuer), and this token is never accepted on tenant routes (its issuer is
      not a tenant).
-   - Suspend, in this order: (1) a TENANT-scope kill switch in the tenant database, owned by the
-     tenant-local profile `platform:manar-fleet` with reason `tenant_suspended`; every process
-     (API replicas, the Temporal worker) reads kill switches per decision, so agent requests and
-     grant redemption are denied at once everywhere; (2) the control status SUSPENDED, which
-     refuses humans at once (`KnownIssuerRegistry` and `AgentMtlsGuard` read it per request) and
-     evicts the caller's cached tenant client. Delete sets the same switch, then DELETED.
-   - Resume flips the status back first, then releases only the platform's own switch: a
-     tenant switch a human set (or re-set after the suspend) stays active. Both steps are written
-     to the tenant's audit chain as `kill_switch.activated` / `kill_switch.deactivated` with a
-     `system` actor.
+   - Suspend, in this order: (1) the platform's own TENANT-scope kill switch row in the tenant
+     database (fixed id `platform-suspension`, `targetId` `platform:manar-fleet`), written with
+     one `INSERT ... ON CONFLICT` statement, its `kill_switch.activated` audit event in the same
+     transaction (no event, no switch). `KillSwitchService.checkAll` denies on any active TENANT
+     row, and every process (API replicas, the Temporal worker) reads kill switches per decision,
+     so agent requests and grant redemption are denied at once everywhere; (2) the control status
+     SUSPENDED, which refuses humans at once (`KnownIssuerRegistry` and `AgentMtlsGuard` read it
+     per request) and evicts the caller's cached tenant client. Delete sets the same switch, then
+     DELETED.
+   - The humans' tenant switch (`targetId` null, the console's) is a separate row the platform
+     never reads or writes. Resume flips the status back, then turns off only the platform row
+     with one conditional `UPDATE ... WHERE id = 'platform-suspension' AND active`, audited in the
+     same transaction. A human stop pressed before, during or after a suspension survives resume.
    - Cached tenant clients in other processes: `getClient` re-reads the tenant's status when a
      cached entry is older than `TENANT_DB_CLIENT_REVALIDATE_MS` (default 5 s), refuses a tenant
      that is no longer ACTIVE, fails closed if the control DB is unreadable, and on a cache miss

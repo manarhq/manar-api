@@ -114,65 +114,93 @@ export class AuditService {
     tenantId: string,
     input: RecordAuditEventInput,
   ): Promise<AuditEventRecord> {
+    const event = await tenantClient.$transaction((tx) =>
+      this.append(tx, input),
+    );
+    this.publishAfterCommit(event, tenantId, input);
+    return event;
+  }
+
+  /**
+   * Appends inside the caller's transaction, so the audited change and its audit event commit
+   * or roll back together (ADR-0010: platform kill switch). Call the returned function after the
+   * transaction commits to publish to Kafka.
+   */
+  async recordInTransaction(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    input: RecordAuditEventInput,
+  ): Promise<() => void> {
+    const event = await this.append(tx, input);
+    return () => this.publishAfterCommit(event, tenantId, input);
+  }
+
+  private async append(
+    tx: Prisma.TransactionClient,
+    input: RecordAuditEventInput,
+  ): Promise<AuditEvent> {
     const correlationId =
       input.correlationId ?? getCorrelationId() ?? randomUUID();
     const timestamp = new Date();
     const id = randomUUID();
+    // Ensures the singleton row exists without a separate init step (the
+    // same "resolve-or-create automatically" posture
+    // `OpenFgaClientService.onModuleInit` establishes elsewhere — see
+    // docs/authorization-model.md) — a no-op `ON CONFLICT DO NOTHING`-style
+    // update for every call after the very first one for this tenant.
+    await tx.auditChainState.upsert({
+      where: { id: AuditService.SINGLETON_ID },
+      update: {},
+      create: { id: AuditService.SINGLETON_ID },
+    });
 
-    const event = await tenantClient.$transaction(async (tx) => {
-      // Ensures the singleton row exists without a separate init step (the
-      // same "resolve-or-create automatically" posture
-      // `OpenFgaClientService.onModuleInit` establishes elsewhere — see
-      // docs/authorization-model.md) — a no-op `ON CONFLICT DO NOTHING`-style
-      // update for every call after the very first one for this tenant.
-      await tx.auditChainState.upsert({
-        where: { id: AuditService.SINGLETON_ID },
-        update: {},
-        create: { id: AuditService.SINGLETON_ID },
-      });
+    const rows = await tx.$queryRaw<AuditChainStateRow[]>`
+      SELECT "latestEventHash" FROM "audit_chain_state"
+      WHERE "id" = ${AuditService.SINGLETON_ID}
+      FOR UPDATE
+    `;
+    const previousHash = rows[0]?.latestEventHash ?? null;
 
-      const rows = await tx.$queryRaw<AuditChainStateRow[]>`
-        SELECT "latestEventHash" FROM "audit_chain_state"
-        WHERE "id" = ${AuditService.SINGLETON_ID}
-        FOR UPDATE
-      `;
-      const previousHash = rows[0]?.latestEventHash ?? null;
+    const eventHash = computeEventHash({
+      id,
+      eventType: input.eventType,
+      correlationId,
+      actor: input.actor,
+      timestamp: timestamp.toISOString(),
+      data: input.data,
+      previousHash,
+    });
 
-      const eventHash = computeEventHash({
+    const created = await tx.auditEvent.create({
+      data: {
         id,
         eventType: input.eventType,
         correlationId,
-        actor: input.actor,
-        timestamp: timestamp.toISOString(),
-        data: input.data,
+        actor: input.actor as unknown as Prisma.InputJsonValue,
+        timestamp,
+        data: (input.data ?? null) as Prisma.InputJsonValue,
         previousHash,
-      });
-
-      const created = await tx.auditEvent.create({
-        data: {
-          id,
-          eventType: input.eventType,
-          correlationId,
-          actor: input.actor as unknown as Prisma.InputJsonValue,
-          timestamp,
-          data: (input.data ?? null) as Prisma.InputJsonValue,
-          previousHash,
-          eventHash,
-        },
-      });
-
-      await tx.auditChainState.update({
-        where: { id: AuditService.SINGLETON_ID },
-        data: {
-          latestEventId: created.id,
-          latestEventHash: created.eventHash,
-          eventCount: { increment: 1 },
-        },
-      });
-
-      return created;
+        eventHash,
+      },
     });
 
+    await tx.auditChainState.update({
+      where: { id: AuditService.SINGLETON_ID },
+      data: {
+        latestEventId: created.id,
+        latestEventHash: created.eventHash,
+        eventCount: { increment: 1 },
+      },
+    });
+
+    return created;
+  }
+
+  private publishAfterCommit(
+    event: AuditEvent,
+    tenantId: string,
+    input: RecordAuditEventInput,
+  ): void {
     const envelope: DomainEventEnvelope = {
       eventId: event.id,
       eventType: event.eventType,
@@ -193,8 +221,6 @@ export class AuditService {
         `Unexpected error publishing audit event "${event.id}" to Kafka: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
-
-    return event;
   }
 
   /**

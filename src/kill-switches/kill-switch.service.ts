@@ -184,8 +184,10 @@ export class KillSwitchService {
       };
     }
 
+    // Any active TENANT row stops the tenant: the humans' switch (targetId null) and the
+    // platform's own suspension switch (ADR-0010) are separate rows.
     const tenantSwitch = await tenantClient.killSwitch.findFirst({
-      where: { scope: 'TENANT', targetId: null, active: true },
+      where: { scope: 'TENANT', active: true },
     });
     if (tenantSwitch) {
       return {
