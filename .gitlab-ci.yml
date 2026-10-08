@@ -21,6 +21,10 @@ default:
     - corepack prepare --activate
     - pnpm config set store-dir .pnpm-store
     - pnpm install --frozen-lockfile
+    # Workspace packages resolve through their gitignored dist/ (main/types
+    # in packages/*/package.json), so lint, nest build and vitest all see
+    # unresolved imports until they are compiled.
+    - pnpm packages:build
 
 cache:
   key:
@@ -216,7 +220,6 @@ test:e2e:
       until node -e "fetch(\"http://localhost:8080/healthz\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
         sleep 1;
       done'
-    - pnpm --filter @manar/sdk-node build
     # Phase 7a/7b integration pass: build and run the real demo-soc-tools
     # service in the background (see the DEMO_SOC_TOOLS_BASE_URL/
     # DEMO_TOOLS_API_KEY variables above), then wait for its own health
