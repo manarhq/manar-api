@@ -390,10 +390,13 @@ A task-gate refusal on `tools/list` is a JSON-RPC error whose `data` is stable:
 - Approval required: `isError: false`,
   `structuredContent = {"status":"PENDING","approvalId":"0b6f...","reason":"policy_requires_approval","riskScore":62,"nextStep":"..."}`.
   Nothing was sent to Microsoft. Calling the same tool again with the same arguments while a
-  person has not decided returns the same `approvalId` (no second request). An MCP client
+  person has not decided returns the same `approvalId` (no second request), unless the fresh
+  decision scores higher or changed policy version or reason: then the old request is expired
+  and a new `approvalId` comes back. An MCP client
   finishes the action over MCP only (ADR-0007):
-  1. `tools/call` `manar_approval_status` with `{"approvalId":"0b6f...","waitSeconds":60}`
-     (`waitSeconds` 0–120, default 60; it waits while `PENDING`). Result:
+  1. `tools/call` `manar_approval_status` with `{"approvalId":"0b6f...","waitSeconds":25}`
+     (`waitSeconds` 0–50, default 25; it waits while `PENDING`; call it again if still
+     `PENDING`). Result:
      `{"approvalId":"0b6f...","status":"PENDING|APPROVED|DENIED|EXPIRED","tool":"<toolId>__<actionId>","resource":"...","nextStep":"..."}`,
      plus `grantExpiresAt` when an approved grant is still usable. An approval of another agent
      or another task is `{"status":"DENIED","reason":"approval_not_found"}`. It never returns a

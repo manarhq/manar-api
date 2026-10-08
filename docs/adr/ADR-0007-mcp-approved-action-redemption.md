@@ -29,18 +29,31 @@ parameter hash, and redemption re-runs the whole decision and writes a `Decision
    server signs its token and takes the existing redemption path unchanged: `verifyGrant`, then
    `authorizeRedemption` (kill switches, AI-system lifecycle, assignment, task liveness, forbidden
    actions, OpenFGA, current policy), which consumes the grant in the same transaction as its
-   `Decision` (stage `GRANT_REDEMPTION`, channel `MCP`). The token never leaves the server.
+   `Decision` (stage `GRANT_REDEMPTION`, channel `MCP`). On this path the server signs the token
+   for itself and does not send it to the agent. The same agent can still fetch its own grant
+   token over REST (`GET /agent/v1/approvals/:id`); that door is unchanged.
 2. **No duplicate approvals while a person decides.** On APPROVAL_REQUIRED the MCP door first looks
    for an unexpired PENDING `ApprovalRequest` for the same agent, task, tool, action, resource and
-   parameters (`ApprovalRequestService.findPendingMatch`). If one exists it answers with that
-   `approvalId` instead of opening a second request. A `Decision` (APPROVAL_REQUIRED) is still
-   written for the call.
+   parameters (`ApprovalRequestService.findPendingMatch`). It reuses that request only if what the
+   approver sees is still accurate: its `riskScore` is at least the fresh decision's, and its
+   policy version and required reason equal the fresh decision's. Redemption does not re-check the
+   risk ceiling (ADR-0006), so the approver must have seen the current risk. If so it answers with
+   that `approvalId` (audit `approval.reused` with `decisionId` and `approvalRequestId`).
+   Otherwise the open request is set EXPIRED only if still PENDING (audit `approval.superseded`,
+   old and new risk, policy version and reason) and a new request is opened. A `Decision`
+   (APPROVAL_REQUIRED) is written for every call. If the approval workflow fails to start after
+   the request row is written, that row is set EXPIRED so a repeated call opens a fresh one
+   instead of waiting out the request TTL.
 3. **A read-only status tool.** Every MCP session lists `manar_approval_status { approvalId,
 waitSeconds? }`. It runs the same task-access gate as `tools/list` (kill switches, task assigned
    to this agent, task live), then returns the status of an approval that belongs to this agent
    **and** this session's task; anything else is `approval_not_found`. It waits up to `waitSeconds`
-   (default 60, max 120) while the status is PENDING, polling PostgreSQL. It never returns a grant
-   token and never executes anything.
+   (default 25, max 50: under the MCP TypeScript SDK's 60 s request timeout) while the status is
+   PENDING, polling PostgreSQL every 2 s. It stops when the client disconnects (the request's
+   abort signal). An agent already holding 4 waits gets the current status at once (in-process
+   count, one replica; a Redis counter when there are several). A store failure during a poll is
+   `enforcement_dependency_unavailable`. It never returns a grant token and never executes
+   anything.
 4. **Results say what happened and what to do next.** PENDING carries `approvalId` and `nextStep`:
    nothing ran; wait with `manar_approval_status`; once APPROVED call the same tool again with
    exactly the same arguments. The status tool's `nextStep` changes with the status (still waiting,
@@ -82,7 +95,11 @@ answers (TLS refuses the handshake; a revoked agent gets 401 from `AgentMtlsGuar
 - If redemption is refused (for example a kill switch engaged after approval), the grant stays
   unconsumed until it expires (`APPROVAL_GRANT_TTL_MS`, 5 minutes), as on the REST door; a retry
   after the switch is released re-decides from scratch.
-- Each status poll is one indexed lookup by primary key per second at most, and no `Decision` row
+- A person who approves the old request in the moment between the reuse check and its expiry wins
+  that race (the expiry only applies to a PENDING row); the grant then carries the risk the
+  approver saw. This is the same position ADR-0006 takes on risk that rises after approval: a kill
+  switch, not the risk ceiling, is the control for it.
+- Each status poll is one lookup by primary key every 2 s at most, and no `Decision` row
   (it is not an action request). The pending-match lookup scans the task's approvals for the tool
   and resource without a dedicated index; acceptable at today's volumes.
 - Rollback: revert the commits. No migration.
@@ -92,5 +109,5 @@ answers (TLS refuses the handshake; a revoked agent gets 401 from `AgentMtlsGuar
 None changes label. The MCP door was already `governed` for ALLOW and DENY; this makes approved
 actions completable on it without leaving MCP, under the same single-use, parameter-bound,
 re-decided grant. Evidence: `src/tools/tool-invocation.service.spec.ts` (MCP door block),
-`src/approvals/grant.service.mcp-lookup.spec.ts`, `test/agent-runtime.e2e-spec.ts` (governed MCP
+`src/approvals/grant.service.mcp-lookup.spec.ts`, `src/agent-runtime/agent-runtime.controller.spec.ts`, `test/agent-runtime.e2e-spec.ts` (governed MCP
 server: approved action over MCP only, negative cases, G15, G16).
