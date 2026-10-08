@@ -40,17 +40,23 @@ import {
 
 /** ADR-0007: the read-only tool an MCP client waits on an approval with. */
 export const APPROVAL_STATUS_TOOL = 'manar_approval_status';
-const APPROVAL_WAIT_MAX_SECONDS = 120;
-const APPROVAL_POLL_MS = 1_000;
+// The MCP TS SDK client times a request out at 60 s by default: stay under it.
+const APPROVAL_WAIT_MAX_SECONDS = 50;
+const APPROVAL_WAIT_DEFAULT_SECONDS = 25;
+const APPROVAL_POLL_MS = 2_000;
+export const MAX_CONCURRENT_APPROVAL_WAITS_PER_AGENT = 4;
+// ponytail: in-process counter, right for one API replica. With several
+// replicas, move it to a Redis counter per tenant+agent with a TTL.
+const approvalWaitsInFlight = new Map<string, number>();
 
-const ApprovalStatusArgsSchema = z.object({
+export const ApprovalStatusArgsSchema = z.object({
   approvalId: z.string().min(1).max(64),
   waitSeconds: z
     .number()
     .int()
     .min(0)
     .max(APPROVAL_WAIT_MAX_SECONDS)
-    .default(60),
+    .default(APPROVAL_WAIT_DEFAULT_SECONDS),
 });
 
 interface ApprovalRow {
@@ -272,7 +278,7 @@ export class AgentRuntimeController {
           })),
           {
             name: APPROVAL_STATUS_TOOL,
-            description: `Status of an approval Manar asked a person for: PENDING, APPROVED, DENIED or EXPIRED, with what to do next. While PENDING it waits up to waitSeconds (default 60, max ${APPROVAL_WAIT_MAX_SECONDS}) for the decision. Read-only: it never runs the action.`,
+            description: `Status of an approval Manar asked a person for: PENDING, APPROVED, DENIED or EXPIRED, with what to do next. While PENDING it waits up to waitSeconds (default ${APPROVAL_WAIT_DEFAULT_SECONDS}, max ${APPROVAL_WAIT_MAX_SECONDS}) for the decision; call it again if it is still PENDING. Read-only: it never runs the action.`,
             inputSchema: {
               type: 'object' as const,
               properties: {
@@ -294,12 +300,13 @@ export class AgentRuntimeController {
       };
     });
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       if (request.params.name === APPROVAL_STATUS_TOOL) {
         return this.approvalStatus(
           agent,
           taskId,
           request.params.arguments ?? {},
+          extra.signal,
         );
       }
       const target = parseToolName(request.params.name);
@@ -353,24 +360,36 @@ export class AgentRuntimeController {
    * `manar_approval_status` (ADR-0007): same task gate as `tools/list`, then
    * only an approval of this agent in this session's task; anything else is
    * `approval_not_found`, never "exists elsewhere". Reads only; no grant
-   * token is ever returned.
+   * token is ever returned. Waits while PENDING, up to `waitSeconds`; stops
+   * when the client goes away (`signal`); an agent already holding
+   * `MAX_CONCURRENT_APPROVAL_WAITS_PER_AGENT` waits gets the current status
+   * at once.
    */
-  private async approvalStatus(
+  async approvalStatus(
     agent: AgentContext,
     taskId: string,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<CallToolResult> {
     const parsed = ApprovalStatusArgsSchema.safeParse(args);
     if (!parsed.success) return deniedResult('invalid_arguments');
-    const { approvalId, waitSeconds } = parsed.data;
+    const { approvalId } = parsed.data;
+
+    const waiter = `${agent.tenant.id}:${agent.agent.id}`;
+    const inFlight = approvalWaitsInFlight.get(waiter) ?? 0;
+    const waits =
+      parsed.data.waitSeconds > 0 &&
+      inFlight < MAX_CONCURRENT_APPROVAL_WAITS_PER_AGENT;
+    if (waits) approvalWaitsInFlight.set(waiter, inFlight + 1);
     try {
       const { tenantClient } = await this.access.assertTaskAccess(
         agent,
         taskId,
       );
-      const deadline = Date.now() + waitSeconds * 1_000;
-      // ponytail: polls PostgreSQL once a second for one request; a
-      // LISTEN/NOTIFY push if many agents wait at once.
+      const deadline =
+        Date.now() + (waits ? parsed.data.waitSeconds * 1_000 : 0);
+      // ponytail: polls PostgreSQL every 2 s per waiting call; a LISTEN/NOTIFY
+      // push if many agents wait at once.
       for (;;) {
         const row = await failClosed('tenant-db', () =>
           tenantClient.approvalRequest.findUnique({
@@ -381,16 +400,30 @@ export class AgentRuntimeController {
         if (!row || row.agentId !== agent.agent.id || row.taskId !== taskId) {
           return deniedResult('approval_not_found');
         }
-        if (row.status !== 'PENDING' || Date.now() >= deadline) {
+        const remaining = deadline - Date.now();
+        if (row.status !== 'PENDING' || remaining <= 0 || signal?.aborted) {
           return okResult(describeApproval(row));
         }
-        await sleep(APPROVAL_POLL_MS);
+        try {
+          await sleep(Math.min(APPROVAL_POLL_MS, remaining), undefined, {
+            signal,
+          });
+        } catch {
+          // Aborted: the client is gone; nobody reads this answer.
+          return okResult(describeApproval(row));
+        }
       }
     } catch (error) {
       if (error instanceof HttpException) {
         return deniedResult(reasonOf(error));
       }
       throw error;
+    } finally {
+      if (waits) {
+        const left = (approvalWaitsInFlight.get(waiter) ?? 1) - 1;
+        if (left > 0) approvalWaitsInFlight.set(waiter, left);
+        else approvalWaitsInFlight.delete(waiter);
+      }
     }
   }
 }
