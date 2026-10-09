@@ -605,12 +605,10 @@ release-image:
   image:
     name: docker.io/moby/buildkit:v0.31.2-rootless@sha256:0eeb84626c0cd01aecae7848c5ed8f095aec279dd936d0cdb5a64110f42ca65b
     entrypoint: ['']
+  interruptible: false
+  cache: []
   variables:
     BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
-    TRIVY_URL: https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
-    TRIVY_SHA256: 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
-    CRANE_URL: https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz
-    CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
   rules:
     - if: $FLEET_MODE
       when: never
@@ -624,8 +622,11 @@ release-image:
     - |
       set -eu
       mkdir -p "$HOME/bin" && export PATH="$HOME/bin:$PATH"
-      wget -q -O /tmp/trivy.tgz "$TRIVY_URL" && echo "$TRIVY_SHA256  /tmp/trivy.tgz" | sha256sum -c -
-      wget -q -O /tmp/crane.tgz "$CRANE_URL" && echo "$CRANE_SHA256  /tmp/crane.tgz" | sha256sum -c -
+      # Tool URLs and checksums are literals here, not variables, so a push option cannot swap them.
+      wget -q -O /tmp/trivy.tgz https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
+      echo "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  /tmp/trivy.tgz" | sha256sum -c -
+      wget -q -O /tmp/crane.tgz https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz
+      echo "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0  /tmp/crane.tgz" | sha256sum -c -
       tar -xzf /tmp/trivy.tgz -C "$HOME/bin" trivy && tar -xzf /tmp/crane.tgz -C "$HOME/bin" crane
       REF="$CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA"
       TAR="/tmp/release-$IMAGE.tar"
