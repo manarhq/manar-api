@@ -95,7 +95,7 @@ test:unit:
     REDIS_URL: redis://redis:6379
   script:
     - pnpm db:migrate:control:deploy
-    - pnpm test
+    - pnpm test:cov
 
 test:e2e:
   rules: !reference [.ci-rules, rules]
