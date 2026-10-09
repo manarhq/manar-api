@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AgentMtlsGuardModule } from '../agent-mtls/agent-mtls-guard.module';
 import { AiAdvisoryModule } from '../ai-advisory/ai-advisory.module';
+import { CatalogModule } from '../platform/catalog.module';
 import { TasksModule } from '../tasks/tasks.module';
 import { ToolInvokeModule } from '../tools/tool-invoke.module';
 import { AgentRuntimeController } from './agent-runtime.controller';
@@ -22,6 +23,7 @@ import { ToolManifestService } from './tool-manifest.service';
     AiAdvisoryModule,
     TasksModule,
     ToolInvokeModule,
+    CatalogModule,
   ],
   controllers: [LlmProxyController, AgentRuntimeController],
   providers: [

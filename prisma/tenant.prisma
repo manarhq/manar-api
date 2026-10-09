@@ -416,6 +416,11 @@ model Task {
   /// established precedent (e.g. `Tenant.residency` in Phase 2).
   riskCeiling Int @default(20)
 
+  /// The pack this task runs (e.g. `it-helpdesk`), or null for a customer's own agent. A
+  /// pack-bound task acts only while staff have that pack enabled for the tenant
+  /// (`TenantCatalog`, src/platform/catalog.*). Delegated children inherit it.
+  packId String?
+
   createdAt DateTime @default(now())
 
   delegationsAsParent TaskDelegation[] @relation("DelegationParent")

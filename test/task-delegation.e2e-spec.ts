@@ -39,6 +39,7 @@ import {
   deleteRealm,
   getUserToken,
 } from './support/keycloak-test-helpers';
+import { allowAllCatalog } from '../src/platform/catalog.fakes';
 
 /**
  * Mandatory Phase 5 (Tasks, Delegation & OpenFGA) scenarios — design
@@ -730,6 +731,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       {
         checkAll: () => Promise.resolve({ killed: false }),
       } as unknown as KillSwitchService,
+      allowAllCatalog(),
     );
 
     const tenantClient = await tenantDatabaseManager.getClient(tenant.id);

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -33,6 +34,8 @@ import {
 import { RevokeStatusResponseDto } from '../agents/agents.dto';
 import { TaskNotFoundError } from './tasks.errors';
 import { TasksService } from './tasks.service';
+import { CatalogService } from '../platform/catalog.service';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import {
   CreateTaskRequestSchema,
   RevokeTaskRequestSchema,
@@ -73,6 +76,7 @@ export class TasksController {
   constructor(
     private readonly tasksService: TasksService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly catalog: CatalogService,
   ) {}
 
   @Post()
@@ -93,6 +97,12 @@ export class TasksController {
   @ApiResponse({ status: 403, type: ErrorResponseDto })
   async createTask(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const input = parseBodyOrThrow(CreateTaskRequestSchema, body);
+    if (input.packId) {
+      const refused = await failClosed('catalog-store', () =>
+        this.catalog.taskDenyReason(auth.tenant.id, { packId: input.packId }),
+      );
+      if (refused) throw new ForbiddenException({ reason: refused });
+    }
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
@@ -121,6 +131,7 @@ export class TasksController {
         expiresAt: input.expiresAt,
         maxExecutions: input.maxExecutions,
         riskCeiling: input.riskCeiling,
+        packId: input.packId,
       },
     );
 

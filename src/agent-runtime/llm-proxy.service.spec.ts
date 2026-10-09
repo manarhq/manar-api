@@ -15,6 +15,11 @@ import { AgentTaskAccessService } from './agent-task-access.service';
 import type { LlmBudgetStore } from './llm-budget.store';
 import { LlmProxyService } from './llm-proxy.service';
 import type { LlmUpstreamClient } from './llm-upstream.client';
+import { allowAllCatalog } from '../platform/catalog.fakes';
+import {
+  CatalogDenied,
+  type CatalogService,
+} from '../platform/catalog.service';
 
 const AGENT: AgentContext = {
   tenant: { id: 'tenant-1', slug: 't' },
@@ -57,8 +62,10 @@ function setup(
     used?: number;
     budget?: number;
     killSwitchDown?: boolean;
+    catalog?: CatalogService;
   } = {},
 ) {
+  const catalog = opts.catalog ?? allowAllCatalog();
   const task = opts.task === undefined ? makeTask() : opts.task;
   const tenantClient = {
     task: { findUnique: vi.fn().mockResolvedValue(task) },
@@ -81,6 +88,7 @@ function setup(
     tenantDatabaseManager,
     killSwitchService,
     new TasksService(null as never, null as never, killSwitchService),
+    catalog,
   );
   const budget = {
     used: vi.fn().mockResolvedValue(opts.used ?? 0),
@@ -130,6 +138,7 @@ function setup(
     audit as unknown as AuditService,
     tenantDatabaseManager,
     config,
+    catalog,
   );
   return { service, upstream, aiAdvisory, audit, budget };
 }
@@ -157,9 +166,12 @@ describe('LlmProxyService', () => {
     expect(result).toMatchObject({
       choices: [{ message: { content: COMPLETION } }],
     });
-    expect(upstream.chat).toHaveBeenCalledWith({
-      messages: [{ role: 'user', content: SECRET_PROMPT }],
-    });
+    expect(upstream.chat).toHaveBeenCalledWith(
+      {
+        messages: [{ role: 'user', content: SECRET_PROMPT }],
+      },
+      null,
+    );
     expect(budget.add).toHaveBeenCalledWith(
       'tenant-1',
       'task-1',
@@ -174,10 +186,13 @@ describe('LlmProxyService', () => {
       ...body(),
       reasoning_effort: 'none',
     });
-    expect(upstream.chat).toHaveBeenCalledWith({
-      messages: [{ role: 'user', content: SECRET_PROMPT }],
-      reasoning_effort: 'none',
-    });
+    expect(upstream.chat).toHaveBeenCalledWith(
+      {
+        messages: [{ role: 'user', content: SECRET_PROMPT }],
+        reasoning_effort: 'none',
+      },
+      null,
+    );
     await expect(
       service.complete(AGENT, 'task-1', { ...body(), reasoning_effort: 'max' }),
     ).rejects.toMatchObject({ status: 400 });
@@ -437,5 +452,81 @@ describe('LlmProxyService', () => {
     await expect(
       service.complete(AGENT, 'task-1', { ...body(), stream: true }),
     ).rejects.toMatchObject({ status: 400 });
+  });
+
+  describe('tenant catalog (src/platform/catalog.*)', () => {
+    const gate = (over: Partial<CatalogService>) =>
+      ({ ...allowAllCatalog(), ...over }) as CatalogService;
+
+    it('refuses with 403 when staff turned the LLM proxy off, and never calls the model', async () => {
+      const { service, upstream } = setup({
+        catalog: gate({
+          llmGate: () =>
+            Promise.reject(new CatalogDenied('llm_proxy_disabled')),
+        }),
+      });
+      await expectDeny(
+        service.complete(AGENT, 'task-1', body()),
+        403,
+        'llm_proxy_disabled',
+      );
+      expect(upstream.chat).not.toHaveBeenCalled();
+    });
+
+    it('refuses a pack-bound task whose pack is disabled', async () => {
+      const { service, upstream } = setup({
+        task: makeTask({ packId: 'it-helpdesk' }),
+        catalog: gate({
+          taskDenyReason: () => Promise.resolve('pack_not_enabled'),
+        }),
+      });
+      await expectDeny(
+        service.complete(AGENT, 'task-1', body()),
+        403,
+        'pack_not_enabled',
+      );
+      expect(upstream.chat).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the catalog cannot be read', async () => {
+      const { service, upstream } = setup({
+        catalog: gate({
+          llmGate: () => Promise.reject(new Error('control db down')),
+        }),
+      });
+      await expectDeny(
+        service.complete(AGENT, 'task-1', body()),
+        503,
+        'enforcement_dependency_unavailable',
+      );
+      expect(upstream.chat).not.toHaveBeenCalled();
+    });
+
+    it("sends the call to the tenant's model and counts its tokens for the month", async () => {
+      const recordTokens = vi.fn().mockResolvedValue(52);
+      const route = { provider: 'core42_compass' as const, model: 'jais-30b' };
+      const { service, upstream } = setup({
+        catalog: gate({
+          llmGate: () => Promise.resolve({ route }),
+          recordTokens,
+        }),
+      });
+      await service.complete(AGENT, 'task-1', body('hello'));
+      expect(upstream.chat.mock.calls[0]?.[1]).toEqual(route);
+      expect(recordTokens).toHaveBeenCalledWith(AGENT.tenant.id, 52);
+    });
+
+    it('does not hand out a completion it could not count', async () => {
+      const { service } = setup({
+        catalog: gate({
+          recordTokens: () => Promise.reject(new Error('redis down')),
+        }),
+      });
+      await expectDeny(
+        service.complete(AGENT, 'task-1', body('hello')),
+        503,
+        'enforcement_dependency_unavailable',
+      );
+    });
   });
 });

@@ -5,6 +5,11 @@ import { LlmUpstreamError } from '../agent-runtime/llm-upstream.client';
 import type { AssistantReader } from './assistant-reader.service';
 import { AssistantService, ASSISTANT_RATE_LIMIT } from './assistant.service';
 import type { ReadResult } from './assistant.tools';
+import { allowAllCatalog } from '../platform/catalog.fakes';
+import {
+  CatalogDenied,
+  type CatalogService,
+} from '../platform/catalog.service';
 
 const ID = '11111111-2222-4333-8444-555555555555';
 const JWT =
@@ -25,6 +30,7 @@ const call = (name: string, args: object, id = name) => ({
 
 /** Builds the service over in-memory fakes; `replies` are the model's turns in order. */
 function setup(opts: {
+  catalog?: CatalogService;
   replies?: Reply[];
   read?: (path: string) => ReadResult;
   upstreamError?: boolean;
@@ -83,6 +89,7 @@ function setup(opts: {
     audit as never,
     tenantDatabaseManager as never,
     config as never,
+    opts.catalog ?? allowAllCatalog(),
   );
   return { service, reads, sent, upstream, throttle, audits };
 }
@@ -98,6 +105,36 @@ const toolMessages = (sent: { messages: unknown[] }[]) =>
   );
 
 describe('AssistantService', () => {
+  it('is off for a tenant whose assistant staff turned off: 403, no model call, no reads', async () => {
+    const { service, upstream, reads } = setup({
+      catalog: {
+        ...allowAllCatalog(),
+        llmGate: () => Promise.reject(new CatalogDenied('assistant_disabled')),
+      } as unknown as CatalogService,
+    });
+    await expect(
+      service.chat(auth(), 'Bearer x', ask('hello')),
+    ).rejects.toMatchObject({
+      status: 403,
+      response: { decision: 'DENY', reason: 'assistant_disabled' },
+    });
+    expect(upstream.chat).not.toHaveBeenCalled();
+    expect(reads).toHaveLength(0);
+  });
+
+  it('fails closed when the catalog cannot be read', async () => {
+    const { service, upstream } = setup({
+      catalog: {
+        ...allowAllCatalog(),
+        llmGate: () => Promise.reject(new Error('control db down')),
+      } as unknown as CatalogService,
+    });
+    await expect(
+      service.chat(auth(), 'Bearer x', ask('hello')),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(upstream.chat).not.toHaveBeenCalled();
+  });
+
   it('says plainly when no model answers, and the console carries on', async () => {
     const { service } = setup({ upstreamError: true });
     await expect(

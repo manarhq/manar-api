@@ -32,6 +32,7 @@ import {
   CredentialBrokerService,
   type CredentialBrokerInvokeInput,
 } from './credential-broker.service';
+import { allowAllCatalog } from '../platform/catalog.fakes';
 
 /**
  * Unit tests for `CredentialBrokerService.applyPostCallAdvisories`'s
@@ -870,6 +871,7 @@ describe('LLM proxy and tool-result DLP classify identically', () => {
         getClient: vi.fn().mockResolvedValue({}),
       } as unknown as TenantDatabaseManager,
       { get: () => 200_000 } as unknown as ConfigService<AppConfig, true>,
+      allowAllCatalog(),
     );
     return { service, chat, analyzeDlp };
   }

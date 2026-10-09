@@ -8,6 +8,7 @@ import { RiskEngine } from '../risk/risk-engine.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
+import { CatalogService } from '../platform/catalog.service';
 import { parseToolActions } from './grant-triples';
 import {
   ENFORCEMENT_DEPENDENCY_UNAVAILABLE,
@@ -186,6 +187,7 @@ export class AuthorizationService {
     private readonly riskEngine: RiskEngine,
     private readonly auditService: AuditService,
     private readonly killSwitchService: KillSwitchService,
+    private readonly catalog: CatalogService,
   ) {}
 
   /**
@@ -481,6 +483,17 @@ export class AuthorizationService {
       { executionAlreadyCounted: redemption },
     );
     if (!liveness.ok) return deny(liveness.reason as string);
+
+    // Step 3b: the tenant's catalog (src/platform/catalog.*). The watcher's built-in connector
+    // needs the `watcher` feature and a pack-bound task needs its pack enabled by Manar staff.
+    // A catalog read failure throws, and `evaluateFailClosed` denies with
+    // `enforcement_dependency_unavailable`.
+    const catalogDeny = await this.catalog.taskDenyReason(
+      tenantId,
+      task,
+      request.toolId,
+    );
+    if (catalogDeny) return deny(catalogDeny);
 
     // Step 4.
     const forbidden = parseToolActions(task.forbiddenActions);
