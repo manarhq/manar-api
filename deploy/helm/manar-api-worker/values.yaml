@@ -115,7 +115,17 @@ livenessProbe:
 # deployment's Activities get slower.
 terminationGracePeriodSeconds: 120
 
+# Internal Prometheus listener (src/metrics/metrics.ts, METRICS_PORT).
+# Never routed by the ingress; the NetworkPolicy admits only the monitoring
+# namespace below.
+metrics:
+  port: 9464
+  scraperNamespaceSelector:
+    labels:
+      kubernetes.io/metadata.name: monitoring
+
 config:
+  METRICS_PORT: '9464'
   NODE_ENV: production
   LOG_LEVEL: info
   # Structurally required by the shared AppConfigSchema but never dialed

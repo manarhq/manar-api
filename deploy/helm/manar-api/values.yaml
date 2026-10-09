@@ -146,7 +146,17 @@ terminationGracePeriodSeconds: 45
 # deploy/docker-compose.yml runs locally, addressed here by their
 # Kubernetes Service name instead of the compose service name — override
 # per-environment as needed, e.g. a managed Postgres/Kafka's real host).
+# Internal Prometheus listener (src/metrics/metrics.ts, METRICS_PORT).
+# Never routed by the ingress; the NetworkPolicy admits only the monitoring
+# namespace below.
+metrics:
+  port: 9464
+  scraperNamespaceSelector:
+    labels:
+      kubernetes.io/metadata.name: monitoring
+
 config:
+  METRICS_PORT: '9464'
   NODE_ENV: production
   LOG_LEVEL: info
   # REQUIRED in production, and there is no safe default: with

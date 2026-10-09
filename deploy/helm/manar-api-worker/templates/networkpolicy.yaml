@@ -1,6 +1,6 @@
 {{/*
-No ingress rules at all — no Service, nothing ever initiates a connection
-to this pod (see values.yaml's chart doc comment and
+One ingress rule: Prometheus scraping the metrics port. Nothing else
+initiates a connection to this pod (see values.yaml's chart doc comment and
 docs/kubernetes.md). Egress is scoped to what WorkerAppModule actually
 calls at runtime, not the full structurally-required config surface.
 */}}
@@ -18,7 +18,15 @@ spec:
   policyTypes:
     - Ingress
     - Egress
-  ingress: []
+  ingress:
+    # Only Prometheus, on the metrics port (Temporal SDK exporter).
+    - ports:
+        - port: metrics
+          protocol: TCP
+      from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.metrics.scraperNamespaceSelector.labels | nindent 14 }}
   egress:
     - ports:
         - port: 53

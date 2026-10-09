@@ -20,6 +20,7 @@ import { TenantsConfigSchema } from '../tenants/tenants.config';
 import { LlmProxyConfigSchema } from '../agent-runtime/llm-proxy.config';
 import { PlatformConfigSchema } from '../platform/platform.config';
 import { FleetHeartbeatConfigSchema } from '../fleet-heartbeat/fleet-heartbeat.config';
+import { MetricsConfigSchema } from '../metrics/metrics';
 
 /**
  * Application-level environment schema.
@@ -64,7 +65,8 @@ export const AppConfigSchema = z
   .extend(TenantsConfigSchema.shape)
   .extend(LlmProxyConfigSchema.shape)
   .extend(PlatformConfigSchema.shape)
-  .extend(FleetHeartbeatConfigSchema.shape);
+  .extend(FleetHeartbeatConfigSchema.shape)
+  .extend(MetricsConfigSchema.shape);
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

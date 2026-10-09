@@ -22,6 +22,7 @@ import {
 } from './openfga-object-id.util';
 import { OpenFgaClientService } from './openfga-client.service';
 import type { AuthorizeRequest } from './authorize-request.validation';
+import { recordDecision } from '../metrics/metrics';
 
 type Verdict =
   | { decision: 'ALLOW' }
@@ -203,6 +204,7 @@ export class AuthorizationService {
     request: AuthorizeRequest,
     context: DecisionContext = { channel: 'AUTHORIZE' },
   ): Promise<AuthorizeDecision> {
+    const startedAt = process.hrtime.bigint();
     const evaluation = await this.evaluateFailClosed(
       tenantClient,
       tenantId,
@@ -218,6 +220,7 @@ export class AuthorizationService {
       context,
       evaluation,
       { stage: 'REQUEST' },
+      startedAt,
     );
   }
 
@@ -249,6 +252,7 @@ export class AuthorizationService {
     context: DecisionContext,
     grant: GrantCheck,
   ): Promise<AuthorizeDecision> {
+    const startedAt = process.hrtime.bigint();
     const evaluation = grant.valid
       ? await this.evaluateFailClosed(
           tenantClient,
@@ -269,6 +273,7 @@ export class AuthorizationService {
         stage: 'GRANT_REDEMPTION',
         grantId: grant.valid ? grant.grantId : undefined,
       },
+      startedAt,
     );
   }
 
@@ -306,6 +311,40 @@ export class AuthorizationService {
    * a decision it could execute under without a durable record of it.
    */
   private async commit(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    agentId: string,
+    request: AuthorizeRequest,
+    context: DecisionContext,
+    evaluation: Evaluation,
+    kind: DecisionRecordKind,
+    startedAt: bigint,
+  ): Promise<AuthorizeDecision> {
+    try {
+      const result = await this.commitAndAudit(
+        tenantClient,
+        tenantId,
+        agentId,
+        request,
+        context,
+        evaluation,
+        kind,
+      );
+      recordDecision(
+        startedAt,
+        result.decision,
+        'reason' in result ? result.reason : undefined,
+      );
+      return result;
+    } catch (error) {
+      // The decision could not be recorded: the caller gets a 503 and must
+      // not act, so it counts against availability, never as an ALLOW.
+      recordDecision(startedAt, 'ERROR', ENFORCEMENT_DEPENDENCY_UNAVAILABLE);
+      throw error;
+    }
+  }
+
+  private async commitAndAudit(
     tenantClient: TenantPrismaClient,
     tenantId: string,
     agentId: string,

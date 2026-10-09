@@ -44,6 +44,14 @@ spec:
     - ports:
         - port: agent-mtls
           protocol: TCP
+    # Prometheus scrape of the internal metrics listener, monitoring only.
+    - ports:
+        - port: metrics
+          protocol: TCP
+      from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.metrics.scraperNamespaceSelector.labels | nindent 14 }}
   egress:
     # DNS
     - ports:

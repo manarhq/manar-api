@@ -51,6 +51,9 @@ spec:
             - name: agent-mtls
               containerPort: {{ .Values.service.agentMtlsPort }}
               protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
           envFrom:
             - configMapRef:
                 name: {{ include "manar-api.fullname" . }}-config
