@@ -20,6 +20,7 @@ import type { TenantDatabaseManager } from '../database/tenant-database-manager.
 import type { SecretProvider } from '../database/secret-provider';
 import type { HttpToolAdapter } from './http-tool.adapter';
 import type { McpToolAdapter } from './mcp-tool.adapter';
+import type { GitLabToolAdapter } from './gitlab-tool.adapter';
 import type { MicrosoftToolAdapter } from './microsoft-tool.adapter';
 import type { ManarConnectorService } from './manar-connector.service';
 import type {
@@ -130,6 +131,7 @@ function makeService(options: {
   } as unknown as McpToolAdapter;
   const invokeMicrosoft = vi.fn().mockResolvedValue(options.toolResult);
   const invokeManar = vi.fn().mockResolvedValue(options.toolResult);
+  const invokeGitLab = vi.fn().mockResolvedValue(options.toolResult);
   const microsoftAdapter = {
     invoke: invokeMicrosoft,
   } as unknown as MicrosoftToolAdapter;
@@ -161,6 +163,7 @@ function makeService(options: {
       get: () => options.injectionBlockThreshold ?? 0.8,
     } as unknown as ConfigService<AppConfig, true>,
     { invoke: invokeManar } as unknown as ManarConnectorService,
+    { invoke: invokeGitLab } as unknown as GitLabToolAdapter,
   );
 
   return {
@@ -172,6 +175,7 @@ function makeService(options: {
     invokeHttp,
     invokeMicrosoft,
     invokeManar,
+    invokeGitLab,
   };
 }
 
@@ -523,6 +527,21 @@ describe('CredentialBrokerService protocol dispatch', () => {
     expect(invokeHttp).not.toHaveBeenCalled();
     expect(invokeMicrosoft).toHaveBeenCalledTimes(1);
     expect(invokeMicrosoft.mock.calls[0]![4]).toBe('resolved-secret');
+  });
+
+  it('sends a GITLAB tool to GitLabToolAdapter with the broker-resolved token, never to the HTTP adapter', async () => {
+    const { service, invokeHttp, invokeMicrosoft, invokeGitLab } = makeService({
+      toolResult: { success: true, data: [] },
+      tool: makeTool({ protocol: 'GITLAB' }),
+    });
+    const { tenantClient } = fakeTenantClient();
+
+    await service.invoke(tenantClient, baseInput);
+
+    expect(invokeHttp).not.toHaveBeenCalled();
+    expect(invokeMicrosoft).not.toHaveBeenCalled();
+    expect(invokeGitLab).toHaveBeenCalledTimes(1);
+    expect(invokeGitLab.mock.calls[0]![4]).toBe('resolved-secret');
   });
 });
 
