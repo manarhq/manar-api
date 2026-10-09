@@ -67,11 +67,10 @@ export const PolicyRuleSchema = z.object({
     }),
 
   /**
-   * Exact resource identifier to match, or `"*"` ("any resource for this
-   * tool/action") — mirrors `allowedResourceSelectors[].pattern`'s exact-
-   * or-wildcard convention (see docs/authorization-model.md's known
-   * resource-matching limitation, which applies here too: no glob/prefix
-   * matching this phase). Omitted entirely means the same as `"*"`.
+   * Exact resource identifier to match, `"*"` ("any resource for this
+   * tool/action"), or a prefix ending in `*` (`manar/demo-repo:*`, ADR-0012;
+   * see `resourcePatternMatches`). Task `allowedResourceSelectors` stay
+   * exact-or-`"*"`. Omitted entirely means the same as `"*"`.
    */
   resourcePattern: z.string().min(1).max(2048).default('*'),
 

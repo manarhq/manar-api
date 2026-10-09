@@ -39,7 +39,7 @@ export interface ToolRecord {
   vendor: string | null;
   description: string | null;
   baseEndpoint: string;
-  protocol: 'HTTP' | 'MCP' | 'MICROSOFT';
+  protocol: 'HTTP' | 'MCP' | 'MICROSOFT' | 'GITLAB';
   credentialReference: SecretReferenceDescriptor;
   enabled: boolean;
   metadata: unknown;

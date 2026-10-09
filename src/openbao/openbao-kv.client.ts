@@ -77,6 +77,34 @@ export class OpenBaoKvClient {
   }
 
   /**
+   * KV v1 (no versions, delete is permanent), for values that must not
+   * survive their deletion, such as an approval handover (ADR-0011). `path`
+   * includes the mount, e.g. `handover/<tenant>/<id>`. Reads and lists
+   * return `null` for a missing path; any other failure throws.
+   */
+  async readV1(path: string): Promise<Record<string, unknown> | null> {
+    return this.request<Record<string, unknown>>('GET', path, undefined, true);
+  }
+
+  async writeV1(path: string, data: Record<string, unknown>): Promise<void> {
+    await this.request('POST', path, data);
+  }
+
+  async deleteV1(path: string): Promise<void> {
+    await this.request('DELETE', path);
+  }
+
+  async listV1(path: string): Promise<string[]> {
+    const data = await this.request<{ keys?: string[] }>(
+      'GET',
+      `${path}?list=true`,
+      undefined,
+      true,
+    );
+    return data?.keys ?? [];
+  }
+
+  /**
    * Reads only the KV v2 metadata of `path` (never the secret value) and returns its
    * `custom_metadata`, or null when the path has none. Used for credential expiry dates that an
    * operator records with `bao kv metadata put -custom-metadata=expires_at=<ISO date> <path>`.
@@ -86,14 +114,15 @@ export class OpenBaoKvClient {
   ): Promise<Record<string, string> | null> {
     const response = await this.request<{
       custom_metadata?: Record<string, string> | null;
-    }>('GET', `${this.mountPath}/metadata/${path}`);
-    return response.custom_metadata ?? null;
+    } | null>('GET', `${this.mountPath}/metadata/${path}`, undefined, true);
+    return response?.custom_metadata ?? null;
   }
 
   private async request<T>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     apiPath: string,
     body?: unknown,
+    nullOn404 = false,
   ): Promise<T> {
     const response = await fetch(`${this.baseUrl}/v1/${apiPath}`, {
       method,
@@ -104,6 +133,10 @@ export class OpenBaoKvClient {
       body: body ? JSON.stringify(body) : undefined,
     });
 
+    if (nullOn404 && response.status === 404) {
+      await response.body?.cancel();
+      return null as T;
+    }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       this.logger.error(
@@ -118,6 +151,7 @@ export class OpenBaoKvClient {
       );
     }
 
+    if (response.status === 204) return undefined as T;
     const json = (await response.json()) as { data: T };
     return json.data;
   }

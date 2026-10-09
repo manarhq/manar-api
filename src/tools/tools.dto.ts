@@ -59,8 +59,8 @@ export class ToolSummaryDto {
   @ApiProperty()
   baseEndpoint!: string;
 
-  @ApiProperty({ enum: ['HTTP', 'MCP', 'MICROSOFT'] })
-  protocol!: 'HTTP' | 'MCP' | 'MICROSOFT';
+  @ApiProperty({ enum: ['HTTP', 'MCP', 'MICROSOFT', 'GITLAB'] })
+  protocol!: 'HTTP' | 'MCP' | 'MICROSOFT' | 'GITLAB';
 
   @ApiProperty()
   enabled!: boolean;

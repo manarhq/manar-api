@@ -221,6 +221,38 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /**
+   * Same upsert-by-`eventId` contract as `upsertAuditEvent`, for many
+   * documents in one Bulk request with one refresh. `audit:reindex` uses it:
+   * a refresh per document cost about 250 ms each on the CI runner's disk,
+   * so reindexing even a dozen events overran a 5 s test (pipeline 894), and
+   * a real tenant's history would take hours. Retrying the whole batch is
+   * safe because every item is keyed by `eventId`.
+   */
+  async bulkUpsertAuditEvents(documents: AuditEventDocument[]): Promise<void> {
+    if (documents.length === 0) return;
+    await this.ensureIndexExists();
+    await this.withRetry('bulkUpsertAuditEvents', async () => {
+      const response = await this.client.bulk({
+        refresh: true,
+        body: documents.flatMap((document) => [
+          { index: { _index: this.indexName, _id: document.eventId } },
+          document,
+        ]),
+      });
+      const body = response.body as {
+        errors: boolean;
+        items: { index?: { error?: { type?: string } } }[];
+      };
+      if (body.errors) {
+        const failed = body.items.filter((item) => item.index?.error);
+        throw new Error(
+          `OpenSearch bulk upsert failed for ${failed.length}/${documents.length} document(s): ${failed[0]?.index?.error?.type ?? 'unknown'}`,
+        );
+      }
+    });
+  }
+
   /** Fetches one document by `eventId` — used by tests and `audit:reindex`'s own verification. */
   async getById(eventId: string): Promise<AuditEventDocument | null> {
     try {

@@ -8,6 +8,8 @@ import { AuditReindexCommand } from './commands/audit-reindex.command';
 import { DemoSeedCommand } from './commands/demo-seed.command';
 import { TenantsMigrateCommand } from './commands/tenants-migrate.command';
 import { ManarConnectorRegisterCommand } from './commands/manar-connector-register.command';
+import { MicrosoftRegisterCommand } from './commands/microsoft-register.command';
+import { GitLabConnectorRegisterCommand } from './commands/gitlab-connector-register.command';
 import { FleetKeygenCommand } from './commands/fleet-keygen.command';
 import { FleetReportCommand } from './commands/fleet-report.command';
 import { FleetHeartbeatModule } from '../fleet-heartbeat/fleet-heartbeat.module';
@@ -46,6 +48,8 @@ import { FleetHeartbeatModule } from '../fleet-heartbeat/fleet-heartbeat.module'
     DemoSeedCommand,
     TenantsMigrateCommand,
     ManarConnectorRegisterCommand,
+    MicrosoftRegisterCommand,
+    GitLabConnectorRegisterCommand,
     FleetKeygenCommand,
     FleetReportCommand,
   ],
