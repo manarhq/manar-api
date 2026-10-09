@@ -16,6 +16,8 @@ import { PLATFORM_SWITCH_ID } from './platform-suspension';
 export const USAGE_MONTHS = 6;
 const QUARANTINE_HISTORY_DAYS = 30;
 const MAX_EXPIRIES = 64;
+/** Tenant audit chains written at once after a platform kill switch change. */
+export const AUDIT_CONCURRENCY = 8;
 
 export type ExpiryKind = 'agent_ca' | 'tls_server' | 'tool_credential';
 
@@ -51,6 +53,7 @@ function windowStart(now = new Date()): Date {
 export class PlatformOpsService {
   private readonly logger = new Logger(PlatformOpsService.name);
   private auditCache?: { at: number; summary: AuditChainSummary };
+  private auditChainQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly config: ConfigService<AppConfig, true>,
@@ -266,7 +269,21 @@ export class PlatformOpsService {
    * lives in the control DB, so this cannot share its transaction: a tenant that cannot be written
    * is logged by id and counted, and never undoes the stop.
    */
-  async auditPlatformSwitch(
+  auditPlatformSwitch(
+    eventType: AuditEventType,
+    caller: string,
+    data: Record<string, unknown>,
+  ): Promise<{ audited: number; failed: number }> {
+    // One change at a time, in order: an engage's events land before the release that follows,
+    // and two writes never race on a tenant chain's first event.
+    const run = this.auditChainQueue.then(() =>
+      this.writeTenantChains(eventType, caller, data),
+    );
+    this.auditChainQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async writeTenantChains(
     eventType: AuditEventType,
     caller: string,
     data: Record<string, unknown>,
@@ -277,7 +294,8 @@ export class PlatformOpsService {
     });
     let audited = 0;
     let failed = 0;
-    for (const { id } of rows) {
+    const queue = rows.map((r) => r.id);
+    const writeOne = async (id: string) => {
       try {
         const db = await this.tenants.getClient(id);
         const publish = await db.$transaction((tx) =>
@@ -300,7 +318,15 @@ export class PlatformOpsService {
           `platform kill switch change not written to tenant ${id} audit chain`,
         );
       }
-    }
+    };
+    // Bounded: a deployment with many tenants writes a few chains at a time, not all at once.
+    const worker = async () => {
+      for (let id = queue.shift(); id !== undefined; id = queue.shift())
+        await writeOne(id);
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(AUDIT_CONCURRENCY, rows.length) }, worker),
+    );
     return { audited, failed };
   }
 
