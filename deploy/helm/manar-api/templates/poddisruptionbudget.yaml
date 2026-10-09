@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "manar-api.fullname" . }}
+  labels:
+    {{- include "manar-api.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  # A pod that is not Ready can always be evicted, so a stuck rollout never blocks a drain.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "manar-api.selectorLabels" . | nindent 6 }}
+{{- end }}

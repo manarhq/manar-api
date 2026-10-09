@@ -170,15 +170,27 @@ Every `NetworkPolicy` in this repo is default-deny-by-omission
 nothing gets unrestricted egress, and DNS (CoreDNS/kube-dns) is always
 listed as its own explicit rule rather than assumed.
 
-Assumption baked into every chart (documented, not hidden): dependency
-pods are matched by `app.kubernetes.io/name` **within the policy's own
-namespace** — i.e., a single `manar` namespace holding manar-api's three
-Deployments plus Postgres/Keycloak/OpenBao/OpenFGA/Temporal/Kafka/Redis/
-OpenSearch/`manar-ai`/`demo-soc-tools`, matching the single-Docker-network
-posture `deploy/docker-compose.yml` already has locally. A real
-deployment that splits dependencies across namespaces needs a
-`namespaceSelector` added per egress rule — not done here since it isn't
-this repo's call to make about a cluster topology that doesn't exist yet.
+Namespaces and labels (October 2026, agreed with the platform repo
+`manar/manar-infra`): apps run in `manar-prod`, backing services in
+`manar-platform`, the Traefik ingress and CoreDNS in `kube-system`. Every rule
+selects its peer by namespace (`kubernetes.io/metadata.name`) plus the pod
+labels the backing-service operators set (CNPG `cnpg.io/cluster: manar-pg`,
+Strimzi `strimzi.io/cluster: manar-kafka`, the Valkey HAProxy
+`app.kubernetes.io/name: valkey-primary`, and `app.kubernetes.io/name` for the
+rest). The rules are maps keyed by name in `values.yaml` (`networkPolicy.ingress`,
+`networkPolicy.egress`), so an overlay switches one off with
+`networkPolicy.egress.<name>.enabled: false`, changes its peers or adds one
+without restating the others (Helm and Flux merge maps but replace lists).
+`keycloak-public` (Traefik websecure, 8443, on by default) carries Keycloak calls to the public issuer, which manar-infra rewrites in-cluster; `backingServiceTls.caSecretName` must name the internal CA Secret. Outbound HTTPS to public addresses (connectors,
+hosted model upstreams, a remote manar-fleet) is the `external-https` entry:
+TCP 443 to `0.0.0.0/0` minus private, link-local and CGNAT ranges. The
+namespace-wide default-deny is the platform repo's; these policies list what
+each app needs on its own.
+
+The worker's egress also allows Valkey, OpenFGA and Keycloak (requested by the
+platform owner): `WorkerAppModule` imports the kill-switch, policy, tools,
+approvals and webhooks modules, and allowing those three is cheaper than
+proving on every change that none of them reach a client.
 
 ## Secrets
 

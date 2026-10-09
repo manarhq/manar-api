@@ -30,6 +30,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "manar-api.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
       {{/*
       Room for the preStop sleep + the app's own shutdown hooks
       (src/main.ts's enableGracefulShutdown) to finish before SIGKILL. Must
@@ -59,6 +60,10 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.httpPort | quote }}
+            {{- if .Values.backingServiceTls.caSecretName }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/manar/backing-service-ca/{{ .Values.backingServiceTls.caKey }}
+            {{- end }}
           {{- if gt (int .Values.preStopSleepSeconds) 0 }}
           {{/*
           Delays SIGTERM reaching the process so Fastify keeps serving
@@ -92,12 +97,22 @@ spec:
             - name: agent-mtls-certs
               mountPath: /app/deploy/openbao
               readOnly: true
+            {{- with .Values.backingServiceTls.caSecretName }}
+            - name: backing-service-ca
+              mountPath: /etc/manar/backing-service-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
         - name: agent-mtls-certs
           secret:
             secretName: {{ include "manar-api.agentMtlsCertsSecretName" . }}
+        {{- with .Values.backingServiceTls.caSecretName }}
+        - name: backing-service-ca
+          secret:
+            secretName: {{ . }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
