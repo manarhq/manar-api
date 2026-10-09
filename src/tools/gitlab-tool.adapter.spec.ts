@@ -521,6 +521,27 @@ describe('GitLabToolAdapter (against the DEMO FIXTURE)', () => {
       });
     });
 
+    it('a merge waits while GitLab is still checking mergeability', async () => {
+      await invoke('gitlab.branch.create', `${P}:feature/c`, { ref: 'main' });
+      await invoke('gitlab.mr.create', P, {
+        sourceBranch: 'feature/c',
+        targetBranch: 'main',
+        title: 't',
+      });
+      const head = (
+        (await invoke('gitlab.mr.get', `${P}!1`)).data as { sha: string }
+      ).sha;
+      await control('checking', { reads: 1 });
+      const merged = await invoke('gitlab.mr.merge', `${P}!1`, {
+        sha: head,
+        targetBranch: 'main',
+      });
+      expect(merged).toMatchObject({
+        success: true,
+        data: { state: 'merged' },
+      });
+    });
+
     it('a branch delete is bound to the tip commit the person saw', async () => {
       await invoke('gitlab.branch.create', `${P}:old`, { ref: 'main' });
       expect(

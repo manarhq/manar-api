@@ -68,6 +68,8 @@ class FixtureState {
   nextNote = 1;
   /** Test control: retarget this MR just before its next merge runs (a race a precheck cannot see). */
   retargetOnMerge: { iid: number; targetBranch: string } | null = null;
+  /** Test control: report `checking` merge status for this many more reads (GitLab right after a push). */
+  checkingReads = 0;
 
   constructor() {
     this.reset();
@@ -90,6 +92,7 @@ class FixtureState {
     this.faults.clear();
     this.nextNote = 1;
     this.retargetOnMerge = null;
+    this.checkingReads = 0;
   }
 }
 
@@ -154,6 +157,10 @@ export default function gitlabFixtureRoutes(
     variables: [...state.variables.keys()],
   }));
   fastify.get('/_fixture/requests', () => ({ requests: state.requests }));
+  fastify.post('/_fixture/checking', (request) => {
+    state.checkingReads = (request.body as { reads: number }).reads;
+    return { status: 'armed' };
+  });
   fastify.post('/_fixture/retarget-on-merge', (request) => {
     state.retargetOnMerge = request.body as {
       iid: number;
@@ -205,7 +212,12 @@ export default function gitlabFixtureRoutes(
         ...mr,
         notes: undefined,
         sha: state.branches.get(mr.source_branch)?.sha ?? null,
-        detailed_merge_status: mr.state === 'opened' ? 'mergeable' : 'not_open',
+        detailed_merge_status:
+          mr.state !== 'opened'
+            ? 'not_open'
+            : state.checkingReads-- > 0
+              ? 'checking'
+              : 'mergeable',
         author: {
           username: 'project_bot',
           avatar_url: 'https://gitlab.fixture/a.png',

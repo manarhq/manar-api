@@ -51,6 +51,8 @@ export interface GitLabActionDef {
    */
   precheck?: {
     request(target: GitLabTarget): GitLabRequest;
+    /** True while GitLab is still computing the state the check needs; the read is repeated (bounded). */
+    settling?(found: unknown): boolean;
     refuse(
       found: unknown,
       target: GitLabTarget,
@@ -452,6 +454,15 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
     },
     precheck: {
       request: (t) => ({ method: 'GET', path: `merge_requests/${t.iid}` }),
+      // Right after a push GitLab answers 405 to a merge until it has
+      // computed mergeability; wait for that instead of spending the grant.
+      settling: (found) =>
+        ['checking', 'unchecked', 'preparing', 'approvals_syncing'].includes(
+          String(
+            (found as { detailed_merge_status?: unknown } | undefined)
+              ?.detailed_merge_status,
+          ),
+        ),
       refuse: (found, _t, p) => {
         const mr = found as
           | { state?: unknown; sha?: unknown; target_branch?: unknown }

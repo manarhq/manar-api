@@ -33,12 +33,17 @@ import type { ToolActionRecord, ToolRecord } from './tool-registry.service';
  */
 const GitLabToolMetadataSchema = z.object({
   project: z.string().regex(GITLAB_PROJECT),
-  requestTimeoutMs: z.number().int().min(100).max(120_000).default(15_000),
+  // GitLab merges can take tens of seconds on a busy instance (a 15 s deadline
+  // turned a live merge into UNKNOWN on 9 Oct 2026).
+  requestTimeoutMs: z.number().int().min(100).max(120_000).default(60_000),
 });
 type GitLabToolMetadata = z.infer<typeof GitLabToolMetadataSchema>;
 
 const READ_MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 200;
+/** How long a precheck waits for GitLab to finish computing a state (10 x 1 s). */
+const SETTLE_MAX_READS = 10;
+const SETTLE_DELAY_MS = 1_000;
 /** Errors that prove the request never left this process. */
 const NOT_SENT_ERROR_CODES = new Set([
   'ECONNREFUSED',
@@ -159,7 +164,17 @@ export class GitLabToolAdapter implements ToolProtocolAdapter {
     const ctx = { tool, metadata: metadata.data, credential, name: def.name };
 
     if (def.precheck) {
-      const checked = await this.send(ctx, def.precheck.request(target), false);
+      let checked = await this.send(ctx, def.precheck.request(target), false);
+      for (
+        let wait = 0;
+        wait < SETTLE_MAX_READS &&
+        checked.kind === 'ok' &&
+        def.precheck.settling?.(checked.body);
+        wait += 1
+      ) {
+        await sleep(SETTLE_DELAY_MS);
+        checked = await this.send(ctx, def.precheck.request(target), false);
+      }
       if (checked.kind === 'final') return checked.result;
       const missing = checked.kind === 'status' && checked.status === 404;
       if (checked.kind !== 'ok' && !missing) {
