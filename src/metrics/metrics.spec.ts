@@ -44,9 +44,14 @@ describe('metrics', () => {
     const histogram = await registry
       .getSingleMetric('manar_authorization_decision_duration_seconds')
       ?.get();
-    const count = histogram?.values.find(
-      (v) =>
-        String(v.metricName).endsWith('_count') && v.labels.decision === 'DENY',
+    // Histogram values carry metricName (_bucket, _sum, _count) at runtime.
+    const values = (histogram?.values ?? []) as {
+      metricName?: string;
+      labels: Record<string, unknown>;
+      value: number;
+    }[];
+    const count = values.find(
+      (v) => v.metricName?.endsWith('_count') && v.labels.decision === 'DENY',
     );
     expect(count?.value).toBeGreaterThan(0);
   });
