@@ -13,21 +13,21 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 
 ## Commands (verified 2026-09-17)
 
-| Task                  | Command                                                                                                    | Baseline                                           |
-| --------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| Backing services      | `pnpm infra:up` (Compose `deploy/docker-compose.yml`) then `pnpm infra:openbao-init`                       | all healthy                                        |
-| Lint                  | `pnpm lint` (gating, no auto-fix; `pnpm lint:fix` to fix)                                                  | clean on tracked source                            |
-| Typecheck             | `pnpm typecheck` (builds `packages/manar-ai-client` and `packages/sdk-node` first, then api + scripts)     | pass                                               |
-| Unit tests            | `pnpm test` / `pnpm test:cov`                                                                              | 36 files, 318 tests; lines 57.35%, branches 39.75% |
-| E2E tests             | `pnpm test:e2e` (needs the stack and OpenBao PKI; stop any host worker first, the specs start their own)   | 27 files, 168 tests                                |
-| Build                 | `pnpm build`                                                                                               | pass                                               |
-| API                   | `pnpm start:dev` / `pnpm start:prod` — HTTP `:3000`, agent mTLS `:3443`                                    |                                                    |
-| Temporal worker       | `pnpm worker:dev` / `pnpm worker:prod`                                                                     |                                                    |
-| OpenFGA model tests   | `pnpm fga:test`                                                                                            |                                                    |
-| Prisma client         | `pnpm db:generate` (runs on install)                                                                       |                                                    |
-| Control DB migrations | `pnpm db:migrate:control` (dev) / `pnpm db:migrate:control:deploy`                                         | 3 migrations                                       |
-| Tenant DB migrations  | `pnpm manar tenants:migrate` (every ACTIVE tenant; run on every upgrade, after the control migrations)     |                                                    |
-| Demo reseed           | `pnpm manar demo:seed` (idempotent; only needed after wiping the OpenBao volume)                           |                                                    |
+| Task                  | Command                                                                                                  | Baseline                                           |
+| --------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Backing services      | `pnpm infra:up` (Compose `deploy/docker-compose.yml`) then `pnpm infra:openbao-init`                     | all healthy                                        |
+| Lint                  | `pnpm lint` (gating, no auto-fix; `pnpm lint:fix` to fix)                                                | clean on tracked source                            |
+| Typecheck             | `pnpm typecheck` (builds `packages/manar-ai-client` and `packages/sdk-node` first, then api + scripts)   | pass                                               |
+| Unit tests            | `pnpm test` / `pnpm test:cov`                                                                            | 36 files, 318 tests; lines 57.35%, branches 39.75% |
+| E2E tests             | `pnpm test:e2e` (needs the stack and OpenBao PKI; stop any host worker first, the specs start their own) | 27 files, 168 tests                                |
+| Build                 | `pnpm build`                                                                                             | pass                                               |
+| API                   | `pnpm start:dev` / `pnpm start:prod` — HTTP `:3000`, agent mTLS `:3443`                                  |                                                    |
+| Temporal worker       | `pnpm worker:dev` / `pnpm worker:prod`                                                                   |                                                    |
+| OpenFGA model tests   | `pnpm fga:test`                                                                                          |                                                    |
+| Prisma client         | `pnpm db:generate` (runs on install)                                                                     |                                                    |
+| Control DB migrations | `pnpm db:migrate:control` (dev) / `pnpm db:migrate:control:deploy`                                       | 3 migrations                                       |
+| Tenant DB migrations  | `pnpm manar tenants:migrate` (every ACTIVE tenant; run on every upgrade, after the control migrations)   |                                                    |
+| Demo reseed           | `pnpm manar demo:seed` (idempotent; only needed after wiping the OpenBao volume)                         |                                                    |
 
 **OpenBao is persistent locally** (file storage on the `manar-openbao-data` volume;
 `deploy/openbao-entrypoint.sh` inits once and unseals on every start). Restarts keep the CA and
@@ -100,6 +100,6 @@ Longer per-area docs are in `docs/*.md`. Treat them as leads; the code and tests
 
 - ADRs: `docs/adr/ADR-NNNN-<slug>.md` from `ADR-0000-template.md`. Written: ADR-0001 (the
   thesis), ADR-0002 (LLM proxy, tool manifest, governed MCP server; its "Agent contract" section is the agent API), ADR-0003 (capability token format, deferred), ADR-0004 (Microsoft connectors and credentials),
-  ADR-0005 (Cedar, proposed and conditional), ADR-0006 (decision record commits with its reservation; grant redemption re-decides), ADR-0007 (an MCP client completes an approved action by calling the same tool again), ADR-0008 (read-only console assistant), ADR-0009 (watcher: agent quarantine, built-in Manar connector, human-only release), ADR-0010 (platform API for manar-fleet and the signed heartbeat). Workspace ADR-001…009 in `../docs/adr/` remain the cross-repo record.
+  ADR-0005 (Cedar, proposed and conditional), ADR-0006 (decision record commits with its reservation; grant redemption re-decides), ADR-0007 (an MCP client completes an approved action by calling the same tool again), ADR-0008 (read-only console assistant), ADR-0009 (watcher: agent quarantine, built-in Manar connector, human-only release), ADR-0010 (platform API for manar-fleet and the signed heartbeat), ADR-0013 (per-tenant catalog: feature flags, packs, LLM route, enforced fail closed). Workspace ADR-001…009 in `../docs/adr/` remain the cross-repo record.
 - CI: GitLab (`.gitlab-ci.yml`): lint, typecheck, unit (PostgreSQL + Redis), e2e (full services),
   build, images, gitleaks, semgrep, Trivy, SBOM, Helm render + kubeconform + kube-linter.
