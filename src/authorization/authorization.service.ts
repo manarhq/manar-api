@@ -158,8 +158,9 @@ function correlationIdForRecord(): string {
  * state, safe to expose). Step 5's DENY is deliberately generic
  * (`not_authorized`) — never surfacing *why* OpenFGA denied, so a caller
  * can't probe the shape of the authorization model. An OpenFGA outage
- * (network failure, wrong port, container down) is caught and treated as
- * DENY too (`authorization_backend_unavailable`) — never as ALLOW, and
+ * (network failure, wrong port, container down, or no answer within
+ * OPENFGA_CHECK_TIMEOUT_MS) is caught and treated as DENY with the product
+ * rule's reason (`enforcement_dependency_unavailable`) — never as ALLOW, and
  * never as an unhandled 5xx that could be mistaken for anything but a
  * definite non-ALLOW. Steps 6-7 (Phase 6) are inserted strictly *after*
  * Phase 5's own OpenFGA check and *before* its `executionCount` increment
@@ -565,7 +566,7 @@ export class AuthorizationService {
         `OpenFGA check failed for task "${task.id}" — failing closed (DENY)`,
         error instanceof Error ? error.stack : undefined,
       );
-      return deny('authorization_backend_unavailable');
+      return deny(ENFORCEMENT_DEPENDENCY_UNAVAILABLE);
     }
     const openFgaResult = { exactAllowed, wildcardAllowed };
     if (!exactAllowed && !wildcardAllowed) {

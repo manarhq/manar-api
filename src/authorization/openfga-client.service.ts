@@ -118,10 +118,31 @@ export class OpenFgaClientService implements OnModuleInit {
 
   /** A single relationship check — throws on any transport/server failure, deliberately not swallowed here (see class doc comment). */
   async check(tuple: TupleKey): Promise<boolean> {
-    const result = await this.requireClient().check(tuple, {
-      authorizationModelId: this.requireModelId(),
+    const timeoutMs = this.configService.get('OPENFGA_CHECK_TIMEOUT_MS', {
+      infer: true,
     });
-    return result.allowed ?? false;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const result = await Promise.race([
+        this.requireClient().check(tuple, {
+          authorizationModelId: this.requireModelId(),
+          // One quick retry for a blip; the race below bounds the total.
+          retryParams: { maxRetry: 1, minWaitInMs: 50 },
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(`OpenFGA check timed out after ${timeoutMs} ms`),
+              ),
+            timeoutMs,
+          );
+        }),
+      ]);
+      return result.allowed ?? false;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private requireClient(): OpenFgaClient {
