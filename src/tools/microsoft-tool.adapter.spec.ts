@@ -10,9 +10,13 @@ import {
   type MicrosoftFixtureOptions,
 } from '../../packages/demo-soc-tools/src/microsoft/fixture';
 import {
+  FIXTURE_DYNAMIC_GROUP_ID,
+  FIXTURE_GROUP_ID,
   FIXTURE_INCIDENT_ID,
   FIXTURE_MACHINE_ID,
+  FIXTURE_SECOND_USER_ID,
   FIXTURE_USER_ID,
+  FIXTURE_USER_UPN,
 } from '../../packages/demo-soc-tools/src/microsoft/seed-data';
 import { findMicrosoftAction, MICROSOFT_ACTIONS } from './microsoft-actions';
 import { MicrosoftToolAdapter } from './microsoft-tool.adapter';
@@ -138,6 +142,7 @@ describe('MicrosoftToolAdapter (against the DEMO FIXTURE)', () => {
     for (const def of MICROSOFT_ACTIONS) {
       expect(def.permissions.length).toBeGreaterThan(0);
       if (def.destructive) expect(def.mutating).toBe(true);
+      expect(['build', 'run'].filter((k) => k in def)).toHaveLength(1);
     }
   });
 
@@ -355,7 +360,7 @@ describe('MicrosoftToolAdapter (against the DEMO FIXTURE)', () => {
       });
     });
 
-    it('resets the password to a random value that is never returned', async () => {
+    it('resets the password to a temporary value handed over for the approver only, never in data', async () => {
       const result = await invoke(
         graph(),
         'entra.user.password.reset',
@@ -371,9 +376,10 @@ describe('MicrosoftToolAdapter (against the DEMO FIXTURE)', () => {
         path: `/graph/v1.0/users/${FIXTURE_USER_ID}`,
       });
       expect(profile.forceChangePasswordNextSignIn).toBe(true);
-      expect(profile.password.length).toBeGreaterThanOrEqual(32);
+      expect(profile.password.length).toBeGreaterThanOrEqual(24);
       expect(result.success).toBe(true);
-      expect(JSON.stringify(result)).not.toContain(profile.password);
+      expect(result.handover).toEqual({ temporaryPassword: profile.password });
+      expect(JSON.stringify(result.data)).not.toContain(profile.password);
 
       await invoke(graph(), 'entra.user.password.reset', FIXTURE_USER_ID);
       const again = (await lastCall()).body?.passwordProfile as {
@@ -417,6 +423,258 @@ describe('MicrosoftToolAdapter (against the DEMO FIXTURE)', () => {
       for (const r of results) expect(r.success).toBe(false);
       expect(results.at(-2)?.errorMessage).toBe('unknown_microsoft_action');
       expect(await requests()).toEqual([]);
+    });
+  });
+
+  describe('helpdesk and joiner/leaver actions', () => {
+    interface State {
+      users: {
+        id: string;
+        userPrincipalName: string;
+        accountEnabled: boolean;
+        sessionsRevokedAt: string | null;
+        authMethods: { '@odata.type': string }[];
+      }[];
+      groups: { id: string; members: string[] }[];
+    }
+    const state = () => fixtureGet<State>('state');
+    const user = async (id: string) =>
+      (await state()).users.find((u) => u.id === id)!;
+    const members = async (groupId: string) =>
+      (await state()).groups.find((g) => g.id === groupId)!.members;
+    const mutations = async () =>
+      (await requests()).filter(
+        (r) => r.method !== 'GET' && !r.path.startsWith('/login/'),
+      );
+    const lastCall = async () => (await requests()).at(-1)!;
+
+    it('mfa.reset removes every method but the password, phone last, then revokes sessions', async () => {
+      const result = await invoke(
+        graph(),
+        'entra.user.mfa.reset',
+        FIXTURE_USER_ID,
+      );
+      expect(result).toMatchObject({
+        success: true,
+        data: {
+          methodsRemoved: ['microsoftAuthenticatorMethods', 'phoneMethods'],
+          methodsKept: ['passwordAuthenticationMethod'],
+          sessionsRevoked: true,
+        },
+      });
+      expect((await mutations()).map((r) => `${r.method} ${r.path}`)).toEqual([
+        expect.stringMatching(/^DELETE .*\/microsoftAuthenticatorMethods\//),
+        expect.stringMatching(/^DELETE .*\/phoneMethods\//),
+        `POST /graph/v1.0/users/${FIXTURE_USER_ID}/revokeSignInSessions`,
+      ]);
+      const after = await user(FIXTURE_USER_ID);
+      expect(after.authMethods.map((m) => m['@odata.type'])).toEqual([
+        '#microsoft.graph.passwordAuthenticationMethod',
+      ]);
+      expect(after.sessionsRevokedAt).not.toBeNull();
+    });
+
+    it('mfa.reset that fails after removing a method is a partial, UNKNOWN outcome', async () => {
+      await fault({
+        method: 'DELETE',
+        path: `/graph/v1.0/users/${FIXTURE_USER_ID}/authentication/phoneMethods/3179e48a-750b-4051-897c-87b9720928f7`,
+        status: 403,
+      });
+      const result = await invoke(
+        graph(),
+        'entra.user.mfa.reset',
+        FIXTURE_USER_ID,
+      );
+      expect(result).toEqual({
+        success: false,
+        outcomeUnknown: true,
+        errorMessage:
+          'partial: done microsoftAuthenticatorMethods; phoneMethods failed (HTTP 403 FixtureInjectedFault)',
+      });
+    });
+
+    it('mfa.reset that cannot list methods fails definitely, with nothing changed', async () => {
+      const result = await invoke(
+        graph(),
+        'entra.user.mfa.reset',
+        'nobody@fixture.example',
+      );
+      expect(result).toEqual({
+        success: false,
+        errorMessage: 'HTTP 404 Request_ResourceNotFound',
+      });
+      expect(await mutations()).toEqual([]);
+    });
+
+    it('unlock re-enables the account', async () => {
+      await invoke(graph(), 'entra.user.disable', FIXTURE_USER_ID);
+      const result = await invoke(
+        graph(),
+        'entra.user.unlock',
+        FIXTURE_USER_ID,
+      );
+      expect(result.success).toBe(true);
+      expect((await user(FIXTURE_USER_ID)).accountEnabled).toBe(true);
+    });
+
+    it('lists, adds and removes group members, resolving a UPN to its object id', async () => {
+      const listed = await invoke(
+        graph(),
+        'entra.group.members.list',
+        FIXTURE_GROUP_ID,
+      );
+      expect(listed).toMatchObject({
+        success: true,
+        data: { value: [{ id: FIXTURE_USER_ID }] },
+      });
+
+      const membership = `${FIXTURE_GROUP_ID}:lee.gu@fixture.example`;
+      const added = await invoke(graph(), 'entra.group.member.add', membership);
+      expect(added).toMatchObject({
+        success: true,
+        data: {
+          added: true,
+          groupId: FIXTURE_GROUP_ID,
+          userId: FIXTURE_SECOND_USER_ID,
+        },
+      });
+      expect(await lastCall()).toMatchObject({
+        method: 'POST',
+        path: `/graph/v1.0/groups/${FIXTURE_GROUP_ID}/members/$ref`,
+        body: {
+          '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${FIXTURE_SECOND_USER_ID}`,
+        },
+      });
+      expect(await members(FIXTURE_GROUP_ID)).toContain(FIXTURE_SECOND_USER_ID);
+
+      // Graph refuses a second add; nothing changed, so a definite FAILURE.
+      expect(
+        await invoke(graph(), 'entra.group.member.add', membership),
+      ).toEqual({
+        success: false,
+        errorMessage: 'HTTP 400 Request_BadRequest',
+      });
+
+      const removed = await invoke(
+        graph(),
+        'entra.group.member.remove',
+        `${FIXTURE_GROUP_ID}:${FIXTURE_SECOND_USER_ID}`,
+      );
+      expect(removed).toMatchObject({ success: true, data: { removed: true } });
+      expect(await members(FIXTURE_GROUP_ID)).not.toContain(
+        FIXTURE_SECOND_USER_ID,
+      );
+    });
+
+    it('rejects a membership resource without both a group id and a user', async () => {
+      const results = await Promise.all(
+        [
+          FIXTURE_GROUP_ID,
+          `not-a-guid:${FIXTURE_USER_ID}`,
+          `${FIXTURE_GROUP_ID}:../x`,
+        ].map((r) => invoke(graph(), 'entra.group.member.add', r)),
+      );
+      for (const r of results) expect(r.success).toBe(false);
+      expect(await requests()).toEqual([]);
+    });
+
+    it('create makes a disabled user with a temporary password for the approver only', async () => {
+      const upn = 'new.joiner@fixture.example';
+      const result = await invoke(graph(), 'entra.user.create', upn, {
+        displayName: 'New Joiner',
+        department: 'IT',
+      });
+      const call = await lastCall();
+      expect(call).toMatchObject({
+        method: 'POST',
+        path: '/graph/v1.0/users',
+        body: {
+          userPrincipalName: upn,
+          mailNickname: 'new.joiner',
+          displayName: 'New Joiner',
+          accountEnabled: false,
+          department: 'IT',
+          passwordProfile: { forceChangePasswordNextSignIn: true },
+        },
+      });
+      const password = (call.body?.passwordProfile as { password: string })
+        .password;
+      expect(result).toMatchObject({
+        success: true,
+        data: { userPrincipalName: upn, accountEnabled: false },
+        handover: { temporaryPassword: password },
+      });
+      expect(JSON.stringify(result.data)).not.toContain(password);
+      expect(
+        (await state()).users.find((u) => u.userPrincipalName === upn),
+      ).toBeDefined();
+    });
+
+    it('create needs a UPN resource and a display name', async () => {
+      const results = await Promise.all([
+        invoke(graph(), 'entra.user.create', 'no-domain', { displayName: 'x' }),
+        invoke(graph(), 'entra.user.create', 'a@fixture.example', {}),
+        invoke(graph(), 'entra.user.create', 'a@fixture.example', {
+          displayName: 'x',
+          passwordProfile: { password: 'chosen-by-the-agent' },
+        }),
+      ]);
+      for (const r of results) expect(r.success).toBe(false);
+      expect(await requests()).toEqual([]);
+    });
+
+    it('offboard disables, revokes sessions, leaves static groups, keeps dynamic ones and declares the handover', async () => {
+      const result = await invoke(
+        graph(),
+        'entra.user.offboard',
+        FIXTURE_USER_UPN,
+      );
+      expect(result).toMatchObject({
+        success: true,
+        data: {
+          userId: FIXTURE_USER_ID,
+          disabled: true,
+          sessionsRevoked: true,
+          groupsRemoved: [FIXTURE_GROUP_ID],
+          groupsKeptDynamic: [FIXTURE_DYNAMIC_GROUP_ID],
+          handover: {
+            mailbox: expect.stringMatching(/^declared-only/) as unknown,
+            oneDrive: expect.stringMatching(/^declared-only/) as unknown,
+          },
+        },
+      });
+      const after = await user(FIXTURE_USER_ID);
+      expect(after.accountEnabled).toBe(false);
+      expect(after.sessionsRevokedAt).not.toBeNull();
+      expect(await members(FIXTURE_GROUP_ID)).not.toContain(FIXTURE_USER_ID);
+      expect(await members(FIXTURE_DYNAMIC_GROUP_ID)).toContain(
+        FIXTURE_USER_ID,
+      );
+    });
+
+    it('offboard that fails after disabling is a partial, UNKNOWN outcome and goes no further', async () => {
+      await fault({
+        method: 'POST',
+        path: `/graph/v1.0/users/${FIXTURE_USER_ID}/revokeSignInSessions`,
+        status: 503,
+      });
+      const result = await invoke(
+        graph(),
+        'entra.user.offboard',
+        FIXTURE_USER_ID,
+      );
+      expect(result).toEqual({
+        success: false,
+        outcomeUnknown: true,
+        errorMessage:
+          'partial: done disable; sessions.revoke failed (HTTP 503 FixtureInjectedFault)',
+      });
+      expect(await members(FIXTURE_GROUP_ID)).toContain(FIXTURE_USER_ID);
+      expect(
+        (await mutations()).filter((r) =>
+          r.path.endsWith('revokeSignInSessions'),
+        ),
+      ).toHaveLength(1);
     });
   });
 

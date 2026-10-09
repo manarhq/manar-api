@@ -6,6 +6,7 @@ import { McpToolAdapter } from './mcp-tool.adapter';
 import { MicrosoftToolAdapter } from './microsoft-tool.adapter';
 import { ManarConnectorService } from './manar-connector.service';
 import { ToolRegistryService } from './tool-registry.service';
+import { HandoverStore } from './handover.store';
 
 /**
  * Providers-only module (no controller — see `ToolInvokeModule` for the
@@ -27,7 +28,8 @@ import { ToolRegistryService } from './tool-registry.service';
     MicrosoftToolAdapter,
     ManarConnectorService,
     CredentialBrokerService,
+    HandoverStore,
   ],
-  exports: [ToolRegistryService, CredentialBrokerService],
+  exports: [ToolRegistryService, CredentialBrokerService, HandoverStore],
 })
 export class ToolsModule {}

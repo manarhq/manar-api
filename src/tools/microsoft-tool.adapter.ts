@@ -17,6 +17,7 @@ import { validateAgainstSchema } from './json-schema-validator.util';
 import {
   findMicrosoftAction,
   MICROSOFT_SCOPES,
+  type MicrosoftCall,
   type MicrosoftRequest,
 } from './microsoft-actions';
 import type {
@@ -145,13 +146,11 @@ export class MicrosoftToolAdapter implements ToolProtocolAdapter {
         errorMessage: `Invalid params for action "${def.name}": ${validation.errors}`,
       };
     }
-    const request = def.build(
-      resource,
-      (params ?? {}) as Record<string, unknown>,
-    );
+    const values = (params ?? {}) as Record<string, unknown>;
 
     // The catalog flags are the truth for retry safety; the row is only a
-    // copy of them, so either one saying "side effect" means one attempt.
+    // copy of them, so either one saying "side effect" means one attempt
+    // (for every step but a GET inside a multi-step action).
     const sideEffecting =
       def.mutating || def.destructive || action.mutating || action.destructive;
 
@@ -165,15 +164,21 @@ export class MicrosoftToolAdapter implements ToolProtocolAdapter {
       return { success: false, errorMessage: 'token_acquisition_failed' };
     }
 
-    return this.send(
-      tool,
-      def.name,
-      request,
-      accessToken,
-      sideEffecting,
-      metadata.data,
-      credential,
-    );
+    const call: MicrosoftCall = (request) =>
+      this.send(
+        tool,
+        def.name,
+        request,
+        accessToken,
+        sideEffecting && request.method !== 'GET',
+        metadata.data,
+        credential,
+      );
+    if (def.run) return def.run(resource, values, call);
+    if (!def.build) {
+      return { success: false, errorMessage: 'unknown_microsoft_action' };
+    }
+    return call(def.build(resource, values));
   }
 
   private async send(

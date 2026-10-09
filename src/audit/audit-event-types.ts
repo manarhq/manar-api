@@ -29,6 +29,8 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_REUSED: 'approval.reused',
   /** ADR-0007: an open approval was expired because a fresh decision scored higher or changed policy version or reason. */
   APPROVAL_SUPERSEDED: 'approval.superseded',
+  /** ADR-0011: the approver collected the value an approved action produced for them (field names only). */
+  APPROVAL_HANDOVER_COLLECTED: 'approval.handover_collected',
 
   TOOL_INVOCATION_STARTED: 'tool.invocation.started',
   TOOL_INVOCATION_COMPLETED: 'tool.invocation.completed',

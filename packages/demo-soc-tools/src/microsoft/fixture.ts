@@ -64,6 +64,7 @@ interface RecordedRequest {
 
 class FixtureState {
   users = new Map<string, FixtureSeed['users'][number]>();
+  groups = new Map<string, FixtureSeed['groups'][number]>();
   riskyUsers = new Map<string, FixtureSeed['riskyUsers'][number]>();
   machines = new Map<string, FixtureSeed['machines'][number]>();
   incidents: FixtureSeed['incidents'] = [];
@@ -83,6 +84,7 @@ class FixtureState {
   reset(): void {
     const seed = seedData();
     this.users = new Map(seed.users.map((u) => [u.id, u]));
+    this.groups = new Map(seed.groups.map((g) => [g.id, g]));
     this.riskyUsers = new Map(seed.riskyUsers.map((u) => [u.id, u]));
     this.machines = new Map(seed.machines.map((m) => [m.id, m]));
     this.incidents = seed.incidents;
@@ -191,6 +193,7 @@ export default function microsoftFixtureRoutes(
   });
   fastify.get('/_fixture/state', () => ({
     users: [...state.users.values()],
+    groups: [...state.groups.values()],
     riskyUsers: [...state.riskyUsers.values()],
     isolatedMachineIds: [...state.isolated],
     machineActions: state.machineActions,
@@ -310,6 +313,139 @@ export default function microsoftFixtureRoutes(
             'https://graph.microsoft.com/v1.0/$metadata#Edm.Boolean',
           value: true,
         };
+      });
+
+      graph.post('/users', (request, reply) => {
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const upn = body.userPrincipalName;
+        const profile = body.passwordProfile as
+          | { password?: unknown; forceChangePasswordNextSignIn?: unknown }
+          | undefined;
+        if (
+          typeof upn !== 'string' ||
+          typeof body.displayName !== 'string' ||
+          typeof body.mailNickname !== 'string' ||
+          typeof body.accountEnabled !== 'boolean' ||
+          typeof profile?.password !== 'string'
+        ) {
+          return graphError(reply, 400, 'Request_BadRequest');
+        }
+        if (state.findUser(upn)) {
+          return graphError(reply, 400, 'Request_BadRequest');
+        }
+        const user: FixtureSeed['users'][number] = {
+          id: randomUUID(),
+          userPrincipalName: upn,
+          displayName: body.displayName,
+          accountEnabled: body.accountEnabled,
+          sessionsRevokedAt: null,
+          passwordResetAt: new Date().toISOString(),
+          forceChangePasswordNextSignIn:
+            profile.forceChangePasswordNextSignIn === true,
+          authMethods: [],
+        };
+        state.users.set(user.id, user);
+        return reply.code(201).send(userView(user));
+      });
+
+      graph.get(
+        '/users/:id/memberOf/microsoft.graph.group',
+        (request, reply) => {
+          const user = state.findUser((request.params as { id: string }).id);
+          if (!user) return graphError(reply, 404, 'Request_ResourceNotFound');
+          return {
+            value: [...state.groups.values()]
+              .filter((g) => g.members.includes(user.id))
+              .map(({ id, displayName, groupTypes, mailEnabled }) => ({
+                id,
+                displayName,
+                groupTypes,
+                mailEnabled,
+              })),
+          };
+        },
+      );
+
+      graph.get('/users/:id/authentication/methods', (request, reply) => {
+        const user = state.findUser((request.params as { id: string }).id);
+        if (!user) return graphError(reply, 404, 'Request_ResourceNotFound');
+        return { value: user.authMethods };
+      });
+
+      graph.delete(
+        '/users/:id/authentication/:segment/:methodId',
+        (request, reply) => {
+          const { id, segment, methodId } = request.params as {
+            id: string;
+            segment: string;
+            methodId: string;
+          };
+          const user = state.findUser(id);
+          const index =
+            user?.authMethods.findIndex(
+              (m) =>
+                m.id === methodId &&
+                m['@odata.type'] ===
+                  `#microsoft.graph.${segment.replace(/Methods$/, '')}AuthenticationMethod`,
+            ) ?? -1;
+          if (!user || index < 0) {
+            return graphError(reply, 404, 'itemNotFound');
+          }
+          user.authMethods.splice(index, 1);
+          return reply.code(204).send();
+        },
+      );
+
+      graph.get('/groups/:id/members', (request, reply) => {
+        const group = state.groups.get((request.params as { id: string }).id);
+        if (!group) return graphError(reply, 404, 'Request_ResourceNotFound');
+        return {
+          value: group.members
+            .map((m) => state.users.get(m))
+            .filter((u) => u !== undefined)
+            .slice(0, top(request.query))
+            .map((u) => ({
+              '@odata.type': '#microsoft.graph.user',
+              ...userView(u),
+            })),
+        };
+      });
+
+      graph.post('/groups/:id/members/$ref', (request, reply) => {
+        const group = state.groups.get((request.params as { id: string }).id);
+        if (!group) return graphError(reply, 404, 'Request_ResourceNotFound');
+        const ref = (request.body as { '@odata.id'?: unknown } | null)?.[
+          '@odata.id'
+        ];
+        const userId =
+          typeof ref === 'string'
+            ? /\/directoryObjects\/([^/]+)$/.exec(ref)?.[1]
+            : undefined;
+        if (!userId || !state.users.has(userId)) {
+          return graphError(reply, 400, 'Request_BadRequest');
+        }
+        if (group.groupTypes.includes('DynamicMembership')) {
+          return graphError(reply, 400, 'Request_BadRequest');
+        }
+        if (group.members.includes(userId)) {
+          // Graph: "One or more added object references already exist".
+          return graphError(reply, 400, 'Request_BadRequest');
+        }
+        group.members.push(userId);
+        return reply.code(204).send();
+      });
+
+      graph.delete('/groups/:id/members/:userId/$ref', (request, reply) => {
+        const { id, userId } = request.params as { id: string; userId: string };
+        const group = state.groups.get(id);
+        if (!group || !group.members.includes(userId)) {
+          return graphError(reply, 404, 'Request_ResourceNotFound');
+        }
+        if (group.groupTypes.includes('DynamicMembership')) {
+          return graphError(reply, 400, 'Request_BadRequest');
+        }
+        group.members = group.members.filter((m) => m !== userId);
+        return reply.code(204).send();
       });
 
       graph.get('/security/incidents', (request) => ({

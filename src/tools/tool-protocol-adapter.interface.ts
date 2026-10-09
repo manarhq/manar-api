@@ -23,6 +23,13 @@ export interface ToolInvocationResult {
    * reconciled, never retried blindly (Gate 0 finding R1).
    */
   outcomeUnknown?: true;
+  /**
+   * For the approving person only, never the agent (a temporary password,
+   * ADR-0011). `CredentialBrokerService` removes it from the result before
+   * audit, DLP or the response, and keeps it only in OpenBao until that
+   * person collects it once.
+   */
+  handover?: Record<string, string>;
 }
 
 /**

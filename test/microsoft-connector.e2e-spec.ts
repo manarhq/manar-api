@@ -25,6 +25,7 @@ import { TenantDatabaseManager } from '../src/database/tenant-database-manager.s
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
 import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
+import { HANDOVER_TTL_MS, HandoverStore } from '../src/tools/handover.store';
 import { AiAdvisoryClient } from '../src/ai-advisory/ai-advisory-client.service';
 import type { AppConfig } from '../src/config/env.validation';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
@@ -37,7 +38,10 @@ import {
   microsoftPolicyContent,
 } from '../src/cli/commands/microsoft-fixture-seed';
 import { buildMicrosoftFixtureApp } from '../packages/demo-soc-tools/src/microsoft/fixture';
-import { FIXTURE_SECOND_USER_ID } from '../packages/demo-soc-tools/src/microsoft/seed-data';
+import {
+  FIXTURE_GROUP_ID,
+  FIXTURE_SECOND_USER_ID,
+} from '../packages/demo-soc-tools/src/microsoft/seed-data';
 import {
   assignRealmRole,
   createRealmUser,
@@ -79,6 +83,7 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
   let tenant: ProvisionedTenant;
   let ownerToken: string;
   let approverToken: string;
+  let otherApproverToken: string;
 
   const USER_PASSWORD = 'Passw0rd!Test';
   const { userId, machineId, incidentId } = MICROSOFT_FIXTURE_IDS;
@@ -300,6 +305,7 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
     };
     ownerToken = await tokenFor('TENANT_OWNER');
     approverToken = await tokenFor('APPROVER');
+    otherApproverToken = await tokenFor('APPROVER');
   }, 180_000);
 
   afterAll(async () => {
@@ -315,7 +321,13 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
     await control?.$disconnect();
   }, 60_000);
 
-  it('reads an incident (ALLOW), then disables a user and isolates a device only after human approval', async () => {
+  /**
+   * Catalog, fixture secret, the generated default policy, an enrolled agent
+   * and a task with `grants`. `approve` asks, checks nothing reached
+   * Microsoft, approves as the approver and returns the grant token and the
+   * approval id.
+   */
+  async function governedAgent(grants: Record<string, unknown>) {
     const http = () => request(humanApp.getHttpServer());
 
     // ---- Setup: catalog + fixture secret in OpenBao + policy + task ----
@@ -333,7 +345,7 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
       .post('/policies')
       .set('Authorization', `Bearer ${ownerToken}`)
       .send({
-        name: 'Microsoft Connector Approval Policy',
+        name: `Microsoft Connector Approval Policy ${randomUUID().slice(0, 8)}`,
         description: 'Every Microsoft mutation needs approval.',
         content: microsoftPolicyContent(),
         reason: 'microsoft connector e2e',
@@ -384,31 +396,10 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
         .send({
           name: `Microsoft e2e ${randomUUID().slice(0, 8)}`,
           assignedAgentId: agentId,
-          allowedToolActions: [
-            { toolId: MICROSOFT_GRAPH_TOOL, actionId: 'security.incident.get' },
-            { toolId: MICROSOFT_GRAPH_TOOL, actionId: 'entra.user.get' },
-            { toolId: MICROSOFT_GRAPH_TOOL, actionId: 'entra.user.disable' },
-            {
-              toolId: MICROSOFT_GRAPH_TOOL,
-              actionId: 'entra.user.sessions.revoke',
-            },
-            {
-              toolId: MICROSOFT_DEFENDER_TOOL,
-              actionId: 'defender.machine.isolate',
-            },
-            {
-              toolId: MICROSOFT_DEFENDER_TOOL,
-              actionId: 'defender.machineaction.list',
-            },
-          ],
-          allowedResourceSelectors: [
-            { toolId: MICROSOFT_GRAPH_TOOL, pattern: incidentId },
-            { toolId: MICROSOFT_GRAPH_TOOL, pattern: userId },
-            { toolId: MICROSOFT_DEFENDER_TOOL, pattern: machineId },
-          ],
           forbiddenActions: [],
           expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-          riskCeiling: 50,
+          riskCeiling: 100,
+          ...grants,
         })
         .expect(201)
     ).body as { id: string };
@@ -422,6 +413,11 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
 
     /** Asks, sees APPROVAL_REQUIRED with nothing sent to Microsoft, approves, and returns the grant. */
     async function approve(body: Record<string, unknown>): Promise<string> {
+      return (await approval(body)).grantToken;
+    }
+    async function approval(
+      body: Record<string, unknown>,
+    ): Promise<{ grantToken: string; approvalId: string }> {
       const before = (await fixtureRequests()).length;
       const pending = await invoke(body);
       expect(pending.status).toBe(202);
@@ -449,12 +445,43 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
           grantToken?: string;
         };
         if (polledBody.status === 'APPROVED' && polledBody.grantToken) {
-          return polledBody.grantToken;
+          return { grantToken: polledBody.grantToken, approvalId };
         }
         if (Date.now() > deadline) throw new Error('approval did not resolve');
         await new Promise((r) => setTimeout(r, 250));
       }
     }
+
+    return { http, invoke, approve, approval, task, tenantClient };
+  }
+
+  it('reads an incident (ALLOW), then disables a user and isolates a device only after human approval', async () => {
+    const { invoke, approve, tenantClient, task } = await governedAgent({
+      allowedToolActions: [
+        { toolId: MICROSOFT_GRAPH_TOOL, actionId: 'security.incident.get' },
+        { toolId: MICROSOFT_GRAPH_TOOL, actionId: 'entra.user.get' },
+        { toolId: MICROSOFT_GRAPH_TOOL, actionId: 'entra.user.disable' },
+        {
+          toolId: MICROSOFT_GRAPH_TOOL,
+          actionId: 'entra.user.sessions.revoke',
+        },
+        {
+          toolId: MICROSOFT_DEFENDER_TOOL,
+          actionId: 'defender.machine.isolate',
+        },
+        {
+          toolId: MICROSOFT_DEFENDER_TOOL,
+          actionId: 'defender.machineaction.list',
+        },
+      ],
+      allowedResourceSelectors: [
+        { toolId: MICROSOFT_GRAPH_TOOL, pattern: incidentId },
+        { toolId: MICROSOFT_GRAPH_TOOL, pattern: userId },
+        { toolId: MICROSOFT_DEFENDER_TOOL, pattern: machineId },
+      ],
+      forbiddenActions: [],
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
 
     // ---- 1. Read the incident: ALLOW, executed at once ----
     const incident = await invoke({
@@ -571,5 +598,188 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
     expect(persisted).not.toContain(MICROSOFT_FIXTURE_APP.clientSecret);
     expect(persisted).not.toContain('fixture.graph.');
     expect(persisted).not.toContain('fixture.defender.');
+  }, 120_000);
+
+  it('helpdesk and joiner/leaver: the temporary password reaches only its approver, once; group change, joiner and leaver need approval', async () => {
+    const membership = `${FIXTURE_GROUP_ID}:${FIXTURE_SECOND_USER_ID}`;
+    const joiner = 'new.joiner@fixture.example';
+    const { invoke, approve, approval, http, tenantClient, task } =
+      await governedAgent({
+        allowedToolActions: [
+          'entra.group.members.list',
+          'entra.user.password.reset',
+          'entra.group.member.add',
+          'entra.user.create',
+          'entra.user.offboard',
+        ].map((actionId) => ({ toolId: MICROSOFT_GRAPH_TOOL, actionId })),
+        allowedResourceSelectors: [
+          FIXTURE_GROUP_ID,
+          userId,
+          membership,
+          joiner,
+        ].map((pattern) => ({ toolId: MICROSOFT_GRAPH_TOOL, pattern })),
+      });
+    const sentPasswords = async () =>
+      (
+        (await (
+          await fetch(`${fixtureBase}/microsoft/_fixture/requests`)
+        ).json()) as {
+          requests: {
+            method: string;
+            body: { passwordProfile?: { password: string } } | null;
+          }[];
+        }
+      ).requests
+        .map((r) => r.body?.passwordProfile?.password)
+        .filter((p): p is string => typeof p === 'string');
+    const riskOf = async (approvalId: string) =>
+      (
+        await tenantClient.approvalRequest.findUniqueOrThrow({
+          where: { id: approvalId },
+        })
+      ).riskScore;
+
+    // ---- 1. A read is allowed outright ----
+    const listed = await invoke({
+      toolId: MICROSOFT_GRAPH_TOOL,
+      actionId: 'entra.group.members.list',
+      resource: FIXTURE_GROUP_ID,
+    });
+    expect(listed.body).toMatchObject({
+      success: true,
+      data: { value: [{ id: userId }] },
+    });
+
+    // ---- 2. Password reset: approval, then the agent never sees the password ----
+    const reset = {
+      toolId: MICROSOFT_GRAPH_TOOL,
+      actionId: 'entra.user.password.reset',
+      resource: userId,
+    };
+    const resetApproval = await approval(reset);
+    const resetDone = await invoke({
+      ...reset,
+      grantToken: resetApproval.grantToken,
+    });
+    expect(resetDone.body).toMatchObject({
+      success: true,
+      data: { passwordReset: true, forceChangePasswordNextSignIn: true },
+    });
+    const [password] = await sentPasswords();
+    expect(password).toBeDefined();
+    expect(JSON.stringify(resetDone.body)).not.toContain(password);
+    expect(
+      (resetDone.body as { data: { handover: string } }).data.handover,
+    ).toContain(resetApproval.approvalId);
+
+    const collect = (token: string) =>
+      http()
+        .post(`/approvals/${resetApproval.approvalId}/handover`)
+        .set('Authorization', `Bearer ${token}`);
+    await collect(otherApproverToken).expect(403);
+    const collected = await collect(approverToken).expect(200);
+    expect(collected.headers['cache-control']).toBe('no-store');
+    expect(collected.body).toEqual({
+      approvalRequestId: resetApproval.approvalId,
+      value: { temporaryPassword: password },
+    });
+    await collect(approverToken).expect(404);
+    // KV v1: the collected value is gone from OpenBao, with no version to undelete.
+    const kv = humanApp.get(OpenBaoKvClient);
+    const handoverPath = `handover/${tenant.id}/${resetApproval.approvalId}`;
+    expect(await kv.readV1(handoverPath)).toBeNull();
+
+    // An uncollected value older than 24 h is deleted by the sweep, for good.
+    await kv.writeV1(handoverPath, {
+      value: JSON.stringify({ temporaryPassword: 'expired-fixture-value' }),
+      createdAt: Date.now() - HANDOVER_TTL_MS - 1,
+    });
+    expect(await humanApp.get(HandoverStore).sweep()).toBeGreaterThanOrEqual(1);
+    expect(await kv.readV1(handoverPath)).toBeNull();
+    await collect(approverToken).expect(404);
+
+    // ---- 3. Group change: approval, then executed ----
+    const add = {
+      toolId: MICROSOFT_GRAPH_TOOL,
+      actionId: 'entra.group.member.add',
+      resource: membership,
+    };
+    const added = await invoke({ ...add, grantToken: await approve(add) });
+    expect(added.body).toMatchObject({ success: true, data: { added: true } });
+
+    // ---- 4. Joiner: approval at high risk; disabled by default ----
+    const create = {
+      toolId: MICROSOFT_GRAPH_TOOL,
+      actionId: 'entra.user.create',
+      resource: joiner,
+      params: { displayName: 'New Joiner' },
+    };
+    const createApproval = await approval(create);
+    expect(await riskOf(createApproval.approvalId)).toBeGreaterThanOrEqual(70);
+    const created = await invoke({
+      ...create,
+      grantToken: createApproval.grantToken,
+    });
+    expect(created.body).toMatchObject({
+      success: true,
+      data: { userPrincipalName: joiner, accountEnabled: false },
+    });
+    const joinerPassword = (await sentPasswords()).at(-1);
+    const joinerHandover = await http()
+      .post(`/approvals/${createApproval.approvalId}/handover`)
+      .set('Authorization', `Bearer ${approverToken}`)
+      .expect(200);
+    expect(joinerHandover.body).toMatchObject({
+      value: { temporaryPassword: joinerPassword },
+    });
+
+    // ---- 5. Leaver: approval at high risk; disabled, sessions revoked, groups removed ----
+    const offboard = {
+      toolId: MICROSOFT_GRAPH_TOOL,
+      actionId: 'entra.user.offboard',
+      resource: userId,
+    };
+    const offboardApproval = await approval(offboard);
+    expect(await riskOf(offboardApproval.approvalId)).toBeGreaterThanOrEqual(
+      80,
+    );
+    const left = await invoke({
+      ...offboard,
+      grantToken: offboardApproval.grantToken,
+    });
+    expect(left.body).toMatchObject({
+      success: true,
+      data: {
+        disabled: true,
+        sessionsRevoked: true,
+        groupsRemoved: [FIXTURE_GROUP_ID],
+      },
+    });
+    const after = (await fixtureState()) as unknown as {
+      users: { id: string; accountEnabled: boolean }[];
+      groups: { id: string; members: string[] }[];
+    };
+    expect(after.users.find((u) => u.id === userId)?.accountEnabled).toBe(
+      false,
+    );
+    expect(
+      after.groups.find((g) => g.id === FIXTURE_GROUP_ID)?.members,
+    ).toEqual([FIXTURE_SECOND_USER_ID]);
+
+    // ---- No temporary password anywhere in Manar's records ----
+    const passwords = await sentPasswords();
+    expect(passwords).toHaveLength(2);
+    const persisted = JSON.stringify([
+      await tenantClient.toolInvocation.findMany({
+        where: { taskId: task.id },
+      }),
+      await tenantClient.auditEvent.findMany(),
+      await tenantClient.decision.findMany({ where: { taskId: task.id } }),
+      await tenantClient.approvalRequest.findMany({
+        where: { taskId: task.id },
+      }),
+    ]);
+    for (const p of passwords) expect(persisted).not.toContain(p);
+    expect(persisted).toContain('approval.handover_collected');
   }, 120_000);
 });
