@@ -189,6 +189,24 @@ agentMtls:
     serverKey: 'unused-by-worker'
     caChain: 'unused-by-worker'
 
+# TLS and credentials for Kafka, Valkey/Redis and OpenSearch (manar-api!22,
+# feat/backing-service-tls; the variables exist only once it merges). All
+# optional; leave unset for in-cluster plaintext, where only the
+# NetworkPolicies protect these links (docs/service-tls.md).
+# - Non-secret settings go in `config`: KAFKA_SSL ('true'), KAFKA_SASL_MECHANISM
+#   (plain | scram-sha-256 | scram-sha-512), KAFKA_SASL_USERNAME,
+#   REDIS_USERNAME (TLS is a rediss:// REDIS_URL), OPENSEARCH_USERNAME (TLS is
+#   an https:// OPENSEARCH_NODE), and the CA paths KAFKA_SSL_CA_FILE,
+#   REDIS_TLS_CA_FILE, OPENSEARCH_TLS_CA_FILE under the mount below, e.g.
+#   /etc/manar/backing-service-ca/kafka-ca.pem.
+# - Passwords go in the Secret (`secrets.data` or the externally managed one):
+#   KAFKA_SASL_PASSWORD, REDIS_PASSWORD, OPENSEARCH_PASSWORD. Never set any of
+#   these to an empty string: the config schema rejects empty values.
+backingServiceTls:
+  # A Secret holding the CA bundles (PEM), mounted read-only at
+  # /etc/manar/backing-service-ca. Empty: nothing is mounted.
+  caSecretName: ''
+
 # Voluntary disruptions (node drains, cluster upgrades) take at most this many
 # pods at once. With one replica a drain still proceeds.
 podDisruptionBudget:

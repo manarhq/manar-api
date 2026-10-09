@@ -66,12 +66,22 @@ spec:
             - name: agent-mtls-certs
               mountPath: /app/deploy/openbao
               readOnly: true
+            {{- with .Values.backingServiceTls.caSecretName }}
+            - name: backing-service-ca
+              mountPath: /etc/manar/backing-service-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
         - name: agent-mtls-certs
           secret:
             secretName: {{ include "manar-api-worker.agentMtlsCertsSecretName" . }}
+        {{- with .Values.backingServiceTls.caSecretName }}
+        - name: backing-service-ca
+          secret:
+            secretName: {{ . }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
