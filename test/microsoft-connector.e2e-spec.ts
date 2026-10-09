@@ -724,6 +724,14 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
       success: true,
       data: { userPrincipalName: joiner, accountEnabled: false },
     });
+    const joinerPassword = (await sentPasswords()).at(-1);
+    const joinerHandover = await http()
+      .post(`/approvals/${createApproval.approvalId}/handover`)
+      .set('Authorization', `Bearer ${approverToken}`)
+      .expect(200);
+    expect(joinerHandover.body).toMatchObject({
+      value: { temporaryPassword: joinerPassword },
+    });
 
     // ---- 5. Leaver: approval at high risk; disabled, sessions revoked, groups removed ----
     const offboard = {
