@@ -115,3 +115,12 @@ manar-api stays the security control plane, so the addition has to be small and 
   `FLEET_AUDIT_VERIFY_MINUTES`, default 60), `usage.months[{month, decisions}]` (whole
   deployment) and `killSwitch {active, activatedAt}`. A section that cannot be read is left out.
   Deploy manar-fleet first: it rejects unknown fields.
+- **Timed restore drill:** the backup file may carry `lastRestoreTestSeconds`; it rides in
+  `backup.lastRestoreTestSeconds`.
+- **Per-tenant catalog sections** (catalog workstream, for installs without a platform
+  connection): `tenants[{tenantId, catalog {features, packs, model}, llmTokensMonth {month,
+tokens}, connectors [{name, type, protocol, enabled, credentialExpiresAt}]}]`. This is the one
+  place the heartbeat names tenants (by id) and tools; still config and counts only, built field by
+  field so a credential or its reference can never ride along, and strict on both ends. The source
+  is bound to `HEARTBEAT_TENANT_CATALOG` (`CatalogService` once the catalog module is on main);
+  unbound, the section is left out. A tenant whose section fails is left out and logged by id.
