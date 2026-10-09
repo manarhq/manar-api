@@ -80,7 +80,7 @@ function setup(
   const access = new AgentTaskAccessService(
     tenantDatabaseManager,
     killSwitchService,
-    new TasksService(null as never, null as never),
+    new TasksService(null as never, null as never, killSwitchService),
   );
   const budget = {
     used: vi.fn().mockResolvedValue(opts.used ?? 0),
@@ -166,6 +166,21 @@ describe('LlmProxyService', () => {
       52,
       expect.any(Date),
     );
+  });
+
+  it('forwards reasoning_effort, and refuses a value outside the enum', async () => {
+    const { service, upstream } = setup();
+    await service.complete(AGENT, 'task-1', {
+      ...body(),
+      reasoning_effort: 'none',
+    });
+    expect(upstream.chat).toHaveBeenCalledWith({
+      messages: [{ role: 'user', content: SECRET_PROMPT }],
+      reasoning_effort: 'none',
+    });
+    await expect(
+      service.complete(AGENT, 'task-1', { ...body(), reasoning_effort: 'max' }),
+    ).rejects.toMatchObject({ status: 400 });
   });
 
   it('denies a task assigned to another agent, without calling upstream', async () => {

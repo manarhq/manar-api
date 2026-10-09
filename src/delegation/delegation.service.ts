@@ -15,7 +15,10 @@ import {
 } from '../tasks/tasks.service';
 import { TaskNotFoundError } from '../tasks/tasks.errors';
 import type { DelegateTaskRequest } from './delegation.validation';
+import { KillSwitchService } from '../kill-switches/kill-switch.service';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import {
+  DelegationDeniedError,
   DelegationExceedsParentAuthorityError,
   DelegationExceedsParentLimitsError,
   DelegationNotAssignedAgentError,
@@ -56,6 +59,7 @@ export class DelegationService {
     private readonly tasksService: TasksService,
     private readonly agentsService: AgentsService,
     private readonly auditService: AuditService,
+    private readonly killSwitchService: KillSwitchService,
   ) {}
 
   async delegate(
@@ -66,6 +70,18 @@ export class DelegationService {
     callerAgentId: string,
     input: DelegateTaskRequest,
   ): Promise<DelegationResult> {
+    // ADR-0009: a stopped agent (quarantined, killed, its AI system
+    // suspended) cannot mint a fresh child agent to act through. Fails
+    // closed (503) if the state cannot be read.
+    const stopped = await failClosed('kill-switch-store', () =>
+      this.killSwitchService.checkAll(tenantClient, tenantId, {
+        agentId: callerAgentId,
+      }),
+    );
+    if (stopped.killed) {
+      throw new DelegationDeniedError(stopped.reason ?? 'kill_switch_active');
+    }
+
     const parentTask = await this.tasksService.getTaskOrThrow(
       tenantClient,
       parentTaskId,
@@ -84,10 +100,13 @@ export class DelegationService {
     // its spirit: Section 20's non-amplification invariant would be
     // meaningless if a revoked/expired task could still mint fresh
     // sub-tasks.
-    const liveness = await this.tasksService.evaluateFullLiveness(
-      tenantClient,
-      parentTask,
-      new Date(),
+    const liveness = await failClosed('tenant-db', () =>
+      this.tasksService.evaluateFullLiveness(
+        tenantClient,
+        tenantId,
+        parentTask,
+        new Date(),
+      ),
     );
     if (!liveness.ok) {
       throw new DelegationTaskNotLiveError(

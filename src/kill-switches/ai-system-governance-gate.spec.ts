@@ -27,9 +27,23 @@ type FakeRow = Record<string, unknown>;
  * an implementation that forgot to filter at all, which would block every
  * agent whose AI system merely exists.
  */
-function fakeClient(systems: FakeRow[], links: FakeRow[]): TenantPrismaClient {
+function fakeClient(
+  systems: FakeRow[],
+  links: FakeRow[],
+  quarantines: FakeRow[] = [],
+): TenantPrismaClient {
   return {
     killSwitch: { findFirst: vi.fn(() => Promise.resolve(null)) },
+    agentQuarantine: {
+      findFirst: vi.fn(
+        ({ where }: { where: { agentId: string; active: boolean } }) =>
+          Promise.resolve(
+            quarantines.find(
+              (q) => q.agentId === where.agentId && q.active === where.active,
+            ) ?? null,
+          ),
+      ),
+    },
     agentGroupMembership: { findMany: vi.fn(() => Promise.resolve([])) },
     tool: { findUnique: vi.fn(() => Promise.resolve(null)) },
     aiSystemAgentLink: {
@@ -166,5 +180,50 @@ describe('checkAll — AI-system governance gate', () => {
 
     expect(result.killed).toBe(true);
     expect(result.scope).toBe('AI_SYSTEM');
+  });
+});
+
+describe('checkAll — agent quarantine (ADR-0009)', () => {
+  it('denies a quarantined agent with agent_quarantined', async () => {
+    const client = fakeClient([], [], [{ agentId: 'agent-1', active: true }]);
+    const result = await serviceWithNoPlatformKill().checkAll(
+      client,
+      'tenant-1',
+      { agentId: 'agent-1' },
+    );
+    expect(result).toEqual({
+      killed: true,
+      scope: 'AGENT',
+      reason: 'agent_quarantined',
+    });
+  });
+
+  it('neither a released quarantine nor another agent quarantine blocks', async () => {
+    const client = fakeClient(
+      [],
+      [],
+      [
+        { agentId: 'agent-1', active: false },
+        { agentId: 'agent-2', active: true },
+      ],
+    );
+    const result = await serviceWithNoPlatformKill().checkAll(
+      client,
+      'tenant-1',
+      { agentId: 'agent-1' },
+    );
+    expect(result.killed).toBe(false);
+  });
+
+  it('fails closed: a quarantine lookup error propagates (callers DENY)', async () => {
+    const client = fakeClient([], []);
+    (
+      client.agentQuarantine.findFirst as unknown as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error('db down'));
+    await expect(
+      serviceWithNoPlatformKill().checkAll(client, 'tenant-1', {
+        agentId: 'agent-1',
+      }),
+    ).rejects.toThrow('db down');
   });
 });

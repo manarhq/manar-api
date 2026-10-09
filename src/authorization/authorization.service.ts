@@ -475,6 +475,7 @@ export class AuthorizationService {
     // Steps 2-3: the full ancestor chain, then the task itself.
     const liveness = await this.tasksService.evaluateFullLiveness(
       tenantClient,
+      tenantId,
       task,
       new Date(),
       { executionAlreadyCounted: redemption },

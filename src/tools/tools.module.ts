@@ -4,6 +4,7 @@ import { CredentialBrokerService } from './credential-broker.service';
 import { HttpToolAdapter } from './http-tool.adapter';
 import { McpToolAdapter } from './mcp-tool.adapter';
 import { MicrosoftToolAdapter } from './microsoft-tool.adapter';
+import { ManarConnectorService } from './manar-connector.service';
 import { ToolRegistryService } from './tool-registry.service';
 
 /**
@@ -24,6 +25,7 @@ import { ToolRegistryService } from './tool-registry.service';
     HttpToolAdapter,
     McpToolAdapter,
     MicrosoftToolAdapter,
+    ManarConnectorService,
     CredentialBrokerService,
   ],
   exports: [ToolRegistryService, CredentialBrokerService],

@@ -67,7 +67,12 @@ export class AgentTaskAccessService {
     }
 
     const liveness = await failClosed('tenant-db', () =>
-      this.tasksService.evaluateFullLiveness(tenantClient, task, new Date()),
+      this.tasksService.evaluateFullLiveness(
+        tenantClient,
+        agent.tenant.id,
+        task,
+        new Date(),
+      ),
     );
     if (!liveness.ok) throw denied(liveness.reason ?? 'task_not_live');
 

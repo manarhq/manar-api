@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  GrantableToolActionSchema,
   ResourceSelectorSchema,
   ToolActionSchema,
 } from '../authorization/grant-triples';
@@ -15,7 +16,7 @@ export const CreateTaskRequestSchema = z
     name: z.string().min(1).max(200),
     description: z.string().max(2000).optional(),
     assignedAgentId: z.string().min(1),
-    allowedToolActions: z.array(ToolActionSchema).max(100).default([]),
+    allowedToolActions: z.array(GrantableToolActionSchema).max(100).default([]),
     allowedResourceSelectors: z
       .array(ResourceSelectorSchema)
       .max(100)

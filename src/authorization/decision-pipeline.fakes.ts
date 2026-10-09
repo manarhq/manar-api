@@ -133,7 +133,7 @@ export function makeDecisionHarness(options: DecisionHarnessOptions = {}) {
   );
 
   const service = new AuthorizationService(
-    new TasksService({} as never, {} as never),
+    new TasksService({} as never, {} as never, {} as never),
     { check: openFgaCheck } as unknown as OpenFgaClientService,
     { evaluate: policyEvaluate } as unknown as PolicyEngine,
     { score: riskScore } as unknown as RiskEngine,

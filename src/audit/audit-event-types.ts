@@ -58,6 +58,13 @@ export const AUDIT_EVENT_TYPES = {
   /** A kill switch was deactivated. */
   KILL_SWITCH_DEACTIVATED: 'kill_switch.deactivated',
 
+  // ADR-0009 (watcher). Actor of `agent.quarantined` is the agent that
+  // quarantined; actor of `agent.quarantine_released` is always a human.
+  AGENT_QUARANTINED: 'agent.quarantined',
+  /** The watcher attached its model-written explanation to an active quarantine (once). */
+  AGENT_QUARANTINE_EXPLAINED: 'agent.quarantine_explained',
+  AGENT_QUARANTINE_RELEASED: 'agent.quarantine_released',
+
   // Phase 14 (Users/Roles/Settings) — see src/users/, src/tenant-settings/.
   /** `POST /users/:id/role-bindings` granted a role — see `UsersService.grantRole`. */
   USER_ROLE_GRANTED: 'user.role_granted',

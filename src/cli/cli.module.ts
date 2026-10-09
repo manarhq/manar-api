@@ -7,6 +7,7 @@ import { TenantCreateCommand } from './commands/tenant-create.command';
 import { AuditReindexCommand } from './commands/audit-reindex.command';
 import { DemoSeedCommand } from './commands/demo-seed.command';
 import { TenantsMigrateCommand } from './commands/tenants-migrate.command';
+import { ManarConnectorRegisterCommand } from './commands/manar-connector-register.command';
 
 /**
  * Root module for the `pnpm manar` CLI (see src/cli.ts). Deliberately
@@ -40,6 +41,7 @@ import { TenantsMigrateCommand } from './commands/tenants-migrate.command';
     AuditReindexCommand,
     DemoSeedCommand,
     TenantsMigrateCommand,
+    ManarConnectorRegisterCommand,
   ],
 })
 export class CliModule {}

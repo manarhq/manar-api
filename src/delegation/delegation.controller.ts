@@ -18,6 +18,7 @@ import { DelegationService } from './delegation.service';
 import {
   DelegationExceedsParentAuthorityError,
   DelegationExceedsParentLimitsError,
+  DelegationDeniedError,
   DelegationNotAssignedAgentError,
   DelegationTaskNotLiveError,
 } from './delegation.errors';
@@ -80,6 +81,12 @@ export class DelegationController {
     } catch (error) {
       if (error instanceof TaskNotFoundError) {
         throw new NotFoundException(error.message);
+      }
+      if (error instanceof DelegationDeniedError) {
+        throw new ForbiddenException({
+          decision: 'DENY',
+          reason: error.reason,
+        });
       }
       if (error instanceof DelegationNotAssignedAgentError) {
         throw new ForbiddenException(error.message);

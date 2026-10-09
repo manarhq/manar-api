@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthorizationModule } from '../authorization/authorization.module';
+import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { TasksService } from './tasks.service';
 
 /**
@@ -11,7 +12,7 @@ import { TasksService } from './tasks.service';
  * the former should ever expose a `JwtAuthGuard`-gated route.
  */
 @Module({
-  imports: [AuthorizationModule],
+  imports: [AuthorizationModule, KillSwitchesModule],
   providers: [TasksService],
   exports: [TasksService],
 })

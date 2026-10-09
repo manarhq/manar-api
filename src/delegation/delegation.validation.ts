@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import { MANAR_TOOL } from '../tools/manar-actions';
 import {
+  GrantableToolActionSchema,
   ResourceSelectorSchema,
   ToolActionSchema,
 } from '../authorization/grant-triples';
@@ -27,7 +29,17 @@ export const DelegateTaskRequestSchema = z.object({
   childAgentDisplayName: z.string().min(1).max(200).optional(),
   name: z.string().min(1).max(200),
   description: z.string().max(2000).optional(),
-  allowedToolActions: z.array(ToolActionSchema).max(100).default([]),
+  // ADR-0009: Manar's own connector is never delegated; a watcher cannot
+  // mint child agents that can quarantine.
+  allowedToolActions: z
+    .array(
+      GrantableToolActionSchema.refine((a) => a.toolId !== MANAR_TOOL, {
+        message: `actions on tool "${MANAR_TOOL}" cannot be delegated`,
+        path: ['toolId'],
+      }),
+    )
+    .max(100)
+    .default([]),
   allowedResourceSelectors: z
     .array(ResourceSelectorSchema)
     .max(100)

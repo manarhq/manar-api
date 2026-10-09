@@ -707,6 +707,9 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       {
         recordSafely: () => Promise.resolve(undefined),
       } as unknown as AuditService,
+      {
+        checkAgent: () => Promise.resolve({ killed: false }),
+      } as unknown as KillSwitchService,
     );
     // PolicyEngine/RiskEngine (Phase 6) are never actually reached in this
     // scenario -- OpenFGA denies first (step 5), well before either would

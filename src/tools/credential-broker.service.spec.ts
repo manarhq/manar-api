@@ -21,6 +21,7 @@ import type { SecretProvider } from '../database/secret-provider';
 import type { HttpToolAdapter } from './http-tool.adapter';
 import type { McpToolAdapter } from './mcp-tool.adapter';
 import type { MicrosoftToolAdapter } from './microsoft-tool.adapter';
+import type { ManarConnectorService } from './manar-connector.service';
 import type {
   ToolActionRecord,
   ToolRecord,
@@ -128,6 +129,7 @@ function makeService(options: {
     invoke: vi.fn(),
   } as unknown as McpToolAdapter;
   const invokeMicrosoft = vi.fn().mockResolvedValue(options.toolResult);
+  const invokeManar = vi.fn().mockResolvedValue(options.toolResult);
   const microsoftAdapter = {
     invoke: invokeMicrosoft,
   } as unknown as MicrosoftToolAdapter;
@@ -158,6 +160,7 @@ function makeService(options: {
     {
       get: () => options.injectionBlockThreshold ?? 0.8,
     } as unknown as ConfigService<AppConfig, true>,
+    { invoke: invokeManar } as unknown as ManarConnectorService,
   );
 
   return {
@@ -168,6 +171,7 @@ function makeService(options: {
     resolveSecret,
     invokeHttp,
     invokeMicrosoft,
+    invokeManar,
   };
 }
 
@@ -906,5 +910,47 @@ describe('LLM proxy and tool-result DLP classify identically', () => {
         `tool\n${analyzeDlp.mock.calls[1]![0].content}`,
       );
     }
+  });
+});
+
+describe('CredentialBrokerService: Manar built-in connector (ADR-0009)', () => {
+  it('runs the built-in manar tool in-process with no credential resolved and no outbound adapter', async () => {
+    const toolResult: ToolInvocationResult = { success: true, data: { ok: 1 } };
+    const { service, resolveSecret, invokeHttp, invokeMicrosoft, invokeManar } =
+      makeService({
+        toolResult,
+        tool: makeTool({ name: 'manar', baseEndpoint: 'manar://builtin' }),
+        action: makeAction({ name: 'manar.activity.read' }),
+      });
+    const { tenantClient } = fakeTenantClient();
+    const input = {
+      ...baseInput,
+      toolId: 'manar',
+      actionId: 'manar.activity.read',
+      resource: 'tenant',
+    };
+
+    const result = await service.invoke(tenantClient, input);
+
+    expect(result).toEqual(toolResult);
+    expect(invokeManar).toHaveBeenCalledWith(tenantClient, input);
+    expect(resolveSecret).not.toHaveBeenCalled();
+    expect(invokeHttp).not.toHaveBeenCalled();
+    expect(invokeMicrosoft).not.toHaveBeenCalled();
+  });
+
+  it('a tool merely named manar, at any other endpoint, is an ordinary HTTP tool', async () => {
+    const toolResult: ToolInvocationResult = { success: true, data: {} };
+    const { service, invokeHttp, invokeManar } = makeService({
+      toolResult,
+      tool: makeTool({
+        name: 'manar',
+        baseEndpoint: 'http://elsewhere.invalid',
+      }),
+    });
+    const { tenantClient } = fakeTenantClient();
+    await service.invoke(tenantClient, { ...baseInput, toolId: 'manar' });
+    expect(invokeManar).not.toHaveBeenCalled();
+    expect(invokeHttp).toHaveBeenCalled();
   });
 });

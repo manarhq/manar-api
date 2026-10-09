@@ -1,0 +1,159 @@
+# ADR-0009: The watcher may quarantine agents; only a human releases
+
+- **Status:** PROPOSED (lead review; depends on MR !9, ADR-0006)
+- **Date:** 2026-10-09
+- **Phase:** hackathon demo (21 Oct 2026); first slice of spec Phase 7 (quarantine)
+- **Deciders:** founder brief (9 Oct: "AI may tighten on its own; loosening always needs a
+  human"), engineering judgement for the mechanism
+
+## Context
+
+The founder wants an AI agent that watches the other agents of a tenant and stops one that
+misbehaves, itself governed by Manar. Workspace `CLAUDE.md` §4.1: authorization stays
+deterministic; an LLM, heuristic or anomaly score may only add restriction. So the safety rule
+must be enforced by manar-api, not by the watcher's prompt: the watcher can tighten (quarantine)
+without a human; it can never loosen (release a quarantine, turn off a kill switch, change
+policy, grant tools, approve, alter or delete records).
+
+What existed: kill switches (`src/kill-switches/kill-switch.service.ts`, `checkAll`) read on
+every decision by `AuthorizationService.evaluate` (first attempt and grant redemption) and by
+`AgentTaskAccessService` (LLM proxy, tool manifest, MCP). An AGENT-scope kill switch already
+denies everything. But `KillSwitch.activatedBy` is a foreign key to `UserProfile` (a human), its
+deny reason is `agent_kill_switch_active`, it has no place for evidence or an explanation, and a
+human deactivating it writes `kill_switch.deactivated`, not a quarantine release. Spec §11 (Phase 7) describes quarantine as capturing mutations rather than denying them; the 9 Oct brief asks for
+a simpler, fail-closed deny for the demo.
+
+## Decision
+
+1. **Quarantine is its own row, read by `checkAll`.** New tenant table `agent_quarantines`
+   (migration `20261009100000_add_agent_quarantine`, additive): one row per agent, toggled in
+   place like `KillSwitch`: `active`, `reason` (deterministic, from the detector), `detector`,
+   `evidence` (ids only), `explanationEn` / `explanationAr` (model-written, set at most once),
+   `quarantinedByAgentId`, `decisionId`, `quarantinedAt`, `releasedBy` (a `UserProfile` id),
+   `releasedAt`, `releaseNote`. `checkAll` checks it right after the AGENT kill switch and returns
+   DENY `agent_quarantined`. Because `checkAll` is the one gate, the quarantined agent is refused
+   at authorize, at grant redemption and at the agent-runtime gate (LLM proxy, manifest, MCP). A
+   lookup failure throws, which every caller already turns into DENY
+   `enforcement_dependency_unavailable`. The mTLS guard does not read it, so the agent's identity
+   still works and it sees the reason. **The stop cascades down delegation chains**
+   (security review, 9 Oct): `KillSwitchService.checkAgent` is the one per-agent gate (agent
+   status ACTIVE, then everything `checkAll` enforces), and `TasksService.evaluateFullLiveness`
+   runs it for every distinct ancestor task's agent, denying `ancestor_<reason>`. That function
+   is on every path: authorize and therefore REST tools/invoke and MCP tools/call, grant
+   redemption and issuance, the agent-runtime gate (LLM proxy, manifest, MCP tools/list) and
+   delegation. Delegation also runs `checkAll` on the caller first, so a stopped agent cannot
+   mint a child. Not an `AgentStatus` value: the guard rejects any status
+   but `ACTIVE`, which would hide the reason, and a status column next to a reason row would be
+   two facts that can drift.
+2. **A built-in Manar connector.** The `Tool` row named `manar` with `baseEndpoint`
+   `manar://builtin` (`isManarBuiltin`); `CredentialBrokerService` runs it
+   in-process with no credential (`src/tools/manar-connector.service.ts`), after the full decision
+   pipeline, with the same `tool.invocation.*` audit, DLP and `ToolInvocation` row as every other
+   tool. Tool name `manar`, two actions, catalog in code (`src/tools/manar-actions.ts`):
+   - `manar.activity.read` (read): per-agent aggregates for the window, computed in
+     PostgreSQL, for agents active in it, most recently active first (at most 200; `truncated`
+     with a reason beyond that, and the watcher halves its window): decisions by outcome,
+     denials not caused by Manar stopping the agent, stop-denials apart, mutating and
+     destructive counts, distinct targets of changes, per-action first, last and first-ever
+     times, a 24 h baseline, approval and invocation counts, up to 20 evidence decision ids. No
+     parameters, no inputs hash and no resource value at all (an earlier unkeyed hash was
+     reversible by guessing; distinct targets are now counted server side, so nothing is
+     needed). An agent's window starts after its last quarantine release, so neither a release
+     nor a watcher restart re-quarantines on the evidence that caused it.
+   - `manar.agent.quarantine` (mutating, base risk 0): resource = the target agent id; params
+     `reason`, `detector`, `evidence[]`. Idempotent: on an active quarantine nothing changes.
+     Server-side cap: at most `QUARANTINE_MAX_PER_AGENT` (5) agents per quarantining agent per
+     `QUARANTINE_WINDOW_MS` (10 min), else a definite failure `quarantine_rate_exceeded` (after
+     the ALLOW decision, so the decision row says ALLOW and the invocation says FAILURE). The cap
+     count, the already-quarantined check and the write are one transaction under
+     `pg_advisory_xact_lock` on the quarantining agent, then on the target, so concurrent calls
+     cannot exceed the cap or double a quarantine. Attach-only mode, params `{quarantineId,
+explanation {en, ar}}`: adds the explanation to that quarantine only while it is active,
+     unexplained and owned by the caller; never creates or reactivates, so a release that lands
+     first stays released. The target is looked up in the caller's tenant database, so another
+     tenant's agent is `agent_not_found`. An agent may quarantine itself.
+   - There is no release, deactivate, approve or delete action. A `ToolAction` row with any other
+     name on this tool never runs (`unknown_manar_action`).
+   - Not a new `ToolProtocol` value. We tried one first: the demo API on the previous Prisma
+     client, sharing the tenant database, failed `GET /tools` with P2023 (unknown enum value)
+     as soon as the row existed. A rolling upgrade would hit the same. The row's protocol
+     column says `HTTP`; the HTTP adapter can never call it (`manar:` is not an allowed
+     outbound scheme), and a tool merely named `manar` elsewhere is an ordinary HTTP tool.
+   - `pnpm manar manar-connector:register --tenant <slug>` writes the tool and action rows from
+     the catalog (idempotent).
+3. **No agent can be granted a loosening capability.** `GrantableToolActionSchema`
+   (`src/authorization/grant-triples.ts`) is used for `allowedToolActions` in task creation and
+   delegation: on tool `manar` only the two catalog actions are grantable (400 otherwise), and
+   delegation refuses every action on `manar`, so a watcher cannot mint quarantining children.
+   Forbidding stays unrestricted.
+4. **Release is human only.** `POST /agents/:id/quarantine/release` on the human JWT app,
+   roles `SECURITY_ADMIN` / `TENANT_OWNER` (same as kill switches), optional `note`. The agent
+   mTLS listener has no such route. Loosening fails closed: the `agent.quarantine_released` event
+   is written with the throwing `AuditService.record`; if it fails the release is undone and the
+   caller gets 503. Not one database transaction: `AuditService.record` opens its own
+   interactive transaction (the chain-state row lock), and Prisma does not nest them, so the
+   release is written, then audited, then undone if the audit fails. A crash between the two
+   writes would leave a release without its event; the window is one round trip.
+   `GET /quarantines?active=` lists rows for the console.
+5. **Records.** Every quarantine runs under an ALLOW `Decision` (ADR-0006) whose id is stored on
+   the row. Audit: `agent.quarantined` (actor: the watcher agent; reason, detector, evidence,
+   decision id), `agent.quarantine_explained` (the model text, once), `agent.quarantine_released`
+   (actor: the human; note). A quarantine is not held back by an audit failure (tightening;
+   `recordSafely`), a release is.
+6. **The watcher identity** (set up per tenant, demo kit `watcher-setup.mjs`): an agent linked to
+   an AI system "Manar Watcher", one task whose grants are exactly the two actions on resource
+   `*`, `riskCeiling` 30. `manar.agent.quarantine` scores 25 (baseline 10 + mutating 15), so it
+   runs without approval unless a tenant policy asks for one, which is that tenant's choice.
+
+7. **What the watcher's model may do.** It writes the explanation after the quarantine has
+   landed (the quarantine never waits for it). `MANAR_WATCHER_MODEL_REVIEW` (off by default) lets
+   it suggest quarantines of watched agents; the only executable outcome is a quarantine, so it
+   can only tighten. The `off_hours` detector is off by default (SOC packs run 24/7);
+   `first_destructive` is on: the first time an agent uses a destructive action type it has never
+   used, it is stopped until a person looks, which also fires on a legitimate first use.
+
+## Known limits
+
+- **In-flight race.** A request whose ALLOW decision was committed before the quarantine row
+  landed completes (the broker does not re-check after the decision). Quarantine stops the next
+  request, not one already executing. Same as the kill switches.
+- **Leftover enum value in the live demo database.** The rolled-back first migration added
+  `MANAR` to `ToolProtocol` in `tenant_vax_security_ops_demo`; PostgreSQL cannot drop it. No row
+  uses it and no code refers to it; it is harmless and the shipped migration does not add it.
+
+## Alternatives considered
+
+- **Reuse the AGENT kill switch with `source = watcher`.** Needs `activatedBy` to stop being a
+  human FK, a second deny reason derived from a source column, and makes the human kill-switch
+  deactivate endpoint also release quarantines without the release event. Rejected.
+- **`AgentStatus.QUARANTINED`.** Spec §5 says new states join the existing enums, but the mTLS
+  guard refuses non-`ACTIVE` agents (no reason reaches the agent), and the evidence and
+  explanation still need a home. Rejected for now; the API exposes the quarantine row, and the
+  console maps it to the spec's `QUARANTINED` state at its boundary.
+- **Spec Phase 7 capture mode** (reads run, mutations recorded, not executed). More useful for an
+  investigation and the spec's target; larger (a recording executor, a captured-intents UI).
+  Deferred: deny-all is the fail-closed subset.
+- **Let the watcher call the human kill-switch API with a service account.** Would give an AI a
+  human credential that can also deactivate. Rejected.
+- **Do nothing / prompt-only rule.** The rule would hold only as long as the model obeyed.
+  Rejected by the brief.
+
+## Consequences
+
+- An AI agent can stop any agent in its tenant within one poll interval, with no human in the
+  loop. A buggy or compromised watcher can cause denial of service inside its tenant (never
+  outside it, never a loosening). Mitigations: the watcher is rate-limited and idempotent, every
+  quarantine is a recorded decision with evidence, a human release is one click, and an AGENT
+  kill switch or AI-system suspension stops the watcher itself.
+- `manar.activity.read` aggregates the window and looks up each active (agent, action)'s first
+  decision ever per call. Fine at pilot volume; needs a summary table or an index on
+  `decisions(createdAt)` at scale.
+- The console needs a quarantine badge, the explanation and a Release button (not in this MR).
+- Rollback: drop the table (migration note) and the code; delete the `manar` tool row if wanted.
+
+## Enforcement-label impact
+
+None upgraded. Quarantine is `governed` only for actions brokered by Manar (authorize, tools
+invoke, MCP, LLM proxy); anything an agent does outside Manar is unaffected and stays
+`observed-only` or unknown. The watcher's detection is a heuristic: it adds restriction only and
+never feeds an ALLOW.

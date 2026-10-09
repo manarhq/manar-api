@@ -238,8 +238,9 @@ Content-Type: application/json
 
 Accepted fields: `messages` (required, ≥ 1, each with `role`; other message fields such as
 `content`, `tool_calls`, `tool_call_id`, `name` pass through), `tools`, `tool_choice`,
-`temperature` (0–2), `max_tokens`, `model` (ignored), `stream` (`false` or absent). Other
-fields are dropped. Body limit is Fastify's default 1 MiB.
+`temperature` (0–2), `max_tokens`, `reasoning_effort` (`none`, `minimal`, `low`, `medium`, `high`;
+`none` is sent to Azure OpenAI as `minimal`; added 2026-10-09 for the watcher, ADR-0009),
+`model` (ignored), `stream` (`false` or absent). Other fields are dropped. Body limit is Fastify's default 1 MiB.
 
 `200`, headers `x-manar-task-id: <taskId>` and `x-manar-request-id: <correlation id>`, body
 is the upstream's OpenAI chat completion as returned (Ollama may add `reasoning` on the
