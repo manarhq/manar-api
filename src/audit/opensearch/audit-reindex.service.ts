@@ -44,17 +44,9 @@ export class AuditReindexService {
       });
       if (page.length === 0) break;
 
-      for (const event of page) {
-        // Phase 11b Part 1 — same derived search fields the live indexer
-        // populates (AuditIndexerService.handleMessage); a from-scratch
-        // reindex must reconstruct GET /audit's filterable fields exactly
-        // as faithfully as everything else.
-        const searchFields = extractAuditSearchFields(
-          event.eventType,
-          event.actor,
-          event.data,
-        );
-        await this.openSearchIndexService.upsertAuditEvent({
+      // One Bulk request (and one refresh) per page, not one per event.
+      await this.openSearchIndexService.bulkUpsertAuditEvents(
+        page.map((event) => ({
           eventId: event.id,
           tenantId,
           sequence: event.sequence,
@@ -65,10 +57,14 @@ export class AuditReindexService {
           data: event.data,
           previousHash: event.previousHash,
           eventHash: event.eventHash,
-          ...searchFields,
-        });
-        count += 1;
-      }
+          // Phase 11b Part 1 — same derived search fields the live indexer
+          // populates (AuditIndexerService.handleMessage); a from-scratch
+          // reindex must reconstruct GET /audit's filterable fields exactly
+          // as faithfully as everything else.
+          ...extractAuditSearchFields(event.eventType, event.actor, event.data),
+        })),
+      );
+      count += page.length;
 
       cursorSequence = page[page.length - 1]!.sequence;
       if (page.length < PAGE_SIZE) break;

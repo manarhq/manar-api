@@ -73,6 +73,9 @@ describe('Approval Engine (e2e)', () => {
   let tenant: ProvisionedTenant;
   let adminToken: string;
 
+  /** approvalRequestId -> promise the worker's finalize Activity awaits first (test 9). */
+  const heldFinalizations = new Map<string, Promise<void>>();
+
   const DEMO_TOOLS_BASE_URL =
     process.env.DEMO_SOC_TOOLS_BASE_URL ?? 'http://localhost:3101';
   const DEMO_TOOLS_API_KEY =
@@ -562,9 +565,18 @@ describe('Approval Engine (e2e)', () => {
     workerModuleFixture = await Test.createTestingModule({
       imports: [WorkerAppModule],
     }).compile();
-    const activities = workerModuleFixture
+    const realActivities = workerModuleFixture
       .get(ApprovalActivitiesFactory)
       .build();
+    // Test 9 holds the real finalize Activity for its one request until both
+    // concurrent decide calls have signaled; every other request is untouched.
+    const activities: typeof realActivities = {
+      ...realActivities,
+      finalizeApprovalDecision: async (input) => {
+        await heldFinalizations.get(input.approvalRequestId);
+        return realActivities.finalizeApprovalDecision(input);
+      },
+    };
     const temporalAddress = process.env.TEMPORAL_ADDRESS ?? 'localhost:7233';
     temporalConnection = await NativeConnection.connect({
       address: temporalAddress,
@@ -1413,10 +1425,48 @@ describe('Approval Engine (e2e)', () => {
       // policy/risk re-evaluation) before responding -- signal delivery
       // itself is near-instant, so there is a wide, real window in which
       // both signals land before the workflow ever closes.
-      const [first, second] = await Promise.all([
+      //
+      // That window is not wide on a slow CI runner: pipeline 894 saw the
+      // second call reach the handler after the first had already returned,
+      // so it was a plain late call (409, like `third` below) rather than a
+      // race. The finalize Activity for this request is therefore held until
+      // Temporal has recorded both signals, i.e. until both calls have passed
+      // the PENDING check and are awaiting the result. The race is then real
+      // on every run, and the assertions below are unchanged.
+      let releaseFinalize!: () => void;
+      heldFinalizations.set(
+        approvalId,
+        new Promise<void>((resolve) => (releaseFinalize = resolve)),
+      );
+      const tenantClientForRace = await tenantDatabaseManager.getClient(
+        tenant.id,
+      );
+      const { temporalWorkflowId } =
+        await tenantClientForRace.approvalRequest.findUniqueOrThrow({
+          where: { id: approvalId },
+        });
+      const workflowHandle = agentMtlsApp
+        .get(TemporalClientService)
+        .workflow.getHandle(temporalWorkflowId);
+      const decided = Promise.all([
         decideApproval(approvalId, 'APPROVE', 'first caller'),
         decideApproval(approvalId, 'DENY', 'second caller'),
       ]);
+      try {
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const { events } = await workflowHandle.fetchHistory();
+          const signals = (events ?? []).filter(
+            (e) => e.workflowExecutionSignaledEventAttributes,
+          ).length;
+          if (signals >= 2 || Date.now() > deadline) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      } finally {
+        releaseFinalize();
+        heldFinalizations.delete(approvalId);
+      }
+      const [first, second] = await decided;
 
       expect(first.status).toBe(201);
       expect(second.status).toBe(201);
