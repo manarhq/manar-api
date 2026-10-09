@@ -207,7 +207,7 @@ function ruleMatches(
 
 /**
  * `"*"` matches any resource; a pattern ending in `*` matches by prefix
- * (`manar/demo-repo:*` is every branch of that project, ADR-0011); anything
+ * (`manar/demo-repo:*` is every branch of that project, ADR-0012); anything
  * else must equal the resource exactly. Policy only: task resource selectors
  * stay exact-or-`"*"` (OpenFGA tuples).
  */

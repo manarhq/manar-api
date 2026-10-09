@@ -22,7 +22,7 @@ export interface GitLabToolInput {
 }
 
 /**
- * ADR-0011: registers one GitLab tool (one project) and the catalog actions
+ * ADR-0012: registers one GitLab tool (one project) and the catalog actions
  * in a tenant. Idempotent. Rows are written from the code catalog so policy,
  * risk and the tool manifest see the same flags the adapter uses.
  */

@@ -291,7 +291,7 @@ const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set([
   'authorization',
   'cookie',
   'proxy-authorization',
-  // GitLab's token header (`GitLabToolAdapter`, ADR-0011).
+  // GitLab's token header (`GitLabToolAdapter`, ADR-0012).
   'private-token',
 ]);
 

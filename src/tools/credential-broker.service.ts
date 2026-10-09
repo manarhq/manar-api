@@ -193,7 +193,7 @@ export interface CredentialBrokerInvokeInput {
  *      never logged, never assigned to any field that could end up in the
  *      `ToolInvocation` row or the returned `ToolInvocationResult`.
  *   4. Dispatches to `HttpToolAdapter`, `McpToolAdapter`,
- *      `MicrosoftToolAdapter` (ADR-0004) or `GitLabToolAdapter` (ADR-0011)
+ *      `MicrosoftToolAdapter` (ADR-0004) or `GitLabToolAdapter` (ADR-0012)
  *      based on `Tool.protocol`, all behind this same pipeline, no separate
  *      path for any protocol.
  *   5. Records a `ToolInvocation` row (`SUCCESS`/`FAILURE`, timing,
@@ -441,6 +441,21 @@ export class CredentialBrokerService {
         errorMessage: result.success ? null : (result.errorMessage ?? null),
       },
     });
+
+    if (result.bindingViolation) {
+      await this.auditService.recordSafely(tenantClient, input.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_BINDING_VIOLATED,
+        actor: { type: 'agent', id: input.agentId },
+        data: {
+          taskId: input.taskId,
+          decisionId: input.decisionId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          violation: result.bindingViolation,
+        },
+      });
+    }
 
     if (result.success) {
       result = await this.applyPostCallAdvisories(

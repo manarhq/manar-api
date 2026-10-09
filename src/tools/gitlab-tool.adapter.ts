@@ -80,7 +80,7 @@ type Attempt =
 
 /**
  * Executes the GitLab catalog (`gitlab-actions.ts`) for a `Tool` with
- * `protocol: GITLAB` (ADR-0011), behind `CredentialBrokerService` like every
+ * `protocol: GITLAB` (ADR-0012), behind `CredentialBrokerService` like every
  * other adapter, so authorization, approvals, kill switches, DLP and audit
  * all run before it.
  *
@@ -183,11 +183,24 @@ export class GitLabToolAdapter implements ToolProtocolAdapter {
     switch (answer.kind) {
       case 'final':
         return answer.result;
-      case 'ok':
+      case 'ok': {
+        const violation = def.postcheck?.(answer.body, p);
+        if (violation) {
+          this.logger.error(
+            `GitLab call "${tool.name}/${def.name}" ran but broke its approval binding (${violation})`,
+          );
+          return {
+            success: false,
+            errorMessage: violation,
+            outcomeUnknown: true,
+            bindingViolation: violation,
+          };
+        }
         return {
           success: true,
           data: def.shape ? def.shape(answer.body) : answer.body,
         };
+      }
       default: {
         const errorMessage = this.describe(answer);
         const unknown =

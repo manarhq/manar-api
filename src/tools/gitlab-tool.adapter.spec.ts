@@ -497,6 +497,30 @@ describe('GitLabToolAdapter (against the DEMO FIXTURE)', () => {
       expect((await state()).mergeRequests[0]!.state).toBe('opened');
     });
 
+    it('a merge retargeted between the check and the merge is UNKNOWN with a binding violation', async () => {
+      await invoke('gitlab.branch.create', `${P}:feature/b`, { ref: 'main' });
+      await invoke('gitlab.mr.create', P, {
+        sourceBranch: 'feature/b',
+        targetBranch: 'main',
+        title: 't',
+      });
+      const head = (
+        (await invoke('gitlab.mr.get', `${P}!1`)).data as { sha: string }
+      ).sha;
+      await control('retarget-on-merge', { iid: 1, targetBranch: 'develop' });
+      expect(
+        await invoke('gitlab.mr.merge', `${P}!1`, {
+          sha: head,
+          targetBranch: 'main',
+        }),
+      ).toEqual({
+        success: false,
+        errorMessage: 'merged_into_unapproved_target',
+        outcomeUnknown: true,
+        bindingViolation: 'merged_into_unapproved_target',
+      });
+    });
+
     it('a branch delete is bound to the tip commit the person saw', async () => {
       await invoke('gitlab.branch.create', `${P}:old`, { ref: 'main' });
       expect(

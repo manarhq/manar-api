@@ -23,6 +23,12 @@ export interface ToolInvocationResult {
    * reconciled, never retried blindly (Gate 0 finding R1).
    */
   outcomeUnknown?: true;
+  /**
+   * ADR-0012: a short code set (with `outcomeUnknown`) when the tool's own
+   * answer shows the change did not land where the approved parameters
+   * said. It cannot be undone; the broker records it as its own audit event.
+   */
+  bindingViolation?: string;
 }
 
 /**

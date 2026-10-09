@@ -545,6 +545,34 @@ describe('CredentialBrokerService protocol dispatch', () => {
   });
 });
 
+describe('CredentialBrokerService approval binding (ADR-0012)', () => {
+  it('records approval_binding_violated when the adapter reports one', async () => {
+    const { service, recordSafely } = makeService({
+      toolResult: {
+        success: false,
+        errorMessage: 'merged_into_unapproved_target',
+        outcomeUnknown: true,
+        bindingViolation: 'merged_into_unapproved_target',
+      },
+      tool: makeTool({ protocol: 'GITLAB' }),
+    });
+    const { tenantClient } = fakeTenantClient();
+
+    await service.invoke(tenantClient, baseInput);
+
+    const types = recordSafely.mock.calls.map((c) => c[2].eventType);
+    expect(types).toContain(AUDIT_EVENT_TYPES.TOOL_INVOCATION_OUTCOME_UNKNOWN);
+    expect(types).toContain(AUDIT_EVENT_TYPES.APPROVAL_BINDING_VIOLATED);
+    const event = recordSafely.mock.calls.find(
+      (c) => c[2].eventType === AUDIT_EVENT_TYPES.APPROVAL_BINDING_VIOLATED,
+    )![2];
+    expect(event.data).toMatchObject({
+      decisionId: 'decision-1',
+      violation: 'merged_into_unapproved_target',
+    });
+  });
+});
+
 describe('CredentialBrokerService result DLP (redact fields, not results)', () => {
   const CLEAN: DlpAdvisory = { findings: [], overallSeverity: 'SEVERITY_NONE' };
   const finding = (type: string, source = 'pattern') => ({

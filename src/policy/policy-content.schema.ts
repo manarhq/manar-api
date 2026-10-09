@@ -68,7 +68,7 @@ export const PolicyRuleSchema = z.object({
 
   /**
    * Exact resource identifier to match, `"*"` ("any resource for this
-   * tool/action"), or a prefix ending in `*` (`manar/demo-repo:*`, ADR-0011;
+   * tool/action"), or a prefix ending in `*` (`manar/demo-repo:*`, ADR-0012;
    * see `resourcePatternMatches`). Task `allowedResourceSelectors` stay
    * exact-or-`"*"`. Omitted entirely means the same as `"*"`.
    */

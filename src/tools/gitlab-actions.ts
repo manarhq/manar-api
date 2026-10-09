@@ -1,5 +1,5 @@
 /**
- * The GitLab action catalog (REST v4, ADR-0011): every call Manar can make
+ * The GitLab action catalog (REST v4, ADR-0012): every call Manar can make
  * on a GitLab project for a coding agent, fixed in code. `GitLabToolAdapter`
  * only executes an action named here, builds the request only from this
  * definition, and validates `params` against the schema here.
@@ -57,6 +57,14 @@ export interface GitLabActionDef {
       params: Record<string, unknown>,
     ): string | undefined;
   };
+  /**
+   * Checks the tool's answer to a change that already happened against the
+   * approved params; a code means it landed somewhere else (ADR-0012).
+   */
+  postcheck?(
+    body: unknown,
+    params: Record<string, unknown>,
+  ): string | undefined;
   /** Sent instead when the main request answers 404 (create-or-update). */
   onNotFound?(
     target: GitLabTarget,
@@ -464,6 +472,13 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
         should_remove_source_branch: false,
       },
     }),
+    // GitLab checks `sha` atomically but not the target branch: a retarget
+    // between the precheck and the merge is caught here, after the fact.
+    postcheck: (body, p) =>
+      (body as { target_branch?: unknown } | null)?.target_branch ===
+      p.targetBranch
+        ? undefined
+        : 'merged_into_unapproved_target',
     shape: shapeMr,
   },
   {

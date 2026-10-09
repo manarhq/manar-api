@@ -66,6 +66,8 @@ class FixtureState {
     [];
   faults = new Map<string, Fault>();
   nextNote = 1;
+  /** Test control: retarget this MR just before its next merge runs (a race a precheck cannot see). */
+  retargetOnMerge: { iid: number; targetBranch: string } | null = null;
 
   constructor() {
     this.reset();
@@ -87,6 +89,7 @@ class FixtureState {
     this.requests = [];
     this.faults.clear();
     this.nextNote = 1;
+    this.retargetOnMerge = null;
   }
 }
 
@@ -151,6 +154,13 @@ export default function gitlabFixtureRoutes(
     variables: [...state.variables.keys()],
   }));
   fastify.get('/_fixture/requests', () => ({ requests: state.requests }));
+  fastify.post('/_fixture/retarget-on-merge', (request) => {
+    state.retargetOnMerge = request.body as {
+      iid: number;
+      targetBranch: string;
+    };
+    return { status: 'armed' };
+  });
   fastify.post('/_fixture/faults', (request) => {
     const b = request.body as {
       method: string;
@@ -342,6 +352,10 @@ export default function gitlabFixtureRoutes(
       api.put('/merge_requests/:iid/merge', (request, reply) => {
         const mr = mrOf(request);
         if (!mr) return fail(reply, 404, '404 Not found');
+        if (state.retargetOnMerge?.iid === mr.iid) {
+          mr.target_branch = state.retargetOnMerge.targetBranch;
+          state.retargetOnMerge = null;
+        }
         if (mr.state !== 'opened')
           return fail(reply, 405, '405 Method Not Allowed');
         const source = state.branches.get(mr.source_branch)!;
