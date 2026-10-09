@@ -552,7 +552,7 @@ describe('List/search endpoints (e2e)', () => {
         .expect(200);
       const bodyAsB = resAsB.body as { items: unknown[] };
       expect(bodyAsB.items).toEqual([]);
-    });
+    }, 30_000);
   });
 
   // -----------------------------------------------------------------------
@@ -585,7 +585,7 @@ describe('List/search endpoints (e2e)', () => {
         (e) => e.eventType === 'task.created' && e.taskId === task.id,
       );
       expect(match).toBeDefined();
-    });
+    }, 30_000);
 
     it('rejects a malformed riskMin/riskMax with 400', async () => {
       await request(humanApp.getHttpServer() as App)

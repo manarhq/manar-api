@@ -19,6 +19,7 @@ import {
 import { HttpToolAdapter } from './http-tool.adapter';
 import { McpToolAdapter } from './mcp-tool.adapter';
 import { MicrosoftToolAdapter } from './microsoft-tool.adapter';
+import { GitLabToolAdapter } from './gitlab-tool.adapter';
 import { ManarConnectorService } from './manar-connector.service';
 import { isManarBuiltin } from './manar-actions';
 import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
@@ -192,9 +193,10 @@ export interface CredentialBrokerInvokeInput {
  *      held only in a local variable for exactly as long as step 4 takes —
  *      never logged, never assigned to any field that could end up in the
  *      `ToolInvocation` row or the returned `ToolInvocationResult`.
- *   4. Dispatches to `HttpToolAdapter`, `McpToolAdapter` or
- *      `MicrosoftToolAdapter` (ADR-0004) based on `Tool.protocol` — all
- *      three behind this same pipeline, no separate path for any protocol.
+ *   4. Dispatches to `HttpToolAdapter`, `McpToolAdapter`,
+ *      `MicrosoftToolAdapter` (ADR-0004) or `GitLabToolAdapter` (ADR-0012)
+ *      based on `Tool.protocol`, all behind this same pipeline, no separate
+ *      path for any protocol.
  *   5. Records a `ToolInvocation` row (`SUCCESS`/`FAILURE`, timing,
  *      `resource`, a short `errorMessage` on failure) — never the resolved
  *      credential, never a raw request/response payload (an adapter's
@@ -223,6 +225,7 @@ export class CredentialBrokerService {
     configService: ConfigService<AppConfig, true>,
     private readonly manarConnector: ManarConnectorService,
     private readonly handoverStore: HandoverStore,
+    private readonly gitlabAdapter: GitLabToolAdapter,
   ) {
     this.injectionBlockThreshold = configService.get(
       'PROMPT_INJECTION_BLOCK_THRESHOLD',
@@ -369,7 +372,9 @@ export class CredentialBrokerService {
             ? this.mcpAdapter
             : tool.protocol === 'MICROSOFT'
               ? this.microsoftAdapter
-              : this.httpAdapter;
+              : tool.protocol === 'GITLAB'
+                ? this.gitlabAdapter
+                : this.httpAdapter;
         result = await adapter.invoke(
           tool,
           action,
@@ -452,6 +457,21 @@ export class CredentialBrokerService {
         ...(handoverState ? { handover: handoverState } : {}),
       },
     });
+
+    if (result.bindingViolation) {
+      await this.auditService.recordSafely(tenantClient, input.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_BINDING_VIOLATED,
+        actor: { type: 'agent', id: input.agentId },
+        data: {
+          taskId: input.taskId,
+          decisionId: input.decisionId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          violation: result.bindingViolation,
+        },
+      });
+    }
 
     if (result.success) {
       result = await this.applyPostCallAdvisories(

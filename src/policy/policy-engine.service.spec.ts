@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import type { ToolRegistryService } from '../tools/tool-registry.service';
 import type { DataClassification } from '../common/data-classification';
-import { PolicyEngine } from './policy-engine.service';
+import { PolicyEngine, resourcePatternMatches } from './policy-engine.service';
 
 /** Minimal fake `tenantClient.policyVersion.findMany` — a plain in-memory row list, no real database. `PolicyEngine` only ever calls `findMany`, so nothing else needs stubbing. */
 function fakeTenantClient(rows: unknown[]): TenantPrismaClient {
@@ -121,6 +121,54 @@ describe('PolicyEngine', () => {
     });
     expect(result.effect).toBe('DENY');
     expect(result.policyId).toBe('p1');
+  });
+
+  it('matches a resource pattern ending in * by prefix, and only that pattern', async () => {
+    const rows = [
+      publishedVersion({
+        id: 'v1',
+        policyId: 'p1',
+        version: 1,
+        content: {
+          rules: [
+            {
+              toolId: 'git',
+              actionId: 'commit',
+              resourcePattern: 'org/repo:main',
+              effect: 'DENY',
+            },
+            {
+              toolId: 'git',
+              actionId: 'commit',
+              resourcePattern: 'org/repo:*',
+              effect: 'ALLOW',
+            },
+            {
+              toolId: 'git',
+              actionId: '*',
+              resourcePattern: '*',
+              effect: 'DENY',
+            },
+          ],
+        },
+      }),
+    ];
+    const engine = new PolicyEngine(fakeToolRegistry());
+    const effect = async (resource: string) =>
+      (
+        await engine.evaluate(fakeTenantClient(rows), 'tenant-1', {
+          toolId: 'git',
+          actionId: 'commit',
+          resource,
+        })
+      ).effect;
+    expect(await effect('org/repo:feature/x')).toBe('ALLOW');
+    expect(await effect('org/repo:main')).toBe('DENY');
+    expect(await effect('org/repo')).toBe('DENY');
+    expect(await effect('org/repo-other:x')).toBe('DENY');
+    expect(resourcePatternMatches('*', 'x')).toBe(true);
+    expect(resourcePatternMatches('a*', 'a')).toBe(true);
+    expect(resourcePatternMatches('a', 'ab')).toBe(false);
   });
 
   it('first-match-wins within a single policy', async () => {

@@ -20,6 +20,7 @@ import type { TenantDatabaseManager } from '../database/tenant-database-manager.
 import type { SecretProvider } from '../database/secret-provider';
 import type { HttpToolAdapter } from './http-tool.adapter';
 import type { McpToolAdapter } from './mcp-tool.adapter';
+import type { GitLabToolAdapter } from './gitlab-tool.adapter';
 import type { MicrosoftToolAdapter } from './microsoft-tool.adapter';
 import type { ManarConnectorService } from './manar-connector.service';
 import type { HandoverStore } from './handover.store';
@@ -132,6 +133,7 @@ function makeService(options: {
   } as unknown as McpToolAdapter;
   const invokeMicrosoft = vi.fn().mockResolvedValue(options.toolResult);
   const invokeManar = vi.fn().mockResolvedValue(options.toolResult);
+  const invokeGitLab = vi.fn().mockResolvedValue(options.toolResult);
   const microsoftAdapter = {
     invoke: invokeMicrosoft,
   } as unknown as MicrosoftToolAdapter;
@@ -166,6 +168,7 @@ function makeService(options: {
     {
       put: options.putHandover ?? vi.fn().mockResolvedValue(undefined),
     } as unknown as HandoverStore,
+    { invoke: invokeGitLab } as unknown as GitLabToolAdapter,
   );
 
   return {
@@ -177,6 +180,7 @@ function makeService(options: {
     invokeHttp,
     invokeMicrosoft,
     invokeManar,
+    invokeGitLab,
   };
 }
 
@@ -528,6 +532,49 @@ describe('CredentialBrokerService protocol dispatch', () => {
     expect(invokeHttp).not.toHaveBeenCalled();
     expect(invokeMicrosoft).toHaveBeenCalledTimes(1);
     expect(invokeMicrosoft.mock.calls[0]![4]).toBe('resolved-secret');
+  });
+
+  it('sends a GITLAB tool to GitLabToolAdapter with the broker-resolved token, never to the HTTP adapter', async () => {
+    const { service, invokeHttp, invokeMicrosoft, invokeGitLab } = makeService({
+      toolResult: { success: true, data: [] },
+      tool: makeTool({ protocol: 'GITLAB' }),
+    });
+    const { tenantClient } = fakeTenantClient();
+
+    await service.invoke(tenantClient, baseInput);
+
+    expect(invokeHttp).not.toHaveBeenCalled();
+    expect(invokeMicrosoft).not.toHaveBeenCalled();
+    expect(invokeGitLab).toHaveBeenCalledTimes(1);
+    expect(invokeGitLab.mock.calls[0]![4]).toBe('resolved-secret');
+  });
+});
+
+describe('CredentialBrokerService approval binding (ADR-0012)', () => {
+  it('records approval_binding_violated when the adapter reports one', async () => {
+    const { service, recordSafely } = makeService({
+      toolResult: {
+        success: false,
+        errorMessage: 'merged_into_unapproved_target',
+        outcomeUnknown: true,
+        bindingViolation: 'merged_into_unapproved_target',
+      },
+      tool: makeTool({ protocol: 'GITLAB' }),
+    });
+    const { tenantClient } = fakeTenantClient();
+
+    await service.invoke(tenantClient, baseInput);
+
+    const types = recordSafely.mock.calls.map((c) => c[2].eventType);
+    expect(types).toContain(AUDIT_EVENT_TYPES.TOOL_INVOCATION_OUTCOME_UNKNOWN);
+    expect(types).toContain(AUDIT_EVENT_TYPES.APPROVAL_BINDING_VIOLATED);
+    const event = recordSafely.mock.calls.find(
+      (c) => c[2].eventType === AUDIT_EVENT_TYPES.APPROVAL_BINDING_VIOLATED,
+    )![2];
+    expect(event.data).toMatchObject({
+      decisionId: 'decision-1',
+      violation: 'merged_into_unapproved_target',
+    });
   });
 });
 
