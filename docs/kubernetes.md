@@ -181,8 +181,7 @@ rest). The rules are maps keyed by name in `values.yaml` (`networkPolicy.ingress
 `networkPolicy.egress`), so an overlay switches one off with
 `networkPolicy.egress.<name>.enabled: false`, changes its peers or adds one
 without restating the others (Helm and Flux merge maps but replace lists).
-`keycloak-public` (Traefik websecure, 8443) is off until the in-cluster rewrite of
-the public Keycloak name lands. Outbound HTTPS to public addresses (connectors,
+`keycloak-public` (Traefik websecure, 8443, on by default) carries Keycloak calls to the public issuer, which manar-infra rewrites in-cluster; `backingServiceTls.caSecretName` must name the internal CA Secret. Outbound HTTPS to public addresses (connectors,
 hosted model upstreams, a remote manar-fleet) is the `external-https` entry:
 TCP 443 to `0.0.0.0/0` minus private, link-local and CGNAT ranges. The
 namespace-wide default-deny is the platform repo's; these policies list what

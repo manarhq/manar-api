@@ -164,9 +164,8 @@ config:
   CORS_ALLOWED_ORIGINS: https://manar.example.com
   # Service addresses follow manar/manar-infra (namespaces manar-platform and
   # manar-prod); its HelmRelease overlays are authoritative and override these.
-  # OpenBao is TLS-only there: mount its issuing CA with
-  # backingServiceTls.caSecretName and set NODE_EXTRA_CA_CERTS to the file
-  # (/etc/manar/backing-service-ca/<key>). Keycloak and OpenFGA serve plain
+  # OpenBao is TLS-only there: set backingServiceTls.caSecretName to the internal
+  # CA Secret (NODE_EXTRA_CA_CERTS then points at it). Keycloak and OpenFGA serve plain
   # HTTP in-cluster, so those hops rely on the NetworkPolicies (docs/service-tls.md).
   KEYCLOAK_BASE_URL: http://keycloak.manar-platform.svc:8080
   KEYCLOAK_ADMIN_CLIENT_ID: admin-cli
@@ -263,9 +262,13 @@ agentMtls:
 #   KAFKA_SASL_PASSWORD, REDIS_PASSWORD, OPENSEARCH_PASSWORD. Never set any of
 #   these to an empty string: the config schema rejects empty values.
 backingServiceTls:
-  # A Secret holding the CA bundles (PEM), mounted read-only at
-  # /etc/manar/backing-service-ca. Empty: nothing is mounted.
+  # A Secret holding the internal CA (cert-manager's manar-internal-ca, which signs
+  # OpenBao, Keycloak's in-cluster route and other service certificates), mounted
+  # read-only at /etc/manar/backing-service-ca. When set, NODE_EXTRA_CA_CERTS points at
+  # its `caKey`, so every TLS client in the process trusts it. Empty: nothing is
+  # mounted and only public CAs are trusted.
   caSecretName: ''
+  caKey: ca.crt
 
 # Voluntary disruptions (node drains, cluster upgrades) take at most this many
 # pods at once. With one replica a drain still proceeds.
@@ -439,12 +442,13 @@ networkPolicy:
     # public addresses only, and only TCP 443: an upstream on another port
     # (a self-hosted GitLab on :8443, say) needs its own entry. Narrow the CIDR to the providers' published ranges
     # or route through an egress proxy where the platform has one.
-    # Keycloak through its public issuer (https://auth.manar.vax.sh). Without
-    # an in-cluster rewrite that name resolves to Cloudflare and leaves on 443
-    # (external-https); P1 is adding a CoreDNS rewrite to Traefik websecure
-    # (pod port 8443). Off until that lands, then on by default.
+    # Keycloak through its public issuer (https://auth.manar.vax.sh). manar-infra's
+    # CoreDNS rewrite sends that name to traefik-internal (Traefik websecure, pod
+    # port 8443), which serves keycloak-internal-tls from manar-internal-ca: set
+    # backingServiceTls.caSecretName so the pods trust it. Without the rewrite the
+    # name resolves to Cloudflare and goes out on 443 (external-https).
     keycloak-public:
-      enabled: false
+      enabled: true
       ports: [{ port: 8443, protocol: TCP }]
       to:
         - namespaceSelector:

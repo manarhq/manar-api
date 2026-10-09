@@ -60,6 +60,10 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.httpPort | quote }}
+            {{- if .Values.backingServiceTls.caSecretName }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/manar/backing-service-ca/{{ .Values.backingServiceTls.caKey }}
+            {{- end }}
           {{- if gt (int .Values.preStopSleepSeconds) 0 }}
           {{/*
           Delays SIGTERM reaching the process so Fastify keeps serving

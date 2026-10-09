@@ -56,6 +56,11 @@ spec:
                 name: {{ include "manar-api-worker.fullname" . }}-config
             - secretRef:
                 name: {{ include "manar-api-worker.secretName" . }}
+          {{- if .Values.backingServiceTls.caSecretName }}
+          env:
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/manar/backing-service-ca/{{ .Values.backingServiceTls.caKey }}
+          {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           resources:
