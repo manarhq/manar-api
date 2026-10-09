@@ -17,7 +17,7 @@ PORT=3900 AGENT_MTLS_PORT=3943 METRICS_PORT=3990 \
 TEMPORAL_TASK_QUEUE=manar-approvals-load WEBHOOK_DELIVERY_TASK_QUEUE=manar-webhooks-load \
 OPENFGA_STORE_NAME=manar-load RATE_LIMIT_AGENT_LIMIT=1000000 RATE_LIMIT_HUMAN_LIMIT=1000000 \
   node --env-file=.env dist/main
-METRICS_PORT=3991 TEMPORAL_TASK_QUEUE=manar-approvals-load WEBHOOK_DELIVERY_TASK_QUEUE=manar-webhooks-load \
+WORKER_METRICS_PORT=3991 TEMPORAL_TASK_QUEUE=manar-approvals-load WEBHOOK_DELIVERY_TASK_QUEUE=manar-webhooks-load \
   node --env-file=.env dist/worker.main
 
 # Own demo-soc-tools, so approved isolations never touch the shared fixture
