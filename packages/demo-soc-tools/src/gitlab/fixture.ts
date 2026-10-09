@@ -47,6 +47,8 @@ interface MergeRequest {
 interface Fault {
   status: number;
   message?: string;
+  /** Sent as `Location` (a redirect fault). */
+  location?: string;
   remaining: number;
 }
 
@@ -127,6 +129,7 @@ export default function gitlabFixtureRoutes(
     if (fault) {
       fault.remaining -= 1;
       if (fault.remaining <= 0) state.faults.delete(key);
+      if (fault.location) reply.header('location', fault.location);
       return fail(reply, fault.status, fault.message ?? 'FixtureInjectedFault');
     }
   });
@@ -154,11 +157,13 @@ export default function gitlabFixtureRoutes(
       path: string;
       status: number;
       message?: string;
+      location?: string;
       times?: number;
     };
     state.faults.set(`${b.method} ${b.path}`, {
       status: b.status,
       message: b.message,
+      location: b.location,
       remaining: b.times ?? 1,
     });
     return { status: 'armed' };
@@ -374,6 +379,19 @@ export default function gitlabFixtureRoutes(
           ],
           allow_force_push: false,
         });
+      });
+      api.get('/protected_branches/:name', (request, reply) => {
+        const name = (request.params as { name: string }).name;
+        const p = state.protectedBranches.get(name);
+        if (!p) return fail(reply, 404, '404 Not found');
+        return {
+          name,
+          push_access_levels: [{ access_level_description: levelName(p.push) }],
+          merge_access_levels: [
+            { access_level_description: levelName(p.merge) },
+          ],
+          allow_force_push: false,
+        };
       });
       api.delete('/protected_branches/:name', (request, reply) => {
         const name = (request.params as { name: string }).name;

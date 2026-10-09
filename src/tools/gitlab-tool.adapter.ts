@@ -118,6 +118,20 @@ export class GitLabToolAdapter implements ToolProtocolAdapter {
     if (!metadata.success) {
       return { success: false, errorMessage: 'invalid_gitlab_tool_config' };
     }
+    // The token is bound to one host by two independent settings: the tool
+    // row and the operator's SSRF_ALLOWED_HOSTS. Both must name it.
+    let host: string;
+    try {
+      host = new URL(tool.baseEndpoint).hostname;
+    } catch {
+      return { success: false, errorMessage: 'invalid_gitlab_tool_config' };
+    }
+    if (!this.ssrfPolicy.allowedHosts.has(host)) {
+      this.logger.warn(
+        `Refused "${tool.name}/${action.name}": base endpoint host is not in SSRF_ALLOWED_HOSTS`,
+      );
+      return { success: false, errorMessage: 'gitlab_host_not_allowed' };
+    }
     if (!def) return { success: false, errorMessage: 'unknown_gitlab_action' };
     const target = parseGitLabResource(def.resource, resource);
     if (!target) {
@@ -147,10 +161,16 @@ export class GitLabToolAdapter implements ToolProtocolAdapter {
     if (def.precheck) {
       const checked = await this.send(ctx, def.precheck.request(target), false);
       if (checked.kind === 'final') return checked.result;
-      if (checked.kind !== 'ok') {
+      const missing = checked.kind === 'status' && checked.status === 404;
+      if (checked.kind !== 'ok' && !missing) {
+        // Fail closed: no change without a definite answer about the state.
         return { success: false, errorMessage: this.describe(checked) };
       }
-      const refusal = def.precheck.refuse(checked.body);
+      const refusal = def.precheck.refuse(
+        checked.kind === 'ok' ? checked.body : undefined,
+        target,
+        p,
+      );
       if (refusal) return { success: false, errorMessage: refusal };
     }
 
@@ -207,12 +227,23 @@ export class GitLabToolAdapter implements ToolProtocolAdapter {
         ? ctx.tool.baseEndpoint
         : `${ctx.tool.baseEndpoint}/`,
     ).href;
-    const projectBase = `${base}projects/${encodeURIComponent(ctx.metadata.project)}/`;
+    const projectBase = new URL(
+      `projects/${encodeURIComponent(ctx.metadata.project)}/`,
+      base,
+    );
     const url = new URL(request.path, projectBase);
     for (const [key, value] of Object.entries(request.query ?? {})) {
       url.searchParams.set(key, value);
     }
-    if (!url.href.startsWith(projectBase)) {
+    // Every catalog path is relative and built from encoded segments; this
+    // refuses anything that still resolves off the project (another origin,
+    // a protocol-relative or absolute path, a dot segment).
+    if (
+      url.origin !== projectBase.origin ||
+      !url.pathname.startsWith(projectBase.pathname) ||
+      url.username !== '' ||
+      url.password !== ''
+    ) {
       return {
         kind: 'final',
         result: { success: false, errorMessage: 'unknown_gitlab_action' },
@@ -270,6 +301,9 @@ export class GitLabToolAdapter implements ToolProtocolAdapter {
           request.body !== undefined ? JSON.stringify(request.body) : undefined,
         signal: controller.signal,
         ...this.ssrfPolicy,
+        // GitLab's API does not redirect; a 3xx is refused, not followed,
+        // so the token is only ever sent to the URL built above.
+        maxRedirects: 0,
       });
       const text = await readBoundedResponseText(response).catch(
         (error: unknown) => {

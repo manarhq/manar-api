@@ -42,10 +42,20 @@ export interface GitLabActionDef {
   resource: GitLabResourceKind;
   inputSchema: Record<string, unknown>;
   build(target: GitLabTarget, params: Record<string, unknown>): GitLabRequest;
-  /** Read sent first; a non-empty answer refuses the action before anything changes. */
+  /**
+   * Read sent first, at execution time (after any approval): binds the
+   * change to the state the agent asked about and a person approved. `found`
+   * is the body, or `undefined` when GitLab answered 404; a non-empty answer
+   * refuses the action with nothing changed. Any other failure of the read
+   * refuses it too (fail closed).
+   */
   precheck?: {
     request(target: GitLabTarget): GitLabRequest;
-    refuse(body: unknown): string | undefined;
+    refuse(
+      found: unknown,
+      target: GitLabTarget,
+      params: Record<string, unknown>,
+    ): string | undefined;
   };
   /** Sent instead when the main request answers 404 (create-or-update). */
   onNotFound?(
@@ -141,6 +151,7 @@ const shapeProtection = (o: unknown) => {
 };
 
 const noParams = { type: 'object', additionalProperties: false };
+const SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' };
 const branchName = { type: 'string', pattern: GITLAB_BRANCH.source };
 /** GitLab access levels: 0 no one, 30 developers, 40 maintainers. */
 const accessLevel = { enum: [0, 30, 40] };
@@ -336,10 +347,14 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
         method: 'GET',
         path: `repository/branches/${seg(t.branch!)}`,
       }),
-      refuse: (body) =>
-        (body as { protected?: unknown } | null)?.protected === false
-          ? undefined
-          : 'protected_branch',
+      // GitLab's own branch protection is the last check if a branch is
+      // protected between this read and the commit.
+      refuse: (found) =>
+        found === undefined
+          ? 'branch_not_found'
+          : (found as { protected?: unknown }).protected === false
+            ? undefined
+            : 'protected_branch',
     },
     build: (t, p) => ({
       method: 'POST',
@@ -412,7 +427,7 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
   {
     name: 'gitlab.mr.merge',
     description:
-      'Merge a merge request into its target branch (resource: group/project!iid). Pass `sha` (from gitlab.mr.get) to merge only that exact head commit.',
+      'Merge a merge request (resource: group/project!iid). `sha` and `targetBranch` come from gitlab.mr.get and are what the person approves: Manar refuses if the MR moved to another head commit or target branch, and GitLab merges only that head.',
     mutating: true,
     destructive: false,
     riskBaseScore: 30,
@@ -420,16 +435,31 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
     inputSchema: {
       type: 'object',
       additionalProperties: false,
+      required: ['sha', 'targetBranch'],
       properties: {
-        sha: { type: 'string', pattern: '^[0-9a-f]{40}$' },
+        sha: SHA,
+        targetBranch: branchName,
         squash: { type: 'boolean' },
+      },
+    },
+    precheck: {
+      request: (t) => ({ method: 'GET', path: `merge_requests/${t.iid}` }),
+      refuse: (found, _t, p) => {
+        const mr = found as
+          | { state?: unknown; sha?: unknown; target_branch?: unknown }
+          | undefined;
+        if (!mr) return 'mr_not_found';
+        if (mr.state !== 'opened') return 'mr_not_open';
+        if (mr.target_branch !== p.targetBranch) return 'mr_target_changed';
+        if (mr.sha !== p.sha) return 'mr_head_changed';
+        return undefined;
       },
     },
     build: (t, p) => ({
       method: 'PUT',
       path: `merge_requests/${t.iid}/merge`,
       body: {
-        ...(typeof p.sha === 'string' ? { sha: p.sha } : {}),
+        sha: p.sha,
         ...(typeof p.squash === 'boolean' ? { squash: p.squash } : {}),
         should_remove_source_branch: false,
       },
@@ -439,12 +469,30 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
   {
     name: 'gitlab.branch.delete',
     description:
-      'Delete a branch (resource: group/project:<branch>). Commits only on that branch become unreachable.',
+      'Delete a branch (resource: group/project:<branch>) whose tip is `sha` (from the branch or MR). Refused if the branch moved or is protected. Commits only on that branch become unreachable.',
     mutating: true,
     destructive: true,
     riskBaseScore: 25,
     resource: 'branch',
-    inputSchema: noParams,
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sha'],
+      properties: { sha: SHA },
+    },
+    precheck: {
+      request: (t) => ({
+        method: 'GET',
+        path: `repository/branches/${seg(t.branch!)}`,
+      }),
+      refuse: (found, _t, p) => {
+        const b = found as
+          { protected?: unknown; commit?: { id?: unknown } } | undefined;
+        if (!b) return 'branch_not_found';
+        if (b.protected !== false) return 'protected_branch';
+        return b.commit?.id === p.sha ? undefined : 'branch_tip_changed';
+      },
+    },
     build: (t) => ({
       method: 'DELETE',
       path: `repository/branches/${seg(t.branch!)}`,
@@ -453,7 +501,7 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
   {
     name: 'gitlab.branch.protection.change',
     description:
-      'Protect a branch with the given push and merge levels, or remove its protection (resource: group/project:<branch>). Removing protection lets anyone with push rights rewrite it.',
+      'Protect an unprotected branch with the given push and merge levels, or remove the protection of a protected one (resource: group/project:<branch>). Refused if the branch is not in the state the request assumes. Removing protection lets anyone with push rights rewrite it.',
     mutating: true,
     destructive: true,
     riskBaseScore: 40,
@@ -467,6 +515,16 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
         pushAccessLevel: accessLevel,
         mergeAccessLevel: accessLevel,
       },
+    },
+    precheck: {
+      request: (t) => ({
+        method: 'GET',
+        path: `protected_branches/${seg(t.branch!)}`,
+      }),
+      refuse: (found, _t, p) =>
+        (found !== undefined) === Boolean(p.protect)
+          ? 'protection_state_changed'
+          : undefined,
     },
     build: (t, p) =>
       p.protect
@@ -505,6 +563,7 @@ export const GITLAB_ACTIONS: readonly GitLabActionDef[] = [
     build: (_t, p) => ({
       method: 'PUT',
       path: `variables/${seg(String(p.key))}`,
+      query: { 'filter[environment_scope]': '*' },
       body: variableBody(p),
     }),
     onNotFound: (_t, p) => ({
@@ -521,6 +580,7 @@ function variableBody(p: Record<string, unknown>) {
     value: p.value,
     protected: p.protected ?? true,
     masked: p.masked ?? true,
+    environment_scope: '*',
   };
 }
 

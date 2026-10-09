@@ -25,10 +25,13 @@ import type { ToolActionRecord, ToolRecord } from './tool-registry.service';
 const P = GITLAB_FIXTURE_DEFAULTS.project;
 const TOKEN = GITLAB_FIXTURE_DEFAULTS.token;
 
-function config(allowLoopback = true): ConfigService<AppConfig, true> {
+function config(
+  allowLoopback = true,
+  allowedHosts = '127.0.0.1',
+): ConfigService<AppConfig, true> {
   const values: Record<string, unknown> = {
     NODE_ENV: 'test',
-    SSRF_ALLOWED_HOSTS: '127.0.0.1',
+    SSRF_ALLOWED_HOSTS: allowedHosts,
     SSRF_ALLOW_LOOPBACK: allowLoopback,
   };
   return { get: (key: string) => values[key] } as never;
@@ -106,12 +109,13 @@ describe('GitLabToolAdapter (against the DEMO FIXTURE)', () => {
     (await control<{ requests: Recorded[] }>('requests')).requests;
   const state = () =>
     control<{
-      branches: Record<string, { files: Record<string, string> }>;
+      branches: Record<string, { sha: string; files: Record<string, string> }>;
       protectedBranches: string[];
       mergeRequests: { iid: number; state: string; notes: unknown[] }[];
       variables: string[];
     }>('state');
   const projectPath = `/api/v4/projects/${encodeURIComponent(P)}`;
+  const tip = async (branch: string) => (await state()).branches[branch]!.sha;
 
   it('declares the catalog with the agreed change and risk flags', () => {
     const flags = Object.fromEntries(
@@ -251,7 +255,10 @@ describe('GitLabToolAdapter (against the DEMO FIXTURE)', () => {
     const head = (await invoke('gitlab.mr.get', `${P}!1`)).data as {
       sha: string;
     };
-    const merged = await invoke('gitlab.mr.merge', `${P}!1`, { sha: head.sha });
+    const merged = await invoke('gitlab.mr.merge', `${P}!1`, {
+      sha: head.sha,
+      targetBranch: 'main',
+    });
     expect(merged).toMatchObject({ success: true, data: { state: 'merged' } });
     const s = await state();
     expect(s.branches.main!.files['HELLO.md']).toBe('hello\n');
@@ -277,7 +284,7 @@ describe('GitLabToolAdapter (against the DEMO FIXTURE)', () => {
     });
     expect(result).toEqual({
       success: false,
-      errorMessage: 'HTTP 404 not_found',
+      errorMessage: 'branch_not_found',
     });
   });
 
@@ -292,8 +299,12 @@ describe('GitLabToolAdapter (against the DEMO FIXTURE)', () => {
       data: { name: 'tmp', push: ['No one'], merge: ['Maintainers'] },
     });
     expect(
-      (await invoke('gitlab.branch.delete', `${P}:tmp`)).errorMessage,
-    ).toBe('HTTP 403 forbidden');
+      (
+        await invoke('gitlab.branch.delete', `${P}:tmp`, {
+          sha: await tip('tmp'),
+        })
+      ).errorMessage,
+    ).toBe('protected_branch');
     expect(
       (
         await invoke('gitlab.branch.protection.change', `${P}:tmp`, {
@@ -301,9 +312,13 @@ describe('GitLabToolAdapter (against the DEMO FIXTURE)', () => {
         })
       ).success,
     ).toBe(true);
-    expect((await invoke('gitlab.branch.delete', `${P}:tmp`)).success).toBe(
-      true,
-    );
+    expect(
+      (
+        await invoke('gitlab.branch.delete', `${P}:tmp`, {
+          sha: await tip('tmp'),
+        })
+      ).success,
+    ).toBe(true);
     expect(Object.keys((await state()).branches)).not.toContain('tmp');
   });
 
@@ -399,5 +414,149 @@ describe('GitLabToolAdapter (against the DEMO FIXTURE)', () => {
         .errorMessage,
     ).toBe('invalid_gitlab_tool_config');
     expect(await requests()).toHaveLength(0);
+  });
+
+  describe('security review fixes', () => {
+    it('never follows a redirect, not even to its own origin outside the project path', async () => {
+      // Cross-origin hops already drop PRIVATE-TOKEN (url-safety.spec.ts);
+      // this adapter follows no hop at all.
+      await control('faults', {
+        method: 'GET',
+        path: `${projectPath}/merge_requests`,
+        status: 302,
+        location: `${base}/_fixture/state`,
+        times: 3,
+      });
+      const result = await invoke('gitlab.mr.list', P);
+      expect(result).toEqual({
+        success: false,
+        errorMessage: 'blocked_by_outbound_url_policy',
+      });
+      expect((await requests()).map((r) => r.path)).toEqual([
+        `${projectPath}/merge_requests`,
+      ]);
+    });
+
+    it('sends the token only when the base endpoint host is also on the SSRF allowlist', async () => {
+      const pinned = new GitLabToolAdapter(config(true, 'gitlab.example.test'));
+      expect(
+        await pinned.invoke(tool(), action('gitlab.mr.list'), P, {}, TOKEN),
+      ).toEqual({ success: false, errorMessage: 'gitlab_host_not_allowed' });
+      expect(await requests()).toHaveLength(0);
+    });
+
+    it('a path value cannot leave the project: it is encoded into one segment', async () => {
+      await invoke('gitlab.repo.file.get', P, { path: '@evil.test/x?y#z' });
+      await invoke('gitlab.repo.tree.list', P, {
+        ref: '//evil.test',
+        path: 'a',
+      });
+      for (const r of await requests()) {
+        expect(r.path.startsWith(`${projectPath}/`)).toBe(true);
+      }
+    });
+
+    it('a merge is bound to the reviewed head commit and target branch', async () => {
+      await invoke('gitlab.branch.create', `${P}:feature/a`, { ref: 'main' });
+      await invoke('gitlab.mr.create', P, {
+        sourceBranch: 'feature/a',
+        targetBranch: 'main',
+        title: 't',
+      });
+      const head = (
+        (await invoke('gitlab.mr.get', `${P}!1`)).data as { sha: string }
+      ).sha;
+
+      expect((await invoke('gitlab.mr.merge', `${P}!1`)).errorMessage).toMatch(
+        /Invalid params/,
+      );
+      expect(
+        (
+          await invoke('gitlab.mr.merge', `${P}!1`, {
+            sha: head,
+            targetBranch: 'develop',
+          })
+        ).errorMessage,
+      ).toBe('mr_target_changed');
+      // A commit lands on the source branch after the person approved `head`.
+      await invoke('gitlab.commit.create', `${P}:feature/a`, {
+        message: 'sneaky',
+        actions: [{ action: 'create', file_path: 'x', content: 'x' }],
+      });
+      expect(
+        (
+          await invoke('gitlab.mr.merge', `${P}!1`, {
+            sha: head,
+            targetBranch: 'main',
+          })
+        ).errorMessage,
+      ).toBe('mr_head_changed');
+      expect((await requests()).filter((r) => r.method === 'PUT')).toHaveLength(
+        0,
+      );
+      expect((await state()).mergeRequests[0]!.state).toBe('opened');
+    });
+
+    it('a branch delete is bound to the tip commit the person saw', async () => {
+      await invoke('gitlab.branch.create', `${P}:old`, { ref: 'main' });
+      expect(
+        (await invoke('gitlab.branch.delete', `${P}:old`)).errorMessage,
+      ).toMatch(/Invalid params/);
+      expect(
+        (
+          await invoke('gitlab.branch.delete', `${P}:old`, {
+            sha: 'a'.repeat(40),
+          })
+        ).errorMessage,
+      ).toBe('branch_tip_changed');
+      expect(
+        (await requests()).filter((r) => r.method === 'DELETE'),
+      ).toHaveLength(0);
+      expect(Object.keys((await state()).branches)).toContain('old');
+    });
+
+    it('a protection change runs only from the state the person saw', async () => {
+      expect(
+        (
+          await invoke('gitlab.branch.protection.change', `${P}:main`, {
+            protect: true,
+          })
+        ).errorMessage,
+      ).toBe('protection_state_changed');
+      expect(
+        (
+          await invoke('gitlab.branch.protection.change', `${P}:develop`, {
+            protect: false,
+          })
+        ).errorMessage,
+      ).toBe('protection_state_changed');
+      expect((await requests()).filter((r) => r.method !== 'GET')).toHaveLength(
+        0,
+      );
+    });
+
+    it('fails closed when the protected-branch lookup fails', async () => {
+      await control('faults', {
+        method: 'GET',
+        path: `${projectPath}/repository/branches/develop`,
+        status: 503,
+        times: 3,
+      });
+      const result = await invoke('gitlab.commit.create', `${P}:develop`, {
+        message: 'x',
+        actions: [{ action: 'create', file_path: 'a', content: '' }],
+      });
+      expect(result.success).toBe(false);
+      expect(
+        (await requests()).filter((r) => r.method === 'POST'),
+      ).toHaveLength(0);
+    });
+
+    it('a CI variable is set only for every environment (scope *), never another scope', async () => {
+      await invoke('gitlab.project.variable.set', P, { key: 'K', value: 'v' });
+      const [put, post] = await requests();
+      expect(put!.query).toMatchObject({ 'filter[environment_scope]': '*' });
+      expect(post!.body).toMatchObject({ environment_scope: '*' });
+    });
   });
 });
