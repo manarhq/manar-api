@@ -6,7 +6,10 @@ import { RedisThrottlerStorageService } from './redis-throttler-storage.service'
 
 function fakeConfigService(): ConfigService<AppConfig, true> {
   return {
-    get: () => process.env.REDIS_URL ?? 'redis://localhost:6379',
+    get: (key: string) =>
+      key === 'REDIS_URL'
+        ? (process.env.REDIS_URL ?? 'redis://localhost:6379')
+        : undefined,
   } as unknown as ConfigService<AppConfig, true>;
 }
 
