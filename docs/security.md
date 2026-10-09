@@ -304,6 +304,19 @@ must not permanently block a legitimate retry with the same key. Scoped
 per (tenant-or-agent, controller.handler, key) — the same literal key
 value from two different tenants is never treated as a collision.
 
+**When Redis is unavailable** (every call bounded by `REDIS_TIMEOUT_MS`):
+
+- `claim()` fails: nothing runs; the caller gets a 503
+  `enforcement_dependency_unavailable` and can retry with the same key.
+- The handler succeeded but `store()` fails: the change is committed, so the
+  caller gets its result anyway (logged). The claim was written with
+  `IDEMPOTENCY_IN_PROGRESS_TTL_MS` (default 60 s), so a retry with the same key
+  gets 409 until that marker expires, then runs again; it never blocks a key
+  for the full 24 h. A retry after that window can repeat the change, so
+  callers should not retry a request that already returned 2xx.
+- The handler failed and `release()` fails: the caller gets the handler's own
+  error; the marker expires after the same short TTL.
+
 ## Data residency enforcement (Section 54)
 
 Phase 2 gave every `Tenant` `allowExternalAi`/`allowOutboundTelemetry`/
