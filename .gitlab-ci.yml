@@ -431,6 +431,10 @@ gitleaks:
   image:
     name: ghcr.io/gitleaks/gitleaks:v8.30.1
     entrypoint: ['']
+  # A full, non-shallow clone: the default depth would hide all but the last commits.
+  variables:
+    GIT_DEPTH: 0
+    GIT_STRATEGY: clone
   script:
     - gitleaks git --log-opts="--all" -c .gitleaks.toml --exit-code 1 --redact -v .
 
@@ -474,8 +478,10 @@ trivy-fs:
     name: aquasec/trivy:0.71.0
     entrypoint: ['']
   script:
-    - trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed .
-    - trivy fs --scanners vuln --format json --output trivy-fs-report.json --ignore-unfixed .
+    # Dependencies plus Dockerfile and Helm misconfigurations. Secrets are gitleaks' job here: the
+    # DLP specs carry synthetic credential-shaped fixtures that trivy's secret scanner flags.
+    - trivy fs --scanners vuln,misconfig --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed .
+    - trivy fs --scanners vuln,misconfig --format json --output trivy-fs-report.json --ignore-unfixed .
   artifacts:
     when: always
     paths:
