@@ -12,6 +12,8 @@ export const FIXTURE_USER_UPN = 'adele.vance@fixture.example';
 export const FIXTURE_SECOND_USER_ID = '2b1e9c7d-5a3f-4c8e-9d0b-1a2b3c4d5e6f';
 export const FIXTURE_MACHINE_ID = '4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70';
 export const FIXTURE_INCIDENT_ID = '4201';
+export const FIXTURE_GROUP_ID = '5c0de9a1-7b2f-4e3d-8c1a-9f8e7d6c5b4a';
+export const FIXTURE_DYNAMIC_GROUP_ID = '6d1ef0b2-8c3a-4f4e-9d2b-0a9f8e7d6c5b';
 
 export interface FixtureUser {
   id: string;
@@ -22,6 +24,17 @@ export interface FixtureUser {
   sessionsRevokedAt: string | null;
   passwordResetAt: string | null;
   forceChangePasswordNextSignIn: boolean;
+  /** Registered authentication methods (`id`, `@odata.type`), as Graph lists them. */
+  authMethods: { id: string; '@odata.type': string }[];
+}
+
+export interface FixtureGroup {
+  id: string;
+  displayName: string;
+  groupTypes: string[];
+  mailEnabled: boolean;
+  /** Member user ids. */
+  members: string[];
 }
 
 export interface FixtureRiskyUser {
@@ -58,6 +71,7 @@ export interface FixtureMachineAction {
 
 export interface FixtureSeed {
   users: FixtureUser[];
+  groups: FixtureGroup[];
   riskyUsers: FixtureRiskyUser[];
   machines: FixtureMachine[];
   incidents: Record<string, unknown>[];
@@ -78,6 +92,21 @@ export function seedData(): FixtureSeed {
         sessionsRevokedAt: null,
         passwordResetAt: null,
         forceChangePasswordNextSignIn: false,
+        authMethods: [
+          {
+            id: '28c10230-6103-485e-b985-444c60001490',
+            '@odata.type': '#microsoft.graph.passwordAuthenticationMethod',
+          },
+          {
+            id: '3179e48a-750b-4051-897c-87b9720928f7',
+            '@odata.type': '#microsoft.graph.phoneAuthenticationMethod',
+          },
+          {
+            id: 'b1c2d3e4-0001-4a5b-8c6d-7e8f9a0b1c2d',
+            '@odata.type':
+              '#microsoft.graph.microsoftAuthenticatorAuthenticationMethod',
+          },
+        ],
       },
       {
         id: FIXTURE_SECOND_USER_ID,
@@ -87,6 +116,23 @@ export function seedData(): FixtureSeed {
         sessionsRevokedAt: null,
         passwordResetAt: null,
         forceChangePasswordNextSignIn: false,
+        authMethods: [],
+      },
+    ],
+    groups: [
+      {
+        id: FIXTURE_GROUP_ID,
+        displayName: 'Helpdesk (fixture)',
+        groupTypes: [],
+        mailEnabled: false,
+        members: [FIXTURE_USER_ID],
+      },
+      {
+        id: FIXTURE_DYNAMIC_GROUP_ID,
+        displayName: 'All staff (fixture, dynamic)',
+        groupTypes: ['DynamicMembership'],
+        mailEnabled: false,
+        members: [FIXTURE_USER_ID, FIXTURE_SECOND_USER_ID],
       },
     ],
     riskyUsers: [
