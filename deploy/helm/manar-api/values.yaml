@@ -52,6 +52,7 @@ podSecurityContext:
 # any — it's not binding <1024 without host networking, no raw sockets).
 securityContext:
   allowPrivilegeEscalation: false
+  privileged: false
   readOnlyRootFilesystem: true
   runAsNonRoot: true
   runAsUser: 1001

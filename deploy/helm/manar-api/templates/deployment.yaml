@@ -30,6 +30,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "manar-api.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
       {{/*
       Room for the preStop sleep + the app's own shutdown hooks
       (src/main.ts's enableGracefulShutdown) to finish before SIGKILL. Must
