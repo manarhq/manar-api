@@ -217,17 +217,19 @@ per problem (no redundant pair solving the same problem twice):
 
 | Tool        | Version (pinned image)                    | Problem                                                                                                                                                        | Threshold                                                                                                                        |
 | ----------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Trivy       | `aquasec/trivy:0.71.0`                    | Dependency scan (`trivy fs`) **and** container image scan (`trivy image`, all three built images)                                                              | Fail on **HIGH/CRITICAL** only (`--ignore-unfixed`); full JSON report always uploaded regardless of outcome                      |
+| Trivy       | `aquasec/trivy:0.71.0`                    | Dependency scan (`trivy fs`) **and** container image scan (`trivy image`, all three built images; 0.74.0 by digest, inside `docker:build-images`)              | Fail on **HIGH/CRITICAL** only (`--ignore-unfixed`); full JSON report always uploaded regardless of outcome                      |
 | Gitleaks    | `ghcr.io/gitleaks/gitleaks:v8.30.1`       | Secret scanning, full git history every run (`--log-opts="--all"`), not just the diff                                                                          | Fail on **any** finding not already in `.gitleaks.toml`'s allowlist — no acceptable severity tier for a leaked credential        |
 | Semgrep     | `semgrep/semgrep:1.172.0`                 | SAST                                                                                                                                                           | Fail on **ERROR** severity only (`--config auto`'s highest tier); WARNING/INFO still reported in the JSON artifact, non-blocking |
-| Syft        | `anchore/syft:v1.51.0`                    | SBOM generation (CycloneDX), all three built images                                                                                                            | Artifact-only job — never fails the pipeline                                                                                     |
+| Syft        | `anchore/syft:v1.51.0`                    | SBOM generation (CycloneDX), all three built images, inside `docker:build-images`                                                                              | A Syft failure fails `docker:build-images`; the SBOMs are uploaded as artifacts                                                  |
 | kubeconform | `ghcr.io/yannh/kubeconform:v0.8.0-alpine` | Kubernetes manifest **schema** validity                                                                                                                        | Fail on **any** `-strict` violation                                                                                              |
 | kube-linter | `stackrox/kube-linter:v0.8.3`             | Kubernetes manifest **best-practice/security lint** (non-root, resource limits, anti-affinity, `:latest`, ...) — complements kubeconform, doesn't duplicate it | Fail on any default-profile finding                                                                                              |
 
-`docker:build-images` (in the existing `build` stage, so its artifacts —
-three `docker save` tarballs — exist before any `security`-stage job that
-`needs:` them) builds all three images with the same `--target`/`-f`
-invocations documented above.
+`docker:build-images` (in the `build` stage) builds all three images with
+the same `--target`/`-f` invocations documented above, then scans each
+`docker save` tarball with Trivy and Syft in the same job. The tarballs
+(about 900 MB each) are not artifacts: the instance artifact limit is
+100 MB. Only the Trivy JSON reports and the SBOMs are uploaded. Trivy, Syft
+and the docker images are pinned by digest.
 
 **Verified locally before wiring into CI** (all commands above run
 directly against this repo, not assumed to work):
