@@ -445,6 +445,59 @@ describe('CatalogService.update', () => {
     expect(writes).toEqual([]);
   });
 
+  it('counts a pack not yet in the catalog as disabled at version 0', async () => {
+    const { service, writes } = make();
+    await expect(
+      service.update(
+        't1',
+        CatalogPatchSchema.parse({
+          packs: [
+            {
+              id: 'it-helpdesk',
+              version: 1,
+              enabled: true,
+              expect: { enabled: true },
+            },
+          ],
+        }),
+        'manar-fleet',
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    await service.update(
+      't1',
+      CatalogPatchSchema.parse({
+        packs: [
+          {
+            id: 'it-helpdesk',
+            version: 1,
+            enabled: true,
+            expect: { enabled: false, maxVersion: 0 },
+          },
+        ],
+      }),
+      'manar-fleet',
+    );
+    expect(writes[0]!.packs).toEqual([
+      { id: 'it-helpdesk', version: 1, enabled: true, agents: [] },
+    ]);
+  });
+
+  it('a disable never lowers the version a newer publish set', async () => {
+    const { service, writes } = make({
+      row: row({ packs: [{ ...pack('it-helpdesk', true), version: 2 }] }),
+    });
+    await service.update(
+      't1',
+      CatalogPatchSchema.parse({
+        packs: [{ id: 'it-helpdesk', version: 1, enabled: false }],
+      }),
+      'manar-fleet',
+    );
+    expect(writes[0]!.packs).toEqual([
+      { id: 'it-helpdesk', version: 2, enabled: false, agents: [] },
+    ]);
+  });
+
   it('stores the pack without its precondition when it holds', async () => {
     const { service, writes } = make({
       row: row({ packs: [pack('it-helpdesk', true)] }),

@@ -320,8 +320,12 @@ export class CatalogService {
             current: { enabled: current.enabled, version: current.version },
           });
         const agents = p.agents ?? (i >= 0 ? packs[i]!.agents : []);
-        if (i >= 0) packs[i] = { ...p, agents };
-        else packs.push({ ...p, agents });
+        // Disabling never lowers the version: a disable proposed before a publish keeps the newer one.
+        const version = p.enabled
+          ? p.version
+          : Math.max(current.version, p.version);
+        if (i >= 0) packs[i] = { ...p, version, agents };
+        else packs.push({ ...p, version, agents });
       }
       // Only keys staff set are stored, so an unset feature keeps following its default.
       const next = StoredCatalogSchema.parse({
