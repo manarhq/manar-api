@@ -189,6 +189,12 @@ agentMtls:
     serverKey: 'unused-by-worker'
     caChain: 'unused-by-worker'
 
+# Voluntary disruptions (node drains, cluster upgrades) take at most this many
+# pods at once. With one replica a drain still proceeds.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
 networkPolicy:
   enabled: true
   # No ingress rules at all: no Service, nothing ever initiates a
