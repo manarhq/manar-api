@@ -41,8 +41,12 @@ type GitLabToolMetadata = z.infer<typeof GitLabToolMetadataSchema>;
 
 const READ_MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 200;
-/** How long a precheck waits for GitLab to finish computing a state (10 x 1 s). */
-const SETTLE_MAX_READS = 10;
+/**
+ * How long a precheck waits for GitLab to finish computing a state (45 x 1 s).
+ * gitlab.vax.sh took about a minute to mark a fresh MR mergeable (9 Oct 2026);
+ * 45 s plus the 60 s request deadline stays under the demo bridge's 180 s.
+ */
+const SETTLE_MAX_READS = 45;
 const SETTLE_DELAY_MS = 1_000;
 /** Errors that prove the request never left this process. */
 const NOT_SENT_ERROR_CODES = new Set([
