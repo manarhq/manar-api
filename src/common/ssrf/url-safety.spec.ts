@@ -389,6 +389,25 @@ describe('safeOutboundFetch', () => {
     );
   });
 
+  it('drops a GitLab PRIVATE-TOKEN header on a cross-origin redirect', async () => {
+    const { fetchImpl, requests } = scriptedFetch([
+      { status: 302, location: 'https://attacker.example.test/collect' },
+      { status: 200, body: '{}' },
+    ]);
+
+    await safeOutboundFetch('https://tool.example.test/run', {
+      method: 'GET',
+      headers: { 'PRIVATE-TOKEN': 'glpat-broker-issued' },
+      lookup: scriptedLookup,
+      fetchImpl,
+    });
+
+    expect(requests[0]?.headers['PRIVATE-TOKEN']).toBe('glpat-broker-issued');
+    expect(JSON.stringify(requests[1]?.headers)).not.toContain(
+      'glpat-broker-issued',
+    );
+  });
+
   it('drops the Authorization header on a same-host, different-scheme redirect', async () => {
     const { fetchImpl, requests } = scriptedFetch([
       { status: 302, location: 'http://tool.example.test/run' },
