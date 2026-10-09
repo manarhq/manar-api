@@ -1,35 +1,15 @@
 # Triaged gitleaks findings: synthetic secret-shaped strings that the DLP,
 # credential-broker, LLM-proxy and JWT-guard specs use as detector inputs
 # (placeholder account names, "s3cr3t-value", "hunter22", truncated PEM
-# headers), plus docs/kubernetes.md quoting the README badge sample token
-# already allowlisted in .gitleaks.toml. None is a usable credential.
+# headers), plus README.md's NestJS CircleCI badge sample token and docs/kubernetes.md
+# quoting it. None is a usable credential.
 # Exact fingerprints, so a real secret added to these files later still fails.
-1de19f7787413f23e07c2c7435663f5ab39a8e47:src/auth/jwt-auth.guard.spec.ts:generic-api-key:166
-1de19f7787413f23e07c2c7435663f5ab39a8e47:src/auth/jwt-auth.guard.spec.ts:generic-api-key:88
-8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:azure-ad-client-secret:35
-8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:generic-api-key:21
-8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:generic-api-key:25
-8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:jwt:11
-8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:private-key:17
-8d71467910054b3c2da179354b40cebf835b964a:src/tools/credential-broker.service.spec.ts:azure-ad-client-secret:570
-8d71467910054b3c2da179354b40cebf835b964a:src/tools/credential-broker.service.spec.ts:generic-api-key:575
-8d71467910054b3c2da179354b40cebf835b964a:src/tools/credential-broker.service.spec.ts:jwt:672
-8d71467910054b3c2da179354b40cebf835b964a:src/tools/credential-broker.service.spec.ts:private-key:565
-962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-dlp-floor.spec.ts:azure-ad-client-secret:31
-962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-dlp-floor.spec.ts:generic-api-key:17
-962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-dlp-floor.spec.ts:generic-api-key:21
-962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-dlp-floor.spec.ts:jwt:7
-962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-proxy.service.spec.ts:azure-ad-client-secret:251
-a2dbbc6184e8d653b321a2a540ee582fc9931a32:docs/kubernetes.md:generic-api-key:257
-f3ab20d191565a5501e2876f3acc18271805b587:test/agent-runtime.e2e-spec.ts:azure-ad-client-secret:824
 
 # Triaged 2026-10-09: synthetic detector fixtures in specs (DLP floor and classification, credential
 # broker, LLM proxy, assistant, JWT guard, agent runtime e2e) and docs/kubernetes.md quoting the
 # NestJS sample badge token. None was ever issued. One fingerprint per finding, never a path rule.
 16661f40484c9d8fdf8bad0fefd95cda43efd249:src/agent-runtime/llm-dlp-floor.spec.ts:azure-ad-client-secret:31
 16661f40484c9d8fdf8bad0fefd95cda43efd249:src/agent-runtime/llm-dlp-floor.spec.ts:generic-api-key:17
-16661f40484c9d8fdf8bad0fefd95cda43efd249:src/agent-runtime/llm-dlp-floor.spec.ts:generic-api-key:17
-16661f40484c9d8fdf8bad0fefd95cda43efd249:src/agent-runtime/llm-dlp-floor.spec.ts:generic-api-key:21
 16661f40484c9d8fdf8bad0fefd95cda43efd249:src/agent-runtime/llm-dlp-floor.spec.ts:generic-api-key:21
 16661f40484c9d8fdf8bad0fefd95cda43efd249:src/agent-runtime/llm-dlp-floor.spec.ts:jwt:7
 16661f40484c9d8fdf8bad0fefd95cda43efd249:src/agent-runtime/llm-proxy.service.spec.ts:azure-ad-client-secret:251
@@ -38,17 +18,13 @@ f3ab20d191565a5501e2876f3acc18271805b587:test/agent-runtime.e2e-spec.ts:azure-ad
 75fdece27d06dfc74d4f5c37a3bc463ec0d7944d:src/auth/jwt-auth.guard.spec.ts:generic-api-key:88
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/common/dlp/dlp-classification.spec.ts:azure-ad-client-secret:35
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/common/dlp/dlp-classification.spec.ts:generic-api-key:21
-d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/common/dlp/dlp-classification.spec.ts:generic-api-key:21
-d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/common/dlp/dlp-classification.spec.ts:generic-api-key:25
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/common/dlp/dlp-classification.spec.ts:generic-api-key:25
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/common/dlp/dlp-classification.spec.ts:jwt:11
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/common/dlp/dlp-classification.spec.ts:private-key:17
-d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/common/dlp/dlp-classification.spec.ts:private-key:17
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/tools/credential-broker.service.spec.ts:azure-ad-client-secret:570
-d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/tools/credential-broker.service.spec.ts:generic-api-key:575
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/tools/credential-broker.service.spec.ts:generic-api-key:575
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/tools/credential-broker.service.spec.ts:jwt:672
 d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/tools/credential-broker.service.spec.ts:private-key:565
-d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/tools/credential-broker.service.spec.ts:private-key:565
 d5b5feae18d5d384152a5b18697287e084876021:src/assistant/assistant.service.spec.ts:jwt:11
 e6dbaf307aa65f7c6fbed3dc7f470e2c355d6883:test/agent-runtime.e2e-spec.ts:azure-ad-client-secret:824
+44a4ba4730097328370099d6232d30d380f973c8:README.md:generic-api-key:5
