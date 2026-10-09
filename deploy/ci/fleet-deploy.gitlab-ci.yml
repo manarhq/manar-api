@@ -17,6 +17,8 @@
 
 .fleet-deploy:
   stage: deploy
+  # Never cancelled by a newer pipeline halfway through a Helm upgrade or rollback.
+  interruptible: false
   image:
     name: alpine/helm:4.2.3
     entrypoint: ['']
@@ -45,6 +47,8 @@ fleet-inputs:test:
     name: alpine/helm:4.2.3
     entrypoint: ['']
   before_script: []
+  # A shell test: no pnpm store needed.
+  cache: []
   rules: !reference [.ci-rules, rules]
   script:
     - sh deploy/ci/validate-fleet-inputs.test.sh

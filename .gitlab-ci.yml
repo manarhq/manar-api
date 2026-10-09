@@ -9,13 +9,39 @@ stages:
 include:
   - local: deploy/ci/fleet-deploy.gitlab-ci.yml
 
+# One pipeline per change on the shared runner: a branch with an open merge request runs only
+# the merge request pipeline. main, tags, branches without an MR and manar-fleet trigger
+# pipelines run as before.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - when: always
+
 # The ordinary jobs never run in a manar-fleet deploy pipeline (FLEET_MODE set).
 .ci-rules:
   rules:
     - if: $FLEET_MODE
       when: never
-    # Same as before rules existed: branch pipelines only, no duplicate merge request pipelines.
+    - when: on_success
+
+# The app build and e2e: skipped in a merge request that only changes docs/. Every other
+# pipeline (main, tags, branches) always runs them.
+.code-rules:
+  rules:
+    - if: $FLEET_MODE
+      when: never
     - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+    - changes:
+        # Every path except docs/: root files, then any top-level directory not named docs.
+        - '*'
+        - '[!d]*/**/*'
+        - 'd[!o]*/**/*'
+        - 'do[!c]*/**/*'
+        - 'doc[!s]*/**/*'
+        - 'docs?*/**/*'
+        - '{d,do,doc}/**/*'
 
 variables:
   PNPM_HOME: '$CI_PROJECT_DIR/.pnpm'
@@ -27,7 +53,9 @@ variables:
 # execution.
 default:
   tags: [manar]
-  image: node:24.14.1
+  # A newer pipeline on the same ref cancels this one (deploy and publish jobs opt out).
+  interruptible: true
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/node:24.14.1
   before_script:
     - export PATH="$PNPM_HOME/bin:$PATH"
     - corepack enable
@@ -39,28 +67,35 @@ default:
     # unresolved imports until they are compiled.
     - pnpm packages:build
 
-cache:
+# Jobs only read the pnpm store; lint is the one job that writes it back.
+cache: &pnpm-cache
   key:
     files:
       - pnpm-lock.yaml
   paths:
     - .pnpm-store
+  policy: pull
 
 lint:
   rules: !reference [.ci-rules, rules]
   stage: lint
+  cache:
+    <<: *pnpm-cache
+    policy: pull-push
   script:
     - pnpm lint
 
 typecheck:
   rules: !reference [.ci-rules, rules]
   stage: typecheck
+  needs: []
   script:
     - pnpm typecheck
 
 test:unit:
   rules: !reference [.ci-rules, rules]
   stage: test
+  needs: []
   # Phase 2's tenant-isolation tests run against a real Postgres (never
   # mocked — see docs/tenant-isolation.md), so this job needs a live
   # database service, unlike lint/typecheck/build which only need the
@@ -71,7 +106,7 @@ test:unit:
     # plus every tenant migration) is fsync-bound and stalled past its 60 s
     # hook timeout on the shared runner host.
     - &postgres-service
-      name: postgres:18.6-alpine
+      name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/postgres:18.6-alpine
       alias: postgres
       command:
         [
@@ -84,7 +119,7 @@ test:unit:
           'full_page_writes=off',
         ]
     - &redis-service
-      name: redis:8.10-alpine
+      name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/redis:8.10-alpine
       alias: redis
   variables:
     POSTGRES_USER: manar
@@ -98,8 +133,9 @@ test:unit:
     - pnpm test
 
 test:e2e:
-  rules: !reference [.ci-rules, rules]
+  rules: !reference [.code-rules, rules]
   stage: test
+  needs: []
   # Phase 3's auth e2e suite (test/auth.e2e-spec.ts) provisions real
   # tenants — a real database via Postgres and a real Keycloak realm via
   # the Admin REST API — and validates tokens from a real Resource Owner
@@ -140,7 +176,7 @@ test:e2e:
     - name: quay.io/keycloak/keycloak:26.7.1
       alias: keycloak
       command: ['start-dev']
-    - name: openbao/openbao:2.6.1
+    - name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/openbao/openbao:2.6.1
       alias: openbao
       command: ['server', '-dev']
     - *redis-service
@@ -149,7 +185,7 @@ test:e2e:
     # in the script, not set as a job variable, because job variables are
     # passed to every service and this image turns any KAFKA_* variable
     # into a broker setting.
-    - name: apache/kafka:4.3.1
+    - name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/apache/kafka:4.3.1
       alias: kafka
       variables:
         KAFKA_NODE_ID: '1'
@@ -164,7 +200,7 @@ test:e2e:
         KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
         KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
         KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
-    - name: opensearchproject/opensearch:3.8.0
+    - name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/opensearchproject/opensearch:3.8.0
       alias: opensearch
       # discovery.type has a dot, which a CI variable name cannot carry;
       # the image's entrypoint passes -E flags through to OpenSearch.
@@ -360,8 +396,9 @@ test:e2e:
     - pnpm test:e2e
 
 build:
-  rules: !reference [.ci-rules, rules]
+  rules: !reference [.code-rules, rules]
   stage: build
+  needs: []
   script:
     - pnpm build
   artifacts:
@@ -426,8 +463,9 @@ docker:build-images:
 gitleaks:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
+  needs: []
   image:
     name: ghcr.io/gitleaks/gitleaks:v8.30.1
     entrypoint: ['']
@@ -443,10 +481,11 @@ gitleaks:
 semgrep:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
+  needs: []
   image:
-    name: semgrep/semgrep:1.172.0
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/semgrep/semgrep:1.172.0
     entrypoint: ['']
   variables:
     GIT_DEPTH: 0
@@ -468,10 +507,11 @@ semgrep:
 trivy-fs:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
+  needs: []
   image:
-    name: aquasec/trivy:0.71.0
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/aquasec/trivy:0.71.0
     entrypoint: ['']
   script:
     - trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed .
@@ -539,10 +579,11 @@ syft-sbom:
 k8s-manifests:render:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
+  needs: []
   image:
-    name: alpine/helm:4.2.3
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/alpine/helm:4.2.3
     entrypoint: ['']
   script:
     - mkdir -p rendered
@@ -560,7 +601,7 @@ k8s-manifests:render:
 kubeconform:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
   image:
     name: ghcr.io/yannh/kubeconform:v0.8.0-alpine
@@ -579,10 +620,10 @@ kubeconform:
 kube-linter:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
   image:
-    name: stackrox/kube-linter:v0.8.3-alpine
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/stackrox/kube-linter:v0.8.3-alpine
     entrypoint: ['']
   needs:
     - k8s-manifests:render
