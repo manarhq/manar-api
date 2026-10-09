@@ -16,7 +16,10 @@ import { TenantDatabaseManager } from '../src/database/tenant-database-manager.s
 import { KillSwitchService } from '../src/kill-switches/kill-switch.service';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import {
+  assignRealmRole,
   createPlatformClient,
+  createRealmUser,
+  getUserToken,
   deletePlatformClient,
   deleteRealm,
   getClientCredentialsToken,
@@ -219,6 +222,57 @@ describe('Platform API ops routes (e2e)', () => {
         .expect(201);
       tenantId = b(res).id;
     }, 120_000);
+
+    it('the legacy route still engages, but can no longer release the platform switch alone', async () => {
+      const tenant = await control.tenant.findUniqueOrThrow({
+        where: { id: tenantId },
+      });
+      const secret = await control.secretReference.findFirstOrThrow({
+        where: { tenantId, kind: 'KEYCLOAK_CLIENT_SECRET' },
+      });
+      const user = `ops-admin-${suffix}`;
+      const password = 'Passw0rd!Test';
+      const id = await createRealmUser(SLUG, {
+        username: user,
+        email: `${user}@example.test`,
+        password,
+      });
+      await assignRealmRole(SLUG, id, 'SECURITY_ADMIN');
+      const admin = await getUserToken({
+        realm: SLUG,
+        clientId: tenant.keycloakClientId!,
+        clientSecret: secret.reference,
+        username: user,
+        password,
+      });
+      const operator =
+        process.env.PLATFORM_KILL_SWITCH_OPERATOR_TOKEN ??
+        'dev-only-platform-kill-switch-operator-token-change-me';
+      // Stopping stays easy.
+      await http()
+        .post('/kill-switches/platform')
+        .set('Authorization', `Bearer ${admin}`)
+        .set('X-Platform-Operator-Token', operator)
+        .send({ reason: 'e2e legacy engage' })
+        .expect(201);
+      const refused = await http()
+        .post('/kill-switches/platform/deactivate')
+        .set('Authorization', `Bearer ${admin}`)
+        .set('X-Platform-Operator-Token', operator)
+        .expect(403);
+      expect(b(refused).code).toBe('platform_release_requires_two_person');
+      const state = await http()
+        .get('/platform/v1/kill-switch')
+        .set(auth())
+        .expect(200);
+      expect(b(state)).toMatchObject({ active: true });
+      // The two-person path still ends it, for the named engagement.
+      await http()
+        .post('/platform/v1/kill-switch/release')
+        .set(auth())
+        .send({ staff: 'Ali', expectedEngagementId: b(state).engagementId })
+        .expect(200);
+    }, 60_000);
 
     it('reports kill switches, quarantines, monthly decisions and credential expiry', async () => {
       const db = await app.get(TenantDatabaseManager).getClient(tenantId!);

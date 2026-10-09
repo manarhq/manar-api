@@ -97,8 +97,9 @@ manar-api stays the security control plane, so the addition has to be small and 
   (`WHERE active AND activatedAt = expected`), else 409 `engagement_changed`. So a release
   proposed in manar-fleet for one incident can never end a later stop. Who may engage (one owner,
   at once) and release (proposed, then approved by someone else) is enforced in manar-fleet.
-  Residual: the older `POST /kill-switches/platform/deactivate` (tenant admin plus the operator
-  token) can still turn it off without a second person.
+  The older `POST /kill-switches/platform/deactivate` (tenant admin plus the operator token) now
+  answers 403 `platform_release_requires_two_person`: one person could otherwise end any stop.
+  `POST /kill-switches/platform` still engages, so stopping stays easy.
 - **Tenant ops view** `GET /platform/v1/tenants/:id/ops` (ACTIVE tenants): active kill switches
   with who and when (`platform: true` for the suspension row), quarantines active or released in
   the last 30 days with the detector's reason code (the watcher's generated explanation is left
@@ -124,3 +125,6 @@ tokens}, connectors [{name, type, protocol, enabled, credentialExpiresAt}]}]`. T
   field so a credential or its reference can never ride along, and strict on both ends. The source
   is bound to `HEARTBEAT_TENANT_CATALOG` (`CatalogService` once the catalog module is on main);
   unbound, the section is left out. A tenant whose section fails is left out and logged by id.
+- **Usage tiers (assumption):** PRICING.md gives 250k decisions per month in the platform and "next
+  tier at +25%" without a tier width. manar-fleet and the admin treat each tier as a further 250k
+  per month until the founder sets the width; the usage screen says so.
