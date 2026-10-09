@@ -59,6 +59,15 @@ Redis) where a caller could stay permanently re-blocked after its block
 window expired but its hit-counter's own longer TTL hadn't. See that
 file's own doc comment for the full failure mode.
 
+**When Redis is unavailable or slower than `REDIS_TIMEOUT_MS`** (default
+1000 ms, every connect and command; `src/common/redis/bounded-redis.ts`): the
+agent surface fails closed with a 503 `enforcement_dependency_unavailable`
+within that bound, and the human surface keeps the same limits in each
+instance's memory (`LocalFallbackThrottlerStorage`, logged once per outage,
+`manar_rate_limit_fallback_active`), so limits become per replica until Redis
+is back. A command that times out may still be applied by Redis later, so
+counts are approximate during an outage.
+
 ## Security headers & CORS
 
 `@fastify/helmet` (`src/security/setup-security.ts`), registered on

@@ -148,6 +148,7 @@ config:
   AGENT_MTLS_SERVER_KEY_PATH: deploy/openbao/server-key.pem
   AGENT_MTLS_CLIENT_CA_PATH: deploy/openbao/ca-chain.pem
   OPENFGA_API_URL: http://openfga.manar.svc.cluster.local:8080
+  OPENFGA_CHECK_TIMEOUT_MS: '1000'
   OPENFGA_STORE_NAME: manar
   OPENFGA_MODEL_FILE_PATH: authorization/model.fga
   TEMPORAL_ADDRESS: temporal.manar.svc.cluster.local:7233
@@ -161,6 +162,7 @@ config:
   OPENSEARCH_NODE: http://opensearch.manar.svc.cluster.local:9200
   OPENSEARCH_AUDIT_INDEX: manar-audit-events
   REDIS_URL: redis://redis.manar.svc.cluster.local:6379
+  REDIS_TIMEOUT_MS: '1000'
   AI_ADVISORY_GRPC_TARGET: manar-ai.manar.svc.cluster.local:50051
   AI_ADVISORY_TIMEOUT_MS: '2000'
   AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: '5'
