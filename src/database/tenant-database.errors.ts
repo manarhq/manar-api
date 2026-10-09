@@ -37,3 +37,11 @@ export class TenantProvisioningError extends Error {
     this.cause = cause;
   }
 }
+
+/** A lifecycle change found the tenant in another state than the one it requires. */
+export class TenantLifecycleConflictError extends Error {
+  constructor(tenantId: string, expectedStatus: string) {
+    super(`Tenant "${tenantId}" is not ${expectedStatus}`);
+    this.name = 'TenantLifecycleConflictError';
+  }
+}

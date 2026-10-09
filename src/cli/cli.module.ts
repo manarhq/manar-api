@@ -8,6 +8,9 @@ import { AuditReindexCommand } from './commands/audit-reindex.command';
 import { DemoSeedCommand } from './commands/demo-seed.command';
 import { TenantsMigrateCommand } from './commands/tenants-migrate.command';
 import { ManarConnectorRegisterCommand } from './commands/manar-connector-register.command';
+import { FleetKeygenCommand } from './commands/fleet-keygen.command';
+import { FleetReportCommand } from './commands/fleet-report.command';
+import { FleetHeartbeatModule } from '../fleet-heartbeat/fleet-heartbeat.module';
 
 /**
  * Root module for the `pnpm manar` CLI (see src/cli.ts). Deliberately
@@ -35,6 +38,7 @@ import { ManarConnectorRegisterCommand } from './commands/manar-connector-regist
     DatabaseModule,
     KeycloakModule,
     OpenSearchIndexModule,
+    FleetHeartbeatModule,
   ],
   providers: [
     TenantCreateCommand,
@@ -42,6 +46,8 @@ import { ManarConnectorRegisterCommand } from './commands/manar-connector-regist
     DemoSeedCommand,
     TenantsMigrateCommand,
     ManarConnectorRegisterCommand,
+    FleetKeygenCommand,
+    FleetReportCommand,
   ],
 })
 export class CliModule {}

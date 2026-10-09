@@ -103,6 +103,14 @@ export class AgentMtlsGuard implements CanActivate {
       );
       throw new UnauthorizedException('Unknown agent');
     }
+    // A suspended or deleted tenant's agents stop at once, even while a tenant DB client is
+    // still cached for it (platform API suspend, ADR-0010).
+    if (tenant.status !== 'ACTIVE') {
+      this.logger.warn(
+        `mTLS request for tenant "${parsedIdentifier.tenantSlug}" in status ${tenant.status}`,
+      );
+      throw new UnauthorizedException('Unknown agent');
+    }
 
     const tenantClient = await this.resolveTenantClientOrUnauthorized(
       tenant.id,

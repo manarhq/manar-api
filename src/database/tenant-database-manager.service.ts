@@ -9,6 +9,7 @@ import { Client as PgClient } from 'pg';
 import { Prisma as ControlPrisma } from '../generated/control-client/client';
 import { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AppConfig } from '../config/env.validation';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import { ControlPrismaService } from './control-prisma.service';
 import {
   DEFAULT_TENANT_DB_SECRET_REFERENCE,
@@ -16,6 +17,7 @@ import {
 } from './secret-provider';
 import type { SecretProvider } from './secret-provider';
 import {
+  TenantLifecycleConflictError,
   TenantNotFoundError,
   TenantProvisioningError,
   TenantSlugConflictError,
@@ -35,6 +37,8 @@ export interface ProvisionTenantInput {
 interface CachedClient {
   client: TenantPrismaClient;
   lastUsedAt: number;
+  /** When the tenant's status and binding were last confirmed ACTIVE in the control DB. */
+  validatedAt: number;
 }
 
 /**
@@ -55,6 +59,7 @@ export class TenantDatabaseManager implements OnModuleDestroy {
   private readonly cache = new Map<string, CachedClient>();
   private readonly maxCacheSize: number;
   private readonly idleTtlMs: number;
+  private readonly revalidateMs: number;
   private readonly idleSweepInterval: ReturnType<typeof setInterval>;
 
   constructor(
@@ -66,6 +71,9 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       infer: true,
     });
     this.idleTtlMs = configService.get('TENANT_DB_CLIENT_IDLE_TTL_MS', {
+      infer: true,
+    });
+    this.revalidateMs = configService.get('TENANT_DB_CLIENT_REVALIDATE_MS', {
       infer: true,
     });
 
@@ -119,6 +127,16 @@ export class TenantDatabaseManager implements OnModuleDestroy {
   async getClient(tenantId: string): Promise<TenantPrismaClient> {
     const cached = this.cache.get(tenantId);
     if (cached) {
+      // A cached client is only as good as the status it was created under: another process
+      // (an API replica, the Temporal worker) may have suspended or deleted the tenant since.
+      // Re-check the control DB once the entry is older than TENANT_DB_CLIENT_REVALIDATE_MS.
+      // ponytail: polling bounds the stale window to the TTL; upgrade path is a pub/sub
+      // eviction (Redis or Postgres LISTEN/NOTIFY) on every lifecycle change.
+      if (Date.now() - cached.validatedAt >= this.revalidateMs) {
+        const readAt = Date.now();
+        await this.revalidate(tenantId);
+        cached.validatedAt = readAt;
+      }
       // Move to the end of the Map to mark it most-recently-used.
       this.cache.delete(tenantId);
       cached.lastUsedAt = Date.now();
@@ -126,6 +144,8 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       return cached.client;
     }
 
+    // The stale window starts when the status is read, not when the client is ready.
+    const readAt = Date.now();
     const tenant = await this.resolveTenant(tenantId);
 
     if (
@@ -145,8 +165,21 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     });
     await client.$connect();
 
+    // A suspend can land while connecting; re-check once before the client is cached or used.
+    const recheckAt = Date.now();
+    try {
+      await this.assertActive(tenantId);
+    } catch (error) {
+      await client.$disconnect();
+      throw error;
+    }
+
     this.evictOverflowIfNeeded();
-    this.cache.set(tenantId, { client, lastUsedAt: Date.now() });
+    this.cache.set(tenantId, {
+      client,
+      lastUsedAt: Date.now(),
+      validatedAt: Math.max(readAt, recheckAt),
+    });
 
     return client;
   }
@@ -257,6 +290,35 @@ export class TenantDatabaseManager implements OnModuleDestroy {
   }
 
   /**
+   * Suspends an ACTIVE tenant (platform API, ADR-0010): status SUSPENDED and the cached client
+   * evicted. Human tokens then fail issuer resolution (`KnownIssuerRegistry` needs ACTIVE), agent
+   * mTLS requests fail the tenant status check, and `getClient` refuses the tenant. Data and the
+   * database binding are untouched, so `resumeTenant` restores access.
+   */
+  async suspendTenant(tenantId: string): Promise<void> {
+    await this.setLifecycleStatus(tenantId, 'ACTIVE', 'SUSPENDED');
+  }
+
+  async resumeTenant(tenantId: string): Promise<void> {
+    await this.setLifecycleStatus(tenantId, 'SUSPENDED', 'ACTIVE');
+  }
+
+  private async setLifecycleStatus(
+    tenantId: string,
+    from: 'ACTIVE' | 'SUSPENDED',
+    to: 'ACTIVE' | 'SUSPENDED',
+  ): Promise<void> {
+    const result = await this.control.tenant.updateMany({
+      where: { id: tenantId, status: from },
+      data: { status: to },
+    });
+    if (result.count !== 1) {
+      throw new TenantLifecycleConflictError(tenantId, from);
+    }
+    await this.evict(tenantId);
+  }
+
+  /**
    * Transitions a tenant to DELETED and evicts any cached client. Does
    * **not** drop the underlying database — see
    * `dangerouslyDropTenantDatabase` for the explicit, separately-invoked
@@ -318,6 +380,38 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     const client = await this.getClient(tenantId);
     await client.$queryRaw`SELECT 1`;
     return true;
+  }
+
+  /**
+   * Fails closed: if the control DB cannot be read the cached client is not returned
+   * (`enforcement_dependency_unavailable`); if the tenant is no longer ACTIVE it is evicted and
+   * the caller gets `TenantNotFoundError`.
+   */
+  private async revalidate(tenantId: string): Promise<void> {
+    try {
+      await this.assertActive(tenantId);
+    } catch (error) {
+      if (error instanceof TenantNotFoundError) await this.evict(tenantId);
+      throw error;
+    }
+  }
+
+  private async assertActive(tenantId: string): Promise<void> {
+    const tenant = await failClosed('control-db', () =>
+      this.control.tenant.findUnique({
+        where: { id: tenantId },
+        select: {
+          status: true,
+          databaseBinding: { select: { provisioningStatus: true } },
+        },
+      }),
+    );
+    if (
+      tenant?.status !== 'ACTIVE' ||
+      tenant.databaseBinding?.provisioningStatus !== 'ACTIVE'
+    ) {
+      throw new TenantNotFoundError(tenantId);
+    }
   }
 
   private async evict(tenantId: string): Promise<void> {

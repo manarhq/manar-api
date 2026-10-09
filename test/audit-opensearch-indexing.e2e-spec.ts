@@ -39,6 +39,7 @@ function fakeConfigService(
     TENANT_DB_BASE_URL: process.env.TENANT_DB_BASE_URL ?? '',
     TENANT_DB_CLIENT_CACHE_MAX: 50,
     TENANT_DB_CLIENT_IDLE_TTL_MS: 10 * 60 * 1000,
+    TENANT_DB_CLIENT_REVALIDATE_MS: 5000,
     KEYCLOAK_BASE_URL: process.env.KEYCLOAK_BASE_URL ?? '',
     KEYCLOAK_ADMIN_USERNAME: process.env.KEYCLOAK_ADMIN_USERNAME ?? '',
     KEYCLOAK_ADMIN_PASSWORD: process.env.KEYCLOAK_ADMIN_PASSWORD ?? '',
@@ -80,6 +81,10 @@ function fakeConfigService(
       'test-platform-kill-switch-operator-token',
     MANAR_BFF_SERVICE_TOKEN:
       process.env.MANAR_BFF_SERVICE_TOKEN ?? 'test-manar-bff-service-token',
+    PLATFORM_API_CLIENT_ID: 'manar-fleet',
+    PLATFORM_API_ROLE: 'manar-platform-admin',
+    FLEET_HEARTBEAT_INTERVAL_MINUTES: 5,
+    FLEET_HEARTBEAT_KEY_PATH: 'fleet/heartbeat-signing-key',
     APPROVAL_GRANT_TTL_MS: 300_000,
     APPROVAL_REQUEST_TTL_MS: 1_800_000,
     APPROVAL_DECIDE_RESULT_TIMEOUT_MS: 120_000,
