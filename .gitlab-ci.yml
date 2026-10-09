@@ -396,7 +396,7 @@ docker:build-images:
   rules: !reference [.ci-rules, rules]
   # Non-Node image: skip default's corepack/pnpm before_script and cache.
   inherit:
-    default: false
+    default: [tags]
   stage: build
   image: docker:29
   services:
@@ -426,7 +426,7 @@ docker:build-images:
 gitleaks:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: false
+    default: [tags]
   stage: security
   image:
     name: ghcr.io/gitleaks/gitleaks:v8.30.1
@@ -443,7 +443,7 @@ gitleaks:
 semgrep:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: false
+    default: [tags]
   stage: security
   image:
     name: semgrep/semgrep:1.172.0
@@ -468,7 +468,7 @@ semgrep:
 trivy-fs:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: false
+    default: [tags]
   stage: security
   image:
     name: aquasec/trivy:0.71.0
@@ -490,7 +490,7 @@ trivy-fs:
 trivy-image:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: false
+    default: [tags]
   stage: security
   image:
     name: aquasec/trivy:0.71.0
@@ -515,7 +515,7 @@ trivy-image:
 syft-sbom:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: false
+    default: [tags]
   stage: security
   image:
     name: anchore/syft:v1.51.0-debug
@@ -539,7 +539,7 @@ syft-sbom:
 k8s-manifests:render:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: false
+    default: [tags]
   stage: security
   image:
     name: alpine/helm:4.2.3
@@ -560,7 +560,7 @@ k8s-manifests:render:
 kubeconform:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: false
+    default: [tags]
   stage: security
   image:
     name: ghcr.io/yannh/kubeconform:v0.8.0-alpine
@@ -579,7 +579,7 @@ kubeconform:
 kube-linter:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: false
+    default: [tags]
   stage: security
   image:
     name: stackrox/kube-linter:v0.8.3-alpine
