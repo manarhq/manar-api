@@ -18,7 +18,7 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 | Backing services      | `pnpm infra:up` (Compose `deploy/docker-compose.yml`) then `pnpm infra:openbao-init`                     | all healthy                                        |
 | Lint                  | `pnpm lint` (gating, no auto-fix; `pnpm lint:fix` to fix)                                                | clean on tracked source                            |
 | Typecheck             | `pnpm typecheck` (builds `packages/manar-ai-client` and `packages/sdk-node` first, then api + scripts)   | pass                                               |
-| Unit tests            | `pnpm test` / `pnpm test:cov`                                                                            | 36 files, 318 tests; lines 57.35%, branches 39.75% |
+| Unit tests            | `pnpm test` / `pnpm test:cov` (CI; fails under the floor in `vitest.config.mts`)                        | 62 files, 663 tests; lines 65.2%, branches 50.5%   |
 | E2E tests             | `pnpm test:e2e` (needs the stack and OpenBao PKI; stop any host worker first, the specs start their own) | 27 files, 168 tests                                |
 | Build                 | `pnpm build`                                                                                             | pass                                               |
 | API                   | `pnpm start:dev` / `pnpm start:prod` — HTTP `:3000`, agent mTLS `:3443`                                  |                                                    |
