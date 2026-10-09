@@ -385,13 +385,7 @@ build:
 # ---------------------------------------------------------------------------
 
 # Builds the three images this repo produces (the HTTP app, the Temporal
-# worker — same Dockerfile, different target/CMD — and demo-soc-tools),
-# saves each as a `docker save` tarball so later jobs (trivy-image,
-# syft-sbom-image) can scan them without needing their own docker daemon.
-# Runs in the `build` stage (after `build` above, before any `security`
-# job that consumes its artifacts) — kept in this stage deliberately so
-# stage ordering guarantees the tarballs exist before `security` starts;
-# no existing stage was renamed/reordered/removed to add this.
+# worker — same Dockerfile, different target/CMD — and demo-soc-tools).
 docker:build-images:
   rules: !reference [.ci-rules, rules]
   # Non-Node image: skip default's corepack/pnpm before_script and cache.
@@ -403,6 +397,11 @@ docker:build-images:
     - docker:29-dind
   variables:
     DOCKER_TLS_CERTDIR: '/certs'
+  # The three image tarballs are far over the instance's 100 MB artifact limit
+  # (manar-fleet's single image already failed its upload with 413), so the
+  # image scan (blocking on fixed HIGH/CRITICAL) and the SBOMs run here, on
+  # the tarballs this job built, with the pinned Trivy and Syft binaries
+  # copied out of their images. Only the reports are kept as artifacts.
   script:
     - docker build --build-arg MANAR_GIT_SHA=$CI_COMMIT_SHORT_SHA --target runtime -t manar-api:ci .
     - docker build --build-arg MANAR_GIT_SHA=$CI_COMMIT_SHORT_SHA --target worker -t manar-api-worker:ci .
@@ -410,12 +409,23 @@ docker:build-images:
     - docker save manar-api:ci -o manar-api.tar
     - docker save manar-api-worker:ci -o manar-api-worker.tar
     - docker save demo-soc-tools:ci -o demo-soc-tools.tar
+    - docker create --name trivy-bin aquasec/trivy:0.71.0
+    - docker cp trivy-bin:/usr/local/bin/trivy ./trivy
+    - docker create --name syft-bin anchore/syft:v1.51.0-debug
+    - docker cp syft-bin:/syft ./syft
+    - >
+      for img in manar-api manar-api-worker demo-soc-tools; do
+        ./syft "docker-archive:${img}.tar" -o "cyclonedx-json=sbom-${img}.json";
+        ./trivy image --input "${img}.tar" --format json --output "trivy-image-${img}.json" --ignore-unfixed;
+        ./trivy image --input "${img}.tar" --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed || FAILED=1;
+      done;
+      if [ -n "$FAILED" ]; then exit 1; fi
   artifacts:
+    when: always
     paths:
-      - manar-api.tar
-      - manar-api-worker.tar
-      - demo-soc-tools.tar
-    expire_in: 1 day
+      - trivy-image-*.json
+      - sbom-*.json
+    expire_in: 1 month
 
 # Secret scanning — full git history, not just the diff (matches the
 # one-time retroactive check this phase ran manually: 101 commits, one
@@ -462,8 +472,8 @@ semgrep:
     expire_in: 1 week
 
 # Dependency scanning (pnpm-lock.yaml / node_modules) — not container
-# image scanning, see trivy-image below for that. Threshold: fail on
-# HIGH/CRITICAL only (matches trivy-image's threshold — one policy, not
+# image scanning, see docker:build-images above for that. Threshold: fail on
+# HIGH/CRITICAL only (matches the image scan's threshold — one policy, not
 # two different bars for the same tool).
 trivy-fs:
   rules: !reference [.ci-rules, rules]
@@ -481,56 +491,6 @@ trivy-fs:
     paths:
       - trivy-fs-report.json
     expire_in: 1 week
-
-# Container image scanning — the three images docker:build-images just
-# built. Threshold: fail on HIGH/CRITICAL only (LOW/MEDIUM are reported in
-# the JSON artifact, not blocking — base images this small still carry a
-# long tail of low-severity, often-unfixable-upstream findings that would
-# make a zero-tolerance gate impossible to keep green).
-trivy-image:
-  rules: !reference [.ci-rules, rules]
-  inherit:
-    default: [tags]
-  stage: security
-  image:
-    name: aquasec/trivy:0.71.0
-    entrypoint: ['']
-  needs:
-    - docker:build-images
-  script:
-    - >
-      for img in manar-api manar-api-worker demo-soc-tools; do
-        trivy image --input "${img}.tar" --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed || FAILED=1;
-        trivy image --input "${img}.tar" --format json --output "trivy-image-${img}.json" --ignore-unfixed;
-      done;
-      if [ -n "$FAILED" ]; then exit 1; fi
-  artifacts:
-    when: always
-    paths:
-      - trivy-image-*.json
-    expire_in: 1 week
-
-# SBOM generation (CycloneDX) for each of the three images — an artifact
-# job, not a gate: never fails the pipeline on its own.
-syft-sbom:
-  rules: !reference [.ci-rules, rules]
-  inherit:
-    default: [tags]
-  stage: security
-  image:
-    name: anchore/syft:v1.51.0-debug
-    entrypoint: ['']
-  needs:
-    - docker:build-images
-  script:
-    - >
-      for img in manar-api manar-api-worker demo-soc-tools; do
-        /syft "docker-archive:${img}.tar" -o "cyclonedx-json=sbom-${img}.json";
-      done
-  artifacts:
-    paths:
-      - sbom-*.json
-    expire_in: 1 month
 
 # Renders every Helm chart under deploy/helm/ (values only need an
 # image.tag override — none of these charts assume a live cluster) so
