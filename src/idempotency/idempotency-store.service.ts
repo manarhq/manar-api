@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient, type RedisClientType } from 'redis';
+import { redisClientOptions } from '../audit/live/redis.config';
 import type { AppConfig } from '../config/env.validation';
 
 /** Placeholder value stored the instant a key is claimed, before the real response is known — distinguishes "a request with this key is genuinely still in flight" from "no request has ever used this key." */
@@ -20,11 +21,13 @@ const IN_PROGRESS_SENTINEL = '__manar_idempotency_in_progress__';
 @Injectable()
 export class IdempotencyStoreService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(IdempotencyStoreService.name);
-  private readonly url: string;
+  private readonly redisOptions: ReturnType<typeof redisClientOptions>;
   private client: RedisClientType | undefined;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
-    this.url = this.configService.get('REDIS_URL', { infer: true });
+    this.redisOptions = redisClientOptions((key) =>
+      this.configService.get(key, { infer: true }),
+    );
   }
 
   async onModuleInit(): Promise<void> {
@@ -87,7 +90,7 @@ export class IdempotencyStoreService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async connect(): Promise<void> {
-    this.client = createClient({ url: this.url });
+    this.client = createClient(this.redisOptions);
     this.client.on('error', (error: unknown) => {
       this.logger.warn(
         `Redis idempotency connection error: ${errorMessage(error)}`,

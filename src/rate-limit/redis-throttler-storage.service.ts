@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { ThrottlerStorage } from '@nestjs/throttler';
 import { createClient, type RedisClientType } from 'redis';
+import { redisClientOptions } from '../audit/live/redis.config';
 import type { AppConfig } from '../config/env.validation';
 
 /**
@@ -119,11 +120,13 @@ export class RedisThrottlerStorageService
   implements ThrottlerStorage, OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger(RedisThrottlerStorageService.name);
-  private readonly url: string;
+  private readonly redisOptions: ReturnType<typeof redisClientOptions>;
   private client: RedisClientType | undefined;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
-    this.url = this.configService.get('REDIS_URL', { infer: true });
+    this.redisOptions = redisClientOptions((key) =>
+      this.configService.get(key, { infer: true }),
+    );
   }
 
   async onModuleInit(): Promise<void> {
@@ -193,7 +196,7 @@ export class RedisThrottlerStorageService
   }
 
   private async connect(): Promise<void> {
-    this.client = createClient({ url: this.url });
+    this.client = createClient(this.redisOptions);
     this.client.on('error', (error: unknown) => {
       this.logger.warn(
         `Redis throttler connection error: ${errorMessage(error)}`,
