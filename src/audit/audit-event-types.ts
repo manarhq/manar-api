@@ -74,6 +74,8 @@ export const AUDIT_EVENT_TYPES = {
   USER_ROLE_REVOKED: 'user.role_revoked',
   /** `PATCH /tenant/settings` updated one or more residency/AI-governance flags — see `TenantSettingsService.updateSettings`. */
   TENANT_SETTINGS_UPDATED: 'tenant.settings_updated',
+  /** Manar staff changed this tenant's feature flags, packs or LLM route through manar-fleet (src/platform/catalog.*). */
+  CATALOG_UPDATED: 'catalog.updated',
 
   // Phase 15a (Incidents, Section 70) — see src/incidents/.
   /** `POST /incidents` created a new incident — see `IncidentsService.createIncident`. */
