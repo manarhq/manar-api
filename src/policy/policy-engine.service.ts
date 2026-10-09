@@ -188,8 +188,10 @@ function ruleMatches(
   const toolMatches = rule.toolId === '*' || rule.toolId === request.toolId;
   const actionMatches =
     rule.actionId === '*' || rule.actionId === request.actionId;
-  const resourceMatches =
-    rule.resourcePattern === '*' || rule.resourcePattern === request.resource;
+  const resourceMatches = resourcePatternMatches(
+    rule.resourcePattern,
+    request.resource,
+  );
   // Phase 15a (Section 53): absent means "match regardless of
   // classification" (identical to before this field existed); present
   // means an exact match against the resolved ToolAction's classification,
@@ -201,4 +203,19 @@ function ruleMatches(
   return (
     toolMatches && actionMatches && resourceMatches && classificationMatches
   );
+}
+
+/**
+ * `"*"` matches any resource; a pattern ending in `*` matches by prefix
+ * (`manar/demo-repo:*` is every branch of that project, ADR-0011); anything
+ * else must equal the resource exactly. Policy only: task resource selectors
+ * stay exact-or-`"*"` (OpenFGA tuples).
+ */
+export function resourcePatternMatches(
+  pattern: string,
+  resource: string,
+): boolean {
+  if (pattern === '*') return true;
+  if (pattern.endsWith('*')) return resource.startsWith(pattern.slice(0, -1));
+  return pattern === resource;
 }

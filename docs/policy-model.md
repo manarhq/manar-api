@@ -79,7 +79,7 @@ or YAML (see "YAML⇄JSON round-trip" below):
       name?: string,              // human-readable label, never matched against
       toolId: string,             // exact match, or "*" ("any tool")
       actionId: string,           // exact match, or "*" ("any action")
-      resourcePattern?: string,   // exact match, or "*" (default) — "any resource"
+      resourcePattern?: string,   // exact match, "*" (default, "any resource"), or a prefix ending in "*"
       effect: "ALLOW" | "DENY" | "REQUIRE_APPROVAL",
       riskWeight?: number,        // 0-100, additive RiskEngine contribution when this rule matches
       riskFloor?: number,         // 0-100, RiskEngine score is clamped up to at least this when this rule matches
@@ -93,10 +93,11 @@ or YAML (see "YAML⇄JSON round-trip" below):
 - **Matching**: a rule matches a request `{ toolId, actionId, resource }`
   iff `toolId` is `"*"` or equals the request's `toolId`, **and**
   `actionId` is `"*"` or equals the request's `actionId`, **and**
-  `resourcePattern` is `"*"` or equals the request's `resource`. Same
-  exact-or-`"*"` convention `allowedResourceSelectors[].pattern` already
-  uses (`docs/authorization-model.md`) — no glob/prefix matching this
-  phase, for the same reason that document gives.
+  `resourcePattern` is `"*"`, equals the request's `resource`, or ends in
+  `*` and the resource starts with what comes before it (`manar/demo-repo:*`
+  matches every branch of that project; ADR-0011). Prefix patterns exist in
+  policy only: task `allowedResourceSelectors[].pattern` stays exact or
+  `"*"` (`docs/authorization-model.md`), because those become OpenFGA tuples.
 - **First-match-wins**: rules are evaluated in array order; the first
   matching rule determines this policy's effect for the request. A policy
   with no matching rule contributes nothing (pass-through — see the note
