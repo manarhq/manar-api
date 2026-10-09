@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -304,8 +305,20 @@ export class CatalogService {
         WHERE "tenantId" = ${tenantId} FOR UPDATE`;
       const before = this.parse(tenantId, row!);
       const packs: Pack[] = [...before.packs];
-      for (const p of patch.packs ?? []) {
+      for (const { expect, ...p } of patch.packs ?? []) {
         const i = packs.findIndex((x) => x.id === p.id);
+        const current = i >= 0 ? packs[i]! : { enabled: false, version: 0 };
+        if (
+          (expect?.enabled !== undefined &&
+            current.enabled !== expect.enabled) ||
+          (expect?.maxVersion !== undefined &&
+            current.version > expect.maxVersion)
+        )
+          throw new ConflictException({
+            reason: 'catalog_precondition_failed',
+            pack: p.id,
+            current: { enabled: current.enabled, version: current.version },
+          });
         const agents = p.agents ?? (i >= 0 ? packs[i]!.agents : []);
         if (i >= 0) packs[i] = { ...p, agents };
         else packs.push({ ...p, agents });

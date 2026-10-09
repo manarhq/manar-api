@@ -105,7 +105,24 @@ export const CatalogPatchSchema = z
     features: features.optional(),
     /** Upserted by id. `agents` omitted keeps the pack's current bindings. */
     packs: z
-      .array(pack.extend({ agents: z.array(z.uuid()).max(100).optional() }))
+      .array(
+        pack.extend({
+          agents: z.array(z.uuid()).max(100).optional(),
+          /**
+           * Precondition checked under the row lock: the pack's current state must match, or the
+           * whole change is refused (409 `catalog_precondition_failed`) and nothing is written.
+           * A pack not yet in the catalog counts as disabled at version 0.
+           */
+          expect: z
+            .object({
+              enabled: z.boolean().optional(),
+              /** The current version must be at most this (never move a pack backwards). */
+              maxVersion: z.number().int().min(0).max(100_000).optional(),
+            })
+            .strict()
+            .optional(),
+        }),
+      )
       .max(100)
       .refine(uniquePacks, 'duplicate pack id, or an agent bound to two packs')
       .optional(),

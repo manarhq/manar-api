@@ -292,4 +292,32 @@ describe('Platform catalog for manar-fleet (e2e)', () => {
     const off = await createTask().expect(403);
     expect(off.body).toMatchObject({ reason: 'pack_not_enabled' });
   });
+
+  it('a change that expects the pack enabled never re-enables a disabled one', async () => {
+    await patch({
+      packs: [{ id: 'hr-joiner-leaver', version: 1, enabled: false }],
+    }).expect(200);
+    const res = await patch({
+      packs: [
+        {
+          id: 'hr-joiner-leaver',
+          version: 2,
+          enabled: true,
+          expect: { enabled: true, maxVersion: 1 },
+        },
+      ],
+    }).expect(409);
+    expect(res.body).toMatchObject({ reason: 'catalog_precondition_failed' });
+    const view = await http()
+      .get(catalogUrl())
+      .set('Authorization', `Bearer ${platformToken}`)
+      .expect(200);
+    expect(
+      (
+        view.body as {
+          packs: { id: string; enabled: boolean; version: number }[];
+        }
+      ).packs.find((p) => p.id === 'hr-joiner-leaver'),
+    ).toMatchObject({ enabled: false, version: 1 });
+  });
 });

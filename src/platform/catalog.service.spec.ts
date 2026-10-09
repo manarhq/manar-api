@@ -395,6 +395,79 @@ describe('CatalogService.update', () => {
     expect(record).toHaveBeenCalledOnce();
   });
 
+  it('refuses a change whose precondition no longer holds, and writes nothing', async () => {
+    const { service, writes, committed } = make({
+      row: row({ packs: [pack('it-helpdesk', false)] }),
+    });
+    await expect(
+      service.update(
+        't1',
+        CatalogPatchSchema.parse({
+          packs: [
+            {
+              id: 'it-helpdesk',
+              version: 2,
+              enabled: true,
+              expect: { enabled: true, maxVersion: 1 },
+            },
+          ],
+        }),
+        'manar-fleet',
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { reason: 'catalog_precondition_failed', pack: 'it-helpdesk' },
+    });
+    expect(writes).toEqual([]);
+    expect(committed()).toBe(false);
+  });
+
+  it('never moves a pack back to an older version when maxVersion is set', async () => {
+    const { service, writes } = make({
+      row: row({ packs: [{ ...pack('it-helpdesk', true), version: 3 }] }),
+    });
+    await expect(
+      service.update(
+        't1',
+        CatalogPatchSchema.parse({
+          packs: [
+            {
+              id: 'it-helpdesk',
+              version: 2,
+              enabled: true,
+              expect: { maxVersion: 2 },
+            },
+          ],
+        }),
+        'manar-fleet',
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(writes).toEqual([]);
+  });
+
+  it('stores the pack without its precondition when it holds', async () => {
+    const { service, writes } = make({
+      row: row({ packs: [pack('it-helpdesk', true)] }),
+    });
+    await service.update(
+      't1',
+      CatalogPatchSchema.parse({
+        packs: [
+          {
+            id: 'it-helpdesk',
+            version: 2,
+            enabled: true,
+            expect: { enabled: true, maxVersion: 1 },
+          },
+        ],
+      }),
+      'manar-fleet',
+    );
+    expect(writes[0]!.packs).toEqual([
+      { id: 'it-helpdesk', version: 2, enabled: true, agents: [] },
+    ]);
+  });
+
   it('changes nothing when the tenant audit event cannot be written', async () => {
     const { service, committed } = make({ auditFails: true });
     await expect(

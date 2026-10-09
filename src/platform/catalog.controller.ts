@@ -67,7 +67,12 @@ class CatalogPatchDto {
     description: `Partial; keys: ${CATALOG_FEATURES.join(', ')}`,
   })
   features?: Partial<CatalogFeaturesDto>;
-  @ApiPropertyOptional({ type: [CatalogPackDto] }) packs?: CatalogPackDto[];
+  @ApiPropertyOptional({
+    type: [CatalogPackDto],
+    description:
+      'Each entry may carry expect: { enabled?, maxVersion? }, checked under the row lock; a mismatch is 409 catalog_precondition_failed and nothing is written',
+  })
+  packs?: CatalogPackDto[];
   @ApiPropertyOptional({ type: CatalogModelDto, nullable: true })
   model?: CatalogModelDto | null;
 }

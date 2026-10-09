@@ -48,7 +48,11 @@ monthlyTokenQuota }` or null). Parsed with zod on every read. No row = unmanaged
      that is not enabled is refused (403). Delegated children inherit the parent's `packId`.
    - **Writes** read, merge and write the row in one control-DB transaction holding the row lock
      (`INSERT ... ON CONFLICT DO NOTHING`, then `SELECT ... FOR UPDATE`), so two approved
-     changes for the same tenant never undo each other. The tenant audit event
+     changes for the same tenant never undo each other. A pack entry may carry
+     `expect: { enabled?, maxVersion? }`, checked under that lock; a mismatch is 409
+     `catalog_precondition_failed` and nothing is written. manar-fleet sends it on publish
+     (`enabled: true`, older version) and on enable (`maxVersion`), so a pack disabled in the
+     deployment is never re-enabled by a publish and never moved back a version. The tenant audit event
      (`catalog.updated`) is written inside that transaction: no event, no change.
 4. **Core42 Compass** is a third upstream (OpenAI-compatible, bearer key from
    `CORE42_API_KEY`), used only when a tenant's catalog picks it. Not yet run against a live
