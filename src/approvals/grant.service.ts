@@ -21,7 +21,8 @@ export interface FinalizeDecisionInput {
 }
 
 export interface FinalizeDecisionResult {
-  status: 'APPROVED' | 'DENIED';
+  /** EXPIRED: the request expired (timeout, or superseded on the MCP door) before this decision landed. */
+  status: 'APPROVED' | 'DENIED' | 'EXPIRED';
   grantId?: string;
 }
 
@@ -98,9 +99,7 @@ export class GrantService {
       this.logger.warn(
         `finalizeDecision called for ApprovalRequest "${existing.id}" whose status is already "${existing.status}" — returning the existing outcome (Activity retry, or a bug elsewhere) rather than re-deciding it`,
       );
-      return existing.status === 'APPROVED'
-        ? { status: 'APPROVED', grantId: existing.grant?.id }
-        : { status: 'DENIED' };
+      return outcomeOf(existing);
     }
 
     await tenantClient.approvalDecision.create({
@@ -113,10 +112,9 @@ export class GrantService {
     });
 
     if (input.decision === 'DENY') {
-      await tenantClient.approvalRequest.update({
-        where: { id: existing.id },
-        data: { status: 'DENIED' },
-      });
+      if (!(await this.claimPending(tenantClient, existing.id, 'DENIED'))) {
+        return this.lostTo(tenantClient, existing.id);
+      }
       await this.auditService.recordSafely(tenantClient, input.tenantId, {
         eventType: AUDIT_EVENT_TYPES.APPROVAL_DENIED,
         actor: { type: 'human', id: input.approverId },
@@ -129,19 +127,56 @@ export class GrantService {
       return { status: 'DENIED' };
     }
 
-    const reevaluation = await this.reevaluateAndIssueGrant(
+    // Read-only re-evaluation first; then, in one transaction, the
+    // conditional PENDING -> APPROVED claim, the execution count and the
+    // grant. A request that expired or was decided in between keeps its
+    // state and gets no grant.
+    const reevaluation = await this.reevaluate(
       tenantClient,
       input.tenantId,
       existing,
     );
-    const grantId = reevaluation.grantId;
-
-    await tenantClient.approvalRequest.update({
-      where: { id: existing.id },
-      data: { status: grantId ? 'APPROVED' : 'DENIED' },
+    const issued = await tenantClient.$transaction(async (tx) => {
+      if (!reevaluation.ok) {
+        const claimed = await this.claimPending(tx, existing.id, 'DENIED');
+        return claimed
+          ? {
+              lost: false as const,
+              grant: null,
+              failureReason: reevaluation.failureReason,
+            }
+          : { lost: true as const };
+      }
+      if (!(await this.claimPending(tx, existing.id, 'APPROVED'))) {
+        return { lost: true as const };
+      }
+      // The same atomic, race-closing increment AuthorizationService's own
+      // ALLOW path performs. For an approved action this happens exactly
+      // once, here, at grant-issuance time (never again at redemption; see
+      // AuthorizationService.authorizeRedemption).
+      const incremented = await this.tasksService.incrementExecutionCount(
+        tx,
+        reevaluation.task,
+      );
+      if (!incremented) {
+        await tx.approvalRequest.update({
+          where: { id: existing.id },
+          data: { status: 'DENIED' },
+        });
+        return {
+          lost: false as const,
+          grant: null,
+          failureReason: 'task_execution_limit_reached',
+        };
+      }
+      const grant = await this.createGrant(tx, existing, reevaluation);
+      return { lost: false as const, grant, failureReason: undefined };
     });
 
-    if (grantId) {
+    if (issued.lost) return this.lostTo(tenantClient, existing.id);
+
+    if (issued.grant) {
+      await this.auditGrantIssued(tenantClient, input.tenantId, issued.grant);
       await this.auditService.recordSafely(tenantClient, input.tenantId, {
         eventType: AUDIT_EVENT_TYPES.APPROVAL_APPROVED,
         actor: { type: 'human', id: input.approverId },
@@ -151,28 +186,58 @@ export class GrantService {
           reason: input.reason ?? null,
         },
       });
-    } else {
-      // Section 27: the human clicked APPROVE, but re-evaluation at
-      // approval time no longer supports it (task/agent no longer live,
-      // policy now denies, or the execution limit was reached in the
-      // meantime) — the *request's* final outcome is DENIED even though
-      // the raw human decision (already recorded as an `ApprovalDecision`
-      // row above) was APPROVE. Recorded as `approval.denied` since that's
-      // what actually happened to this request, with `originalDecision`
-      // carrying the human's real input for anyone reconstructing why.
-      await this.auditService.recordSafely(tenantClient, input.tenantId, {
-        eventType: AUDIT_EVENT_TYPES.APPROVAL_DENIED,
-        actor: { type: 'human', id: input.approverId },
-        data: {
-          approvalRequestId: existing.id,
-          decision: 'APPROVE',
-          originalDecision: 'APPROVE',
-          reason: reevaluation.failureReason ?? 'reevaluation_failed',
-        },
-      });
+      return { status: 'APPROVED', grantId: issued.grant.id };
     }
 
-    return grantId ? { status: 'APPROVED', grantId } : { status: 'DENIED' };
+    this.logger.warn(
+      `ApprovalRequest "${existing.id}" re-evaluation failed: ${issued.failureReason}`,
+    );
+    // Section 27: the human clicked APPROVE, but re-evaluation at approval
+    // time no longer supports it (task/agent no longer live, policy now
+    // denies, or the execution limit was reached in the meantime) — the
+    // *request's* final outcome is DENIED even though the raw human decision
+    // (already recorded as an `ApprovalDecision` row above) was APPROVE.
+    // Recorded as `approval.denied` since that's what actually happened to
+    // this request, with `originalDecision` carrying the human's real input.
+    await this.auditService.recordSafely(tenantClient, input.tenantId, {
+      eventType: AUDIT_EVENT_TYPES.APPROVAL_DENIED,
+      actor: { type: 'human', id: input.approverId },
+      data: {
+        approvalRequestId: existing.id,
+        decision: 'APPROVE',
+        originalDecision: 'APPROVE',
+        reason: issued.failureReason ?? 'reevaluation_failed',
+      },
+    });
+    return { status: 'DENIED' };
+  }
+
+  /** PENDING -> `status`, only if still PENDING. False: someone else moved it first. */
+  private async claimPending(
+    client: Pick<TenantPrismaClient, 'approvalRequest'>,
+    id: string,
+    status: 'APPROVED' | 'DENIED',
+  ): Promise<boolean> {
+    const { count } = await client.approvalRequest.updateMany({
+      where: { id, status: 'PENDING' },
+      data: { status },
+    });
+    return count === 1;
+  }
+
+  /** This decision lost the race: report whatever state the request is in now. */
+  private async lostTo(
+    tenantClient: TenantPrismaClient,
+    id: string,
+  ): Promise<FinalizeDecisionResult> {
+    const current = await tenantClient.approvalRequest.findUnique({
+      where: { id },
+      include: { grant: true },
+    });
+    this.logger.warn(
+      `ApprovalRequest "${id}" changed to "${current?.status}" while a decision was being applied; that state stands`,
+    );
+    return current ? outcomeOf(current) : { status: 'EXPIRED' };
   }
 
   /**
@@ -191,8 +256,9 @@ export class GrantService {
     }
     if (existing.status !== 'PENDING') return;
 
-    await tenantClient.approvalRequest.update({
-      where: { id: existing.id },
+    // Conditional: a decision that landed after the read above wins.
+    await tenantClient.approvalRequest.updateMany({
+      where: { id: existing.id, status: 'PENDING' },
       data: { status: 'EXPIRED' },
     });
   }
@@ -234,6 +300,36 @@ export class GrantService {
       },
       secret,
     );
+  }
+
+  /**
+   * The MCP door's redemption (ADR-0007): an MCP `tools/call` cannot carry a
+   * grant token, so the server finds the grant itself. Returns the signed
+   * token of the newest unconsumed, unrevoked, unexpired grant issued for
+   * exactly this agent, task, tool, action, resource and parameter hash, or
+   * null. The token never leaves the server: the caller hands it to
+   * `verifyGrant` and `authorizeRedemption` exactly as if the agent had sent
+   * it, so single use and full revalidation (ADR-0006) are unchanged.
+   */
+  async findRedeemableGrantToken(
+    tenantClient: TenantPrismaClient,
+    input: Omit<ValidateGrantInput, 'grantToken'>,
+  ): Promise<string | null> {
+    const grant = await tenantClient.authorizationGrant.findFirst({
+      where: {
+        agentId: input.agentId,
+        taskId: input.taskId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        parameterHash: computeParameterHash(input),
+        consumedAt: null,
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { issuedAt: 'desc' },
+    });
+    return grant ? this.signGrantTokenFor(input.tenantId, grant) : null;
   }
 
   /**
@@ -320,26 +416,21 @@ export class GrantService {
   }
 
   /**
-   * Returns the new `AuthorizationGrant`'s id on success, or `grantId:
-   * null` (with a `failureReason`) if re-evaluation no longer supports
-   * approval — task/agent no longer live, policy now denies, or the
-   * execution limit was reached in the meantime. `finalizeDecision` treats
-   * a `null` `grantId` as `DENIED`. No grant is ever issued on this path.
+   * Section 27: re-evaluates task/agent liveness and re-runs
+   * PolicyEngine/RiskEngine against *current* state rather than trusting the
+   * original decision — this is what catches a policy republished stricter
+   * mid-flight even though a human already clicked approve. Reads only; the
+   * caller writes (claim, execution count, grant) in one transaction.
    */
-  private async reevaluateAndIssueGrant(
+  private async reevaluate(
     tenantClient: TenantPrismaClient,
     tenantId: string,
     approvalRequest: ApprovalRequestLike,
-  ): Promise<{ grantId: string | null; failureReason?: string }> {
+  ): Promise<Reevaluation> {
     const task = await tenantClient.task.findUnique({
       where: { id: approvalRequest.taskId },
     });
-    if (!task) {
-      this.logger.warn(
-        `ApprovalRequest "${approvalRequest.id}" re-evaluation: task "${approvalRequest.taskId}" no longer exists`,
-      );
-      return { grantId: null, failureReason: 'task_not_found' };
-    }
+    if (!task) return { ok: false, failureReason: 'task_not_found' };
 
     const liveness = await this.tasksService.evaluateFullLiveness(
       tenantClient,
@@ -347,26 +438,16 @@ export class GrantService {
       new Date(),
     );
     if (!liveness.ok) {
-      this.logger.warn(
-        `ApprovalRequest "${approvalRequest.id}" re-evaluation failed: ${liveness.reason}`,
-      );
-      return { grantId: null, failureReason: liveness.reason };
+      return { ok: false, failureReason: liveness.reason ?? 'task_not_live' };
     }
 
     const agent = await tenantClient.agent.findUnique({
       where: { id: approvalRequest.agentId },
     });
     if (!agent || agent.status !== 'ACTIVE') {
-      this.logger.warn(
-        `ApprovalRequest "${approvalRequest.id}" re-evaluation failed: agent "${approvalRequest.agentId}" is not ACTIVE`,
-      );
-      return { grantId: null, failureReason: 'agent_not_active' };
+      return { ok: false, failureReason: 'agent_not_active' };
     }
 
-    // Section 27: re-run PolicyEngine/RiskEngine against *current* state
-    // rather than trusting the original decision — this is what catches a
-    // policy republished stricter mid-flight even though a human already
-    // clicked approve.
     const policyResult = await this.policyEngine.evaluate(
       tenantClient,
       tenantId,
@@ -377,13 +458,12 @@ export class GrantService {
       },
     );
     if (policyResult.effect === 'DENY') {
-      const reason = policyResult.failureReason
-        ? 'policy_evaluation_failed'
-        : 'policy_denied';
-      this.logger.warn(
-        `ApprovalRequest "${approvalRequest.id}" re-evaluation failed: policy now denies this action (${reason})`,
-      );
-      return { grantId: null, failureReason: reason };
+      return {
+        ok: false,
+        failureReason: policyResult.failureReason
+          ? 'policy_evaluation_failed'
+          : 'policy_denied',
+      };
     }
 
     const riskResult = await this.riskEngine.score(tenantClient, {
@@ -396,36 +476,24 @@ export class GrantService {
       policyMatch: policyResult.matchedRule,
     });
 
-    // The same atomic, race-closing increment AuthorizationService's own
-    // ALLOW path performs — for an approved action, this happens exactly
-    // once, here, at grant-issuance time (never again at redemption — see
-    // AuthorizationService.authorizeRedemption).
-    const incremented = await this.tasksService.incrementExecutionCount(
-      tenantClient,
+    return {
+      ok: true,
       task,
-    );
-    if (!incremented) {
-      this.logger.warn(
-        `ApprovalRequest "${approvalRequest.id}" re-evaluation failed: task "${task.id}" execution limit reached`,
-      );
-      return { grantId: null, failureReason: 'task_execution_limit_reached' };
-    }
+      policyVersionId: policyResult.policyVersionId ?? null,
+      riskScore: riskResult.riskScore,
+    };
+  }
 
-    const parameterHash = computeParameterHash({
-      taskId: approvalRequest.taskId,
-      toolId: approvalRequest.toolId,
-      actionId: approvalRequest.actionId,
-      resource: approvalRequest.resource,
-      params: approvalRequest.params,
-    });
-
+  private async createGrant(
+    client: Pick<TenantPrismaClient, 'authorizationGrant'>,
+    approvalRequest: ApprovalRequestLike,
+    reevaluation: Extract<Reevaluation, { ok: true }>,
+  ) {
     const issuedAt = new Date();
     const ttlMs = this.configService.get('APPROVAL_GRANT_TTL_MS', {
       infer: true,
     });
-    const expiresAt = new Date(issuedAt.getTime() + ttlMs);
-
-    const grant = await tenantClient.authorizationGrant.create({
+    return client.authorizationGrant.create({
       data: {
         id: randomUUID(),
         approvalRequestId: approvalRequest.id,
@@ -434,27 +502,38 @@ export class GrantService {
         toolId: approvalRequest.toolId,
         actionId: approvalRequest.actionId,
         resource: approvalRequest.resource,
-        parameterHash,
-        policyVersionId: policyResult.policyVersionId ?? null,
-        riskScore: riskResult.riskScore,
+        parameterHash: computeParameterHash({
+          taskId: approvalRequest.taskId,
+          toolId: approvalRequest.toolId,
+          actionId: approvalRequest.actionId,
+          resource: approvalRequest.resource,
+          params: approvalRequest.params,
+        }),
+        policyVersionId: reevaluation.policyVersionId,
+        riskScore: reevaluation.riskScore,
         issuedAt,
-        expiresAt,
+        expiresAt: new Date(issuedAt.getTime() + ttlMs),
       },
     });
+  }
 
-    // Phase 9a: `approval.grant_issued` — actor `system` (not the
-    // approving human): this is the automated re-evaluation Activity's own
-    // decision to actually mint a grant, distinct from the human's raw
-    // APPROVE decision (`approval.approved`, recorded by the caller,
-    // `finalizeDecision`, with actor `human`). Never includes the signed
-    // grant token itself — no such string is ever persisted anywhere (see
-    // `GrantService.signGrantTokenFor`'s doc comment); only the same
-    // fields the `AuthorizationGrant` row itself carries.
+  /**
+   * Phase 9a: `approval.grant_issued` — actor `system` (not the approving
+   * human): the automated re-evaluation's own decision to mint a grant,
+   * distinct from the human's raw APPROVE (`approval.approved`). Never
+   * includes the signed grant token (no such string is persisted; see
+   * `signGrantTokenFor`).
+   */
+  private async auditGrantIssued(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    grant: Awaited<ReturnType<GrantService['createGrant']>>,
+  ): Promise<void> {
     await this.auditService.recordSafely(tenantClient, tenantId, {
       eventType: AUDIT_EVENT_TYPES.APPROVAL_GRANT_ISSUED,
       actor: { type: 'system', id: 'system:approval-workflow' },
       data: {
-        approvalRequestId: approvalRequest.id,
+        approvalRequestId: grant.approvalRequestId,
         grantId: grant.id,
         taskId: grant.taskId,
         agentId: grant.agentId,
@@ -467,7 +546,28 @@ export class GrantService {
         expiresAt: grant.expiresAt,
       },
     });
-
-    return { grantId: grant.id };
   }
+}
+
+type Reevaluation =
+  | { ok: false; failureReason: string }
+  | {
+      ok: true;
+      task: NonNullable<
+        Awaited<ReturnType<TenantPrismaClient['task']['findUnique']>>
+      >;
+      policyVersionId: string | null;
+      riskScore: number;
+    };
+
+function outcomeOf(request: {
+  status: string;
+  grant?: { id: string } | null;
+}): FinalizeDecisionResult {
+  if (request.status === 'APPROVED') {
+    return { status: 'APPROVED', grantId: request.grant?.id };
+  }
+  return request.status === 'EXPIRED'
+    ? { status: 'EXPIRED' }
+    : { status: 'DENIED' };
 }

@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -66,7 +67,8 @@ export function isPendingApproval(
  *         riskScore, approvalId }` — no tool call is ever attempted.
  *       - `ALLOW` -> `CredentialBrokerService.invoke(...)`.
  *   - **`grantToken` present** (the retry after `GET /agent/v1/approvals/:id`
- *     reported `APPROVED`): `GrantService.verifyGrant` checks the grant is
+ *     reported `APPROVED`; on the MCP door, the token of a matching approved
+ *     grant the server found itself, ADR-0007): `GrantService.verifyGrant` checks the grant is
  *     for *this exact request* (signature, expiry, revocation, single use,
  *     parameter hash), then `AuthorizationService.authorizeRedemption`
  *     re-runs the full decision against current state (S6/F7) and consumes
@@ -82,6 +84,8 @@ export function isPendingApproval(
  */
 @Injectable()
 export class ToolInvocationService {
+  private readonly logger = new Logger(ToolInvocationService.name);
+
   constructor(
     private readonly authorizationService: AuthorizationService,
     private readonly credentialBroker: CredentialBrokerService,
@@ -102,8 +106,27 @@ export class ToolInvocationService {
       this.tenantDatabaseManager.getClient(agent.tenant.id),
     );
 
-    if (input.grantToken) {
-      const grantToken = input.grantToken;
+    // ADR-0007: an MCP `tools/call` cannot carry a grant token, so on the MCP
+    // door the server looks for the grant a person approved for exactly this
+    // agent, task, tool, action, resource and parameter hash, and redeems it
+    // through the same path as a token sent over REST.
+    const grantToken =
+      input.grantToken ??
+      (channel === 'MCP'
+        ? await failClosed('grant-store', () =>
+            this.grantService.findRedeemableGrantToken(tenantClient, {
+              tenantId: agent.tenant.id,
+              agentId: agent.agent.id,
+              taskId: input.taskId,
+              toolId: input.toolId,
+              actionId: input.actionId,
+              resource: input.resource,
+              params: input.params,
+            }),
+          )
+        : null);
+
+    if (grantToken) {
       // S6/F7: verify the grant is for this exact request (signature,
       // expiry, revocation, single use, parameter binding), then re-run the
       // full decision against current state. Only a still-allowed decision
@@ -188,21 +211,27 @@ export class ToolInvocationService {
       });
     }
     if (decision.decision === 'APPROVAL_REQUIRED') {
-      const approvalId = await this.startApproval(tenantClient, agent, input, {
-        riskScore: decision.riskScore,
-        policyVersionId: decision.policyVersionId,
-        deterministicRiskScore: decision.deterministicRiskScore,
-        // ADR-004: the advisory is not a decision input, so nothing is known
-        // about it here. `ApprovalWorkflow` fetches it off the decision path
-        // for the human approver; until then the approval records that no
-        // advisory is attached rather than implying a low one.
-        aiAdvisoryScore: null,
-        advisoryUnavailable: true,
-        riskReasonCodes: decision.riskReasonCodes,
-        riskCeiling: decision.riskCeiling,
-        requiredReason: decision.reason,
-        decisionId: decision.decisionId,
-      });
+      const reused =
+        channel === 'MCP'
+          ? await this.reuseOpenApproval(tenantClient, agent, input, decision)
+          : null;
+      const approvalId =
+        reused ??
+        (await this.startApproval(tenantClient, agent, input, {
+          riskScore: decision.riskScore,
+          policyVersionId: decision.policyVersionId,
+          deterministicRiskScore: decision.deterministicRiskScore,
+          // ADR-004: the advisory is not a decision input, so nothing is known
+          // about it here. `ApprovalWorkflow` fetches it off the decision path
+          // for the human approver; until then the approval records that no
+          // advisory is attached rather than implying a low one.
+          aiAdvisoryScore: null,
+          advisoryUnavailable: true,
+          riskReasonCodes: decision.riskReasonCodes,
+          riskCeiling: decision.riskCeiling,
+          requiredReason: decision.reason,
+          decisionId: decision.decisionId,
+        }));
       return {
         status: 'PENDING',
         reason: decision.reason,
@@ -217,6 +246,75 @@ export class ToolInvocationService {
       input,
       decision.decisionId,
     );
+  }
+
+  /**
+   * ADR-0007: an MCP client repeats the call while it waits. Answer with the
+   * request a person is already looking at, but only if it shows at least the
+   * risk this fresh decision computed, under the same policy version and
+   * reason: redemption does not re-check the risk ceiling (ADR-0006), so the
+   * approver must have seen it. Otherwise the open request is expired
+   * (superseded) and the caller opens a new one. Returns the reused id or null.
+   */
+  private async reuseOpenApproval(
+    tenantClient: TenantClient,
+    agent: AgentContext,
+    input: ToolInvokeRequest,
+    decision: {
+      decisionId: string;
+      riskScore: number;
+      policyVersionId: string | null;
+      reason: string;
+    },
+  ): Promise<string | null> {
+    const open = await failClosed('tenant-db', () =>
+      this.approvalRequestService.findPendingMatch(tenantClient, {
+        taskId: input.taskId,
+        agentId: agent.agent.id,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        params: input.params,
+      }),
+    );
+    if (!open) return null;
+
+    const stillAccurate =
+      open.riskScore >= decision.riskScore &&
+      open.policyVersionId === decision.policyVersionId &&
+      open.requiredReason === decision.reason;
+    if (stillAccurate) {
+      await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_REUSED,
+        actor: { type: 'agent', id: agent.agent.id },
+        data: { decisionId: decision.decisionId, approvalRequestId: open.id },
+      });
+      return open.id;
+    }
+
+    // A decision that landed first wins (ADR-0006 then applies to that
+    // exact, already-approved request); the lost supersede is audited.
+    const superseded = await failClosed('tenant-db', () =>
+      this.approvalRequestService.expireIfPending(tenantClient, open.id),
+    );
+    await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
+      eventType: AUDIT_EVENT_TYPES.APPROVAL_SUPERSEDED,
+      actor: { type: 'agent', id: agent.agent.id },
+      data: {
+        approvalRequestId: open.id,
+        decisionId: decision.decisionId,
+        previousRiskScore: open.riskScore,
+        riskScore: decision.riskScore,
+        previousPolicyVersionId: open.policyVersionId,
+        policyVersionId: decision.policyVersionId,
+        previousRequiredReason: open.requiredReason,
+        requiredReason: decision.reason,
+        ...(superseded.expired
+          ? {}
+          : { supersedeLost: true, statusFound: superseded.status }),
+      },
+    });
+    return null;
   }
 
   private async invokeViaBroker(
@@ -308,17 +406,30 @@ export class ToolInvocationService {
       },
     );
 
-    await this.temporalClient.workflow.start(ApprovalWorkflow, {
-      workflowId: temporalWorkflowId,
-      taskQueue: this.temporalClient.taskQueue,
-      args: [
-        {
-          tenantId: agent.tenant.id,
-          approvalRequestId: approvalRequest.id,
-          expiresAtEpochMs: expiresAt.getTime(),
-        },
-      ],
-    });
+    try {
+      await this.temporalClient.workflow.start(ApprovalWorkflow, {
+        workflowId: temporalWorkflowId,
+        taskQueue: this.temporalClient.taskQueue,
+        args: [
+          {
+            tenantId: agent.tenant.id,
+            approvalRequestId: approvalRequest.id,
+            expiresAtEpochMs: expiresAt.getTime(),
+          },
+        ],
+      });
+    } catch (error) {
+      // ADR-0007: a request with no workflow can never be decided. Expire it
+      // so a repeated call opens a fresh one instead of waiting out the TTL.
+      await this.approvalRequestService
+        .expireIfPending(tenantClient, approvalRequest.id)
+        .catch((expireError: unknown) =>
+          this.logger.warn(
+            `ApprovalRequest "${approvalRequest.id}" has no workflow and could not be expired: ${String(expireError)}`,
+          ),
+        );
+      throw error;
+    }
 
     await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
       eventType: AUDIT_EVENT_TYPES.APPROVAL_REQUESTED,

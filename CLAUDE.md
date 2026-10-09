@@ -100,6 +100,6 @@ Longer per-area docs are in `docs/*.md`. Treat them as leads; the code and tests
 
 - ADRs: `docs/adr/ADR-NNNN-<slug>.md` from `ADR-0000-template.md`. Written: ADR-0001 (the
   thesis), ADR-0002 (LLM proxy, tool manifest, governed MCP server; its "Agent contract" section is the agent API), ADR-0003 (capability token format, deferred), ADR-0004 (Microsoft connectors and credentials),
-  ADR-0005 (Cedar, proposed and conditional), ADR-0006 (decision record commits with its reservation; grant redemption re-decides). Workspace ADR-001…009 in `../docs/adr/` remain the cross-repo record.
+  ADR-0005 (Cedar, proposed and conditional), ADR-0006 (decision record commits with its reservation; grant redemption re-decides), ADR-0007 (an MCP client completes an approved action by calling the same tool again). Workspace ADR-001…009 in `../docs/adr/` remain the cross-repo record.
 - CI: GitLab (`.gitlab-ci.yml`): lint, typecheck, unit (PostgreSQL + Redis), e2e (full services),
   build, images, gitleaks, semgrep, Trivy, SBOM, Helm render + kubeconform + kube-linter.

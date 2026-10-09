@@ -388,16 +388,37 @@ A task-gate refusal on `tools/list` is a JSON-RPC error whose `data` is stable:
   it may have happened, **do not retry it**. A result redacted by DLP or flagged for prompt
   injection comes back exactly as the pipeline returned it.
 - Approval required: `isError: false`,
-  `structuredContent = {"status":"PENDING","approvalId":"0b6f...","reason":"policy_requires_approval","riskScore":62}`.
-  Nothing was sent to Microsoft. Continue with section D.
+  `structuredContent = {"status":"PENDING","approvalId":"0b6f...","reason":"policy_requires_approval","riskScore":62,"nextStep":"..."}`.
+  Nothing was sent to Microsoft. Calling the same tool again with the same arguments while a
+  person has not decided returns the same `approvalId` (no second request), unless the fresh
+  decision scores higher or changed policy version or reason: then the old request is expired
+  and a new `approvalId` comes back. An MCP client
+  finishes the action over MCP only (ADR-0007):
+  1. `tools/call` `manar_approval_status` with `{"approvalId":"0b6f...","waitSeconds":25}`
+     (`waitSeconds` 0–50, default 25; it waits while `PENDING`; call it again if still
+     `PENDING`). Result:
+     `{"approvalId":"0b6f...","status":"PENDING|APPROVED|DENIED|EXPIRED","tool":"<toolId>__<actionId>","resource":"...","nextStep":"..."}`,
+     plus `grantExpiresAt` when an approved grant is still usable. An approval of another agent
+     or another task is `{"status":"DENIED","reason":"approval_not_found"}`. It never returns a
+     grant token.
+  2. Once `APPROVED`, call the same tool again with **exactly** the same `resource` and
+     `params`. Manar finds the grant, re-runs the whole decision and runs it once (`EXECUTED`).
+     A kill switch or policy change since approval returns `DENIED` with its reason. A second
+     identical call after that asks for a new approval.
+
+  REST clients use section D instead.
+
 - Denied: `isError: true`, `structuredContent = {"status":"DENIED","reason":"<reason>"}`.
   Reasons: the task-gate reasons, `forbidden_action`, `not_authorized` (outside the grant
   set; deliberately generic), `policy_denied`, `policy_evaluation_failed`,
   `task_execution_limit_reached`, `dlp_policy_violation`, `tool_not_found`,
   `tool_disabled`, `unknown_tool` (name has no `__`), `invalid_arguments` (e.g. no
-  `resource`), `enforcement_dependency_unavailable` (retryable).
+  `resource`), `enforcement_dependency_unavailable` (retryable), and at redemption the
+  section D grant reasons and kill-switch reasons.
 
-### D. Approval: poll, then redeem
+### D. Approval over REST: poll, then redeem
+
+MCP clients do not need this section (see C and ADR-0007).
 
 Poll `GET /agent/v1/approvals/{approvalId}` (every few seconds; mind the 120/min limit):
 

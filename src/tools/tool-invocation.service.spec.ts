@@ -40,6 +40,21 @@ const INPUT = {
 function setup(
   options: DecisionHarnessOptions & {
     grantValid?: boolean;
+    /** What `GrantService.findRedeemableGrantToken` answers (MCP door). */
+    storedGrantToken?: string | null | Error;
+    /** What `ApprovalRequestService.findPendingMatch` answers (MCP door). */
+    pendingMatch?:
+      | {
+          id: string;
+          riskScore: number;
+          policyVersionId: string | null;
+          requiredReason: string;
+        }
+      | null
+      | Error;
+    workflowStartFails?: boolean;
+    /** What `ApprovalRequestService.expireIfPending` answers. */
+    expireResult?: { expired: boolean; status: string | null };
   } = {},
 ) {
   const h = makeDecisionHarness(options);
@@ -54,6 +69,23 @@ function setup(
         : { valid: true as const, grantId: 'grant-1' },
     ),
   );
+  const answer = <T>(value: T | Error) =>
+    value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
+  const findRedeemableGrantToken = vi.fn(() =>
+    answer(options.storedGrantToken ?? null),
+  );
+  const findPendingMatch = vi.fn(() => answer(options.pendingMatch ?? null));
+  const createApproval = vi.fn().mockResolvedValue({ id: 'approval-1' });
+  const workflowStart = vi.fn(() =>
+    options.workflowStartFails
+      ? Promise.reject(new Error('temporal unavailable'))
+      : Promise.resolve(undefined),
+  );
+  const expireIfPending = vi
+    .fn()
+    .mockResolvedValue(
+      options.expireResult ?? { expired: true, status: 'EXPIRED' },
+    );
   const auditRecordSafely = vi.fn().mockResolvedValue(undefined);
   const service = new ToolInvocationService(
     h.service,
@@ -62,17 +94,30 @@ function setup(
       getClient: () => Promise.resolve(h.tenantClient),
     } as unknown as TenantDatabaseManager,
     {
-      create: vi.fn().mockResolvedValue({ id: 'approval-1' }),
+      create: createApproval,
+      findPendingMatch,
+      expireIfPending,
     } as unknown as ApprovalRequestService,
-    { verifyGrant } as unknown as GrantService,
+    { verifyGrant, findRedeemableGrantToken } as unknown as GrantService,
     {
-      workflow: { start: vi.fn().mockResolvedValue(undefined) },
+      workflow: { start: workflowStart },
       taskQueue: 'q',
     } as unknown as TemporalClientService,
     { get: () => 60_000 } as unknown as ConfigService<AppConfig, true>,
     { recordSafely: auditRecordSafely } as unknown as AuditService,
   );
-  return { h, service, brokerInvoke, verifyGrant, auditRecordSafely };
+  return {
+    h,
+    service,
+    brokerInvoke,
+    verifyGrant,
+    auditRecordSafely,
+    findRedeemableGrantToken,
+    findPendingMatch,
+    createApproval,
+    workflowStart,
+    expireIfPending,
+  };
 }
 
 describe('ToolInvocationService: decision before execution (ADR-003, S1)', () => {
@@ -186,5 +231,238 @@ describe('ToolInvocationService: grant redemption re-runs the decision (S6/F7)',
       outcome: 'DENY',
       reasonCodes: ['grant_already_consumed'],
     });
+  });
+});
+
+describe('ToolInvocationService: the MCP door completes an approved action (ADR-0007)', () => {
+  const NEEDS_APPROVAL = {
+    policy: {
+      effect: 'APPROVAL_REQUIRED' as const,
+      policyId: 'p',
+      policyVersionId: 'pv-1',
+    },
+  };
+
+  it('a repeated call with an approved grant on record redeems it: verified, re-decided, consumed, executed', async () => {
+    const { h, service, brokerInvoke, verifyGrant, findRedeemableGrantToken } =
+      setup({ ...NEEDS_APPROVAL, storedGrantToken: 'server-held-grant' });
+
+    await service.invoke(AGENT, INPUT, 'MCP');
+
+    expect(findRedeemableGrantToken).toHaveBeenCalledWith(h.tenantClient, {
+      tenantId: 'tenant-1',
+      agentId: 'agent-1',
+      ...INPUT,
+    });
+    expect(verifyGrant).toHaveBeenCalledWith(
+      h.tenantClient,
+      expect.objectContaining({ ...INPUT, grantToken: 'server-held-grant' }),
+    );
+    expect(h.events).toEqual(['consume:tx', 'decision:tx', 'broker']);
+    expect(h.decisions[0]).toMatchObject({
+      outcome: 'ALLOW',
+      stage: 'GRANT_REDEMPTION',
+      channel: 'MCP',
+      grantId: 'grant-1',
+    });
+    expect(brokerInvoke).toHaveBeenCalledOnce();
+  });
+
+  it('kill switch engaged after approval: the redemption is a recorded DENY and nothing executes', async () => {
+    const { h, service, brokerInvoke } = setup({
+      storedGrantToken: 'server-held-grant',
+      killSwitch: { killed: true, reason: 'agent_kill_switch_active' },
+    });
+
+    const error = await service
+      .invoke(AGENT, INPUT, 'MCP')
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ForbiddenException);
+    expect(h.decisions[0]).toMatchObject({
+      outcome: 'DENY',
+      stage: 'GRANT_REDEMPTION',
+      reasonCodes: ['agent_kill_switch_active'],
+    });
+    expect(brokerInvoke).not.toHaveBeenCalled();
+  });
+
+  it('a grant-store failure during the lookup fails closed (503) and nothing executes', async () => {
+    const { h, service, brokerInvoke } = setup({
+      storedGrantToken: new Error('connection terminated'),
+    });
+
+    await expect(service.invoke(AGENT, INPUT, 'MCP')).rejects.toBeInstanceOf(
+      EnforcementDependencyUnavailableException,
+    );
+    expect(h.decisions).toHaveLength(0);
+    expect(brokerInvoke).not.toHaveBeenCalled();
+  });
+
+  const OPEN = {
+    id: 'approval-open',
+    riskScore: 10,
+    policyVersionId: 'pv-1',
+    requiredReason: 'policy_requires_approval',
+  };
+
+  it('still waiting: a repeated call returns the open approval instead of opening a second one, and audits the reuse', async () => {
+    const {
+      h,
+      service,
+      createApproval,
+      workflowStart,
+      brokerInvoke,
+      expireIfPending,
+      auditRecordSafely,
+    } = setup({
+      ...NEEDS_APPROVAL,
+      pendingMatch: OPEN,
+    });
+
+    const outcome = await service.invoke(AGENT, INPUT, 'MCP');
+
+    expect(outcome).toMatchObject({
+      status: 'PENDING',
+      approvalId: 'approval-open',
+    });
+    expect(h.decisions[0]).toMatchObject({
+      outcome: 'APPROVAL_REQUIRED',
+      channel: 'MCP',
+    });
+    expect(createApproval).not.toHaveBeenCalled();
+    expect(workflowStart).not.toHaveBeenCalled();
+    expect(expireIfPending).not.toHaveBeenCalled();
+    expect(brokerInvoke).not.toHaveBeenCalled();
+    expect(auditRecordSafely).toHaveBeenCalledWith(
+      h.tenantClient,
+      'tenant-1',
+      expect.objectContaining({
+        eventType: 'approval.reused',
+        data: { decisionId: 'decision-1', approvalRequestId: 'approval-open' },
+      }),
+    );
+  });
+
+  it('the fresh decision scores higher than the open approval: the open one is superseded and a new approval shows the new risk', async () => {
+    const { service, createApproval, expireIfPending, auditRecordSafely } =
+      setup({
+        ...NEEDS_APPROVAL,
+        riskScore: 90,
+        pendingMatch: { ...OPEN, riskScore: 40 },
+      });
+
+    const outcome = await service.invoke(AGENT, INPUT, 'MCP');
+
+    expect(expireIfPending).toHaveBeenCalledWith(
+      expect.anything(),
+      'approval-open',
+    );
+    expect(createApproval).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ riskScore: 90 }),
+    );
+    expect(outcome).toMatchObject({
+      status: 'PENDING',
+      approvalId: 'approval-1',
+      riskScore: 90,
+    });
+    expect(auditRecordSafely).toHaveBeenCalledWith(
+      expect.anything(),
+      'tenant-1',
+      expect.objectContaining({
+        eventType: 'approval.superseded',
+        data: expect.objectContaining({
+          approvalRequestId: 'approval-open',
+          decisionId: 'decision-1',
+        }) as unknown,
+      }),
+    );
+  });
+
+  it('a person approved the open request before it could be superseded: the lost supersede is audited', async () => {
+    const { service, createApproval, auditRecordSafely } = setup({
+      ...NEEDS_APPROVAL,
+      riskScore: 90,
+      pendingMatch: { ...OPEN, riskScore: 40 },
+      expireResult: { expired: false, status: 'APPROVED' },
+    });
+
+    await service.invoke(AGENT, INPUT, 'MCP');
+
+    expect(createApproval).toHaveBeenCalledOnce();
+    expect(auditRecordSafely).toHaveBeenCalledWith(
+      expect.anything(),
+      'tenant-1',
+      expect.objectContaining({
+        eventType: 'approval.superseded',
+        data: expect.objectContaining({
+          approvalRequestId: 'approval-open',
+          supersedeLost: true,
+          statusFound: 'APPROVED',
+        }) as unknown,
+      }),
+    );
+  });
+
+  it('same risk under another policy version: superseded, not reused', async () => {
+    const { service, createApproval, expireIfPending } = setup({
+      ...NEEDS_APPROVAL,
+      pendingMatch: { ...OPEN, policyVersionId: 'pv-0' },
+    });
+
+    await service.invoke(AGENT, INPUT, 'MCP');
+
+    expect(expireIfPending).toHaveBeenCalledWith(
+      expect.anything(),
+      'approval-open',
+    );
+    expect(createApproval).toHaveBeenCalledOnce();
+  });
+
+  it('the approval workflow fails to start: the new request is expired so a repeated call is not stuck on it', async () => {
+    const { service, expireIfPending } = setup({
+      ...NEEDS_APPROVAL,
+      workflowStartFails: true,
+    });
+
+    await expect(service.invoke(AGENT, INPUT, 'MCP')).rejects.toThrow(
+      'temporal unavailable',
+    );
+    expect(expireIfPending).toHaveBeenCalledWith(
+      expect.anything(),
+      'approval-1',
+    );
+  });
+
+  it('an approval-store failure during the pending lookup fails closed (503)', async () => {
+    const { service, createApproval } = setup({
+      ...NEEDS_APPROVAL,
+      pendingMatch: new Error('connection terminated'),
+    });
+
+    await expect(service.invoke(AGENT, INPUT, 'MCP')).rejects.toBeInstanceOf(
+      EnforcementDependencyUnavailableException,
+    );
+    expect(createApproval).not.toHaveBeenCalled();
+  });
+
+  it('the REST door keeps explicit grant tokens: no server-side grant or pending lookup', async () => {
+    const {
+      service,
+      findRedeemableGrantToken,
+      findPendingMatch,
+      createApproval,
+    } = setup({ ...NEEDS_APPROVAL, storedGrantToken: 'server-held-grant' });
+
+    const outcome = await service.invoke(AGENT, INPUT, 'REST');
+
+    expect(outcome).toMatchObject({
+      status: 'PENDING',
+      approvalId: 'approval-1',
+    });
+    expect(findRedeemableGrantToken).not.toHaveBeenCalled();
+    expect(findPendingMatch).not.toHaveBeenCalled();
+    expect(createApproval).toHaveBeenCalledOnce();
   });
 });

@@ -25,6 +25,10 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_GRANT_ISSUED: 'approval.grant_issued',
   APPROVAL_GRANT_REDEEMED: 'approval.grant_redeemed',
   APPROVAL_GRANT_REJECTED: 'approval.grant_rejected',
+  /** ADR-0007: a repeated MCP call was answered with the still-open approval for the same call. */
+  APPROVAL_REUSED: 'approval.reused',
+  /** ADR-0007: an open approval was expired because a fresh decision scored higher or changed policy version or reason. */
+  APPROVAL_SUPERSEDED: 'approval.superseded',
 
   TOOL_INVOCATION_STARTED: 'tool.invocation.started',
   TOOL_INVOCATION_COMPLETED: 'tool.invocation.completed',
