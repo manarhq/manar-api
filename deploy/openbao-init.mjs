@@ -105,16 +105,16 @@ async function ensureMount(mountPath, maxLeaseTtl) {
  * default, since a non-dev OpenBao deployment has no such default and this
  * script is meant to describe the *whole* required bootstrap.
  */
-async function ensureKvV2Mount(mountPath) {
+async function ensureKvMount(mountPath, version) {
   const mounts = await baoRequest('GET', 'sys/mounts');
   if (mounts?.data?.[`${mountPath}/`]) {
     console.log(`==> Mount "${mountPath}/" already exists, skipping enable`);
     return;
   }
-  console.log(`==> Enabling KV v2 secrets engine at "${mountPath}/"`);
+  console.log(`==> Enabling KV v${version} secrets engine at "${mountPath}/"`);
   await baoRequest('POST', `sys/mounts/${mountPath}`, {
     type: 'kv',
-    options: { version: '2' },
+    options: { version },
   });
 }
 
@@ -138,7 +138,10 @@ async function main() {
 
   await ensureMount(ROOT_PATH, ROOT_TTL);
   await ensureMount(INTERMEDIATE_PATH, INTERMEDIATE_TTL);
-  await ensureKvV2Mount(KV_MOUNT_PATH);
+  await ensureKvMount(KV_MOUNT_PATH, '2');
+  // manar-api ADR-0011: approval handovers (temporary passwords). KV v1 has
+  // no versions, so a delete is permanent and nothing can be undeleted.
+  await ensureKvMount('handover', '1');
 
   if (await caAlreadyIssued(ROOT_PATH)) {
     console.log('==> Root CA already generated, skipping');

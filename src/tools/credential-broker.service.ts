@@ -19,11 +19,13 @@ import {
 import { HttpToolAdapter } from './http-tool.adapter';
 import { McpToolAdapter } from './mcp-tool.adapter';
 import { MicrosoftToolAdapter } from './microsoft-tool.adapter';
+import { GitLabToolAdapter } from './gitlab-tool.adapter';
 import { ManarConnectorService } from './manar-connector.service';
 import { isManarBuiltin } from './manar-actions';
 import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
 import { failClosed } from '../common/fail-closed/fail-closed';
 import { ToolRegistryService } from './tool-registry.service';
+import { HandoverStore } from './handover.store';
 
 /**
  * Phase 10b DLP-before-call checkpoint threshold (see docs/ai-security-model.md).
@@ -191,9 +193,10 @@ export interface CredentialBrokerInvokeInput {
  *      held only in a local variable for exactly as long as step 4 takes —
  *      never logged, never assigned to any field that could end up in the
  *      `ToolInvocation` row or the returned `ToolInvocationResult`.
- *   4. Dispatches to `HttpToolAdapter`, `McpToolAdapter` or
- *      `MicrosoftToolAdapter` (ADR-0004) based on `Tool.protocol` — all
- *      three behind this same pipeline, no separate path for any protocol.
+ *   4. Dispatches to `HttpToolAdapter`, `McpToolAdapter`,
+ *      `MicrosoftToolAdapter` (ADR-0004) or `GitLabToolAdapter` (ADR-0012)
+ *      based on `Tool.protocol`, all behind this same pipeline, no separate
+ *      path for any protocol.
  *   5. Records a `ToolInvocation` row (`SUCCESS`/`FAILURE`, timing,
  *      `resource`, a short `errorMessage` on failure) — never the resolved
  *      credential, never a raw request/response payload (an adapter's
@@ -221,6 +224,8 @@ export class CredentialBrokerService {
     private readonly microsoftAdapter: MicrosoftToolAdapter,
     configService: ConfigService<AppConfig, true>,
     private readonly manarConnector: ManarConnectorService,
+    private readonly handoverStore: HandoverStore,
+    private readonly gitlabAdapter: GitLabToolAdapter,
   ) {
     this.injectionBlockThreshold = configService.get(
       'PROMPT_INJECTION_BLOCK_THRESHOLD',
@@ -367,7 +372,9 @@ export class CredentialBrokerService {
             ? this.mcpAdapter
             : tool.protocol === 'MICROSOFT'
               ? this.microsoftAdapter
-              : this.httpAdapter;
+              : tool.protocol === 'GITLAB'
+                ? this.gitlabAdapter
+                : this.httpAdapter;
         result = await adapter.invoke(
           tool,
           action,
@@ -390,6 +397,19 @@ export class CredentialBrokerService {
         error instanceof Error ? error.stack : undefined,
       );
       result = { success: false, errorMessage: 'tool invocation failed' };
+    }
+
+    // ADR-0011: a value for the approving person never travels further than
+    // this line inside the result: it goes to OpenBao or is discarded.
+    const { handover, ...withoutHandover } = result;
+    result = withoutHandover;
+    let handoverState: string | undefined;
+    if (handover && result.success) {
+      handoverState = await this.storeHandover(tenantClient, input, handover);
+      result = {
+        ...result,
+        data: { ...(result.data as object), handover: handoverState },
+      };
     }
 
     const status = result.success
@@ -434,8 +454,24 @@ export class CredentialBrokerService {
         resource: input.resource,
         status,
         errorMessage: result.success ? null : (result.errorMessage ?? null),
+        ...(handoverState ? { handover: handoverState } : {}),
       },
     });
+
+    if (result.bindingViolation) {
+      await this.auditService.recordSafely(tenantClient, input.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_BINDING_VIOLATED,
+        actor: { type: 'agent', id: input.agentId },
+        data: {
+          taskId: input.taskId,
+          decisionId: input.decisionId,
+          toolId: input.toolId,
+          actionId: input.actionId,
+          resource: input.resource,
+          violation: result.bindingViolation,
+        },
+      });
+    }
 
     if (result.success) {
       result = await this.applyPostCallAdvisories(
@@ -611,6 +647,46 @@ export class CredentialBrokerService {
     }
 
     return outcome;
+  }
+
+  /**
+   * ADR-0011: keeps `handover` in OpenBao for the person who approved this
+   * execution, found through the decision's grant. Without an approval
+   * (the policy allowed the action outright) there is no one entitled to it,
+   * so it is discarded. Returns what the agent is told: where it went, never
+   * the value.
+   */
+  private async storeHandover(
+    tenantClient: TenantPrismaClient,
+    input: CredentialBrokerInvokeInput,
+    handover: Record<string, string>,
+  ): Promise<string> {
+    try {
+      const decision = await tenantClient.decision.findUnique({
+        where: { id: input.decisionId },
+        select: { grantId: true },
+      });
+      const grant = decision?.grantId
+        ? await tenantClient.authorizationGrant.findUnique({
+            where: { id: decision.grantId },
+            select: { approvalRequestId: true },
+          })
+        : null;
+      if (!grant) {
+        return 'discarded: no person approved this action, so nobody receives the value';
+      }
+      await this.handoverStore.put(
+        input.tenantId,
+        grant.approvalRequestId,
+        handover,
+      );
+      return `held for the approving person (approval ${grant.approvalRequestId}); not given to the agent`;
+    } catch (error) {
+      this.logger.warn(
+        `Handover for decision "${input.decisionId}" could not be stored: ${error instanceof Error ? error.name : 'unknown'}`,
+      );
+      return 'discarded: it could not be stored; run the action again to issue a new value';
+    }
   }
 
   private async recordInvocation(

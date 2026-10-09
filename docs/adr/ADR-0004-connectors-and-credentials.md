@@ -65,10 +65,9 @@ catalog of Graph and Defender actions.
    invocation, `tool.invocation.outcome_unknown` audit event); any other 4xx, and 429 on a
    mutation, → definite `FAILURE` carrying Microsoft's `error.code` only (never the message,
    which can echo request data).
-8. **Password reset without revealing a password.** `entra.user.password.reset` sets a random
-   36-character password Manar never returns, logs or stores, and forces a change at next
-   sign-in. It locks the current holder of the password out; the user recovers through
-   self-service reset or the helpdesk.
+8. **Password reset without revealing a password to the agent.** `entra.user.password.reset`
+   sets a random password and forces a change at next sign-in. Since ADR-0011 the approving
+   person can collect it once from Manar; without an approval it is discarded (lockout).
 9. **Fixture first, labelled.** Until customer credentials arrive, the catalog is exercised
    against the DEMO FIXTURE in `packages/demo-soc-tools/src/microsoft/` (served by the existing
    demo-soc-tools container under `/microsoft`). `pnpm manar demo:seed --microsoft-fixture-url`
@@ -107,10 +106,8 @@ catalog of Graph and Defender actions.
   - An app-only token cannot disable or reset the password of a user with a privileged Entra
     role unless the app itself holds a sufficient Entra role; expect 403s there.
   - Sign-in logs need Entra ID P1, Identity Protection actions need P2.
-  - "Require MFA re-registration" is not implemented: Graph has no single call; it takes
-    listing and deleting each authentication method (`UserAuthenticationMethod.ReadWrite.All`),
-    in an order that respects the default method, and is not atomic. It should be built and
-    tested against a live tenant, not the fixture.
+  - "Require MFA re-registration" is `entra.user.mfa.reset` since ADR-0011 (list and delete each
+    method, not atomic).
   - Throttling: reads retry at a fixed 200 ms, without honouring `Retry-After`.
   - `UNKNOWN` outcomes still need manual reconciliation (R1); for Defender, the machine-action
     reads are the reconciliation tool.

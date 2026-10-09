@@ -63,7 +63,8 @@ class CatalogConnectorDto {
   @ApiProperty() name!: string;
   @ApiProperty() type!: string;
   @ApiProperty({ type: String, nullable: true }) vendor!: string | null;
-  @ApiProperty({ enum: ['HTTP', 'MCP', 'MICROSOFT'] }) protocol!: string;
+  @ApiProperty({ enum: ['HTTP', 'MCP', 'MICROSOFT', 'GITLAB'] })
+  protocol!: string;
   @ApiProperty() enabled!: boolean;
   @ApiProperty({ type: Date, nullable: true })
   credentialExpiresAt!: Date | null;

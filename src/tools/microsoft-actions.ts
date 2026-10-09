@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
 
 /**
  * The Microsoft action catalog (Phase 2, ADR-0004): every Graph and
@@ -27,7 +28,7 @@ export const MICROSOFT_SCOPES: Record<MicrosoftApi, string> = {
 };
 
 export interface MicrosoftRequest {
-  method: 'GET' | 'POST' | 'PATCH';
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   /** Relative to the tool's base endpoint; built from validated segments only. */
   path: string;
   query?: Record<string, string>;
@@ -45,8 +46,28 @@ export interface MicrosoftActionDef {
   /** What `resource` must look like for this action. */
   resource: RegExp;
   inputSchema: Record<string, unknown>;
-  build(resource: string, params: Record<string, unknown>): MicrosoftRequest;
+  /** Clamps the policy's risk score up to this (create/offboard: high). */
+  riskFloor?: number;
+  /** A single-request action. */
+  build?(resource: string, params: Record<string, unknown>): MicrosoftRequest;
+  /**
+   * A multi-step action: sends its requests through `call`, one by one.
+   * Steps that have already changed something are not undone when a later
+   * one fails; `steps()` turns that into a partial outcome.
+   */
+  run?(
+    resource: string,
+    params: Record<string, unknown>,
+    call: MicrosoftCall,
+  ): Promise<MicrosoftOutcome>;
 }
+
+/** One request's outcome, as the adapter maps it (retries, UNKNOWN). */
+export type MicrosoftOutcome = ToolInvocationResult;
+
+export type MicrosoftCall = (
+  request: MicrosoftRequest,
+) => Promise<MicrosoftOutcome>;
 
 const GUID =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -78,14 +99,117 @@ const topQuery = (params: Record<string, unknown>) => ({
 });
 
 /**
- * A temporary password Manar sets and never returns, logs or stores: the
- * point of the reset is to lock the current holder of the password out.
- * The user gets back in through self-service reset or the helpdesk. The
- * suffix guarantees Entra's complexity rule (3 of 4 character classes).
+ * A temporary password generated inside Manar. It reaches Graph and, when a
+ * person approved the action, that person (through the broker's handover,
+ * ADR-0011); never the agent. The suffix meets Entra's complexity rule
+ * (3 of 4 character classes).
  */
-function lockoutPassword(): string {
-  return `${randomBytes(24).toString('base64url')}Aa1!`;
+function temporaryPassword(): string {
+  return `${randomBytes(18).toString('base64url')}Aa1!`;
 }
+
+/** `<group object id>:<user object id or UPN>`: both targets of a membership change are authorized. */
+const MEMBERSHIP =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:[A-Za-z0-9][A-Za-z0-9@._-]{0,255}$/;
+/** A new user's UPN: `alias@domain`. */
+const NEW_UPN =
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9.-]{0,189}$/;
+
+const GRAPH_OBJECT = 'https://graph.microsoft.com/v1.0/directoryObjects/';
+
+/**
+ * Runs the steps of a multi-step action in order and stops at the first
+ * failure. If nothing changed yet, the failure is returned as it is. If an
+ * earlier mutating step already changed something, the outcome is UNKNOWN
+ * ("partial: ..."), so it is reconciled by a person and never retried.
+ */
+async function steps(
+  call: MicrosoftCall,
+  list: { name: string; request: MicrosoftRequest }[],
+): Promise<{ done: string[]; failure?: MicrosoftOutcome }> {
+  const done: string[] = [];
+  for (const step of list) {
+    const result = await call(step.request);
+    if (!result.success)
+      return { done, failure: partial(done, step.name, result) };
+    if (step.request.method !== 'GET') done.push(step.name);
+  }
+  return { done };
+}
+
+function partial(
+  done: string[],
+  failed: string,
+  result: MicrosoftOutcome,
+): MicrosoftOutcome {
+  if (done.length === 0) return result;
+  return {
+    success: false,
+    errorMessage: `partial: done ${done.join(', ')}; ${failed} failed (${result.errorMessage ?? 'error'})`,
+    outcomeUnknown: true,
+  };
+}
+
+/** The user's object id: a GUID as it is, a UPN looked up (memberships and `$ref` need the id). */
+async function userObjectId(
+  call: MicrosoftCall,
+  user: string,
+): Promise<{ id?: string; failure?: MicrosoftOutcome }> {
+  if (GUID.test(user)) return { id: user };
+  const got = await call({
+    method: 'GET',
+    path: `users/${seg(user)}`,
+    query: { $select: 'id' },
+  });
+  const id = (got.data as { id?: unknown } | undefined)?.id;
+  if (!got.success) return { failure: got };
+  return typeof id === 'string' && GUID.test(id)
+    ? { id }
+    : { failure: { success: false, errorMessage: 'user_id_not_returned' } };
+}
+
+function splitMembership(resource: string): [string, string] {
+  const at = resource.indexOf(':');
+  return [resource.slice(0, at), resource.slice(at + 1)];
+}
+
+/**
+ * Authentication method types Graph can delete, by `@odata.type`, in the
+ * order they are removed. Phone numbers go last, mobile last of all: Entra
+ * refuses to remove a default phone method while others remain.
+ */
+const AUTH_METHOD_SEGMENTS: [string, string][] = [
+  [
+    '#microsoft.graph.microsoftAuthenticatorAuthenticationMethod',
+    'microsoftAuthenticatorMethods',
+  ],
+  ['#microsoft.graph.softwareOathAuthenticationMethod', 'softwareOathMethods'],
+  ['#microsoft.graph.fido2AuthenticationMethod', 'fido2Methods'],
+  [
+    '#microsoft.graph.windowsHelloForBusinessAuthenticationMethod',
+    'windowsHelloForBusinessMethods',
+  ],
+  [
+    '#microsoft.graph.platformCredentialAuthenticationMethod',
+    'platformCredentialMethods',
+  ],
+  [
+    '#microsoft.graph.temporaryAccessPassAuthenticationMethod',
+    'temporaryAccessPassMethods',
+  ],
+  ['#microsoft.graph.emailAuthenticationMethod', 'emailMethods'],
+  ['#microsoft.graph.phoneAuthenticationMethod', 'phoneMethods'],
+];
+/** Phone method ids are fixed by Graph; mobile is removed last. */
+const MOBILE_PHONE_METHOD = '3179e48a-750b-4051-897c-87b9720928f7';
+
+/** What offboarding cannot do through this app, said plainly in its result. */
+export const OFFBOARD_HANDOVER_DECLARED_ONLY = {
+  mailbox:
+    'declared-only: mailbox delegation or conversion to a shared mailbox is an Exchange Online operation, not Microsoft Graph; not done',
+  oneDrive:
+    "declared-only: giving a manager access to the user's OneDrive needs Sites.FullControl.All, which this app does not hold; not done",
+} as const;
 
 const machineAction = (
   name: string,
@@ -283,23 +407,312 @@ export const MICROSOFT_ACTIONS: readonly MicrosoftActionDef[] = [
     name: 'entra.user.password.reset',
     api: 'graph',
     description:
-      'Replace the password with a random one Manar never reveals and require a change at next sign-in. Locks the current password holder out; the user recovers via self-service reset or the helpdesk.',
+      'Set a temporary password generated by Manar and require a change at next sign-in. The password goes only to the person who approved the action (collected once from Manar), never to the agent. Without an approver it is discarded, which locks the current password holder out.',
     mutating: true,
     destructive: true,
     riskBaseScore: 40,
     permissions: ['User-PasswordProfile.ReadWrite.All'],
     resource: USER,
     inputSchema: noParams,
+    run: async (r, _p, call) => {
+      const password = temporaryPassword();
+      const result = await call({
+        method: 'PATCH',
+        path: `users/${seg(r)}`,
+        body: {
+          passwordProfile: { password, forceChangePasswordNextSignIn: true },
+        },
+      });
+      return result.success
+        ? {
+            success: true,
+            data: { passwordReset: true, forceChangePasswordNextSignIn: true },
+            handover: { temporaryPassword: password },
+          }
+        : result;
+    },
+  },
+  {
+    name: 'entra.user.mfa.reset',
+    api: 'graph',
+    description:
+      "Remove the user's registered authentication methods (authenticator app, phone, FIDO2, email, OATH, Windows Hello, temporary access pass; the password stays) and revoke sessions, so the user must register MFA again at next sign-in where MFA is required. Removal is one call per method and is not atomic.",
+    mutating: true,
+    destructive: true,
+    riskBaseScore: 40,
+    permissions: [
+      'UserAuthenticationMethod.ReadWrite.All',
+      'User.RevokeSessions.All',
+    ],
+    resource: USER,
+    inputSchema: noParams,
+    run: async (r, _p, call) => {
+      const listed = await call({
+        method: 'GET',
+        path: `users/${seg(r)}/authentication/methods`,
+      });
+      if (!listed.success) return listed;
+      const methods = (
+        ((listed.data as { value?: unknown } | undefined)?.value ?? []) as {
+          id?: unknown;
+          '@odata.type'?: unknown;
+        }[]
+      ).filter((m) => typeof m.id === 'string');
+      const plan: { name: string; request: MicrosoftRequest }[] = [];
+      const kept: string[] = [];
+      for (const [type, segment] of AUTH_METHOD_SEGMENTS) {
+        const ofType = methods
+          .filter((m) => m['@odata.type'] === type)
+          .sort((a) => (a.id === MOBILE_PHONE_METHOD ? 1 : -1));
+        for (const m of ofType) {
+          plan.push({
+            name: segment,
+            request: {
+              method: 'DELETE',
+              path: `users/${seg(r)}/authentication/${segment}/${seg(String(m.id))}`,
+            },
+          });
+        }
+      }
+      for (const m of methods) {
+        const type = String(m['@odata.type']);
+        if (!AUTH_METHOD_SEGMENTS.some(([t]) => t === type))
+          kept.push(type.replace('#microsoft.graph.', ''));
+      }
+      plan.push({
+        name: 'sessions.revoke',
+        request: {
+          method: 'POST',
+          path: `users/${seg(r)}/revokeSignInSessions`,
+        },
+      });
+      const { done, failure } = await steps(call, plan);
+      if (failure) return failure;
+      return {
+        success: true,
+        data: {
+          methodsRemoved: done.filter((d) => d !== 'sessions.revoke'),
+          methodsKept: kept,
+          sessionsRevoked: true,
+        },
+      };
+    },
+  },
+  {
+    name: 'entra.user.unlock',
+    api: 'graph',
+    description:
+      'Let a locked-out user sign in again: re-enable the account (accountEnabled=true). Graph has no call that clears an Entra smart lockout; that lockout ends on its own after its lockout period. Pair with entra.user.password.reset when the password is the problem.',
+    mutating: true,
+    destructive: false,
+    riskBaseScore: 20,
+    permissions: ['User.EnableDisableAccount.All', 'User.Read.All'],
+    resource: USER,
+    inputSchema: noParams,
     build: (r) => ({
       method: 'PATCH',
       path: `users/${seg(r)}`,
-      body: {
-        passwordProfile: {
-          password: lockoutPassword(),
-          forceChangePasswordNextSignIn: true,
-        },
-      },
+      body: { accountEnabled: true },
     }),
+  },
+  {
+    name: 'entra.group.members.list',
+    api: 'graph',
+    description: "List a group's members (resource: group object id).",
+    mutating: false,
+    destructive: false,
+    riskBaseScore: 5,
+    permissions: ['GroupMember.Read.All'],
+    resource: GUID,
+    inputSchema: topParams,
+    build: (r, p) => ({
+      method: 'GET',
+      path: `groups/${seg(r)}/members`,
+      query: { $select: 'id,displayName,userPrincipalName', ...topQuery(p) },
+    }),
+  },
+  {
+    name: 'entra.group.member.add',
+    api: 'graph',
+    description:
+      'Add a user to a group (resource: "<group object id>:<user object id or UPN>"). Reversible with entra.group.member.remove.',
+    mutating: true,
+    destructive: false,
+    riskBaseScore: 20,
+    permissions: ['GroupMember.ReadWrite.All', 'User.Read.All'],
+    resource: MEMBERSHIP,
+    inputSchema: noParams,
+    run: async (r, _p, call) => {
+      const [group, user] = splitMembership(r);
+      const { id, failure } = await userObjectId(call, user);
+      if (!id) return failure!;
+      const added = await call({
+        method: 'POST',
+        path: `groups/${seg(group)}/members/$ref`,
+        body: { '@odata.id': `${GRAPH_OBJECT}${id}` },
+      });
+      return added.success
+        ? { success: true, data: { added: true, groupId: group, userId: id } }
+        : added;
+    },
+  },
+  {
+    name: 'entra.group.member.remove',
+    api: 'graph',
+    description:
+      'Remove a user from a group (resource: "<group object id>:<user object id or UPN>").',
+    mutating: true,
+    destructive: true,
+    riskBaseScore: 25,
+    permissions: ['GroupMember.ReadWrite.All', 'User.Read.All'],
+    resource: MEMBERSHIP,
+    inputSchema: noParams,
+    run: async (r, _p, call) => {
+      const [group, user] = splitMembership(r);
+      const { id, failure } = await userObjectId(call, user);
+      if (!id) return failure!;
+      const removed = await call({
+        method: 'DELETE',
+        path: `groups/${seg(group)}/members/${seg(id)}/$ref`,
+      });
+      return removed.success
+        ? { success: true, data: { removed: true, groupId: group, userId: id } }
+        : removed;
+    },
+  },
+  {
+    name: 'entra.user.create',
+    api: 'graph',
+    description:
+      'Joiner: create a user (resource: the new UPN), disabled unless accountEnabled is true, with a temporary password Manar generates that goes only to the approving person and must be changed at first sign-in. Add groups with entra.group.member.add.',
+    mutating: true,
+    destructive: false,
+    riskBaseScore: 50,
+    riskFloor: 70,
+    permissions: ['User.ReadWrite.All'],
+    resource: NEW_UPN,
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['displayName'],
+      properties: {
+        displayName: { type: 'string', minLength: 1, maxLength: 256 },
+        accountEnabled: { type: 'boolean' },
+        jobTitle: { type: 'string', minLength: 1, maxLength: 128 },
+        department: { type: 'string', minLength: 1, maxLength: 64 },
+        usageLocation: { type: 'string', pattern: '^[A-Z]{2}$' },
+      },
+    },
+    run: async (r, p, call) => {
+      const password = temporaryPassword();
+      const created = await call({
+        method: 'POST',
+        path: 'users',
+        body: {
+          userPrincipalName: r,
+          mailNickname: r
+            .slice(0, r.indexOf('@'))
+            .replace(/[^A-Za-z0-9._-]/g, ''),
+          displayName: p.displayName,
+          accountEnabled: p.accountEnabled === true,
+          ...(p.jobTitle ? { jobTitle: p.jobTitle } : {}),
+          ...(p.department ? { department: p.department } : {}),
+          ...(p.usageLocation ? { usageLocation: p.usageLocation } : {}),
+          passwordProfile: { password, forceChangePasswordNextSignIn: true },
+        },
+      });
+      if (!created.success) return created;
+      const u = (created.data ?? {}) as Record<string, unknown>;
+      return {
+        success: true,
+        data: {
+          id: u.id,
+          userPrincipalName: u.userPrincipalName,
+          displayName: u.displayName,
+          accountEnabled: u.accountEnabled ?? p.accountEnabled === true,
+        },
+        handover: { temporaryPassword: password },
+      };
+    },
+  },
+  {
+    name: 'entra.user.offboard',
+    api: 'graph',
+    description:
+      'Leaver: disable the account, revoke all sessions, and remove the user from every group Graph can change. Mailbox and OneDrive handover are declared-only (not done; the result says so). Not undone automatically: re-enable with entra.user.enable and re-add groups by hand.',
+    mutating: true,
+    destructive: true,
+    riskBaseScore: 60,
+    riskFloor: 80,
+    permissions: [
+      'User.EnableDisableAccount.All',
+      'User.RevokeSessions.All',
+      'GroupMember.ReadWrite.All',
+      'User.Read.All',
+    ],
+    resource: USER,
+    inputSchema: noParams,
+    run: async (r, _p, call) => {
+      const { id, failure } = await userObjectId(call, r);
+      if (!id) return failure!;
+      const groups = await call({
+        method: 'GET',
+        path: `users/${seg(id)}/memberOf/microsoft.graph.group`,
+        query: { $select: 'id,displayName,groupTypes,mailEnabled' },
+      });
+      if (!groups.success) return groups;
+      const memberOf = (
+        ((groups.data as { value?: unknown } | undefined)?.value ?? []) as {
+          id?: unknown;
+          groupTypes?: unknown;
+        }[]
+      ).filter((g) => typeof g.id === 'string' && GUID.test(g.id));
+      // Dynamic groups follow their rule; Graph cannot remove a member from them.
+      const dynamic = memberOf.filter(
+        (g) =>
+          Array.isArray(g.groupTypes) &&
+          g.groupTypes.includes('DynamicMembership'),
+      );
+      const removable = memberOf.filter((g) => !dynamic.includes(g));
+      const { done, failure: failed } = await steps(call, [
+        {
+          name: 'disable',
+          request: {
+            method: 'PATCH',
+            path: `users/${seg(id)}`,
+            body: { accountEnabled: false },
+          },
+        },
+        {
+          name: 'sessions.revoke',
+          request: {
+            method: 'POST',
+            path: `users/${seg(id)}/revokeSignInSessions`,
+          },
+        },
+        ...removable.map((g) => ({
+          name: `group.remove ${String(g.id)}`,
+          request: {
+            method: 'DELETE' as const,
+            path: `groups/${seg(String(g.id))}/members/${seg(id)}/$ref`,
+          },
+        })),
+      ]);
+      if (failed) return failed;
+      return {
+        success: true,
+        data: {
+          userId: id,
+          disabled: true,
+          sessionsRevoked: true,
+          groupsRemoved: done
+            .filter((d) => d.startsWith('group.remove '))
+            .map((d) => d.slice(13)),
+          groupsKeptDynamic: dynamic.map((g) => String(g.id)),
+          handover: OFFBOARD_HANDOVER_DECLARED_ONLY,
+        },
+      };
+    },
   },
   {
     name: 'entra.user.risk.confirmCompromised',

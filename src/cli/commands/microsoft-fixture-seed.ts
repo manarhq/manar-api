@@ -114,27 +114,47 @@ export async function ensureMicrosoftFixtureTools(
       update: data,
     });
 
-    for (const action of MICROSOFT_ACTIONS.filter((a) => a.api === def.api)) {
-      const row = {
-        description: action.description,
-        riskBaseScore: action.riskBaseScore,
-        mutating: action.mutating,
-        destructive: action.destructive,
-        inputSchema: action.inputSchema as Prisma.InputJsonObject,
-      };
-      await tenantClient.toolAction.upsert({
-        where: { toolId_name: { toolId: tool.id, name: action.name } },
-        create: { toolId: tool.id, name: action.name, ...row },
-        update: row,
-      });
-    }
+    await syncMicrosoftActions(tenantClient, tool.id, def.api);
   }
 }
 
-/** Every Microsoft mutation needs a human approval; reads are allowed. Generated from the catalog, so a new action cannot slip through unlisted. */
-export function microsoftPolicyContent() {
+/** Writes the `ToolAction` rows of one Microsoft tool from the code catalog (idempotent). */
+export async function syncMicrosoftActions(
+  tenantClient: TenantPrismaClient,
+  toolRowId: string,
+  api: 'graph' | 'defender',
+): Promise<number> {
+  const actions = MICROSOFT_ACTIONS.filter((a) => a.api === api);
+  for (const action of actions) {
+    const row = {
+      description: action.description,
+      riskBaseScore: action.riskBaseScore,
+      mutating: action.mutating,
+      destructive: action.destructive,
+      inputSchema: action.inputSchema as Prisma.InputJsonObject,
+    };
+    await tenantClient.toolAction.upsert({
+      where: { toolId_name: { toolId: toolRowId, name: action.name } },
+      create: { toolId: toolRowId, name: action.name, ...row },
+      update: row,
+    });
+  }
+  return actions.length;
+}
+
+/**
+ * Every Microsoft mutation needs a human approval; reads are allowed.
+ * Generated from the catalog, so a new action cannot slip through unlisted.
+ * Joiner and leaver (`riskFloor` in the catalog) are scored high. `tools`
+ * renames the tools for a live registration (`microsoft:register --name`).
+ */
+export function microsoftPolicyContent(
+  tools: { graph?: string; defender?: string } = {},
+) {
   const toolOf = (api: string) =>
-    api === 'graph' ? MICROSOFT_GRAPH_TOOL : MICROSOFT_DEFENDER_TOOL;
+    api === 'graph'
+      ? (tools.graph ?? MICROSOFT_GRAPH_TOOL)
+      : (tools.defender ?? MICROSOFT_DEFENDER_TOOL);
   return {
     rules: [
       ...MICROSOFT_ACTIONS.filter((a) => a.mutating).map((a) => ({
@@ -144,6 +164,7 @@ export function microsoftPolicyContent() {
         resourcePattern: '*',
         effect: 'APPROVAL_REQUIRED' as const,
         riskWeight: a.destructive ? 40 : 20,
+        ...(a.riskFloor ? { riskFloor: a.riskFloor } : {}),
         description: a.description,
       })),
       ...MICROSOFT_ACTIONS.filter((a) => !a.mutating).map((a) => ({
