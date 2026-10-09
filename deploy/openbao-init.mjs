@@ -3,7 +3,8 @@
  * One-time (safe to re-run) OpenBao PKI bootstrap for local dev/CI.
  *
  * Unlike Postgres/Keycloak, `deploy/docker-compose.yml`'s `openbao` service
- * boots empty — a `-dev` server with no secrets engines configured. This
+ * boots with no PKI configured (a fresh volume locally, a `-dev` server in
+ * CI). Every step below skips what already exists, so re-running is safe. This
  * script drives OpenBao's HTTP API directly (no `vault`/`bao` CLI
  * dependency, so it runs identically in a bare `node` GitLab CI job as it
  * does locally) to:

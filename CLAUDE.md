@@ -27,12 +27,16 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 | Prisma client         | `pnpm db:generate` (runs on install)                                                                       |                                                    |
 | Control DB migrations | `pnpm db:migrate:control` (dev) / `pnpm db:migrate:control:deploy`                                         | 3 migrations                                       |
 | Tenant DB migrations  | `pnpm manar tenants:migrate` (every ACTIVE tenant; run on every upgrade, after the control migrations)     |                                                    |
-| Demo reseed           | `pnpm manar demo:seed` (idempotent; needed after an OpenBao restart, which drops the demo tool credential) |                                                    |
+| Demo reseed           | `pnpm manar demo:seed` (idempotent; only needed after wiping the OpenBao volume)                           |                                                    |
 
-**OpenBao runs in dev mode (in-memory).** Whenever its container restarts, the PKI mounts
-vanish and agent enrollment returns 500 until you run `pnpm infra:openbao-init` and restart
-the API. `/health/ready` reports `openbao` unhealthy when this happens (it probes the
-intermediate's `ca_chain`, not just the port).
+**OpenBao is persistent locally** (file storage on the `manar-openbao-data` volume;
+`deploy/openbao-entrypoint.sh` inits once and unseals on every start). Restarts keep the CA and
+the `secret/tools/*` credentials. The unseal key and initial root token are in
+`~/.manar-openbao/` (host only, never in a repo); apps keep `OPENBAO_TOKEN=manar-dev-root-token`.
+`pnpm infra:openbao-init` is needed once per fresh volume and skips what exists (it never
+regenerates an existing CA). If the volume is wiped, the PKI is gone: re-run it, restart the API
+and re-enroll agents; `/health/ready` reports `openbao` unhealthy until then (it probes the
+intermediate's `ca_chain`). CI still runs OpenBao in `-dev` mode (`.gitlab-ci.yml`).
 
 `src/generated/**` is Prisma output and is ignored by eslint. `pnpm demo:agent` runs the scripted
 demo against `packages/demo-soc-tools`; with `test/complete-demo.e2e-spec.ts` it is the rehearsed
