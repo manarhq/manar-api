@@ -81,9 +81,7 @@ describe('rate limiting with Redis down', () => {
     const port = await closedPort();
     redisDown = new RedisThrottlerStorageService({
       get: (key: string) =>
-        key === 'RATE_LIMIT_REDIS_TIMEOUT_MS'
-          ? 1000
-          : `redis://127.0.0.1:${port}`,
+        key === 'REDIS_TIMEOUT_MS' ? 1000 : `redis://127.0.0.1:${port}`,
     } as unknown as ConfigService<AppConfig, true>);
     human = await appWith(
       new LocalFallbackThrottlerStorage(redisDown, 'human'),

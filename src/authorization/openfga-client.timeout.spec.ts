@@ -4,7 +4,10 @@ import { OpenFgaClient } from '@openfga/sdk';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
-import { OpenFgaClientService } from './openfga-client.service';
+import {
+  buildCheckClient,
+  OpenFgaClientService,
+} from './openfga-client.service';
 
 /**
  * Load-test finding (9 Oct): with OpenFGA down, each decision waited about
@@ -27,6 +30,11 @@ function serviceAgainst(apiUrl: string): OpenFgaClientService {
       apiUrl,
       storeId: '01HZZZZZZZZZZZZZZZZZZZZZZZ',
     }),
+    checkClient: buildCheckClient(
+      apiUrl,
+      '01HZZZZZZZZZZZZZZZZZZZZZZZ',
+      TIMEOUT_MS,
+    ),
     _storeId: '01HZZZZZZZZZZZZZZZZZZZZZZZ',
     _authorizationModelId: '01HZZZZZZZZZZZZZZZZZZZZZZZ',
   });
@@ -76,5 +84,24 @@ describe('OpenFgaClientService.check is bounded', () => {
       serviceAgainst(`http://127.0.0.1:${port}`).check(TUPLE),
     );
     expect(ms).toBeLessThan(TIMEOUT_MS + 300);
+  });
+
+  it('a timed-out check does not leave its socket open (no pile-up during an outage)', async () => {
+    const open = new Set<Socket>();
+    const blackHole = createServer((s) => {
+      s.resume(); // read, so the client's close is seen
+      open.add(s);
+      s.on('close', () => open.delete(s));
+    });
+    servers.push(blackHole);
+    await new Promise<void>((r) => blackHole.listen(0, '127.0.0.1', r));
+    const { port } = blackHole.address() as AddressInfo;
+
+    await elapsedUntilRejected(
+      serviceAgainst(`http://127.0.0.1:${port}`).check(TUPLE),
+    );
+    // The SDK's own default would keep it for 10 s.
+    await new Promise((r) => setTimeout(r, TIMEOUT_MS * 2 + 200));
+    expect(open.size).toBe(0);
   });
 });

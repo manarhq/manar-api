@@ -26,14 +26,6 @@ export const RateLimitConfigSchema = z.object({
   RATE_LIMIT_AGENT_TTL_MS: z.coerce.number().int().positive().default(60_000),
   /** Max requests per agent per `RATE_LIMIT_AGENT_TTL_MS` window. */
   RATE_LIMIT_AGENT_LIMIT: z.coerce.number().int().positive().default(120),
-  /**
-   * Bound on every limits-store round trip (connect and command). When it
-   * is exceeded the agent surface fails closed (503) and the human surface
-   * falls back to in-memory limits. A command that times out may still
-   * apply its increment in Redis later, so counts are approximate by up to
-   * the requests in flight at the time: accepted.
-   */
-  RATE_LIMIT_REDIS_TIMEOUT_MS: z.coerce.number().int().positive().default(1000),
 });
 
 export type RateLimitConfig = z.infer<typeof RateLimitConfigSchema>;

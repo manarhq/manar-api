@@ -11,7 +11,7 @@ type ThrottlerStorageRecord = Awaited<
 
 /**
  * The human surface's limits store: Redis, and when Redis is unavailable or
- * slower than RATE_LIMIT_REDIS_TIMEOUT_MS, the same limits in this
+ * slower than REDIS_TIMEOUT_MS, the same limits in this
  * process's memory. Tenant limits never disappear during a Redis outage;
  * they become per replica (with N replicas a tenant gets up to N times its
  * limit until Redis is back). Logged once per outage and exported as

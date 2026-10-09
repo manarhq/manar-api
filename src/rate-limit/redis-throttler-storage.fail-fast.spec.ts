@@ -8,7 +8,7 @@ import { RedisThrottlerStorageService } from './redis-throttler-storage.service'
 /**
  * Load-test finding (9 Oct): with Redis down, every agent request waited
  * about 5 s before failing closed. Failing closed must also be fast: each
- * limits-store call is bounded by RATE_LIMIT_REDIS_TIMEOUT_MS.
+ * limits-store call is bounded by REDIS_TIMEOUT_MS.
  */
 const TIMEOUT_MS = 250;
 const BOUND_MS = 1_000;
@@ -16,8 +16,7 @@ const REDIS = new URL(process.env.REDIS_URL ?? 'redis://localhost:6379');
 
 function config(url: string): ConfigService<AppConfig, true> {
   return {
-    get: (key: string) =>
-      key === 'RATE_LIMIT_REDIS_TIMEOUT_MS' ? TIMEOUT_MS : url,
+    get: (key: string) => (key === 'REDIS_TIMEOUT_MS' ? TIMEOUT_MS : url),
   } as unknown as ConfigService<AppConfig, true>;
 }
 

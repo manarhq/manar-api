@@ -6,8 +6,8 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { ThrottlerStorage } from '@nestjs/throttler';
-import { createClient, type RedisClientType } from 'redis';
 import type { AppConfig } from '../config/env.validation';
+import { BoundedRedis } from '../common/redis/bounded-redis';
 
 /**
  * Mirrors `@nestjs/throttler`'s own `ThrottlerStorageRecord` shape exactly
@@ -119,20 +119,20 @@ export class RedisThrottlerStorageService
   implements ThrottlerStorage, OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger(RedisThrottlerStorageService.name);
-  private readonly url: string;
-  private readonly timeoutMs: number;
-  private client: RedisClientType | undefined;
+  private readonly redis: BoundedRedis;
 
-  constructor(private readonly configService: ConfigService<AppConfig, true>) {
-    this.url = this.configService.get('REDIS_URL', { infer: true });
-    this.timeoutMs = this.configService.get('RATE_LIMIT_REDIS_TIMEOUT_MS', {
-      infer: true,
-    });
+  constructor(configService: ConfigService<AppConfig, true>) {
+    this.redis = new BoundedRedis(
+      configService.get('REDIS_URL', { infer: true }),
+      configService.get('REDIS_TIMEOUT_MS', { infer: true }),
+      this.logger,
+      'Rate-limit store',
+    );
   }
 
   async onModuleInit(): Promise<void> {
     try {
-      await this.connect();
+      await this.redis.connect();
     } catch (error) {
       this.logger.warn(
         `Could not connect to Redis at startup (will retry lazily on first increment): ${errorMessage(error)}`,
@@ -141,15 +141,7 @@ export class RedisThrottlerStorageService
   }
 
   async onModuleDestroy(): Promise<void> {
-    try {
-      // quit() waits for a reply a reconnecting client never gets.
-      if (this.client?.isReady) await this.client.quit();
-      else this.client?.destroy();
-    } catch (error) {
-      this.logger.warn(
-        `Error closing Redis throttler connection: ${errorMessage(error)}`,
-      );
-    }
+    await this.redis.close();
   }
 
   /**
@@ -166,7 +158,7 @@ export class RedisThrottlerStorageService
     blockDuration: number,
     throttlerName: string,
   ): Promise<ThrottlerStorageRecord> {
-    const client = await this.getClient();
+    const client = await this.redis.get();
     const redisKey = `manar:throttle:${throttlerName}:${key}`;
 
     const result = (await client.eval(INCREMENT_SCRIPT, {
@@ -187,62 +179,6 @@ export class RedisThrottlerStorageService
       isBlocked: isBlocked === 1,
       timeToBlockExpire: Math.max(0, Math.ceil(timeToBlockExpireMs / 1000)),
     };
-  }
-
-  /**
-   * Fails fast whenever Redis is not ready: a client that is reconnecting
-   * rejects at once (no offline queue), and a new connection attempt or a
-   * command never waits longer than RATE_LIMIT_REDIS_TIMEOUT_MS. The agent
-   * surface turns any of these into a 503 enforcement_dependency_unavailable.
-   */
-  private async getClient(): Promise<RedisClientType> {
-    if (this.client?.isReady) return this.client;
-    if (this.client?.isOpen) {
-      throw new Error('Redis throttler storage: reconnecting');
-    }
-    await this.connect();
-    if (!this.client) {
-      throw new Error('Redis throttler storage: no connection available');
-    }
-    return this.client;
-  }
-
-  private async connect(): Promise<void> {
-    const client: RedisClientType = createClient({
-      url: this.url,
-      disableOfflineQueue: true,
-      socket: { connectTimeout: this.timeoutMs },
-      commandOptions: { timeout: this.timeoutMs },
-    });
-    client.on('error', (error: unknown) => {
-      this.logger.warn(
-        `Redis throttler connection error: ${errorMessage(error)}`,
-      );
-    });
-    this.client = client;
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      await Promise.race([
-        client.connect(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () =>
-              reject(
-                new Error(`Redis connect timed out after ${this.timeoutMs} ms`),
-              ),
-            this.timeoutMs,
-          );
-        }),
-      ]);
-    } catch (error) {
-      // Drop the half-open client so the next request starts a fresh,
-      // bounded attempt instead of waiting on this one.
-      this.client = undefined;
-      client.destroy();
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
   }
 }
 

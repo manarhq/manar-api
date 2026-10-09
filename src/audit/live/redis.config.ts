@@ -10,6 +10,13 @@ import { z } from 'zod';
 export const RedisConfigSchema = z.object({
   /** Matches `deploy/docker-compose.yml`'s `redis` service's default host-mapped port. */
   REDIS_URL: z.string().min(1).default('redis://localhost:6379'),
+  /**
+   * Bound on every connect and command of the request-path Redis clients
+   * (rate limits, idempotency). Past it the agent surface fails closed (503),
+   * the human surface's limits fall back to memory, and idempotency fails the
+   * request. A timed-out command may still apply later: counts are approximate.
+   */
+  REDIS_TIMEOUT_MS: z.coerce.number().int().positive().default(1000),
 });
 
 export type RedisConfig = z.infer<typeof RedisConfigSchema>;
