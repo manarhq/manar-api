@@ -270,6 +270,9 @@ export class JwtAuthGuard implements CanActivate {
           role,
           grantedBy: 'keycloak:realm_access',
         })),
+        // Concurrent first requests from one user both see the role missing;
+        // ON CONFLICT DO NOTHING lets the second one through instead of a 500.
+        skipDuplicates: true,
       });
     }
     if (toRevoke.length > 0) {
