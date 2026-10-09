@@ -1,6 +1,6 @@
 {{- /*
 Per-app allow rules, values-driven (values.yaml networkPolicy.ingress and
-networkPolicy.egress, each a list of { name, ports, from|to } with raw
+networkPolicy.egress, each a list of { name, enabled?, ports, from|to } with raw
 NetworkPolicy peers). An ingress rule with no `from` admits any source on its
 ports. The namespace-level default-deny lives in the platform repo
 (manar/manar-infra); this policy lists what this app needs on its own, so it
@@ -32,12 +32,14 @@ spec:
     {{- end }}
   egress:
     {{- range .Values.networkPolicy.egress }}
+    {{- if ne (toString .enabled) "false" }}
     - ports:
         {{- toYaml .ports | nindent 8 }}
       {{- with .to }}
       to:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+    {{- end }}
     {{- else }} []
     {{- end }}
 {{- end }}
