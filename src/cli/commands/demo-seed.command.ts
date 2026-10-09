@@ -30,8 +30,10 @@ interface DemoSeedOptions {
 }
 
 /** Fixed, deterministic identifiers — never randomized — so re-running this command finds and reuses everything a prior run already created (Section 85: "idempotently provisions"). */
-const TENANT_SLUG = 'vax-security-ops-demo';
-const TENANT_NAME = 'VAX Security Operations Demo';
+const TENANT_SLUG =
+  process.env.MANAR_SEED_TENANT_SLUG ?? 'vax-security-ops-demo';
+const TENANT_NAME =
+  process.env.MANAR_SEED_TENANT_NAME ?? 'VAX Security Operations Demo';
 
 /** Dev-only, documented in docs/demo.md — never used outside a local/demo deployment. */
 const DEMO_USER_PASSWORD = 'Passw0rd!Demo2026';
