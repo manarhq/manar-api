@@ -3,7 +3,10 @@ import {
   ConflictException,
   Controller,
   Get,
+  ForbiddenException,
   GatewayTimeoutException,
+  Header,
+  HttpCode,
   Logger,
   NotFoundException,
   Param,
@@ -39,6 +42,9 @@ import {
   parseLimit,
 } from '../common/pagination/cursor-pagination';
 import { ApprovalRequestNotFoundError } from './approvals.errors';
+import { HandoverStore } from '../tools/handover.store';
+import { AuditService } from '../audit/audit.service';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ApprovalRequestService } from './approval-request.service';
 import { DecideApprovalRequestSchema } from './approvals.validation';
 import {
@@ -124,6 +130,8 @@ export class ApprovalsController {
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly temporalClient: TemporalClientService,
     configService: ConfigService<AppConfig, true>,
+    private readonly handoverStore: HandoverStore,
+    private readonly auditService: AuditService,
   ) {
     this.decideResultTimeoutMs = configService.get(
       'APPROVAL_DECIDE_RESULT_TIMEOUT_MS',
@@ -346,6 +354,47 @@ export class ApprovalsController {
             ? 'DENY'
             : undefined,
     };
+  }
+
+  @Post(':id/handover')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Collect, once, what an approved action produced for its approver',
+    description:
+      'ADR-0011. Some actions produce a value only the approving person may see, never the agent: the temporary password of entra.user.password.reset and entra.user.create. Only the person who approved this request can collect it, exactly once; it is then deleted from OpenBao. 404 when there is nothing to collect (not executed yet, already collected, expired after 24 h, or the action produces nothing).',
+  })
+  @ApiParam({ name: 'id', description: 'ApprovalRequest ID', format: 'uuid' })
+  @ApiResponse({ status: 200, description: '`{ approvalRequestId, value }`' })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async collectHandover(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') id: string,
+  ): Promise<{ approvalRequestId: string; value: Record<string, string> }> {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const approved = await tenantClient.approvalDecision.findFirst({
+      where: { approvalRequestId: id, decision: 'APPROVE' },
+      select: { approverId: true },
+    });
+    if (!approved) throw new NotFoundException('nothing to collect');
+    if (approved.approverId !== auth.user.id) {
+      throw new ForbiddenException(
+        'only the person who approved this request can collect its handover',
+      );
+    }
+    const value = await this.handoverStore.take(auth.tenant.id, id);
+    if (!value) throw new NotFoundException('nothing to collect');
+    await this.auditService.recordSafely(tenantClient, auth.tenant.id, {
+      eventType: AUDIT_EVENT_TYPES.APPROVAL_HANDOVER_COLLECTED,
+      actor: { type: 'human', id: auth.user.id },
+      // Which fields were handed over, never their values.
+      data: { approvalRequestId: id, fields: Object.keys(value) },
+    });
+    return { approvalRequestId: id, value };
   }
 
   /**

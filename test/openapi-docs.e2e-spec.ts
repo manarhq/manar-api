@@ -38,6 +38,7 @@ const DOCUMENTED_PATHS = [
   '/policies/{id}/versions/{versionId}/publish',
   '/approvals',
   '/approvals/{id}/decide',
+  '/approvals/{id}/handover',
   '/audit',
   '/audit/verify',
   '/kill-switches',

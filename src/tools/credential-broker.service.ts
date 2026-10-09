@@ -24,6 +24,7 @@ import { isManarBuiltin } from './manar-actions';
 import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
 import { failClosed } from '../common/fail-closed/fail-closed';
 import { ToolRegistryService } from './tool-registry.service';
+import { HandoverStore } from './handover.store';
 
 /**
  * Phase 10b DLP-before-call checkpoint threshold (see docs/ai-security-model.md).
@@ -221,6 +222,7 @@ export class CredentialBrokerService {
     private readonly microsoftAdapter: MicrosoftToolAdapter,
     configService: ConfigService<AppConfig, true>,
     private readonly manarConnector: ManarConnectorService,
+    private readonly handoverStore: HandoverStore,
   ) {
     this.injectionBlockThreshold = configService.get(
       'PROMPT_INJECTION_BLOCK_THRESHOLD',
@@ -392,6 +394,19 @@ export class CredentialBrokerService {
       result = { success: false, errorMessage: 'tool invocation failed' };
     }
 
+    // ADR-0011: a value for the approving person never travels further than
+    // this line inside the result: it goes to OpenBao or is discarded.
+    const { handover, ...withoutHandover } = result;
+    result = withoutHandover;
+    let handoverState: string | undefined;
+    if (handover && result.success) {
+      handoverState = await this.storeHandover(tenantClient, input, handover);
+      result = {
+        ...result,
+        data: { ...(result.data as object), handover: handoverState },
+      };
+    }
+
     const status = result.success
       ? 'SUCCESS'
       : result.outcomeUnknown
@@ -434,6 +449,7 @@ export class CredentialBrokerService {
         resource: input.resource,
         status,
         errorMessage: result.success ? null : (result.errorMessage ?? null),
+        ...(handoverState ? { handover: handoverState } : {}),
       },
     });
 
@@ -611,6 +627,46 @@ export class CredentialBrokerService {
     }
 
     return outcome;
+  }
+
+  /**
+   * ADR-0011: keeps `handover` in OpenBao for the person who approved this
+   * execution, found through the decision's grant. Without an approval
+   * (the policy allowed the action outright) there is no one entitled to it,
+   * so it is discarded. Returns what the agent is told: where it went, never
+   * the value.
+   */
+  private async storeHandover(
+    tenantClient: TenantPrismaClient,
+    input: CredentialBrokerInvokeInput,
+    handover: Record<string, string>,
+  ): Promise<string> {
+    try {
+      const decision = await tenantClient.decision.findUnique({
+        where: { id: input.decisionId },
+        select: { grantId: true },
+      });
+      const grant = decision?.grantId
+        ? await tenantClient.authorizationGrant.findUnique({
+            where: { id: decision.grantId },
+            select: { approvalRequestId: true },
+          })
+        : null;
+      if (!grant) {
+        return 'discarded: no person approved this action, so nobody receives the value';
+      }
+      await this.handoverStore.put(
+        input.tenantId,
+        grant.approvalRequestId,
+        handover,
+      );
+      return `held for the approving person (approval ${grant.approvalRequestId}); not given to the agent`;
+    } catch (error) {
+      this.logger.warn(
+        `Handover for decision "${input.decisionId}" could not be stored: ${error instanceof Error ? error.name : 'unknown'}`,
+      );
+      return 'discarded: it could not be stored; run the action again to issue a new value';
+    }
   }
 
   private async recordInvocation(

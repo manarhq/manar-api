@@ -22,6 +22,7 @@ import type { HttpToolAdapter } from './http-tool.adapter';
 import type { McpToolAdapter } from './mcp-tool.adapter';
 import type { MicrosoftToolAdapter } from './microsoft-tool.adapter';
 import type { ManarConnectorService } from './manar-connector.service';
+import type { HandoverStore } from './handover.store';
 import type {
   ToolActionRecord,
   ToolRecord,
@@ -113,6 +114,7 @@ function makeService(options: {
   action?: ToolActionRecord;
   record?: ReturnType<typeof vi.fn>;
   injectionBlockThreshold?: number;
+  putHandover?: ReturnType<typeof vi.fn>;
 }) {
   const toolRegistry = {
     findToolAction: vi.fn().mockResolvedValue({
@@ -161,6 +163,9 @@ function makeService(options: {
       get: () => options.injectionBlockThreshold ?? 0.8,
     } as unknown as ConfigService<AppConfig, true>,
     { invoke: invokeManar } as unknown as ManarConnectorService,
+    {
+      put: options.putHandover ?? vi.fn().mockResolvedValue(undefined),
+    } as unknown as HandoverStore,
   );
 
   return {
@@ -952,5 +957,81 @@ describe('CredentialBrokerService: Manar built-in connector (ADR-0009)', () => {
     await service.invoke(tenantClient, { ...baseInput, toolId: 'manar' });
     expect(invokeManar).not.toHaveBeenCalled();
     expect(invokeHttp).toHaveBeenCalled();
+  });
+});
+
+describe('CredentialBrokerService handover (ADR-0011)', () => {
+  const secret = 'Tmp-Value-Never-Shown-1!';
+  const toolResult: ToolInvocationResult = {
+    success: true,
+    data: { passwordReset: true },
+    handover: { temporaryPassword: secret },
+  };
+  const msTool = makeTool({ protocol: 'MICROSOFT' });
+  const handoverNote = (r: ToolInvocationResult) =>
+    (r.data as { handover?: string }).handover;
+
+  function clientWith(grantId: string | null, approvalRequestId?: string) {
+    const { tenantClient } = fakeTenantClient();
+    Object.assign(tenantClient, {
+      decision: {
+        findUnique: vi.fn().mockResolvedValue({ grantId }),
+      },
+      authorizationGrant: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValue(approvalRequestId ? { approvalRequestId } : null),
+      },
+    });
+    return tenantClient;
+  }
+
+  it('stores the value for the approving person and never returns or audits it', async () => {
+    const putHandover = vi.fn().mockResolvedValue(undefined);
+    const { service, recordSafely, analyzeDlp } = makeService({
+      toolResult,
+      tool: msTool,
+      putHandover,
+    });
+    const result = await service.invoke(
+      clientWith('grant-1', 'approval-1'),
+      baseInput,
+    );
+
+    expect(putHandover).toHaveBeenCalledWith('tenant-1', 'approval-1', {
+      temporaryPassword: secret,
+    });
+    expect(result.success).toBe(true);
+    expect(handoverNote(result)).toContain('approval-1');
+    expect(result).not.toHaveProperty('handover');
+    const seen = JSON.stringify([
+      result,
+      recordSafely.mock.calls,
+      analyzeDlp.mock.calls,
+    ]);
+    expect(seen).not.toContain(secret);
+  });
+
+  it('discards the value when no person approved the action', async () => {
+    const putHandover = vi.fn();
+    const { service } = makeService({ toolResult, tool: msTool, putHandover });
+    const result = await service.invoke(clientWith(null), baseInput);
+
+    expect(putHandover).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(handoverNote(result)).toMatch(/^discarded/);
+  });
+
+  it('discards the value, and still reports the executed action, when OpenBao fails', async () => {
+    const putHandover = vi.fn().mockRejectedValue(new Error('down'));
+    const { service } = makeService({ toolResult, tool: msTool, putHandover });
+    const result = await service.invoke(
+      clientWith('grant-1', 'approval-1'),
+      baseInput,
+    );
+
+    expect(result.success).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(handoverNote(result)).toMatch(/^discarded: it could not be stored/);
   });
 });

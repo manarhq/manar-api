@@ -51,7 +51,9 @@ export class OpenBaoKvClient {
       metadata: { version: number; deletion_time?: string };
     }>('GET', `${this.mountPath}/data/${path}`);
 
-    if (response.metadata?.deletion_time) {
+    // With `delete_version_after` set, `deletion_time` is a future time.
+    const deletionTime = response.metadata?.deletion_time;
+    if (deletionTime && new Date(deletionTime).getTime() <= Date.now()) {
       throw new Error(
         `OpenBao KV secret at "${path}" has been deleted (version ${response.metadata.version})`,
       );
@@ -72,12 +74,23 @@ export class OpenBaoKvClient {
   async writeSecret(
     path: string,
     data: Record<string, unknown>,
+    options: { deleteVersionAfter?: string } = {},
   ): Promise<void> {
+    if (options.deleteVersionAfter) {
+      await this.request('POST', `${this.mountPath}/metadata/${path}`, {
+        delete_version_after: options.deleteVersionAfter,
+      });
+    }
     await this.request('POST', `${this.mountPath}/data/${path}`, { data });
   }
 
+  /** Deletes every version and the metadata of the secret at `path` (KV v2 `metadata` delete): nothing is left to undelete. */
+  async destroySecret(path: string): Promise<void> {
+    await this.request('DELETE', `${this.mountPath}/metadata/${path}`);
+  }
+
   private async request<T>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     apiPath: string,
     body?: unknown,
   ): Promise<T> {
@@ -104,6 +117,7 @@ export class OpenBaoKvClient {
       );
     }
 
+    if (response.status === 204) return undefined as T;
     const json = (await response.json()) as { data: T };
     return json.data;
   }
