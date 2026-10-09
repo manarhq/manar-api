@@ -338,7 +338,7 @@ test:e2e:
     # source at a pinned commit, outside the checkout and with a clean env
     # (the local settings deploy/docker-compose.yml gives it).
     - curl -fsSL -o /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/$ASTRAL_UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz"
-    - curl -fsSL -o /tmp/manar-ai.tar.gz "$CI_SERVER_URL/api/v4/projects/manar%2Fmanar-ai/repository/archive.tar.gz?sha=$MANAR_AI_REF"
+    - curl -fsSL --header "JOB-TOKEN: $CI_JOB_TOKEN" -o /tmp/manar-ai.tar.gz "$CI_SERVER_URL/api/v4/projects/manar%2Fmanar-ai/repository/archive.tar.gz?sha=$MANAR_AI_REF"
     - tar xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1
     - mkdir -p /tmp/manar-ai && tar xzf /tmp/manar-ai.tar.gz -C /tmp/manar-ai --strip-components=1
     - uv sync --project /tmp/manar-ai --locked --no-dev --quiet
