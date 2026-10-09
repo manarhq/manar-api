@@ -127,10 +127,10 @@ config:
   # backingServiceTls.caSecretName and set NODE_EXTRA_CA_CERTS to the file
   # (/etc/manar/backing-service-ca/<key>). Keycloak and OpenFGA serve plain
   # HTTP in-cluster, so those hops rely on the NetworkPolicies (docs/service-tls.md).
-  KEYCLOAK_BASE_URL: http://keycloak.manar-platform.svc.cluster.local:8080
+  KEYCLOAK_BASE_URL: http://keycloak.manar-platform.svc:8080
   KEYCLOAK_ADMIN_CLIENT_ID: admin-cli
   KEYCLOAK_CLIENT_ID: manar-api
-  OPENBAO_ADDR: https://openbao-active.manar-platform.svc.cluster.local:8200
+  OPENBAO_ADDR: https://openbao-active.manar-platform.svc:8200
   OPENBAO_KV_MOUNT_PATH: secret
   OPENBAO_PKI_ROOT_PATH: pki-root
   OPENBAO_PKI_INTERMEDIATE_PATH: pki-int
@@ -139,21 +139,21 @@ config:
   AGENT_MTLS_SERVER_CERT_PATH: deploy/openbao/server-cert.pem
   AGENT_MTLS_SERVER_KEY_PATH: deploy/openbao/server-key.pem
   AGENT_MTLS_CLIENT_CA_PATH: deploy/openbao/ca-chain.pem
-  OPENFGA_API_URL: http://openfga.manar-platform.svc.cluster.local:8080
+  OPENFGA_API_URL: http://openfga.manar-platform.svc:8080
   OPENFGA_STORE_NAME: manar
   OPENFGA_MODEL_FILE_PATH: authorization/model.fga
-  TEMPORAL_ADDRESS: temporal-frontend.manar-platform.svc.cluster.local:7233
+  TEMPORAL_ADDRESS: temporal-frontend.manar-platform.svc:7233
   TEMPORAL_NAMESPACE: default
   TEMPORAL_TASK_QUEUE: manar-approvals
   APPROVAL_REQUEST_TTL_MS: '86400000'
   APPROVAL_GRANT_TTL_MS: '3600000'
-  KAFKA_BROKERS: manar-kafka-kafka-bootstrap.manar-platform.svc.cluster.local:9092
+  KAFKA_BROKERS: manar-kafka-kafka-bootstrap.manar-platform.svc:9092
   KAFKA_AUDIT_TOPIC: manar.audit-events
   KAFKA_CLIENT_ID: manar-api-worker
-  OPENSEARCH_NODE: http://opensearch.manar-platform.svc.cluster.local:9200
+  OPENSEARCH_NODE: http://opensearch.manar-platform.svc:9200
   OPENSEARCH_AUDIT_INDEX: manar-audit-events
-  REDIS_URL: redis://valkey-primary.manar-platform.svc.cluster.local:6379
-  AI_ADVISORY_GRPC_TARGET: manar-ai.manar-prod.svc.cluster.local:50051
+  REDIS_URL: redis://valkey-primary.manar-platform.svc:6379
+  AI_ADVISORY_GRPC_TARGET: manar-ai.manar-prod.svc:50051
   AI_ADVISORY_TIMEOUT_MS: '2000'
   AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: '5'
   AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'
@@ -220,19 +220,21 @@ podDisruptionBudget:
   maxUnavailable: 1
 
 networkPolicy:
-  # Per-app allow rules (templates/networkpolicy.yaml). Each entry is
-  # { name, ports, from } (ingress) or { name, ports, to } (egress) with raw
-  # NetworkPolicy peers, so a cluster with other labels overrides the list.
+  # Per-app allow rules (templates/networkpolicy.yaml), keyed by name so an
+  # overlay can switch one off (`<name>.enabled: false`), change its peers or
+  # add one without restating the rest (Helm and Flux replace lists, merge maps).
+  # Each value is { enabled?, ports, from } (ingress) or { enabled?, ports, to }
+  # (egress) with raw NetworkPolicy peers.
   # Namespaces: manar-prod (apps), manar-platform (backing services),
   # kube-system (Traefik ingress, DNS); labels as set by manar/manar-infra.
   # An ingress entry without `from` admits any source on its ports.
   enabled: true
   # No Service: nothing connects to the worker.
-  ingress: []
+  ingress: {}
   egress:
     # DNS (CoreDNS in kube-system). Kept even though the namespace policy in
     # manar/manar-infra also allows it, so the chart works on its own.
-    - name: dns
+    dns:
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
@@ -245,7 +247,7 @@ networkPolicy:
     # set (manar/manar-infra). NetworkPolicy matches pods, not Service names:
     # manar-pg-rw/-ro/-r are CNPG instances, valkey-primary is the HAProxy in
     # front of Valkey (never the servers or the sentinel directly).
-    - name: postgres
+    postgres:
       ports: [{ port: 5432, protocol: TCP }]
       to:
         - namespaceSelector:
@@ -253,7 +255,7 @@ networkPolicy:
           podSelector:
             matchLabels:
               { cnpg.io/cluster: manar-pg, cnpg.io/podRole: instance }
-    - name: openbao
+    openbao:
       ports: [{ port: 8200, protocol: TCP }]
       to:
         - namespaceSelector:
@@ -264,7 +266,7 @@ networkPolicy:
               # (not app.kubernetes.io/component), so match name and instance.
               app.kubernetes.io/name: openbao
               app.kubernetes.io/instance: openbao
-    - name: valkey
+    valkey:
       ports: [{ port: 6379, protocol: TCP }]
       to:
         - namespaceSelector:
@@ -273,7 +275,7 @@ networkPolicy:
             matchLabels:
               app.kubernetes.io/name: valkey-primary
               app.kubernetes.io/component: proxy
-    - name: keycloak
+    keycloak:
       ports: [{ port: 8080, protocol: TCP }]
       to:
         - namespaceSelector:
@@ -284,7 +286,7 @@ networkPolicy:
                 app.kubernetes.io/name: keycloak,
                 app.kubernetes.io/instance: keycloak,
               }
-    - name: openfga
+    openfga:
       ports: [{ port: 8080, protocol: TCP }]
       to:
         - namespaceSelector:
@@ -295,7 +297,7 @@ networkPolicy:
                 app.kubernetes.io/name: openfga,
                 app.kubernetes.io/instance: openfga,
               }
-    - name: temporal
+    temporal:
       ports: [{ port: 7233, protocol: TCP }]
       to:
         - namespaceSelector:
@@ -305,14 +307,14 @@ networkPolicy:
               app.kubernetes.io/name: temporal
               app.kubernetes.io/instance: temporal
               app.kubernetes.io/component: frontend
-    - name: kafka
+    kafka:
       ports: [{ port: 9092, protocol: TCP }]
       to:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: manar-platform }
           podSelector:
             matchLabels: { strimzi.io/cluster: manar-kafka }
-    - name: opensearch
+    opensearch:
       ports: [{ port: 9200, protocol: TCP }]
       to:
         - namespaceSelector:
@@ -323,7 +325,7 @@ networkPolicy:
                 app.kubernetes.io/name: opensearch,
                 app.kubernetes.io/instance: opensearch,
               }
-    - name: manar-ai
+    manar-ai:
       ports: [{ port: 50051, protocol: TCP }]
       to:
         - namespaceSelector:
@@ -332,7 +334,7 @@ networkPolicy:
             matchLabels: { app.kubernetes.io/name: manar-ai }
     # The scripted demo's fixture tools, installed by this repo's demo-soc-tools
     # chart into the same namespace. Remove in a deployment without it.
-    - name: demo-soc-tools
+    demo-soc-tools:
       ports: [{ port: 3100, protocol: TCP }]
       to:
         - podSelector:
@@ -342,11 +344,11 @@ networkPolicy:
     # public addresses only, and only TCP 443: an upstream on another port
     # (a self-hosted GitLab on :8443, say) needs its own entry. Narrow the CIDR to the providers' published ranges
     # or route through an egress proxy where the platform has one.
-    # Opt-in: Keycloak through its public hostname. The issuer is public
-    # (KC_HOSTNAME=https://auth.manar.vax.sh), so token and JWKS calls go to
-    # the Traefik websecure entry point (pod port 8443) unless the cluster
-    # rewrites that name to the in-cluster service. Set enabled: true until it does.
-    - name: keycloak-public
+    # Keycloak through its public issuer (https://auth.manar.vax.sh). Without
+    # an in-cluster rewrite that name resolves to Cloudflare and leaves on 443
+    # (external-https); P1 is adding a CoreDNS rewrite to Traefik websecure
+    # (pod port 8443). Off until that lands, then on by default.
+    keycloak-public:
       enabled: false
       ports: [{ port: 8443, protocol: TCP }]
       to:
@@ -356,7 +358,7 @@ networkPolicy:
             matchLabels:
               app.kubernetes.io/name: traefik
               app.kubernetes.io/instance: traefik-kube-system
-    - name: external-https
+    external-https:
       ports: [{ port: 443, protocol: TCP }]
       to:
         - ipBlock:

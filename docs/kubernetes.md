@@ -177,9 +177,12 @@ selects its peer by namespace (`kubernetes.io/metadata.name`) plus the pod
 labels the backing-service operators set (CNPG `cnpg.io/cluster: manar-pg`,
 Strimzi `strimzi.io/cluster: manar-kafka`, the Valkey HAProxy
 `app.kubernetes.io/name: valkey-primary`, and `app.kubernetes.io/name` for the
-rest). The rules are plain lists in `values.yaml` (`networkPolicy.ingress`,
-`networkPolicy.egress`), so a cluster with other labels overrides the list
-without a template change. Outbound HTTPS to public addresses (connectors,
+rest). The rules are maps keyed by name in `values.yaml` (`networkPolicy.ingress`,
+`networkPolicy.egress`), so an overlay switches one off with
+`networkPolicy.egress.<name>.enabled: false`, changes its peers or adds one
+without restating the others (Helm and Flux merge maps but replace lists).
+`keycloak-public` (Traefik websecure, 8443) is off until the in-cluster rewrite of
+the public Keycloak name lands. Outbound HTTPS to public addresses (connectors,
 hosted model upstreams, a remote manar-fleet) is the `external-https` entry:
 TCP 443 to `0.0.0.0/0` minus private, link-local and CGNAT ranges. The
 namespace-wide default-deny is the platform repo's; these policies list what
