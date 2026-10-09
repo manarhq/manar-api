@@ -4,6 +4,9 @@ import type { CatalogService } from './catalog.service';
 export const allowAllCatalog = (): CatalogService =>
   ({
     taskDenyReason: () => Promise.resolve(null),
-    llmGate: () => Promise.resolve({ route: null }),
+    resolveTaskPack: (_t: string, _a: string, requested?: string) =>
+      Promise.resolve(requested ?? null),
+    hiddenTools: () => Promise.resolve([]),
+    llmGate: () => Promise.resolve({ route: null, quota: null }),
     recordTokens: () => Promise.resolve(0),
   }) as unknown as CatalogService;

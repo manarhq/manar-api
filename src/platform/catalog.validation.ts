@@ -53,8 +53,19 @@ const pack = z
     id: PACK_ID,
     version: z.number().int().min(1).max(100_000),
     enabled: z.boolean(),
+    /**
+     * Agents that run this pack. Every task of a bound agent is a task of this pack, whatever
+     * `Task.packId` says, so disabling the pack stops the agent. Bound by staff only.
+     */
+    agents: z.array(z.uuid()).max(100).default([]),
   })
   .strict();
+
+/** One entry per pack id, and an agent runs at most one pack. */
+const uniquePacks = <T extends { id: string; agents?: string[] }[]>(packs: T) =>
+  new Set(packs.map((p) => p.id)).size === packs.length &&
+  new Set(packs.flatMap((p) => p.agents ?? [])).size ===
+    packs.reduce((n, p) => n + (p.agents?.length ?? 0), 0);
 
 export const ModelConfigSchema = z
   .object({
@@ -77,7 +88,10 @@ export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 /** What is stored in `tenant_catalogs`. Parsed on every read; a row that fails denies. */
 export const StoredCatalogSchema = z.object({
   features,
-  packs: z.array(pack).max(100),
+  packs: z
+    .array(pack)
+    .max(100)
+    .refine(uniquePacks, 'duplicate pack id, or an agent bound to two packs'),
   model: ModelConfigSchema.nullable(),
 });
 export type StoredCatalog = z.infer<typeof StoredCatalogSchema>;
@@ -89,7 +103,12 @@ export type StoredCatalog = z.infer<typeof StoredCatalogSchema>;
 export const CatalogPatchSchema = z
   .object({
     features: features.optional(),
-    packs: z.array(pack).max(100).optional(),
+    /** Upserted by id. `agents` omitted keeps the pack's current bindings. */
+    packs: z
+      .array(pack.extend({ agents: z.array(z.uuid()).max(100).optional() }))
+      .max(100)
+      .refine(uniquePacks, 'duplicate pack id, or an agent bound to two packs')
+      .optional(),
     model: ModelConfigSchema.nullable().optional(),
   })
   .strict()

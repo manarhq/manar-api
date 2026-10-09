@@ -12,6 +12,8 @@ import { CatalogService } from '../platform/catalog.service';
 export interface TaskAccess {
   tenantClient: TenantPrismaClient;
   task: TaskRecord;
+  /** Tools the tenant's catalog keeps out of the manifest (the watcher's connector when off). */
+  hiddenTools: string[];
 }
 
 /** 403 in the same shape `POST /agent/v1/tools/invoke` uses for a DENY. */
@@ -83,7 +85,10 @@ export class AgentTaskAccessService {
       this.catalog.taskDenyReason(agent.tenant.id, task),
     );
     if (catalogDeny) throw denied(catalogDeny);
+    const hiddenTools = await failClosed('catalog-store', () =>
+      this.catalog.hiddenTools(agent.tenant.id),
+    );
 
-    return { tenantClient, task };
+    return { tenantClient, task, hiddenTools };
   }
 }

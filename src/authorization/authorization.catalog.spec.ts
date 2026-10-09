@@ -21,9 +21,18 @@ function catalog(row: unknown, fails = false) {
     {} as never,
     {} as never,
     {} as never,
+    { get: () => 'ollama' } as never,
   );
 }
-const stored = (features: object, packs: object[] = []) => ({
+const stored = (
+  features: object,
+  packs: {
+    id: string;
+    version: number;
+    enabled: boolean;
+    agents?: string[];
+  }[] = [],
+) => ({
   features,
   packs,
   model: null,
@@ -131,5 +140,31 @@ describe('AuthorizationService and the tenant catalog', () => {
       reason: 'enforcement_dependency_unavailable',
     });
     expect(h.openFgaCheck).not.toHaveBeenCalled();
+  });
+
+  it("denies a bound agent's task that carries no packId once its pack is disabled", async () => {
+    const h = makeDecisionHarness({
+      task: { assignedAgentId: '11111111-1111-4111-8111-111111111111' },
+      catalog: catalog(
+        stored({}, [
+          {
+            id: 'it-helpdesk',
+            version: 1,
+            enabled: false,
+            agents: ['11111111-1111-4111-8111-111111111111'],
+          },
+        ]),
+      ),
+    });
+    const result = await h.service.authorize(
+      h.tenantClient,
+      'tenant-1',
+      '11111111-1111-4111-8111-111111111111',
+      REQUEST,
+    );
+    expect(result).toMatchObject({
+      decision: 'DENY',
+      reason: 'pack_not_enabled',
+    });
   });
 });

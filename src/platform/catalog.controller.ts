@@ -39,6 +39,19 @@ class CatalogPackDto {
   @ApiProperty({ example: 'it-helpdesk' }) id!: string;
   @ApiProperty() version!: number;
   @ApiProperty() enabled!: boolean;
+  @ApiProperty({
+    type: [String],
+    description:
+      'Agent ids bound to this pack: all their tasks are this pack. Omitted on PATCH keeps them.',
+  })
+  agents!: string[];
+}
+
+class CatalogAgentDto {
+  @ApiProperty() id!: string;
+  @ApiProperty() slug!: string;
+  @ApiProperty() displayName!: string;
+  @ApiProperty() status!: string;
 }
 
 class CatalogModelDto {
@@ -66,8 +79,6 @@ class CatalogConnectorDto {
   @ApiProperty({ enum: ['HTTP', 'MCP', 'MICROSOFT', 'GITLAB'] })
   protocol!: string;
   @ApiProperty() enabled!: boolean;
-  @ApiProperty({ type: Date, nullable: true })
-  credentialExpiresAt!: Date | null;
 }
 
 class CatalogViewDto {
@@ -92,6 +103,13 @@ class CatalogViewDto {
     description: 'Registered tools; null unless the tenant is ACTIVE',
   })
   connectors!: CatalogConnectorDto[] | null;
+  @ApiProperty({
+    type: [CatalogAgentDto],
+    nullable: true,
+    description:
+      'Agents, for binding them to a pack; null unless the tenant is ACTIVE',
+  })
+  agents!: CatalogAgentDto[] | null;
 }
 
 /**

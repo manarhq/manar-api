@@ -53,6 +53,8 @@ export class ToolManifestService {
   async build(
     tenantClient: TenantPrismaClient,
     task: TaskRecord,
+    /** Tool names the tenant's catalog switched off (listing is not authorization either way). */
+    hiddenTools: string[] = [],
   ): Promise<ToolManifest> {
     return failClosed('tenant-db', async () => {
       const effective = await this.tasksService.getEffectiveGrantSet(
@@ -70,7 +72,7 @@ export class ToolManifestService {
 
       const toolIds = [
         ...new Set([...patterns.keys()].map((k) => parseToolName(k)!.toolId)),
-      ];
+      ].filter((id) => !hiddenTools.includes(id));
       const tools = await tenantClient.tool.findMany({
         where: { name: { in: toolIds }, enabled: true },
         include: { actions: true },

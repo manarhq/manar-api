@@ -5,7 +5,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 import { MANAR_TOOL } from '../tools/manar-actions';
 import { CatalogDenied, CatalogService, catalogGate } from './catalog.service';
-import { CatalogPatchSchema } from './catalog.validation';
+import { CatalogPatchSchema, StoredCatalogSchema } from './catalog.validation';
 
 type Row = {
   features: unknown;
@@ -15,6 +15,9 @@ type Row = {
   updatedAt: Date;
 } | null;
 
+const AGENT = '11111111-1111-4111-8111-111111111111';
+const OTHER = '22222222-2222-4222-8222-222222222222';
+
 function make(
   opts: {
     row?: Row;
@@ -22,6 +25,8 @@ function make(
     tenant?: { residency: string; allowExternalAi: boolean; status?: string };
     used?: number;
     usageError?: boolean;
+    env?: Record<string, string>;
+    auditFails?: boolean;
   } = {},
 ) {
   const tenant = {
@@ -31,23 +36,42 @@ function make(
     allowExternalAi: false,
     ...opts.tenant,
   };
-  type Upsert = {
-    create: Record<string, unknown>;
-    update: Record<string, unknown>;
+  const stored = opts.row ?? null;
+  const writes: Record<string, unknown>[] = [];
+  const sql: string[] = [];
+  const tx = {
+    $executeRaw: vi.fn((s: TemplateStringsArray) => {
+      sql.push(s.join('?'));
+      return Promise.resolve(1);
+    }),
+    $queryRaw: vi.fn((s: TemplateStringsArray) => {
+      sql.push(s.join('?'));
+      return Promise.resolve([
+        stored ?? { features: {}, packs: [], model: null },
+      ]);
+    }),
+    tenantCatalog: {
+      update: vi.fn((a: { data: Record<string, unknown> }) => {
+        writes.push(a.data);
+        return Promise.resolve({});
+      }),
+    },
   };
-  const upsert = vi.fn<(arg: Upsert) => Promise<object>>(() =>
-    Promise.resolve({}),
-  );
+  let committed = false;
   const control = {
     tenantCatalog: {
       findUnique: opts.rowError
         ? vi.fn().mockRejectedValue(new Error('control db down'))
-        : vi.fn().mockResolvedValue(opts.row ?? null),
-      upsert,
+        : vi.fn().mockResolvedValue(stored),
     },
     tenant: {
       findUnique: vi.fn().mockResolvedValue(tenant),
       findUniqueOrThrow: vi.fn().mockResolvedValue(tenant),
+    },
+    $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => {
+      const r = await fn(tx);
+      committed = true;
+      return r;
     },
   };
   const usage = {
@@ -56,15 +80,22 @@ function make(
       : vi.fn().mockResolvedValue(opts.used ?? 0),
     add: vi.fn().mockResolvedValue(1),
   };
-  const recordSafely = vi.fn().mockResolvedValue(undefined);
-  const db = { tool: { findMany: vi.fn().mockResolvedValue([]) } };
+  const record = opts.auditFails
+    ? vi.fn().mockRejectedValue(new Error('audit down'))
+    : vi.fn().mockResolvedValue({});
+  const db = {
+    tool: { findMany: vi.fn().mockResolvedValue([]) },
+    agent: { findMany: vi.fn().mockResolvedValue([]) },
+  };
+  const env: Record<string, string> = { LLM_PROVIDER: 'ollama', ...opts.env };
   const service = new CatalogService(
     control as never,
     usage as never,
-    { recordSafely } as never,
+    { record } as never,
     { getClient: vi.fn().mockResolvedValue(db) } as never,
+    { get: (k: string) => env[k] } as never,
   );
-  return { service, upsert, usage, recordSafely, db };
+  return { service, writes, sql, record, committed: () => committed };
 }
 
 const row = (r: Partial<NonNullable<Row>>): Row => ({
@@ -74,6 +105,12 @@ const row = (r: Partial<NonNullable<Row>>): Row => ({
   updatedBy: 'manar-fleet',
   updatedAt: new Date(),
   ...r,
+});
+const pack = (id: string, enabled: boolean, agents: string[] = []) => ({
+  id,
+  version: 1,
+  enabled,
+  agents,
 });
 
 const azure = {
@@ -86,7 +123,9 @@ const azure = {
 describe('CatalogService.taskDenyReason (decision path and agent runtime)', () => {
   it('lets an unmanaged tenant run its own agents and the watcher, as before the catalog', async () => {
     const { service } = make();
-    await expect(service.taskDenyReason('t1', {}, 'graph')).resolves.toBe(null);
+    await expect(
+      service.taskDenyReason('t1', { assignedAgentId: AGENT }, 'graph'),
+    ).resolves.toBe(null);
     await expect(service.taskDenyReason('t1', {}, MANAR_TOOL)).resolves.toBe(
       null,
     );
@@ -102,10 +141,7 @@ describe('CatalogService.taskDenyReason (decision path and agent runtime)', () =
   it('allows a pack-bound task only for its own enabled pack', async () => {
     const { service } = make({
       row: row({
-        packs: [
-          { id: 'it-helpdesk', version: 1, enabled: true },
-          { id: 'hr-joiner-leaver', version: 1, enabled: false },
-        ],
+        packs: [pack('it-helpdesk', true), pack('hr-joiner-leaver', false)],
       }),
     });
     await expect(
@@ -119,11 +155,40 @@ describe('CatalogService.taskDenyReason (decision path and agent runtime)', () =
     ).resolves.toBe('pack_not_enabled');
   });
 
+  it("stops a bound agent's task without a packId when its pack is disabled", async () => {
+    const { service } = make({
+      row: row({ packs: [pack('it-helpdesk', false, [AGENT])] }),
+    });
+    await expect(
+      service.taskDenyReason('t1', { assignedAgentId: AGENT }, 'graph'),
+    ).resolves.toBe('pack_not_enabled');
+    await expect(
+      service.taskDenyReason('t1', { assignedAgentId: OTHER }, 'graph'),
+    ).resolves.toBe(null);
+  });
+
+  it("refuses a task that names another pack than its agent's", async () => {
+    const { service } = make({
+      row: row({
+        packs: [
+          pack('it-helpdesk', true, [AGENT]),
+          pack('coding-agents', true),
+        ],
+      }),
+    });
+    await expect(
+      service.taskDenyReason('t1', {
+        packId: 'coding-agents',
+        assignedAgentId: AGENT,
+      }),
+    ).resolves.toBe('pack_mismatch');
+  });
+
   it('turns every pack off with the packs feature, even an enabled pack', async () => {
     const { service } = make({
       row: row({
         features: { packs: false },
-        packs: [{ id: 'it-helpdesk', version: 1, enabled: true }],
+        packs: [pack('it-helpdesk', true)],
       }),
     });
     await expect(
@@ -131,18 +196,20 @@ describe('CatalogService.taskDenyReason (decision path and agent runtime)', () =
     ).resolves.toBe('packs_disabled');
   });
 
-  it('turns the watcher connector off with the watcher feature, and nothing else', async () => {
+  it('turns the watcher connector off with the watcher feature, and hides it from manifests', async () => {
     const { service } = make({ row: row({ features: { watcher: false } }) });
     await expect(service.taskDenyReason('t1', {}, MANAR_TOOL)).resolves.toBe(
       'watcher_disabled',
     );
     await expect(service.taskDenyReason('t1', {}, 'graph')).resolves.toBe(null);
+    await expect(service.hiddenTools('t1')).resolves.toEqual([MANAR_TOOL]);
+    await expect(make().service.hiddenTools('t1')).resolves.toEqual([]);
   });
 
-  it('fails closed when the catalog cannot be read', async () => {
+  it('fails closed when the catalog cannot be read, for every task', async () => {
     const { service } = make({ rowError: true });
     await expect(
-      service.taskDenyReason('t1', { packId: 'it-helpdesk' }),
+      service.taskDenyReason('t1', { assignedAgentId: AGENT }, 'graph'),
     ).rejects.toThrow('control db down');
     await expect(
       service.taskDenyReason('t1', {}, MANAR_TOOL),
@@ -150,21 +217,64 @@ describe('CatalogService.taskDenyReason (decision path and agent runtime)', () =
   });
 
   it('fails closed on a stored row that does not parse', async () => {
-    const { service } = make({
-      row: row({ features: { watcher: 'yes' } }),
-    });
+    const { service } = make({ row: row({ features: { watcher: 'yes' } }) });
     await expect(service.taskDenyReason('t1', {}, MANAR_TOOL)).rejects.toThrow(
       'malformed',
     );
   });
 });
 
+describe('CatalogService.resolveTaskPack (task creation)', () => {
+  const bound = row({
+    packs: [pack('it-helpdesk', true, [AGENT]), pack('coding-agents', true)],
+  });
+
+  it("gives a bound agent's task its pack, and refuses another one", async () => {
+    const { service } = make({ row: bound });
+    await expect(service.resolveTaskPack('t1', AGENT)).resolves.toBe(
+      'it-helpdesk',
+    );
+    await expect(
+      service.resolveTaskPack('t1', AGENT, 'coding-agents'),
+    ).rejects.toEqual(new CatalogDenied('pack_mismatch'));
+    await expect(service.resolveTaskPack('t1', OTHER)).resolves.toBe(null);
+    await expect(
+      service.resolveTaskPack('t1', OTHER, 'coding-agents'),
+    ).resolves.toBe('coding-agents');
+  });
+
+  it('refuses a pack that is not enabled', async () => {
+    const { service } = make();
+    await expect(
+      service.resolveTaskPack('t1', OTHER, 'it-helpdesk'),
+    ).rejects.toEqual(new CatalogDenied('pack_not_enabled'));
+  });
+});
+
 describe('CatalogService.llmGate (LLM proxy and assistant)', () => {
-  it('uses the deployment model for an unmanaged tenant', async () => {
+  it('uses the local default model for an unmanaged UAE tenant', async () => {
     const { service } = make();
     await expect(service.llmGate('t1', 'llm_proxy')).resolves.toEqual({
       route: null,
+      quota: null,
     });
+  });
+
+  it('applies the external-AI and residency rules to the deployment default too', async () => {
+    const env = { LLM_PROVIDER: 'azure_openai' };
+    await expect(
+      make({ env }).service.llmGate('t1', 'llm_proxy'),
+    ).rejects.toEqual(new CatalogDenied('llm_external_not_allowed'));
+    const tenant = { residency: 'UAE', allowExternalAi: true };
+    await expect(
+      make({ env, tenant }).service.llmGate('t1', 'assistant'),
+    ).rejects.toEqual(new CatalogDenied('llm_residency_mismatch'));
+    await expect(
+      make({
+        env: { ...env, LLM_DEFAULT_UAE_RESIDENT: 'true' },
+        tenant,
+      }).service.llmGate('t1', 'assistant'),
+    ).resolves.toEqual({ route: null, quota: null });
   });
 
   it('refuses a surface staff switched off', async () => {
@@ -179,7 +289,7 @@ describe('CatalogService.llmGate (LLM proxy and assistant)', () => {
     );
   });
 
-  it('refuses an external model when the tenant does not allow external AI', async () => {
+  it("refuses the tenant's external model when the tenant does not allow external AI", async () => {
     const { service } = make({ row: row({ model: azure }) });
     await expect(service.llmGate('t1', 'llm_proxy')).rejects.toEqual(
       new CatalogDenied('llm_external_not_allowed'),
@@ -209,6 +319,7 @@ describe('CatalogService.llmGate (LLM proxy and assistant)', () => {
     });
     await expect(service.llmGate('t1', 'assistant')).resolves.toEqual({
       route: { provider: 'azure_openai', model: 'gpt-5-mini' },
+      quota: null,
     });
   });
 
@@ -228,6 +339,7 @@ describe('CatalogService.llmGate (LLM proxy and assistant)', () => {
       ),
     ).resolves.toEqual({
       route: { provider: 'azure_openai', model: 'gpt-5-mini' },
+      quota: 1000,
     });
     await expect(
       make({ row: row({ model }), tenant, usageError: true }).service.llmGate(
@@ -250,11 +362,11 @@ describe('catalogGate', () => {
 });
 
 describe('CatalogService.update', () => {
-  it('merges features key by key, upserts packs by id and audits in the tenant chain', async () => {
-    const { service, upsert, recordSafely } = make({
+  it('reads under the row lock, merges, keeps agent bindings and audits inside the transaction', async () => {
+    const { service, writes, sql, record } = make({
       row: row({
         features: { watcher: false },
-        packs: [{ id: 'it-helpdesk', version: 1, enabled: true }],
+        packs: [pack('it-helpdesk', true, [AGENT])],
       }),
     });
     await service.update(
@@ -263,34 +375,49 @@ describe('CatalogService.update', () => {
         features: { assistant: false },
         packs: [
           { id: 'it-helpdesk', version: 2, enabled: true },
-          { id: 'coding-agents', version: 1, enabled: true },
+          { id: 'coding-agents', version: 1, enabled: true, agents: [OTHER] },
         ],
       }),
       'manar-fleet',
     );
-    const data = upsert.mock.calls[0]![0].update;
-    expect(data.features).toEqual({ assistant: false, watcher: false });
-    expect(data.packs).toEqual([
-      { id: 'it-helpdesk', version: 2, enabled: true },
-      { id: 'coding-agents', version: 1, enabled: true },
-    ]);
-    expect(data.updatedBy).toBe('manar-fleet');
-    expect(recordSafely).toHaveBeenCalledOnce();
+    expect(sql.some((q) => q.includes('INSERT INTO "tenant_catalogs"'))).toBe(
+      true,
+    );
+    expect(sql.some((q) => q.includes('FOR UPDATE'))).toBe(true);
+    expect(writes[0]).toMatchObject({
+      features: { assistant: false, watcher: false },
+      packs: [
+        { id: 'it-helpdesk', version: 2, enabled: true, agents: [AGENT] },
+        { id: 'coding-agents', version: 1, enabled: true, agents: [OTHER] },
+      ],
+      updatedBy: 'manar-fleet',
+    });
+    expect(record).toHaveBeenCalledOnce();
+  });
+
+  it('changes nothing when the tenant audit event cannot be written', async () => {
+    const { service, committed } = make({ auditFails: true });
+    await expect(
+      service.update(
+        't1',
+        CatalogPatchSchema.parse({ features: { watcher: false } }),
+        'manar-fleet',
+      ),
+    ).rejects.toThrow('audit down');
+    expect(committed()).toBe(false);
   });
 
   it('stores only what staff set for a first write, so later defaults still apply', async () => {
-    const { service, upsert } = make();
+    const { service, writes } = make();
     await service.update(
       't1',
       CatalogPatchSchema.parse({ features: { watcher: false } }),
       'manar-fleet',
     );
-    expect(upsert.mock.calls[0]![0].create.features).toEqual({
-      watcher: false,
-    });
+    expect(writes[0]!.features).toEqual({ watcher: false });
   });
 
-  it('rejects an empty or unknown change', () => {
+  it('rejects an empty or unknown change, duplicate packs and an agent in two packs', () => {
     expect(CatalogPatchSchema.safeParse({}).success).toBe(false);
     expect(
       CatalogPatchSchema.safeParse({ features: { billing: true } }).success,
@@ -298,6 +425,21 @@ describe('CatalogService.update', () => {
     expect(
       CatalogPatchSchema.safeParse({
         model: { ...azure, provider: 'openai' },
+      }).success,
+    ).toBe(false);
+    expect(
+      CatalogPatchSchema.safeParse({
+        packs: [pack('it-helpdesk', true), pack('it-helpdesk', false)],
+      }).success,
+    ).toBe(false);
+    expect(
+      StoredCatalogSchema.safeParse({
+        features: {},
+        packs: [
+          pack('it-helpdesk', true, [AGENT]),
+          pack('coding-agents', true, [AGENT]),
+        ],
+        model: null,
       }).success,
     ).toBe(false);
   });

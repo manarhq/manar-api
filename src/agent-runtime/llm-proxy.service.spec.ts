@@ -507,7 +507,7 @@ describe('LlmProxyService', () => {
       const route = { provider: 'core42_compass' as const, model: 'jais-30b' };
       const { service, upstream } = setup({
         catalog: gate({
-          llmGate: () => Promise.resolve({ route }),
+          llmGate: () => Promise.resolve({ route, quota: null }),
           recordTokens,
         }),
       });

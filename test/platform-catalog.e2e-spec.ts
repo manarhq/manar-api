@@ -234,4 +234,62 @@ describe('Platform catalog for manar-fleet (e2e)', () => {
       usage: { month: new Date().toISOString().slice(0, 7), tokens: 0 },
     });
   });
+
+  it('concurrent changes to different packs and flags all stick (row lock)', async () => {
+    const packs = Array.from({ length: 8 }, (_, i) => `conc-pack-${i}`);
+    const results = await Promise.all([
+      ...packs.map((id) =>
+        patch({ packs: [{ id, version: 1, enabled: true }] }),
+      ),
+      patch({ features: { watcher: false } }),
+      patch({ features: { llm_proxy: false } }),
+    ]);
+    for (const r of results) expect(r.status).toBe(200);
+    const res = await http()
+      .get(catalogUrl())
+      .set('Authorization', `Bearer ${platformToken}`)
+      .expect(200);
+    const body = res.body as {
+      packs: { id: string }[];
+      features: Record<string, boolean>;
+    };
+    for (const id of packs) expect(body.packs.map((p) => p.id)).toContain(id);
+    expect(body.features).toMatchObject({ watcher: false, llm_proxy: false });
+    await patch({ features: { watcher: true, llm_proxy: true } }).expect(200);
+  });
+
+  it('binds an agent to a pack: its tasks get the pack, another pack is refused, and disabling stops it', async () => {
+    await patch({
+      packs: [
+        { id: 'it-helpdesk', version: 1, enabled: true, agents: [agentId] },
+      ],
+    }).expect(200);
+    const view = await http()
+      .get(catalogUrl())
+      .set('Authorization', `Bearer ${platformToken}`)
+      .expect(200);
+    expect((view.body as { agents: { id: string }[] }).agents).toEqual([
+      expect.objectContaining({ id: agentId }),
+    ]);
+
+    const created = await createTask().expect(201);
+    const db = await app.get(TenantDatabaseManager).getClient(tenantId!);
+    const task = await db.task.findUniqueOrThrow({
+      where: { id: (created.body as { id: string }).id },
+    });
+    expect(task.packId).toBe('it-helpdesk');
+
+    await patch({
+      packs: [{ id: 'coding-agents', version: 1, enabled: true }],
+    }).expect(200);
+    const other = await createTask('coding-agents').expect(403);
+    expect(other.body).toMatchObject({ reason: 'pack_mismatch' });
+
+    // Omitting agents on a later change keeps the binding.
+    await patch({
+      packs: [{ id: 'it-helpdesk', version: 1, enabled: false }],
+    }).expect(200);
+    const off = await createTask().expect(403);
+    expect(off.body).toMatchObject({ reason: 'pack_not_enabled' });
+  });
 });

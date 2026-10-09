@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
 import type { AppConfig } from '../config/env.validation';
@@ -120,9 +125,10 @@ export class AssistantService {
   ): Promise<AssistantChatResponse> {
     const body = parseBodyOrThrow(AssistantChatSchema, rawBody);
     await this.enforceRateLimit(auth);
-    const { route } = await catalogGate(() =>
+    const { route, quota } = await catalogGate(() =>
       this.catalog.llmGate(auth.tenant.id, 'assistant'),
     );
+    const budget = { quota, spent: false };
 
     const started = Date.now();
     const locale = body.locale;
@@ -195,6 +201,7 @@ export class AssistantService {
         const reply = await this.callModel(
           auth.tenant.id,
           route,
+          budget,
           messages,
           last ? undefined : tools,
         );
@@ -305,9 +312,16 @@ export class AssistantService {
   private async callModel(
     tenantId: string,
     route: LlmRoute['route'],
+    budget: { quota: number | null; spent: boolean },
     messages: unknown[],
     tools: ReturnType<typeof toolSchemas> | undefined,
   ): Promise<ModelMessage> {
+    // A chat runs several model rounds; once the month's quota is spent, the next one is refused.
+    if (budget.spent)
+      throw new ForbiddenException({
+        decision: 'DENY',
+        reason: 'llm_token_quota_exhausted',
+      });
     const ollama =
       (route?.provider ?? this.config.get('LLM_PROVIDER', { infer: true })) ===
       'ollama';
@@ -321,9 +335,11 @@ export class AssistantService {
       route,
     );
     // Counts toward the tenant's monthly quota; an unwritable counter refuses the answer.
-    await failClosed('limits-store', () =>
+    const monthTotal = await failClosed('limits-store', () =>
       this.catalog.recordTokens(tenantId, chargedTokens(response, messages)),
     );
+    if (budget.quota !== null && monthTotal >= budget.quota)
+      budget.spent = true;
     const choices = response.body.choices as
       { message?: ModelMessage }[] | undefined;
     return choices?.[0]?.message ?? {};

@@ -122,6 +122,27 @@ describe('AssistantService', () => {
     expect(reads).toHaveLength(0);
   });
 
+  it('refuses the next model round once the month quota is spent mid-chat', async () => {
+    const { service, upstream } = setup({
+      replies: [
+        { tool_calls: [call('list_pending_approvals', {})] },
+        { content: 'never asked' },
+      ],
+      catalog: {
+        ...allowAllCatalog(),
+        llmGate: () => Promise.resolve({ route: null, quota: 100 }),
+        recordTokens: () => Promise.resolve(150),
+      } as unknown as CatalogService,
+    });
+    await expect(
+      service.chat(auth(), 'Bearer x', ask('what is pending?')),
+    ).rejects.toMatchObject({
+      status: 403,
+      response: { reason: 'llm_token_quota_exhausted' },
+    });
+    expect(upstream.chat).toHaveBeenCalledTimes(1);
+  });
+
   it('fails closed when the catalog cannot be read', async () => {
     const { service, upstream } = setup({
       catalog: {
