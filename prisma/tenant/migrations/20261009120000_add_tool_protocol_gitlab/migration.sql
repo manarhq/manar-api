@@ -1,4 +1,4 @@
--- ADR-0011: a Tool whose actions run through GitLabToolAdapter (REST v4,
+-- ADR-0012: a Tool whose actions run through GitLabToolAdapter (REST v4,
 -- project access token from OpenBao, catalog in src/tools/gitlab-actions.ts).
 --
 -- Additive. Rollback: PostgreSQL cannot drop an enum value; delete or

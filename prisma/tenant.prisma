@@ -596,7 +596,7 @@ model PolicyVersion {
 /// docs/mcp.md. `MICROSOFT` -> `MicrosoftToolAdapter` (Phase 2, ADR-0004):
 /// Graph or Defender for Endpoint via an OAuth2 client-credentials token,
 /// actions from the fixed catalog in `src/tools/microsoft-actions.ts`.
-/// `GITLAB` -> `GitLabToolAdapter` (ADR-0011): one GitLab project over REST
+/// `GITLAB` -> `GitLabToolAdapter` (ADR-0012): one GitLab project over REST
 /// v4 with a project access token, catalog in `src/tools/gitlab-actions.ts`.
 enum ToolProtocol {
   HTTP

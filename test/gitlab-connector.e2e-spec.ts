@@ -45,7 +45,7 @@ import {
 import { FakeAnalysisServiceServer } from './support/fake-analysis-service-server';
 
 /**
- * ADR-0011: a coding agent drives the GitLab catalog over the governed MCP
+ * ADR-0012: a coding agent drives the GitLab catalog over the governed MCP
  * server (mTLS -> tools/call -> authorize -> policy -> approval workflow ->
  * same tools/call again (ADR-0007) -> credential broker -> OpenBao ->
  * GitLabToolAdapter) against the in-process GitLab DEMO FIXTURE, with the

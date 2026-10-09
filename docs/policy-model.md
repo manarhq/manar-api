@@ -95,7 +95,7 @@ or YAML (see "YAML⇄JSON round-trip" below):
   `actionId` is `"*"` or equals the request's `actionId`, **and**
   `resourcePattern` is `"*"`, equals the request's `resource`, or ends in
   `*` and the resource starts with what comes before it (`manar/demo-repo:*`
-  matches every branch of that project; ADR-0011). Prefix patterns exist in
+  matches every branch of that project; ADR-0012). Prefix patterns exist in
   policy only: task `allowedResourceSelectors[].pattern` stays exact or
   `"*"` (`docs/authorization-model.md`), because those become OpenFGA tuples.
 - **First-match-wins**: rules are evaluated in array order; the first

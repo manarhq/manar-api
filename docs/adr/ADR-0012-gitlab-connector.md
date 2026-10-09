@@ -1,4 +1,4 @@
-# ADR-0011 — A typed GitLab connector for one project, governed per branch and merge request
+# ADR-0012 — A typed GitLab connector for one project, governed per branch and merge request
 
 - **Status:** ACCEPTED
 - **Date:** 2026-10-09
@@ -40,19 +40,26 @@ which branch. Policy resource patterns matched exactly or `*` only, so a policy 
    (both in the approved parameter hash); a read at execution time refuses if the MR is not open,
    was retargeted or has a new head, and GitLab merges only that `sha`. Branch delete is bound to
    the tip `sha`; protection change to the current protection state. A commit is preceded by a read
-   that refuses a protected branch. Every precheck fails closed.
-7. **The token goes to one host only.** Sent as `PRIVATE-TOKEN`, only when the tool's base endpoint
+   that refuses a protected branch. Every precheck fails closed. After a merge, the MR GitLab
+   returns is compared with the approved `targetBranch`; a mismatch is recorded as `UNKNOWN` plus an
+   audit event `tool.invocation.approval_binding_violated` (it cannot be undone, it is made visible).
+7. **GitLab enforces what it can atomically.** The connector's token is a **Developer**-role
+   project access token, and the project protects `main` with push = No one, merge = Developers +
+   Maintainers. GitLab itself then refuses any direct push or commit to `main` and any delete of a
+   protected branch, whatever happens between Manar's read and the write. A merge passes `sha`,
+   so GitLab refuses a moved head.
+8. **The token goes to one host only.** Sent as `PRIVATE-TOKEN`, only when the tool's base endpoint
    host is also in the operator's `SSRF_ALLOWED_HOSTS` (two independent settings), over HTTPS
    outside development, never through a redirect (`maxRedirects: 0`), and only to a URL whose
    parsed origin and path stay under `<base>/projects/<project>/`. `safeOutboundFetch` now also
    drops `PRIVATE-TOKEN` on any cross-origin hop. Errors carry the status and a fixed word, never
    GitLab's message or the URL.
-8. **Hard catalog limits:** a commit cannot touch `.gitlab-ci.yml` or `.gitlab/` (CI runs with the
+9. **Hard catalog limits:** a commit cannot touch `.gitlab-ci.yml` or `.gitlab/` (CI runs with the
    project's secrets); a CI variable is written for scope `*`, protected and masked by default, and
    its value is never returned.
-9. **Outcome rules** as in ADR-0004: reads retried, mutations sent once; a 5xx, timeout or dropped
-   connection after sending is `UNKNOWN`, and so is GitLab's 400 "Deadline Exceeded" (seen live on
-   9 Oct: the commit had landed).
+10. **Outcome rules** as in ADR-0004: reads retried, mutations sent once; a 5xx, timeout or dropped
+    connection after sending is `UNKNOWN`, and so is GitLab's 400 "Deadline Exceeded" (seen live on
+    9 Oct: the commit had landed).
 
 ## Alternatives considered
 
@@ -71,9 +78,18 @@ which branch. Policy resource patterns matched exactly or `*` only, so a policy 
 - Any MCP client (Claude Code through the governed MCP server, ADR-0007) can work on the project:
   read, branch, commit, open an MR at once; merge after a person approves and the agent repeats the
   call.
-- Residual races, stated: between the precheck read and the change, GitLab's own branch protection
-  is the last control for a commit; a retarget in the same instant as a merge is not caught (GitLab
-  checks only the head `sha`); a branch delete has no server-side `sha` condition.
+- Remaining windows, stated:
+  - **Merge retarget.** GitLab checks the head `sha` atomically but not the target branch. A
+    retarget between the precheck and the merge merges into the other branch; Manar detects it
+    afterwards (`approval_binding_violated`, outcome `UNKNOWN`) but cannot prevent it. A merge into
+    a protected branch still needs merge rights there.
+  - **Branch delete.** GitLab's branch delete has no expected-`sha` condition and returns no tip.
+    A push to an unprotected branch between the precheck and the delete is deleted with it and is
+    not detected. Protected branches cannot be deleted at all (GitLab refuses).
+  - **Protection change.** Bound to the state read just before; a change by someone else in
+    between is not detected. With the Developer token GitLab refuses protection changes and CI
+    variable writes (403): the actions stay in the catalog and in policy (approval, high risk), and
+    work only where a tenant registers a Maintainer token knowingly.
 - A `*` task selector plus the policy is the project restriction; a tenant that publishes no policy
   for the tool still has the project pin and the token's own scope (a project access token).
 - A project access token can read public projects on the instance; the project pin refuses them.
