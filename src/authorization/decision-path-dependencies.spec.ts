@@ -144,6 +144,25 @@ describe('ADR-004 — synchronous decision path dependencies', () => {
     expect([...source.matchAll(IMPORT_RE)].map((m) => m[1])).toEqual(['zod']);
   });
 
+  /**
+   * ADR-0008: the console assistant calls a model and reads through the
+   * HTTP routes; nothing on the decision path may import any of it. No
+   * module in it is exempt.
+   */
+  it('cannot reach the console assistant', () => {
+    const offenders = [...graph.keys()]
+      .filter((file) => file.startsWith(resolve(SRC, 'assistant')))
+      .map((f) => f.replace(`${SRC}/`, ''));
+    expect(offenders).toEqual([]);
+  });
+
+  it('the assistant module exists where this test looks for it', () => {
+    // Guards against the check above passing vacuously after a rename.
+    expect(existsSync(resolve(SRC, 'assistant/assistant.service.ts'))).toBe(
+      true,
+    );
+  });
+
   it('no module on the decision path calls fetch (the LLM upstream is HTTP)', () => {
     const offenders = [...graph.keys()]
       .filter((file) => /\bfetch\(/.test(readFileSync(file, 'utf8')))

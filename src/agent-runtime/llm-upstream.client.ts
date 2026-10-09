@@ -8,6 +8,7 @@ export interface UpstreamChatRequest {
   tool_choice?: unknown;
   temperature?: number;
   max_tokens?: number;
+  /** Passed through; the console assistant sets `none` for Ollama. */
   reasoning_effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
 }
 
