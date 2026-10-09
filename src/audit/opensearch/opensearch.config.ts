@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { unreadableFile } from '../live/redis.config';
 import { z } from 'zod';
 
 /**
@@ -32,26 +33,57 @@ export const OpenSearchConfigSchema = z.object({
 export type OpenSearchConfig = z.infer<typeof OpenSearchConfigSchema>;
 
 /**
- * Client options for `OPENSEARCH_NODE`: basic auth when both credentials are set, the CA when
- * given. Half a credential pair, or a CA file for a plain `http://` node, throws.
+ * Cross-field rules, checked at startup (`AppConfigSchema`) and by `openSearchClientOptions`:
+ * both credentials or neither, credentials (here or in the node URL) only over `https://`, and a
+ * CA file only for `https://` and readable.
  */
+export function openSearchConfigIssues(c: Partial<OpenSearchConfig>): string[] {
+  const node = c.OPENSEARCH_NODE ?? '';
+  const https = node.startsWith('https://');
+  let urlCredentials = false;
+  try {
+    const u = new URL(node);
+    urlCredentials = Boolean(u.username || u.password);
+  } catch {
+    // An unparsable node fails in the client; nothing to add here.
+  }
+  const issues: string[] = [];
+  if (Boolean(c.OPENSEARCH_USERNAME) !== Boolean(c.OPENSEARCH_PASSWORD))
+    issues.push(
+      'Set both OPENSEARCH_USERNAME and OPENSEARCH_PASSWORD, or neither',
+    );
+  if (
+    (c.OPENSEARCH_USERNAME || c.OPENSEARCH_PASSWORD || urlCredentials) &&
+    !https
+  )
+    issues.push(
+      'OpenSearch credentials need an https:// OPENSEARCH_NODE (they would be sent in clear)',
+    );
+  if (c.OPENSEARCH_TLS_CA_FILE && !https)
+    issues.push(
+      'OPENSEARCH_TLS_CA_FILE is set but OPENSEARCH_NODE is not https://',
+    );
+  if (unreadableFile(c.OPENSEARCH_TLS_CA_FILE))
+    issues.push('OPENSEARCH_TLS_CA_FILE cannot be read');
+  return issues;
+}
+
+/** Client options for `OPENSEARCH_NODE`; a misconfigured connection throws. */
 export function openSearchClientOptions(
   get: <K extends keyof OpenSearchConfig>(key: K) => OpenSearchConfig[K],
 ) {
-  const node = get('OPENSEARCH_NODE');
-  const username = get('OPENSEARCH_USERNAME');
-  const password = get('OPENSEARCH_PASSWORD');
-  const caFile = get('OPENSEARCH_TLS_CA_FILE');
-  if (Boolean(username) !== Boolean(password))
-    throw new Error(
-      'Set both OPENSEARCH_USERNAME and OPENSEARCH_PASSWORD, or neither',
-    );
-  if (caFile && !node.startsWith('https://'))
-    throw new Error(
-      'OPENSEARCH_TLS_CA_FILE is set but OPENSEARCH_NODE is not https://',
-    );
+  const c: Partial<OpenSearchConfig> = {
+    OPENSEARCH_NODE: get('OPENSEARCH_NODE'),
+    OPENSEARCH_USERNAME: get('OPENSEARCH_USERNAME'),
+    OPENSEARCH_PASSWORD: get('OPENSEARCH_PASSWORD'),
+    OPENSEARCH_TLS_CA_FILE: get('OPENSEARCH_TLS_CA_FILE'),
+  };
+  const [issue] = openSearchConfigIssues(c);
+  if (issue) throw new Error(issue);
+  const { OPENSEARCH_USERNAME: username, OPENSEARCH_PASSWORD: password } = c;
+  const caFile = c.OPENSEARCH_TLS_CA_FILE;
   return {
-    node,
+    node: c.OPENSEARCH_NODE as string,
     ...(username && password ? { auth: { username, password } } : {}),
     ...(caFile ? { ssl: { ca: readFileSync(caFile) } } : {}),
   };

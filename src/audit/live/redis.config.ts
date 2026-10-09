@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { accessSync, constants, readFileSync } from 'node:fs';
 import { z } from 'zod';
 
 /**
@@ -20,23 +20,72 @@ export const RedisConfigSchema = z.object({
 
 export type RedisConfig = z.infer<typeof RedisConfigSchema>;
 
+/** A CA file that is set must be readable now, so a bad mount stops startup. */
+export function unreadableFile(path: string | undefined): boolean {
+  if (!path) return false;
+  try {
+    accessSync(path, constants.R_OK);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function urlCredentials(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    return Boolean(u.username || u.password);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cross-field rules for the Redis connection, checked at startup (`AppConfigSchema`) and again
+ * by `redisClientOptions`. Credentials only travel over TLS: an ACL user or password, in the
+ * URL or in `REDIS_USERNAME`/`REDIS_PASSWORD`, needs `rediss://`.
+ */
+export function redisConfigIssues(c: Partial<RedisConfig>): string[] {
+  const url = c.REDIS_URL ?? '';
+  const tls = url.startsWith('rediss://');
+  const issues: string[] = [];
+  if (c.REDIS_TLS_CA_FILE && !tls)
+    issues.push('REDIS_TLS_CA_FILE is set but REDIS_URL is not rediss://');
+  if (unreadableFile(c.REDIS_TLS_CA_FILE))
+    issues.push('REDIS_TLS_CA_FILE cannot be read');
+  if (c.REDIS_USERNAME && !c.REDIS_PASSWORD)
+    issues.push('REDIS_USERNAME is set without REDIS_PASSWORD');
+  if ((c.REDIS_PASSWORD || urlCredentials(url)) && !tls)
+    issues.push(
+      'Redis credentials need a rediss:// REDIS_URL (they would be sent in clear)',
+    );
+  return issues;
+}
+
 /**
  * Options for every node-redis client in this process. TLS is on when `REDIS_URL` is
- * `rediss://`; a CA file without TLS is a misconfiguration and throws rather than silently
- * connecting in plaintext.
+ * `rediss://`. A misconfigured connection throws rather than connecting in plaintext.
  */
 export function redisClientOptions(
   get: <K extends keyof RedisConfig>(key: K) => RedisConfig[K],
   socket: Record<string, unknown> = {},
 ) {
-  const url = get('REDIS_URL');
-  const caFile = get('REDIS_TLS_CA_FILE');
-  if (caFile && !url.startsWith('rediss://'))
-    throw new Error('REDIS_TLS_CA_FILE is set but REDIS_URL is not rediss://');
-  const username = get('REDIS_USERNAME');
-  const password = get('REDIS_PASSWORD');
+  const c: Partial<RedisConfig> = {
+    REDIS_URL: get('REDIS_URL'),
+    REDIS_USERNAME: get('REDIS_USERNAME'),
+    REDIS_PASSWORD: get('REDIS_PASSWORD'),
+    REDIS_TLS_CA_FILE: get('REDIS_TLS_CA_FILE'),
+  };
+  const [issue] = redisConfigIssues(c);
+  if (issue) throw new Error(issue);
+  const {
+    REDIS_URL: url,
+    REDIS_USERNAME: username,
+    REDIS_PASSWORD: password,
+  } = c;
+  const caFile = c.REDIS_TLS_CA_FILE;
   return {
-    url,
+    url: url as string,
     ...(username ? { username } : {}),
     ...(password ? { password } : {}),
     socket: {

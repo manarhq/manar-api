@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { unreadableFile } from './live/redis.config';
 
 /**
  * Phase 9a (Audit Chain & Kafka Event Backbone) — connection settings for
@@ -36,40 +37,68 @@ export const KafkaConfigSchema = z.object({
 export type KafkaConfig = z.infer<typeof KafkaConfigSchema>;
 
 /**
- * Constructor config for every Kafka client in this process (`KafkaJS.Kafka`). Throws on a
- * half-configured connection: a CA file without TLS, SASL without credentials, or PLAIN SASL
- * without TLS (it would send the password in clear).
+ * Cross-field rules, checked at startup (`AppConfigSchema`, so a bad value stops the process
+ * instead of leaving the best-effort consumers silently disconnected) and by
+ * `kafkaClientConfig`. SASL only over TLS, mechanism and credentials together, a readable CA
+ * only with TLS.
  */
+export function kafkaConfigIssues(c: Partial<KafkaConfig>): string[] {
+  const ssl = c.KAFKA_SSL === 'true';
+  const creds = Boolean(c.KAFKA_SASL_USERNAME || c.KAFKA_SASL_PASSWORD);
+  const issues: string[] = [];
+  if (c.KAFKA_SSL_CA_FILE && !ssl)
+    issues.push('KAFKA_SSL_CA_FILE is set but KAFKA_SSL is not true');
+  if (unreadableFile(c.KAFKA_SSL_CA_FILE))
+    issues.push('KAFKA_SSL_CA_FILE cannot be read');
+  if (
+    c.KAFKA_SASL_MECHANISM &&
+    !(c.KAFKA_SASL_USERNAME && c.KAFKA_SASL_PASSWORD)
+  )
+    issues.push(
+      'KAFKA_SASL_MECHANISM needs KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD',
+    );
+  if (creds && !c.KAFKA_SASL_MECHANISM)
+    issues.push(
+      'KAFKA_SASL_USERNAME or KAFKA_SASL_PASSWORD is set without KAFKA_SASL_MECHANISM',
+    );
+  if ((c.KAFKA_SASL_MECHANISM || creds) && !ssl)
+    issues.push(
+      'Kafka SASL needs KAFKA_SSL=true (credentials would cross the network in clear)',
+    );
+  return issues;
+}
+
+/** Constructor config for every Kafka client in this process (`KafkaJS.Kafka`); throws on a misconfiguration. */
 export function kafkaClientConfig(
   get: <K extends keyof KafkaConfig>(key: K) => KafkaConfig[K],
   clientId: string,
 ) {
-  const brokers = get('KAFKA_BROKERS')
+  const c: Partial<KafkaConfig> = {
+    KAFKA_BROKERS: get('KAFKA_BROKERS'),
+    KAFKA_SSL: get('KAFKA_SSL'),
+    KAFKA_SSL_CA_FILE: get('KAFKA_SSL_CA_FILE'),
+    KAFKA_SASL_MECHANISM: get('KAFKA_SASL_MECHANISM'),
+    KAFKA_SASL_USERNAME: get('KAFKA_SASL_USERNAME'),
+    KAFKA_SASL_PASSWORD: get('KAFKA_SASL_PASSWORD'),
+  };
+  const [issue] = kafkaConfigIssues(c);
+  if (issue) throw new Error(issue);
+  const brokers = (c.KAFKA_BROKERS ?? '')
     .split(',')
     .map((broker) => broker.trim())
     .filter(Boolean);
-  const ssl = get('KAFKA_SSL') === 'true';
-  const caFile = get('KAFKA_SSL_CA_FILE');
-  const mechanism = get('KAFKA_SASL_MECHANISM');
-  const username = get('KAFKA_SASL_USERNAME');
-  const password = get('KAFKA_SASL_PASSWORD');
-  if (caFile && !ssl)
-    throw new Error('KAFKA_SSL_CA_FILE is set but KAFKA_SSL is not true');
-  if (mechanism && !(username && password))
-    throw new Error(
-      'KAFKA_SASL_MECHANISM needs KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD',
-    );
-  if (mechanism === 'plain' && !ssl)
-    throw new Error('KAFKA_SASL_MECHANISM=plain needs KAFKA_SSL=true');
+  const mechanism = c.KAFKA_SASL_MECHANISM;
+  const username = c.KAFKA_SASL_USERNAME;
+  const password = c.KAFKA_SASL_PASSWORD;
   return {
     kafkaJS: {
       brokers,
       clientId,
-      ...(ssl ? { ssl: true } : {}),
+      ...(c.KAFKA_SSL === 'true' ? { ssl: true } : {}),
       ...(mechanism && username && password
         ? { sasl: { mechanism, username, password } }
         : {}),
     },
-    ...(caFile ? { 'ssl.ca.location': caFile } : {}),
+    ...(c.KAFKA_SSL_CA_FILE ? { 'ssl.ca.location': c.KAFKA_SSL_CA_FILE } : {}),
   };
 }
