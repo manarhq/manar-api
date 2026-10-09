@@ -38,7 +38,18 @@ while sleep 30; do
     manar-postgres manar-redis manar-openfga manar-keycloak 2>/dev/null | sed "s/^/$(date +%T) /"
 done > "$RUN/docker-stats.txt" &
 DSTATS=$!
-trap 'kill $IOSTAT $VMSTAT $DSTATS $PIDSTAT 2>/dev/null || true' EXIT
+# What the load tenant's PostgreSQL sessions wait on (lock contention shows
+# here first). Read-only; PG_CONTAINER and TENANT_DB name the local stack.
+PGWAIT=
+if [[ -n "${TENANT_DB:-}" ]]; then
+  while sleep 10; do
+    docker exec "${PG_CONTAINER:-manar-postgres}" psql -U "${PG_USER:-manar}" -d postgres -tAc \
+      "select now()::time(0), coalesce(wait_event_type,'cpu'), coalesce(wait_event,'running'), count(*)
+       from pg_stat_activity where datname = '$TENANT_DB' and state = 'active' group by 2, 3 order by 4 desc" 2>/dev/null
+  done > "$RUN/pg-waits.txt" &
+  PGWAIT=$!
+fi
+trap 'kill $IOSTAT $VMSTAT $DSTATS $PIDSTAT $PGWAIT 2>/dev/null || true' EXIT
 
 pids=()
 for ((i = 0; i < SHARDS; i++)); do
