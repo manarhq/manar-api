@@ -392,16 +392,19 @@ docker:build-images:
   inherit:
     default: [tags]
   stage: build
-  image: docker:29
+  # docker:29 and docker:29-dind share this digest (checked with
+  # docker buildx imagetools inspect, 9 Oct 2026).
+  image: docker@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
   services:
-    - docker:29-dind
+    - name: docker@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+      alias: docker
   variables:
     DOCKER_TLS_CERTDIR: '/certs'
   # The three image tarballs are far over the instance's 100 MB artifact limit
   # (manar-fleet's single image already failed its upload with 413), so the
   # image scan (blocking on fixed HIGH/CRITICAL) and the SBOMs run here, on
-  # the tarballs this job built, with the pinned Trivy and Syft binaries
-  # copied out of their images. Only the reports are kept as artifacts.
+  # the tarballs this job built, with Trivy 0.74.0 and Syft 1.51.0 (debug)
+  # binaries copied out of their digest-pinned images. Only the reports are kept as artifacts.
   script:
     - docker build --build-arg MANAR_GIT_SHA=$CI_COMMIT_SHORT_SHA --target runtime -t manar-api:ci .
     - docker build --build-arg MANAR_GIT_SHA=$CI_COMMIT_SHORT_SHA --target worker -t manar-api-worker:ci .
@@ -409,9 +412,9 @@ docker:build-images:
     - docker save manar-api:ci -o manar-api.tar
     - docker save manar-api-worker:ci -o manar-api-worker.tar
     - docker save demo-soc-tools:ci -o demo-soc-tools.tar
-    - docker create --name trivy-bin aquasec/trivy:0.71.0
+    - docker create --name trivy-bin aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
     - docker cp trivy-bin:/usr/local/bin/trivy ./trivy
-    - docker create --name syft-bin anchore/syft:v1.51.0-debug
+    - docker create --name syft-bin anchore/syft@sha256:7b980ab125ee77c58ef89622672e2176a6d82722d709362fa1bb6bc12d50e786
     - docker cp syft-bin:/syft ./syft
     - >
       for img in manar-api manar-api-worker demo-soc-tools; do
