@@ -621,7 +621,10 @@ describe('Kill Switches (e2e)', () => {
     };
 
     const before = await agent.manar.authorize(authorizeRequest);
-    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     const activated = await activateTenantKillSwitch(
       adminToken,
@@ -641,7 +644,10 @@ describe('Kill Switches (e2e)', () => {
     }
 
     const after = await agent.manar.authorize(authorizeRequest);
-    expect(after).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(after).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
   }, 30_000);
 
   it('2. AGENT kill switch denies a previously-ALLOWed action immediately; deactivating restores it', async () => {
@@ -659,7 +665,10 @@ describe('Kill Switches (e2e)', () => {
     };
 
     const before = await agent.manar.authorize(authorizeRequest);
-    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     const activated = await activateAgentKillSwitch(adminToken, agent.agentId);
     expect(activated.scope).toBe('AGENT');
@@ -674,7 +683,10 @@ describe('Kill Switches (e2e)', () => {
     await deactivateAgentKillSwitch(adminToken, agent.agentId);
 
     const after = await agent.manar.authorize(authorizeRequest);
-    expect(after).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(after).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
   }, 30_000);
 
   it('3. AGENT_GROUP kill switch denies a previously-ALLOWed action immediately; deactivating restores it', async () => {
@@ -697,7 +709,10 @@ describe('Kill Switches (e2e)', () => {
     };
 
     const before = await agent.manar.authorize(authorizeRequest);
-    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     const activated = await activateAgentGroupKillSwitch(adminToken, group.id);
     expect(activated.scope).toBe('AGENT_GROUP');
@@ -712,7 +727,10 @@ describe('Kill Switches (e2e)', () => {
     await deactivateAgentGroupKillSwitch(adminToken, group.id);
 
     const after = await agent.manar.authorize(authorizeRequest);
-    expect(after).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(after).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
   }, 30_000);
 
   it('4. TOOL kill switch denies a previously-ALLOWed action immediately; deactivating restores it', async () => {
@@ -734,7 +752,10 @@ describe('Kill Switches (e2e)', () => {
     };
 
     const before = await agent.manar.authorize(authorizeRequest);
-    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     const activated = await activateToolKillSwitch(adminToken, tool.id);
     expect(activated.scope).toBe('TOOL');
@@ -749,7 +770,10 @@ describe('Kill Switches (e2e)', () => {
     await deactivateToolKillSwitch(adminToken, tool.id);
 
     const after = await agent.manar.authorize(authorizeRequest);
-    expect(after).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(after).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
   }, 30_000);
 
   it('5. grant redemption: an already-issued, still-valid AuthorizationGrant becomes unusable the moment a kill switch activates', async () => {
@@ -909,7 +933,10 @@ describe('Kill Switches (e2e)', () => {
         actionId: 'read',
         resource: 'anything',
       });
-      expect(allowedB).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+      expect(allowedB).toEqual<AuthorizeDecision>({
+        decision: 'ALLOW',
+        decisionId: expect.any(String) as string,
+      });
     } finally {
       await deactivateAgentKillSwitch(adminToken, agentA.agentId);
     }
@@ -949,9 +976,15 @@ describe('Kill Switches (e2e)', () => {
     };
 
     const before1 = await agent1.manar.authorize(request1);
-    expect(before1).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before1).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
     const before2 = await agent2.manar.authorize(request2);
-    expect(before2).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before2).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     const activated = await activatePlatformKillSwitch(
       adminToken,
@@ -976,8 +1009,14 @@ describe('Kill Switches (e2e)', () => {
     }
 
     const after1 = await agent1.manar.authorize(request1);
-    expect(after1).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(after1).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
     const after2 = await agent2.manar.authorize(request2);
-    expect(after2).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(after2).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
   }, 30_000);
 });

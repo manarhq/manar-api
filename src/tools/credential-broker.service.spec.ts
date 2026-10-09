@@ -101,6 +101,7 @@ const baseInput: CredentialBrokerInvokeInput = {
   actionId: 'search-events',
   resource: 'host-1',
   params: {},
+  decisionId: 'decision-1',
 };
 
 function makeService(options: {
@@ -461,6 +462,50 @@ describe('CredentialBrokerService audit-before-side-effect (R2)', () => {
   });
 });
 
+describe('CredentialBrokerService links execution to its decision (ADR-003)', () => {
+  it.each([
+    [{ success: true, data: {} }, 'SUCCESS'],
+    [{ success: false, errorMessage: 'HTTP 500' }, 'FAILURE'],
+    [
+      { success: false, outcomeUnknown: true, errorMessage: 'timeout' },
+      'UNKNOWN',
+    ],
+  ] as [ToolInvocationResult, string][])(
+    'the ToolInvocation row and the audit events carry the decision id (%o -> %s)',
+    async (toolResult, status) => {
+      const record = vi.fn().mockResolvedValue({});
+      const { service, recordSafely } = makeService({ toolResult, record });
+      const { tenantClient } = fakeTenantClient();
+      const toolInvocationCreate = vi.spyOn(
+        tenantClient.toolInvocation,
+        'create',
+      );
+
+      await service.invoke(tenantClient, baseInput);
+
+      expect(toolInvocationCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          decisionId: 'decision-1',
+          status,
+        }) as unknown,
+      });
+      expect(record).toHaveBeenCalledWith(
+        tenantClient,
+        'tenant-1',
+        expect.objectContaining({
+          eventType: AUDIT_EVENT_TYPES.TOOL_INVOCATION_STARTED,
+          data: expect.objectContaining({
+            decisionId: 'decision-1',
+          }) as unknown,
+        }),
+      );
+      for (const [, , event] of recordSafely.mock.calls) {
+        expect(event.data).toMatchObject({ decisionId: 'decision-1' });
+      }
+    },
+  );
+});
+
 describe('CredentialBrokerService protocol dispatch', () => {
   it('sends a MICROSOFT tool to MicrosoftToolAdapter with the broker-resolved secret, never to the HTTP adapter', async () => {
     const { service, invokeHttp, invokeMicrosoft } = makeService({
@@ -763,6 +808,7 @@ describe('LLM proxy and tool-result DLP classify identically', () => {
     ['UAE mobile', '+971 50 123 4567', CLEAN, '[REDACTED:UAE_MOBILE]'],
     [
       'JWT',
+      // nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token (synthetic DLP fixture, signature is "signature-value")
       'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl',
       CLEAN,
       'blocked',

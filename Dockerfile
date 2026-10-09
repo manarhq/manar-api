@@ -35,8 +35,9 @@ COPY . .
 # docs/kubernetes.md); pre-building the dependency here instead makes this
 # image buildable without touching that file. `pnpm build`'s own script
 # still redundantly rebuilds both workspace packages afterward — harmless,
-# just a few extra idempotent seconds.
-RUN pnpm --filter @manar-ai/grpc-client build \
+# just a few extra idempotent seconds. `@manar/sdk-node` has the same
+# problem since the CLI's demo:seed imports it, so build both packages.
+RUN pnpm packages:build \
   && pnpm db:generate && pnpm build
 
 # ---- prod-deps: install production-only dependencies ----
@@ -52,6 +53,12 @@ WORKDIR /app
 
 RUN addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 --ingroup nodejs manar
+
+# The runtime only runs `node`; the base image's bundled npm, corepack and
+# yarn (and their dependencies' advisories in image scans) are build tools.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+  /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+  /opt/yarn-v* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 COPY --from=prod-deps --chown=manar:nodejs /app/node_modules ./node_modules
 COPY --from=build --chown=manar:nodejs /app/dist ./dist

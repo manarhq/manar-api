@@ -5,6 +5,7 @@
     "test",
     "dist",
     "**/*spec.ts",
+    "**/*.fakes.ts",
     "vitest.config.mts",
     "prisma",
     "packages",

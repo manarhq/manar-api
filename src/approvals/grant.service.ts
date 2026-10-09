@@ -8,7 +8,6 @@ import { PolicyEngine } from '../policy/policy-engine.service';
 import { RiskEngine } from '../risk/risk-engine.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
-import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { ApprovalRequestNotFoundError } from './approvals.errors';
 import { computeParameterHash } from './parameter-hash.util';
 import { signGrantToken, verifyGrantToken } from './grant-token.util';
@@ -69,7 +68,6 @@ export class GrantService {
     private readonly riskEngine: RiskEngine,
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly auditService: AuditService,
-    private readonly killSwitchService: KillSwitchService,
   ) {}
 
   /**
@@ -239,30 +237,22 @@ export class GrantService {
   }
 
   /**
-   * `POST /agent/v1/tools/invoke`'s `grantToken` retry path (Section 80).
-   * Verifies signature+expiry, then checks every binding invariant in
-   * turn: the decoded claims match *this* request's
-   * `agentId`/`taskId`/`toolId`/`actionId`/`resource` exactly, and —
-   * critically — `parameterHash` recomputed from *this exact request's*
-   * `params` matches the grant's own (the parameter-binding invariant).
-   * Only then loads the `AuthorizationGrant` row itself and checks
-   * unconsumed/unrevoked/unexpired. Re-checks task/agent liveness (the
-   * fail-closed conditions that exist today) AND every applicable kill
-   * switch (platform/tenant/agent/agent-group/tool, for *this exact grant's*
-   * own agent+tool — `KillSwitchService.checkAll`, Section 32's harder
-   * requirement: an already-issued grant, still unexpired and unconsumed,
-   * must become unusable the moment a relevant kill switch activates, not
-   * only block *new* `/agent/v1/authorize` requests — see
-   * docs/kill-switches.md) but does **not** re-run
-   * `PolicyEngine`/`RiskEngine` or increment `executionCount` again —
-   * those already happened once, at grant-issuance time
-   * (`reevaluateAndIssueGrant`). On success, atomically marks the grant
-   * consumed via a conditional `UPDATE ... WHERE consumedAt IS NULL` (the
-   * same race-closing pattern `TasksService.incrementExecutionCount`
-   * uses) — single-use, closing the approval-replay race for good: a
-   * concurrent or later repeated use of the same token always loses it.
+   * `POST /agent/v1/tools/invoke`'s `grantToken` retry path (Section 80),
+   * first half: is this the grant for *this exact request*? Verifies
+   * signature and expiry, then that the decoded claims match this request's
+   * `agentId`/`taskId`/`toolId`/`actionId`/`resource` exactly and that
+   * `parameterHash` recomputed from *this request's* `params` matches (the
+   * parameter-binding invariant), then that the persisted `AuthorizationGrant`
+   * row agrees and is unconsumed, unrevoked and unexpired.
+   *
+   * It does not consume the grant. The second half,
+   * `AuthorizationService.authorizeRedemption`, re-runs the full decision
+   * against current state (S6/F7) and, only if that still allows, consumes
+   * the grant with a conditional `UPDATE ... WHERE consumedAt IS NULL` in the
+   * same transaction as the `Decision` record (ADR-003), so single use is
+   * still enforced by the database: a concurrent or repeated use loses.
    */
-  async validateAndConsumeGrant(
+  async verifyGrant(
     tenantClient: TenantPrismaClient,
     input: ValidateGrantInput,
   ): Promise<GrantValidationResult> {
@@ -324,53 +314,6 @@ export class GrantService {
       // request above, but the persisted row is the actual source of
       // truth for consumption/expiry — never trust the token alone.
       return { valid: false, reason: 'grant_mismatch' };
-    }
-
-    const task = await tenantClient.task.findUnique({
-      where: { id: input.taskId },
-    });
-    if (!task) return { valid: false, reason: 'task_not_found' };
-    const liveness = await this.tasksService.evaluateFullLiveness(
-      tenantClient,
-      task,
-      new Date(),
-    );
-    if (!liveness.ok) {
-      return { valid: false, reason: liveness.reason ?? 'task_not_live' };
-    }
-
-    const agent = await tenantClient.agent.findUnique({
-      where: { id: input.agentId },
-    });
-    if (!agent || agent.status !== 'ACTIVE') {
-      return { valid: false, reason: 'agent_not_active' };
-    }
-
-    // Section 32's harder kill-switch requirement: re-check every
-    // applicable scope *right now*, at redemption time — never trust
-    // whatever was true when this grant was originally issued. A kill
-    // switch activated any time between issuance and this exact retry
-    // (including immediately after a previously-successful use of a
-    // *different* grant for the same agent) makes this still-valid,
-    // still-unexpired, still-unconsumed grant unusable.
-    const killSwitchCheck = await this.killSwitchService.checkAll(
-      tenantClient,
-      input.tenantId,
-      { agentId: grant.agentId, toolId: grant.toolId },
-    );
-    if (killSwitchCheck.killed) {
-      return { valid: false, reason: killSwitchCheck.reason as string };
-    }
-
-    const consumeResult = await tenantClient.authorizationGrant.updateMany({
-      where: { id: grant.id, consumedAt: null },
-      data: { consumedAt: new Date() },
-    });
-    if (consumeResult.count === 0) {
-      // Lost the single-use race against a concurrent use of this exact
-      // token — Section 80's approval-replay invariant, enforced at the
-      // database level, not just by the earlier in-memory check above.
-      return { valid: false, reason: 'grant_already_consumed' };
     }
 
     return { valid: true, grantId: grant.id };
@@ -455,8 +398,8 @@ export class GrantService {
 
     // The same atomic, race-closing increment AuthorizationService's own
     // ALLOW path performs — for an approved action, this happens exactly
-    // once, here, at grant-issuance time (never again when the grant is
-    // later consumed — see validateAndConsumeGrant's own doc comment).
+    // once, here, at grant-issuance time (never again at redemption — see
+    // AuthorizationService.authorizeRedemption).
     const incremented = await this.tasksService.incrementExecutionCount(
       tenantClient,
       task,

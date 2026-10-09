@@ -166,7 +166,7 @@ export class KillSwitchService {
   /**
    * The single check `AuthorizationService.authorize` (an early pipeline
    * step, before the ancestor-chain walk — see that class's doc comment)
-   * and `GrantService.validateAndConsumeGrant` (Section 32's harder
+   * and `AuthorizationService.authorizeRedemption` (Section 32's harder
    * requirement — re-checked at redemption time, not just at issuance)
    * both call. Short-circuits on the first active switch found, in the
    * spec's own cheapest-first order.

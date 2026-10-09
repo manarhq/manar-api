@@ -727,6 +727,40 @@ describe('Approval Engine (e2e)', () => {
     // directly -- never trusting the gateway's own response alone.
     const afterApprove = await getRealDemoHost(DEMO_HOST_ID);
     expect(afterApprove.isolated).toBe(true);
+
+    // ADR-003: both attempts left a durable Decision, the execution is
+    // linked to the redemption decision, and the redemption decision hashed
+    // exactly the inputs the grant was bound to.
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    const decisions = await tenantClient.decision.findMany({
+      where: { taskId: task.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(decisions.map((d) => [d.outcome, d.stage, d.channel])).toEqual([
+      ['APPROVAL_REQUIRED', 'REQUEST', 'REST'],
+      ['ALLOW', 'GRANT_REDEMPTION', 'REST'],
+    ]);
+    const grant = await tenantClient.authorizationGrant.findFirstOrThrow({
+      where: { taskId: task.id },
+    });
+    expect(decisions[1]!.grantId).toBe(grant.id);
+    expect(decisions[1]!.inputsHash).toBe(grant.parameterHash);
+    expect(decisions[0]!.inputsHash).toBe(grant.parameterHash);
+    expect(grant.consumedAt).not.toBeNull();
+    const invocation = await tenantClient.toolInvocation.findFirstOrThrow({
+      where: { taskId: task.id },
+    });
+    expect(invocation).toMatchObject({
+      decisionId: decisions[1]!.id,
+      status: 'SUCCESS',
+    });
+    const started = await tenantClient.auditEvent.findFirstOrThrow({
+      where: {
+        eventType: 'tool.invocation.started',
+        data: { path: ['taskId'], equals: task.id },
+      },
+    });
+    expect(started.data).toMatchObject({ decisionId: decisions[1]!.id });
   }, 60_000);
 
   it('2. decide DENY -> ApprovalRequest.status DENIED, retry without a grant never executes', async () => {
@@ -1139,6 +1173,158 @@ describe('Approval Engine (e2e)', () => {
 
       expect(fixture.requests).toHaveLength(0);
     } finally {
+      await fixture.stop();
+    }
+  }, 30_000);
+
+  it('7b. S6/F7: policy republished to DENY after the grant was issued -> redemption re-runs the decision and refuses; DENY recorded; grant left unconsumed; nothing executes', async () => {
+    const fixture = new HttpFixtureServer();
+    const baseEndpoint = await fixture.start();
+    try {
+      const tool = await registerTool({
+        name: uniqueSlug('redeem-tool'),
+        baseEndpoint,
+      });
+      await registerToolAction({
+        toolId: tool.id,
+        name: 'sensitive-action',
+        riskBaseScore: 5,
+      });
+      const { id: policyId, latestVersion } = await createPolicy(
+        uniqueSlug('redeem-policy'),
+        [
+          {
+            toolId: tool.name,
+            actionId: 'sensitive-action',
+            effect: 'APPROVAL_REQUIRED',
+          },
+        ],
+      );
+      await publishVersion(policyId, latestVersion.id);
+
+      const agent = await createEnrolledAgent('redeem-revalidate');
+      const task = await createTask({
+        assignedAgentId: agent.agentId,
+        allowedToolActions: [
+          { toolId: tool.name, actionId: 'sensitive-action' },
+        ],
+        allowedResourceSelectors: [{ toolId: tool.name, pattern: '*' }],
+        riskCeiling: 100,
+      });
+      const body = {
+        taskId: task.id,
+        toolId: tool.name,
+        actionId: 'sensitive-action',
+        resource: 'host-redeem',
+        params: { reason: 'containment' },
+      };
+
+      const initialInvoke = await invokeToolOverMtls(agent.identity, body);
+      expect(initialInvoke.status).toBe(202);
+      const { approvalId } = initialInvoke.body as { approvalId: string };
+      expect((await decideApproval(approvalId, 'APPROVE', 'ok')).status).toBe(
+        201,
+      );
+      const polled = await waitForApprovalStatus(agent.identity, approvalId);
+      expect(polled.status).toBe('APPROVED');
+      expect(polled.grantToken).toBeTruthy();
+
+      // The grant exists and is unexpired. Now the policy changes.
+      const stricterVersion = await createPolicyVersion(policyId, [
+        { toolId: tool.name, actionId: 'sensitive-action', effect: 'DENY' },
+      ]);
+      await publishVersion(policyId, stricterVersion.id);
+
+      const redeem = await invokeToolOverMtls(agent.identity, {
+        ...body,
+        grantToken: polled.grantToken,
+      });
+      expect(redeem.status).toBe(403);
+      const denied = redeem.body as { reason: string; decisionId: string };
+      expect(denied.reason).toBe('policy_denied');
+      expect(fixture.requests).toHaveLength(0);
+
+      const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+      const decision = await tenantClient.decision.findUniqueOrThrow({
+        where: { id: denied.decisionId },
+      });
+      const grant = await tenantClient.authorizationGrant.findFirstOrThrow({
+        where: { taskId: task.id },
+      });
+      expect(decision).toMatchObject({
+        outcome: 'DENY',
+        stage: 'GRANT_REDEMPTION',
+        reasonCodes: ['policy_denied'],
+        policyVersionId: stricterVersion.id,
+        grantId: grant.id,
+      });
+      expect(grant.consumedAt).toBeNull();
+      const rejected = await tenantClient.auditEvent.findFirstOrThrow({
+        where: {
+          eventType: 'approval.grant_rejected',
+          data: { path: ['decisionId'], equals: denied.decisionId },
+        },
+      });
+      expect(rejected.data).toMatchObject({ reason: 'policy_denied' });
+      expect(
+        await tenantClient.toolInvocation.count({ where: { taskId: task.id } }),
+      ).toBe(0);
+    } finally {
+      await fixture.stop();
+    }
+  }, 30_000);
+
+  it('7c. ADR-003 G14: when the decision record cannot be written the request is a 503 and the tool is never contacted', async () => {
+    const fixture = new HttpFixtureServer();
+    const baseEndpoint = await fixture.start();
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    try {
+      const tool = await registerTool({
+        name: uniqueSlug('g14-tool'),
+        baseEndpoint,
+      });
+      await registerToolAction({
+        toolId: tool.id,
+        name: 'read-thing',
+        riskBaseScore: 0,
+      });
+      const agent = await createEnrolledAgent('g14');
+      const task = await createTask({
+        assignedAgentId: agent.agentId,
+        allowedToolActions: [{ toolId: tool.name, actionId: 'read-thing' }],
+        allowedResourceSelectors: [{ toolId: tool.name, pattern: '*' }],
+        riskCeiling: 100,
+      });
+      const body = {
+        taskId: task.id,
+        toolId: tool.name,
+        actionId: 'read-thing',
+        resource: 'thing-1',
+        params: {},
+      };
+
+      // Control: with the decision store available, this request executes.
+      expect((await invokeToolOverMtls(agent.identity, body)).status).toBe(200);
+      expect(fixture.requests).toHaveLength(1);
+
+      await tenantClient.$executeRawUnsafe(
+        'ALTER TABLE "decisions" RENAME TO "decisions_g14"',
+      );
+      const failed = await invokeToolOverMtls(agent.identity, body);
+      expect(failed.status).toBe(503);
+      expect((failed.body as { reason: string }).reason).toBe(
+        'enforcement_dependency_unavailable',
+      );
+      expect(fixture.requests).toHaveLength(1);
+      // The failed transaction also rolled back its execution-count increment.
+      const taskRow = await tenantClient.task.findUniqueOrThrow({
+        where: { id: task.id },
+      });
+      expect(taskRow.executionCount).toBe(1);
+    } finally {
+      await tenantClient
+        .$executeRawUnsafe('ALTER TABLE "decisions_g14" RENAME TO "decisions"')
+        .catch(() => undefined);
       await fixture.stop();
     }
   }, 30_000);

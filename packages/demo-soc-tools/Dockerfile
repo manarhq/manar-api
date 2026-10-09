@@ -53,6 +53,12 @@ WORKDIR /app
 RUN addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 --ingroup nodejs demosoc
 
+# The runtime only runs `node`; the base image's bundled npm, corepack and
+# yarn (and their dependencies' advisories in image scans) are build tools.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+  /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+  /opt/yarn-v* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
 COPY --from=prod-deps --chown=demosoc:nodejs /app/node_modules ./node_modules
 COPY --from=prod-deps --chown=demosoc:nodejs /app/packages/demo-soc-tools/node_modules ./packages/demo-soc-tools/node_modules
 COPY --from=build --chown=demosoc:nodejs /app/packages/demo-soc-tools/dist ./packages/demo-soc-tools/dist

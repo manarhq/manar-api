@@ -43,7 +43,7 @@ touching any tenant DB — matching the design spec's explicit instruction.
 
 `src/kill-switches/kill-switch.service.ts`'s `checkAll(tenantClient,
 tenantId, { agentId, toolId? })` is the single lookup both
-`AuthorizationService.authorize` and `GrantService.validateAndConsumeGrant`
+`AuthorizationService.authorize` and `AuthorizationService.authorizeRedemption`
 call — one implementation of "is this agent/tool/tenant/platform currently
 killed," not two copies that could drift. Cheapest-first, short-circuiting
 on the first active switch found:
@@ -92,13 +92,12 @@ app-layer state, safe to expose, same as `not_assigned_agent`/
 Section 32's actual hard requirement: an `AuthorizationGrant` issued
 _before_ a kill switch activates must become unusable immediately, not
 just block _new_ `/agent/v1/authorize`/`/agent/v1/tools/invoke` requests.
-`GrantService.validateAndConsumeGrant` (`src/approvals/grant.service.ts`)
-— the existing validate-and-consume path a `grantToken` retry of
-`POST /agent/v1/tools/invoke` goes through — now calls `checkAll` (for the
-grant's own `agentId`/`toolId`, re-derived from the _persisted_
-`AuthorizationGrant` row, never the caller-supplied request alone) right
-after the existing task/agent liveness checks and right before the atomic
-`consumedAt` update. This means:
+A `grantToken` retry of `POST /agent/v1/tools/invoke` goes through
+`GrantService.verifyGrant` (binds the grant to this exact request; the
+claims and the persisted `AuthorizationGrant` row must both match it) and
+then `AuthorizationService.authorizeRedemption`, which re-runs the whole
+pipeline, `checkAll` first, before the atomic `consumedAt` update (2026-10-07,
+S6/F7). This means:
 
 - The check runs against _current_ state at redemption time, never
   whatever was true at issuance.

@@ -792,9 +792,89 @@ model ToolInvocation {
   /// might carry secret material.
   errorMessage String?
 
+  /// ADR-003: the `Decision` this execution ran under. The decision commits
+  /// before the tool is contacted; this row records the outcome
+  /// (`SUCCESS`/`FAILURE`/`UNKNOWN`) against it. Null only for rows written
+  /// before the column existed.
+  decisionId String?
+  decision   Decision? @relation(fields: [decisionId], references: [id])
+
   createdAt DateTime @default(now())
 
+  @@index([decisionId])
   @@map("tool_invocations")
+}
+
+/// `Decision.outcome` -- the spec's three-valued decision.
+enum DecisionOutcome {
+  ALLOW
+  APPROVAL_REQUIRED
+  DENY
+}
+
+/// Which door the action request came through. `AUTHORIZE` is
+/// `POST /agent/v1/authorize`, which decides without executing.
+enum DecisionChannel {
+  REST
+  MCP
+  AUTHORIZE
+}
+
+/// `REQUEST`: an agent's first attempt. `GRANT_REDEMPTION`: the retry with an
+/// approval grant, re-decided against current state (S6/F7).
+enum DecisionStage {
+  REQUEST
+  GRANT_REDEMPTION
+}
+
+/// ADR-003 / security finding S1: the durable record of one authorization
+/// decision, committed in PostgreSQL before anything executes. For ALLOW it
+/// commits in the same transaction as the execution-count increment (first
+/// attempt) or the grant consumption (redemption). If it cannot be written
+/// the request fails closed with 503 and nothing executes.
+///
+/// Append-only. No foreign keys to `Task`/`Agent`: a DENY for an unknown
+/// task is still a decision, and decisions outlive what they name. The
+/// execution outcome links back through `ToolInvocation.decisionId`.
+model Decision {
+  id String @id @default(uuid())
+
+  outcome DecisionOutcome
+  /// The decisive reason first (`allowed`, `policy_denied`,
+  /// `risk_ceiling_exceeded`, ...), then any deterministic risk reason codes.
+  reasonCodes String[]
+
+  /// The policy whose rule matched, when one did.
+  policyId        String?
+  policyVersionId String?
+  /// Deterministic `RiskEngine` score, when the pipeline got that far.
+  riskScore       Int?
+
+  /// sha256 of the canonical `{ taskId, toolId, actionId, resource, params }`
+  /// (`computeParameterHash`, the same hash an approval grant binds to).
+  inputsHash String
+
+  agentId  String
+  taskId   String
+  toolId   String
+  actionId String
+  resource String
+
+  channel DecisionChannel
+  stage   DecisionStage   @default(REQUEST)
+  /// The `AuthorizationGrant` presented, for `GRANT_REDEMPTION`.
+  grantId String?
+
+  correlationId String
+
+  createdAt DateTime @default(now())
+
+  toolInvocations ToolInvocation[]
+
+  @@index([taskId, createdAt])
+  @@index([agentId, createdAt])
+  @@index([grantId])
+  @@map("decisions")
 }
 
 /// `ToolInvocation.status` -- Section 35 explicitly asks for exactly these

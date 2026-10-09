@@ -1,0 +1,24 @@
+# Triaged gitleaks findings: synthetic secret-shaped strings that the DLP,
+# credential-broker, LLM-proxy and JWT-guard specs use as detector inputs
+# (placeholder account names, "s3cr3t-value", "hunter22", truncated PEM
+# headers), plus docs/kubernetes.md quoting the README badge sample token
+# already allowlisted in .gitleaks.toml. None is a usable credential.
+# Exact fingerprints, so a real secret added to these files later still fails.
+1de19f7787413f23e07c2c7435663f5ab39a8e47:src/auth/jwt-auth.guard.spec.ts:generic-api-key:166
+1de19f7787413f23e07c2c7435663f5ab39a8e47:src/auth/jwt-auth.guard.spec.ts:generic-api-key:88
+8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:azure-ad-client-secret:35
+8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:generic-api-key:21
+8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:generic-api-key:25
+8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:jwt:11
+8d71467910054b3c2da179354b40cebf835b964a:src/common/dlp/dlp-classification.spec.ts:private-key:17
+8d71467910054b3c2da179354b40cebf835b964a:src/tools/credential-broker.service.spec.ts:azure-ad-client-secret:570
+8d71467910054b3c2da179354b40cebf835b964a:src/tools/credential-broker.service.spec.ts:generic-api-key:575
+8d71467910054b3c2da179354b40cebf835b964a:src/tools/credential-broker.service.spec.ts:jwt:672
+8d71467910054b3c2da179354b40cebf835b964a:src/tools/credential-broker.service.spec.ts:private-key:565
+962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-dlp-floor.spec.ts:azure-ad-client-secret:31
+962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-dlp-floor.spec.ts:generic-api-key:17
+962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-dlp-floor.spec.ts:generic-api-key:21
+962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-dlp-floor.spec.ts:jwt:7
+962d2a283163940d0965e10c852f3bf6d13e86ac:src/agent-runtime/llm-proxy.service.spec.ts:azure-ad-client-secret:251
+a2dbbc6184e8d653b321a2a540ee582fc9931a32:docs/kubernetes.md:generic-api-key:257
+f3ab20d191565a5501e2876f3acc18271805b587:test/agent-runtime.e2e-spec.ts:azure-ad-client-secret:824

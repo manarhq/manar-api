@@ -409,7 +409,10 @@ describe('Policy & Risk Engine (e2e)', () => {
       actionId: 'read',
       resource: 'anything',
     });
-    expect(decision).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(decision).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
   }, 30_000);
 
   it('5. the API never exposes an update/delete path for a published policy version', async () => {
@@ -623,7 +626,10 @@ describe('Policy & Risk Engine (e2e)', () => {
       actionId: 'read',
       resource: 'anything',
     });
-    expect(before).toEqual<AuthorizeDecision>({ decision: 'ALLOW' });
+    expect(before).toEqual<AuthorizeDecision>({
+      decision: 'ALLOW',
+      decisionId: expect.any(String) as string,
+    });
 
     const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
     const authorProfile = await tenantClient.userProfile.findFirstOrThrow();

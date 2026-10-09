@@ -148,24 +148,26 @@ EXPIRED`. No `ApprovalDecision` row (nobody decided) and no grant is
 7. The agent retries `POST /agent/v1/tools/invoke` with the _same_ body
    (`taskId`/`toolId`/`actionId`/`resource`/`params`) plus `grantToken`.
    Its presence — not a separate flag — is what routes the request onto
-   the grant-validation path (`GrantService.validateAndConsumeGrant`)
-   **instead of** `AuthorizationService.authorize`'s normal pipeline; that
-   gate was already satisfied once, at approval time. Validation checks,
-   in order: signature/expiry (`jose.jwtVerify`); the decoded claims match
+   the redemption path: `GrantService.verifyGrant`, then
+   `AuthorizationService.authorizeRedemption` (2026-10-07, S6/F7).
+   `verifyGrant` checks, in order: signature/expiry (`jose.jwtVerify`); the decoded claims match
    _this_ request's `agentId`/`taskId`/`toolId`/`actionId`/`resource`
    exactly; `parameterHash` recomputed from _this exact request's_
    `params` matches (Section 80's parameter-binding invariant — change
    even one nested value and the grant is rejected); the persisted
-   `AuthorizationGrant` row itself is unconsumed/unrevoked/unexpired; and
-   the task/agent are still live (the fail-closed conditions that already
-   exist — no kill-switch system exists yet to check beyond that). On
-   success, the grant is atomically marked consumed (`UPDATE ... WHERE
-consumedAt IS NULL`, closing the same kind of race
-   `incrementExecutionCount` already closes) and the request proceeds
-   straight to `CredentialBrokerService.invoke`, exactly like the `ALLOW`
-   path already does. **Does not** re-run `PolicyEngine`/`RiskEngine` or
-   increment `executionCount` again — those already happened once, at
-   grant-issuance time.
+   `AuthorizationGrant` row itself is unconsumed/unrevoked/unexpired.
+   `authorizeRedemption` then re-runs the full decision against current
+   state: kill switches at every level and AI-system suspension, task
+   assignment, liveness and TTL (ancestors included), forbidden actions,
+   OpenFGA, and the current policy version. A policy `DENY` refuses; a
+   policy `APPROVAL_REQUIRED` and the risk ceiling do not, because a human
+   approved this exact request. It does not increment `executionCount`
+   again (that happened at grant issuance, and the task's own limit does not
+   count this request twice). Every outcome is a `Decision` row
+   (`stage = GRANT_REDEMPTION`). On ALLOW the grant is marked consumed
+   (`UPDATE ... WHERE consumedAt IS NULL AND revokedAt IS NULL AND
+expiresAt > now`) in the same transaction as that row, and the request
+   proceeds to `CredentialBrokerService.invoke` under the decision's id.
 8. A consumed, expired, revoked, or parameter-mismatched grant used again
    → `403 { decision: 'DENY', reason: 'grant_already_consumed' |
 'grant_expired' | 'grant_revoked' | 'grant_mismatch' | ... }`. No tool

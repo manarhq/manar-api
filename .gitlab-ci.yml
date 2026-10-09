@@ -21,6 +21,10 @@ default:
     - corepack prepare --activate
     - pnpm config set store-dir .pnpm-store
     - pnpm install --frozen-lockfile
+    # Workspace packages resolve through their gitignored dist/ (main/types
+    # in packages/*/package.json), so lint, nest build and vitest all see
+    # unresolved imports until they are compiled.
+    - pnpm packages:build
 
 cache:
   key:
@@ -45,14 +49,34 @@ test:unit:
   # mocked — see docs/tenant-isolation.md), so this job needs a live
   # database service, unlike lint/typecheck/build which only need the
   # generated Prisma clients (codegen, no live connection required).
+  # The rate-limit storage spec runs against a real Redis too.
   services:
-    - postgres:18.6-alpine
+    # Throwaway CI database: no fsync. Tenant provisioning (CREATE DATABASE
+    # plus every tenant migration) is fsync-bound and stalled past its 60 s
+    # hook timeout on the shared runner host.
+    - &postgres-service
+      name: postgres:18.6-alpine
+      alias: postgres
+      command:
+        [
+          'postgres',
+          '-c',
+          'fsync=off',
+          '-c',
+          'synchronous_commit=off',
+          '-c',
+          'full_page_writes=off',
+        ]
+    - &redis-service
+      name: redis:8.10-alpine
+      alias: redis
   variables:
     POSTGRES_USER: manar
     POSTGRES_PASSWORD: manar
     POSTGRES_DB: manar_control
     CONTROL_DATABASE_URL: postgresql://manar:manar@postgres:5432/manar_control
     TENANT_DB_BASE_URL: postgresql://manar:manar@postgres:5432/postgres
+    REDIS_URL: redis://redis:6379
   script:
     - pnpm db:migrate:control:deploy
     - pnpm test
@@ -90,15 +114,67 @@ test:e2e:
   # no Docker needed), migrated then backgrounded, mirroring how
   # deploy/docker-compose.yml's openfga-migrate → openfga sequencing works,
   # just via shell steps instead of compose `depends_on`.
+  #
+  # The audit pipeline (Kafka, OpenSearch), the rate limiter and live feed
+  # (Redis) and the approval workflows (Temporal, run in-job below like
+  # OpenFGA) complete the deploy/docker-compose.yml stack the suite runs on.
   services:
-    - postgres:18.6-alpine
+    - *postgres-service
     - name: quay.io/keycloak/keycloak:26.7.1
       alias: keycloak
       command: ['start-dev']
     - name: openbao/openbao:2.6.1
       alias: openbao
       command: ['server', '-dev']
+    - *redis-service
+    # Single-node KRaft broker, as in deploy/docker-compose.yml but with one
+    # listener: the job reaches it at kafka:9092. KAFKA_BROKERS is exported
+    # in the script, not set as a job variable, because job variables are
+    # passed to every service and this image turns any KAFKA_* variable
+    # into a broker setting.
+    - name: apache/kafka:4.3.1
+      alias: kafka
+      variables:
+        KAFKA_NODE_ID: '1'
+        KAFKA_PROCESS_ROLES: broker,controller
+        KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+        KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+        KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+        KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+        KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+        KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+        KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+        KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+        KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+    - name: opensearchproject/opensearch:3.8.0
+      alias: opensearch
+      # discovery.type has a dot, which a CI variable name cannot carry;
+      # the image's entrypoint passes -E flags through to OpenSearch.
+      command: ['opensearch', '-Ediscovery.type=single-node']
+      variables:
+        DISABLE_SECURITY_PLUGIN: 'true'
+        OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
   variables:
+    # One network per job, so services resolve each other by alias the way
+    # they do under Compose (Kafka advertises kafka:9092).
+    FF_NETWORK_PER_BUILD: 'true'
+    # Config the app refuses to boot without. CI-only placeholders, the
+    # same kind as .env.example's dev values; nothing real is signed here.
+    APPROVAL_GRANT_SIGNING_SECRET: ci-only-approval-grant-signing-secret
+    PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ci-only-platform-kill-switch-operator-token
+    MANAR_BFF_SERVICE_TOKEN: ci-only-manar-bff-service-token
+    # demo-soc-tools and the specs' webhook receivers listen on loopback in
+    # this job; .env.example sets the same for local dev. The app refuses
+    # SSRF_ALLOW_LOOPBACK under NODE_ENV=production.
+    SSRF_ALLOWED_HOSTS: 127.0.0.1,localhost
+    SSRF_ALLOW_LOOPBACK: 'true'
+    REDIS_URL: redis://redis:6379
+    OPENSEARCH_NODE: http://opensearch:9200
+    TEMPORAL_ADDRESS: 127.0.0.1:7233
+    TEMPORAL_CLI_VERSION: 1.5.1
+    ASTRAL_UV_VERSION: 0.11.33
+    MANAR_AI_REF: 6088d9a280af4130479154a382044d8136909c17
     POSTGRES_USER: manar
     POSTGRES_PASSWORD: manar
     POSTGRES_DB: manar_control
@@ -216,7 +292,6 @@ test:e2e:
       until node -e "fetch(\"http://localhost:8080/healthz\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
         sleep 1;
       done'
-    - pnpm --filter @manar/sdk-node build
     # Phase 7a/7b integration pass: build and run the real demo-soc-tools
     # service in the background (see the DEMO_SOC_TOOLS_BASE_URL/
     # DEMO_TOOLS_API_KEY variables above), then wait for its own health
@@ -228,6 +303,42 @@ test:e2e:
       timeout 30 bash -c '
       until node -e "fetch(\"$DEMO_SOC_TOOLS_BASE_URL/health/ready\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
         sleep 1;
+      done'
+    # Temporal: the CLI's single-binary dev server (in-memory, namespace
+    # `default`), for the same reason OpenFGA runs in-job. The specs start
+    # their own workers.
+    - >
+      node -e "
+      fetch('https://github.com/temporalio/cli/releases/download/v' + process.env.TEMPORAL_CLI_VERSION + '/temporal_cli_' + process.env.TEMPORAL_CLI_VERSION + '_linux_amd64.tar.gz')
+        .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+        .then((b) => require('fs').writeFileSync('temporal.tar.gz', Buffer.from(b)));
+      "
+    - tar xzf temporal.tar.gz temporal && chmod +x temporal
+    - ./temporal server start-dev --headless --ip 127.0.0.1 &
+    - timeout 60 bash -c 'until ./temporal operator cluster health --address "$TEMPORAL_ADDRESS" >/dev/null 2>&1; do sleep 1; done'
+    # manar-ai: ai-advisory.e2e-spec.ts runs its DLP scenarios against the
+    # real service (no image is published), so run its gRPC server from
+    # source at a pinned commit, outside the checkout and with a clean env
+    # (the local settings deploy/docker-compose.yml gives it).
+    - curl -fsSL -o /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/$ASTRAL_UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz"
+    - curl -fsSL -o /tmp/manar-ai.tar.gz "$CI_SERVER_URL/api/v4/projects/manar%2Fmanar-ai/repository/archive.tar.gz?sha=$MANAR_AI_REF"
+    - tar xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1
+    - mkdir -p /tmp/manar-ai && tar xzf /tmp/manar-ai.tar.gz -C /tmp/manar-ai --strip-components=1
+    - uv sync --project /tmp/manar-ai --locked --no-dev --quiet
+    - >
+      (cd /tmp/manar-ai && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$HOME"
+      PORT=8000 ENVIRONMENT=local LOG_LEVEL=INFO GRPC_PORT=50051 AI_PROVIDER=ollama
+      OLLAMA_HOST=http://ollama-not-configured.invalid:11434 OLLAMA_TIMEOUT_SECONDS=5
+      OLLAMA_MODEL=qwen3:8b EMBEDDING_MODEL=qwen3-embedding:0.6b
+      .venv/bin/python -m app.grpc.server) &
+    - timeout 60 bash -c 'until exec 3<>/dev/tcp/127.0.0.1/50051 2>/dev/null; do sleep 1; done'
+    - export KAFKA_BROKERS=kafka:9092
+    - timeout 90 bash -c 'until exec 3<>/dev/tcp/kafka/9092 2>/dev/null; do sleep 1; done'
+    - timeout 90 bash -c 'until exec 3<>/dev/tcp/redis/6379 2>/dev/null; do sleep 1; done'
+    - >
+      timeout 120 bash -c '
+      until node -e "fetch(process.env.OPENSEARCH_NODE + \"/_cluster/health\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
+        sleep 2;
       done'
     - pnpm test:e2e
 
@@ -264,6 +375,9 @@ build:
 # stage ordering guarantees the tarballs exist before `security` starts;
 # no existing stage was renamed/reordered/removed to add this.
 docker:build-images:
+  # Non-Node image: skip default's corepack/pnpm before_script and cache.
+  inherit:
+    default: false
   stage: build
   image: docker:29
   services:
@@ -291,6 +405,8 @@ docker:build-images:
 # already allowlisted — there is no acceptable severity tier for a
 # leaked credential.
 gitleaks:
+  inherit:
+    default: false
   stage: security
   image:
     name: ghcr.io/gitleaks/gitleaks:v8.30.1
@@ -305,6 +421,8 @@ gitleaks:
 # tiers include a meaningful false-positive/style-opinion rate that would
 # otherwise make this gate noisy enough to get disabled.
 semgrep:
+  inherit:
+    default: false
   stage: security
   image:
     name: semgrep/semgrep:1.172.0
@@ -313,9 +431,9 @@ semgrep:
     GIT_DEPTH: 0
   script:
     # Full report (every severity) — always produced, never fails the job.
-    - semgrep scan --config auto --json --output semgrep-report.json || true
+    - semgrep scan --config auto --json --output semgrep-report.json . || true
     # Gate: ERROR severity only.
-    - semgrep scan --config auto --severity ERROR --error
+    - semgrep scan --config auto --severity ERROR --error .
   artifacts:
     when: always
     paths:
@@ -327,6 +445,8 @@ semgrep:
 # HIGH/CRITICAL only (matches trivy-image's threshold — one policy, not
 # two different bars for the same tool).
 trivy-fs:
+  inherit:
+    default: false
   stage: security
   image:
     name: aquasec/trivy:0.71.0
@@ -346,6 +466,8 @@ trivy-fs:
 # long tail of low-severity, often-unfixable-upstream findings that would
 # make a zero-tolerance gate impossible to keep green).
 trivy-image:
+  inherit:
+    default: false
   stage: security
   image:
     name: aquasec/trivy:0.71.0
@@ -368,16 +490,18 @@ trivy-image:
 # SBOM generation (CycloneDX) for each of the three images — an artifact
 # job, not a gate: never fails the pipeline on its own.
 syft-sbom:
+  inherit:
+    default: false
   stage: security
   image:
-    name: anchore/syft:v1.51.0
+    name: anchore/syft:v1.51.0-debug
     entrypoint: ['']
   needs:
     - docker:build-images
   script:
     - >
       for img in manar-api manar-api-worker demo-soc-tools; do
-        syft "docker-archive:${img}.tar" -o "cyclonedx-json=sbom-${img}.json";
+        /syft "docker-archive:${img}.tar" -o "cyclonedx-json=sbom-${img}.json";
       done
   artifacts:
     paths:
@@ -389,8 +513,12 @@ syft-sbom:
 # kubeconform/kube-linter below can validate the manifests this phase
 # actually produced. Same Helm major version (v4) validated locally.
 k8s-manifests:render:
+  inherit:
+    default: false
   stage: security
-  image: alpine/helm:4.2.3
+  image:
+    name: alpine/helm:4.2.3
+    entrypoint: ['']
   script:
     - mkdir -p rendered
     - helm template manar-api deploy/helm/manar-api --set image.tag=ci > rendered/manar-api.yaml
@@ -405,6 +533,8 @@ k8s-manifests:render:
 # violation (-strict rejects unknown fields too) — there's no acceptable
 # severity tier for "this isn't a valid Kubernetes object."
 kubeconform:
+  inherit:
+    default: false
   stage: security
   image:
     name: ghcr.io/yannh/kubeconform:v0.8.0-alpine
@@ -421,11 +551,13 @@ kubeconform:
 # .kube-linter.yaml config needed, the built-in default checks are what
 # this chart set was written against and passes clean).
 kube-linter:
+  inherit:
+    default: false
   stage: security
   image:
-    name: stackrox/kube-linter:v0.8.3
+    name: stackrox/kube-linter:v0.8.3-alpine
     entrypoint: ['']
   needs:
     - k8s-manifests:render
   script:
-    - kube-linter lint rendered/
+    - /kube-linter lint rendered/

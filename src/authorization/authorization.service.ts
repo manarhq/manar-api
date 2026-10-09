@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { HttpException, Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { TaskRecord, TasksService } from '../tasks/tasks.service';
@@ -5,11 +6,15 @@ import { TaskNotFoundError } from '../tasks/tasks.errors';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { RiskEngine } from '../risk/risk-engine.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
-import type { AuditEventType } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { parseToolActions } from './grant-triples';
-import { ENFORCEMENT_DEPENDENCY_UNAVAILABLE } from '../common/fail-closed/fail-closed';
+import {
+  ENFORCEMENT_DEPENDENCY_UNAVAILABLE,
+  failClosed,
+} from '../common/fail-closed/fail-closed';
+import { computeParameterHash } from '../approvals/parameter-hash.util';
+import { getCorrelationId } from '../logging/correlation-id.store';
 import {
   ANY_RESOURCE_PATTERN,
   agentObjectId,
@@ -18,7 +23,7 @@ import {
 import { OpenFgaClientService } from './openfga-client.service';
 import type { AuthorizeRequest } from './authorize-request.validation';
 
-export type AuthorizeDecision =
+type Verdict =
   | { decision: 'ALLOW' }
   | { decision: 'DENY'; reason: string }
   | {
@@ -55,6 +60,56 @@ export type AuthorizeDecision =
       /** The `Task.riskCeiling` `riskScore` was actually compared against. */
       riskCeiling: number;
     };
+
+/**
+ * The pipeline's answer plus the id of the `Decision` row that recorded it
+ * (ADR-003). Callers execute only under a `decisionId`.
+ */
+export type AuthorizeDecision = Verdict & { decisionId: string };
+
+export type DecisionChannel = 'REST' | 'MCP' | 'AUTHORIZE';
+
+export interface DecisionContext {
+  channel: DecisionChannel;
+  /** The action's parameters: hashed into `Decision.inputsHash`, never stored. */
+  params?: unknown;
+}
+
+export type DecisionStage = 'REQUEST' | 'GRANT_REDEMPTION';
+
+type DecisionRecordKind =
+  { stage: 'REQUEST' } | { stage: 'GRANT_REDEMPTION'; grantId?: string };
+
+/** What `GrantService.verifyGrant` concluded about the presented grant token. */
+export type GrantCheck =
+  { valid: true; grantId: string } | { valid: false; reason: string };
+
+/** What `evaluate` concluded, before anything is written. */
+interface Evaluation {
+  verdict: Verdict;
+  /** Extra fields for the audit event ("enough data to reconstruct why"). */
+  audit: Record<string, unknown>;
+  policyId?: string;
+  policyVersionId?: string;
+  riskScore?: number;
+  riskReasonCodes?: string[];
+  /** Present on ALLOW: the task whose execution count the commit increments. */
+  task?: TaskRecord;
+}
+
+function deny(
+  reason: string,
+  audit: Record<string, unknown> = {},
+  policy: Pick<Evaluation, 'policyId' | 'policyVersionId'> = {},
+): Evaluation {
+  return { verdict: { decision: 'DENY', reason }, audit, ...policy };
+}
+
+/** A client-supplied `x-correlation-id` is stored only if it is a sane id. */
+function correlationIdForRecord(): string {
+  const id = getCorrelationId();
+  return id && /^[\w.:-]{1,128}$/.test(id) ? id : randomUUID();
+}
 
 /**
  * `POST /agent/v1/authorize`'s pipeline (Section 22 — fail-closed at every
@@ -111,6 +166,14 @@ export type AuthorizeDecision =
  * stable decision from this phase onward, but this phase implements no
  * path to ever fulfil one (Phase 8) — it's correctly a dead end for now.
  * See docs/policy-model.md.
+ *
+ * ADR-003 (security finding S1): `evaluate` only reads. Its verdict is then
+ * written as a `Decision` row by `commit`, and only after that commit does
+ * the caller get an answer it can act on. For ALLOW, step 8's increment and
+ * the `Decision` insert are one transaction. If the decision cannot be
+ * written the request fails closed with 503 `enforcement_dependency_unavailable`
+ * and nothing executes. Audit events are recorded after the commit and
+ * carry the `decisionId`.
  */
 @Injectable()
 export class AuthorizationService {
@@ -129,40 +192,240 @@ export class AuthorizationService {
    * Any exception escaping the pipeline below (a tenant-DB or control-DB
    * error in a kill-switch or task lookup, `AncestorChainTooDeepError`, a
    * dangling parent, malformed stored actions) is a DENY with reason
-   * `enforcement_dependency_unavailable`, audited on a best-effort basis,
-   * never a bare 500 (Gate 0 findings S32 and S61).
+   * `enforcement_dependency_unavailable`, recorded like any other decision,
+   * never a bare 500 (Gate 0 findings S32 and S61). A failure to record the
+   * decision itself is a 503.
    */
   async authorize(
     tenantClient: TenantPrismaClient,
     tenantId: string,
     authenticatedAgentId: string,
     request: AuthorizeRequest,
+    context: DecisionContext = { channel: 'AUTHORIZE' },
   ): Promise<AuthorizeDecision> {
+    const evaluation = await this.evaluateFailClosed(
+      tenantClient,
+      tenantId,
+      authenticatedAgentId,
+      request,
+      'REQUEST',
+    );
+    return this.commit(
+      tenantClient,
+      tenantId,
+      authenticatedAgentId,
+      request,
+      context,
+      evaluation,
+      { stage: 'REQUEST' },
+    );
+  }
+
+  /**
+   * Security finding S6/F7 (spec §6.2): redeeming an approval grant re-runs
+   * the whole pipeline against current state, never trusting the decision
+   * that was true when the human approved. Kill switches at every level,
+   * AI-system suspension, task liveness and TTL (ancestors included),
+   * assignment, forbidden actions, OpenFGA and the current policy version
+   * are all evaluated again; signature, expiry, revocation, single use and
+   * parameter binding were checked by `GrantService.verifyGrant` (`grant`).
+   *
+   * Differences from a first attempt, both because a human has already
+   * approved this exact request: a policy `APPROVAL_REQUIRED` and a risk
+   * score above the task ceiling do not block, only `DENY` does; and the
+   * execution count is not incremented again (it was at grant issuance), so
+   * the task's own limit does not count this request twice.
+   *
+   * ALLOW consumes the grant (`UPDATE ... WHERE consumedAt IS NULL AND
+   * revokedAt IS NULL AND expiresAt > now`) in the same transaction as the
+   * `Decision` insert; losing that race records DENY `grant_already_consumed`.
+   * Every outcome, including an invalid grant, is a recorded `Decision`.
+   */
+  async authorizeRedemption(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    authenticatedAgentId: string,
+    request: AuthorizeRequest,
+    context: DecisionContext,
+    grant: GrantCheck,
+  ): Promise<AuthorizeDecision> {
+    const evaluation = grant.valid
+      ? await this.evaluateFailClosed(
+          tenantClient,
+          tenantId,
+          authenticatedAgentId,
+          request,
+          'GRANT_REDEMPTION',
+        )
+      : deny(grant.reason);
+    return this.commit(
+      tenantClient,
+      tenantId,
+      authenticatedAgentId,
+      request,
+      context,
+      evaluation,
+      {
+        stage: 'GRANT_REDEMPTION',
+        grantId: grant.valid ? grant.grantId : undefined,
+      },
+    );
+  }
+
+  private async evaluateFailClosed(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    authenticatedAgentId: string,
+    request: AuthorizeRequest,
+    stage: DecisionStage,
+  ): Promise<Evaluation> {
     try {
       return await this.evaluate(
         tenantClient,
         tenantId,
         authenticatedAgentId,
         request,
+        stage,
       );
     } catch (error) {
       if (error instanceof HttpException) throw error;
       this.logger.error(
         `authorize failed closed for task "${request.taskId}": ${error instanceof Error ? error.message : String(error)}`,
       );
-      await this.auditService.recordSafely(tenantClient, tenantId, {
-        eventType: AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED,
-        actor: { type: 'agent', id: authenticatedAgentId },
-        data: {
-          taskId: request.taskId,
-          toolId: request.toolId,
-          actionId: request.actionId,
-          resource: request.resource,
-          reason: ENFORCEMENT_DEPENDENCY_UNAVAILABLE,
-        },
-      });
-      return { decision: 'DENY', reason: ENFORCEMENT_DEPENDENCY_UNAVAILABLE };
+      return deny(ENFORCEMENT_DEPENDENCY_UNAVAILABLE);
     }
+  }
+
+  /**
+   * Writes the `Decision` row, then audits. For ALLOW the reservation (the
+   * execution-count increment on a first attempt, the grant consumption on
+   * redemption) and the insert are one transaction, so a decision that
+   * commits has reserved its execution and one that does not commit has not.
+   * Losing the reservation race turns ALLOW into DENY before anything is
+   * written. Any failure here is a 503 (`failClosed`): the caller never gets
+   * a decision it could execute under without a durable record of it.
+   */
+  private async commit(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    agentId: string,
+    request: AuthorizeRequest,
+    context: DecisionContext,
+    evaluation: Evaluation,
+    kind: DecisionRecordKind,
+  ): Promise<AuthorizeDecision> {
+    const insert = (
+      client: Pick<TenantPrismaClient, 'decision'>,
+      final: Evaluation,
+    ) => this.insertDecision(client, agentId, request, context, final, kind);
+
+    const { decisionId, final } = await failClosed('decision-store', () => {
+      if (evaluation.verdict.decision !== 'ALLOW') {
+        return insert(tenantClient, evaluation);
+      }
+      const task = evaluation.task;
+      return tenantClient.$transaction(async (tx) => {
+        const reserved =
+          kind.stage === 'GRANT_REDEMPTION'
+            ? await this.consumeGrant(tx, kind.grantId)
+            : task !== undefined &&
+              (await this.tasksService.incrementExecutionCount(tx, task));
+        return insert(
+          tx,
+          reserved
+            ? evaluation
+            : deny(
+                kind.stage === 'GRANT_REDEMPTION'
+                  ? 'grant_already_consumed'
+                  : 'task_execution_limit_reached',
+              ),
+        );
+      });
+    });
+
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType:
+        final.verdict.decision === 'ALLOW'
+          ? AUDIT_EVENT_TYPES.AUTHORIZATION_ALLOWED
+          : final.verdict.decision === 'DENY'
+            ? AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED
+            : AUDIT_EVENT_TYPES.AUTHORIZATION_PENDING_APPROVAL,
+      actor: { type: 'agent', id: agentId },
+      data: {
+        taskId: request.taskId,
+        toolId: request.toolId,
+        actionId: request.actionId,
+        resource: request.resource,
+        decisionId,
+        channel: context.channel,
+        stage: kind.stage,
+        ...(kind.stage === 'GRANT_REDEMPTION' && kind.grantId
+          ? { grantId: kind.grantId }
+          : {}),
+        ...('reason' in final.verdict ? { reason: final.verdict.reason } : {}),
+        ...final.audit,
+      },
+    });
+    return { ...final.verdict, decisionId };
+  }
+
+  /** Single use, enforced in the database: only one redemption can win. */
+  private async consumeGrant(
+    tx: Pick<TenantPrismaClient, 'authorizationGrant'>,
+    grantId: string | undefined,
+  ): Promise<boolean> {
+    if (!grantId) return false;
+    const now = new Date();
+    const result = await tx.authorizationGrant.updateMany({
+      where: {
+        id: grantId,
+        consumedAt: null,
+        revokedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: { consumedAt: now },
+    });
+    return result.count > 0;
+  }
+
+  private async insertDecision(
+    client: Pick<TenantPrismaClient, 'decision'>,
+    agentId: string,
+    request: AuthorizeRequest,
+    context: DecisionContext,
+    evaluation: Evaluation,
+    kind: DecisionRecordKind,
+  ): Promise<{ decisionId: string; final: Evaluation }> {
+    const { verdict } = evaluation;
+    const decisive = verdict.decision === 'ALLOW' ? 'allowed' : verdict.reason;
+    const row = await client.decision.create({
+      data: {
+        outcome: verdict.decision,
+        reasonCodes:
+          verdict.decision === 'DENY'
+            ? [decisive]
+            : [decisive, ...(evaluation.riskReasonCodes ?? [])],
+        policyId: evaluation.policyId ?? null,
+        policyVersionId: evaluation.policyVersionId ?? null,
+        riskScore:
+          verdict.decision === 'DENY' ? null : (evaluation.riskScore ?? null),
+        inputsHash: computeParameterHash({
+          ...request,
+          params: context.params,
+        }),
+        agentId,
+        taskId: request.taskId,
+        toolId: request.toolId,
+        actionId: request.actionId,
+        resource: request.resource,
+        channel: context.channel,
+        stage: kind.stage,
+        grantId:
+          kind.stage === 'GRANT_REDEMPTION' ? (kind.grantId ?? null) : null,
+        correlationId: correlationIdForRecord(),
+      },
+    });
+    return { decisionId: row.id, final: evaluation };
   }
 
   private async evaluate(
@@ -170,47 +433,25 @@ export class AuthorizationService {
     tenantId: string,
     authenticatedAgentId: string,
     request: AuthorizeRequest,
-  ): Promise<AuthorizeDecision> {
-    // Phase 9a: every branch below records an `authorization.allowed`/
-    // `authorization.denied`/`authorization.pending_approval` AuditEvent
-    // before returning — via `this.audit(...)`, a thin wrapper so each
-    // branch stays a single `return` statement while still carrying
-    // "enough data to reconstruct why" (Section 46: matched policy, risk
-    // score, OpenFGA result) in `data`. Never changes what's returned to
-    // the caller — `auditService.recordSafely` never throws.
-    const audit = (
-      eventType: AuditEventType,
-      data: Record<string, unknown>,
-    ): Promise<unknown> =>
-      this.auditService.recordSafely(tenantClient, tenantId, {
-        eventType,
-        actor: { type: 'agent', id: authenticatedAgentId },
-        data: {
-          taskId: request.taskId,
-          toolId: request.toolId,
-          actionId: request.actionId,
-          resource: request.resource,
-          ...data,
-        },
-      });
+    stage: DecisionStage,
+  ): Promise<Evaluation> {
+    const redemption = stage === 'GRANT_REDEMPTION';
 
     // Step 0 (kill-switch phase, Section 32): platform → tenant → agent →
-    // agent-group(s) → tool. Runs before the task is even resolved — none
-    // of these five checks need it, and this is the cheapest, most
-    // fundamental "don't bother evaluating anything else" gate in the
-    // whole pipeline. See KillSwitchService.checkAll's own doc comment for
-    // the exact per-scope lookup order.
+    // agent-group(s) → tool, then AI-system lifecycle. Runs before the task
+    // is even resolved — none of these checks need it, and this is the
+    // cheapest, most fundamental "don't bother evaluating anything else"
+    // gate in the whole pipeline. See KillSwitchService.checkAll's own doc
+    // comment for the exact per-scope lookup order.
     const killSwitchCheck = await this.killSwitchService.checkAll(
       tenantClient,
       tenantId,
       { agentId: authenticatedAgentId, toolId: request.toolId },
     );
     if (killSwitchCheck.killed) {
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-        reason: killSwitchCheck.reason,
+      return deny(killSwitchCheck.reason as string, {
         killSwitchScope: killSwitchCheck.scope,
       });
-      return { decision: 'DENY', reason: killSwitchCheck.reason as string };
     }
 
     let task: TaskRecord;
@@ -220,50 +461,32 @@ export class AuthorizationService {
         request.taskId,
       );
     } catch (error) {
-      if (error instanceof TaskNotFoundError) {
-        await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-          reason: 'task_not_found',
-        });
-        return { decision: 'DENY', reason: 'task_not_found' };
-      }
+      if (error instanceof TaskNotFoundError) return deny('task_not_found');
       throw error;
     }
 
     // Step 1.
     if (task.assignedAgentId !== authenticatedAgentId) {
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-        reason: 'not_assigned_agent',
+      return deny('not_assigned_agent', {
         assignedAgentId: task.assignedAgentId,
       });
-      return { decision: 'DENY', reason: 'not_assigned_agent' };
     }
-
-    const now = new Date();
 
     // Steps 2-3: the full ancestor chain, then the task itself.
     const liveness = await this.tasksService.evaluateFullLiveness(
       tenantClient,
       task,
-      now,
+      new Date(),
+      { executionAlreadyCounted: redemption },
     );
-    if (!liveness.ok) {
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-        reason: liveness.reason,
-      });
-      return { decision: 'DENY', reason: liveness.reason as string };
-    }
+    if (!liveness.ok) return deny(liveness.reason as string);
 
     // Step 4.
     const forbidden = parseToolActions(task.forbiddenActions);
     const isForbidden = forbidden.some(
       (f) => f.toolId === request.toolId && f.actionId === request.actionId,
     );
-    if (isForbidden) {
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-        reason: 'forbidden_action',
-      });
-      return { decision: 'DENY', reason: 'forbidden_action' };
-    }
+    if (isForbidden) return deny('forbidden_action');
 
     // Step 5.
     const agentSubject = agentObjectId(tenantId, authenticatedAgentId);
@@ -282,7 +505,6 @@ export class AuthorizationService {
       ANY_RESOURCE_PATTERN,
     );
 
-    let allowed: boolean;
     let exactAllowed = false;
     let wildcardAllowed = false;
     try {
@@ -298,24 +520,16 @@ export class AuthorizationService {
           object: wildcardGrant,
         }),
       ]);
-      allowed = exactAllowed || wildcardAllowed;
     } catch (error) {
       this.logger.error(
         `OpenFGA check failed for task "${task.id}" — failing closed (DENY)`,
         error instanceof Error ? error.stack : undefined,
       );
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-        reason: 'authorization_backend_unavailable',
-      });
-      return { decision: 'DENY', reason: 'authorization_backend_unavailable' };
+      return deny('authorization_backend_unavailable');
     }
-
-    if (!allowed) {
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-        reason: 'not_authorized',
-        openFgaResult: { exactAllowed, wildcardAllowed },
-      });
-      return { decision: 'DENY', reason: 'not_authorized' };
+    const openFgaResult = { exactAllowed, wildcardAllowed };
+    if (!exactAllowed && !wildcardAllowed) {
+      return deny('not_authorized', { openFgaResult });
     }
 
     // Step 6 (Phase 6): PolicyEngine — an extra, org-defined restriction
@@ -333,23 +547,43 @@ export class AuthorizationService {
         resource: request.resource,
       },
     );
+    const policy = {
+      policyId: policyResult.policyId,
+      policyVersionId: policyResult.policyVersionId,
+    };
     if (policyResult.effect === 'DENY') {
-      const reason = policyResult.failureReason
-        ? 'policy_evaluation_failed'
-        : 'policy_denied';
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-        reason,
-        matchedRule: policyResult.matchedRule ?? null,
-        policyVersionId: policyResult.policyVersionId ?? null,
-        policyFailureReason: policyResult.failureReason ?? null,
-      });
-      return { decision: 'DENY', reason };
+      return deny(
+        policyResult.failureReason
+          ? 'policy_evaluation_failed'
+          : 'policy_denied',
+        {
+          matchedRule: policyResult.matchedRule ?? null,
+          policyVersionId: policyResult.policyVersionId ?? null,
+          policyFailureReason: policyResult.failureReason ?? null,
+        },
+        policy,
+      );
+    }
+
+    // Redemption: a human approved this exact request, so the policy asking
+    // for approval and the risk ceiling are already satisfied; only DENY
+    // (above) refuses. The grant is consumed in `commit`.
+    if (redemption) {
+      return {
+        verdict: { decision: 'ALLOW' },
+        audit: {
+          policyVersionId: policyResult.policyVersionId ?? null,
+          matchedRule: policyResult.matchedRule ?? null,
+          openFgaResult,
+        },
+        ...policy,
+        task,
+      };
     }
 
     // Step 7 (Phase 6): RiskEngine. finalRiskScore vs. this task's own
-    // riskCeiling (Phase 5's field, unused until now) — either that or
-    // the matched policy rule itself asking for approval routes this
-    // request to APPROVAL_REQUIRED instead of ALLOW.
+    // riskCeiling — either that or the matched policy rule itself asking
+    // for approval routes this request to APPROVAL_REQUIRED instead of ALLOW.
     const riskResult = await this.riskEngine.score(tenantClient, {
       tenantId,
       toolId: request.toolId,
@@ -359,6 +593,11 @@ export class AuthorizationService {
       agentId: authenticatedAgentId,
       policyMatch: policyResult.matchedRule,
     });
+    const scored = {
+      ...policy,
+      riskScore: riskResult.riskScore,
+      riskReasonCodes: riskResult.reasonCodes,
+    };
 
     if (
       policyResult.effect === 'APPROVAL_REQUIRED' ||
@@ -368,49 +607,40 @@ export class AuthorizationService {
         policyResult.effect === 'APPROVAL_REQUIRED'
           ? 'policy_requires_approval'
           : 'risk_ceiling_exceeded';
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_PENDING_APPROVAL, {
-        reason,
-        riskScore: riskResult.riskScore,
-        riskReasonCodes: riskResult.reasonCodes,
-        policyVersionId: policyResult.policyVersionId ?? null,
-        matchedRule: policyResult.matchedRule ?? null,
-        riskCeiling: task.riskCeiling,
-      });
       return {
-        decision: 'APPROVAL_REQUIRED',
-        reason,
-        riskScore: riskResult.riskScore,
-        policyVersionId: policyResult.policyVersionId ?? null,
-        deterministicRiskScore: riskResult.riskScore,
-        riskReasonCodes: riskResult.reasonCodes,
-        riskCeiling: task.riskCeiling,
+        verdict: {
+          decision: 'APPROVAL_REQUIRED',
+          reason,
+          riskScore: riskResult.riskScore,
+          policyVersionId: policyResult.policyVersionId ?? null,
+          deterministicRiskScore: riskResult.riskScore,
+          riskReasonCodes: riskResult.reasonCodes,
+          riskCeiling: task.riskCeiling,
+        },
+        audit: {
+          riskScore: riskResult.riskScore,
+          riskReasonCodes: riskResult.reasonCodes,
+          policyVersionId: policyResult.policyVersionId ?? null,
+          matchedRule: policyResult.matchedRule ?? null,
+          riskCeiling: task.riskCeiling,
+        },
+        ...scored,
       };
     }
 
-    // Step 8 (was Phase 5's step 6). `TasksService.incrementExecutionCount`
-    // (Phase 8 hoisted this atomic, race-closing increment out of this
-    // class and into `TasksService` — the same single-conditional-update
-    // pattern `AgentsService.enroll` uses for single-use enrollment tokens
-    // — since `GrantService`, Phase 8, needs to perform this exact same
-    // increment once for an approved action, at grant-issuance time; one
-    // implementation, not two copies that could drift).
-    const incremented = await this.tasksService.incrementExecutionCount(
-      tenantClient,
+    // Step 8: ALLOW. The atomic, race-closing `executionCount` increment
+    // (`TasksService.incrementExecutionCount`) happens in `commit`, in the
+    // same transaction as the `Decision` insert.
+    return {
+      verdict: { decision: 'ALLOW' },
+      audit: {
+        riskScore: riskResult.riskScore,
+        policyVersionId: policyResult.policyVersionId ?? null,
+        matchedRule: policyResult.matchedRule ?? null,
+        openFgaResult,
+      },
+      ...scored,
       task,
-    );
-    if (!incremented) {
-      await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_DENIED, {
-        reason: 'task_execution_limit_reached',
-      });
-      return { decision: 'DENY', reason: 'task_execution_limit_reached' };
-    }
-
-    await audit(AUDIT_EVENT_TYPES.AUTHORIZATION_ALLOWED, {
-      riskScore: riskResult.riskScore,
-      policyVersionId: policyResult.policyVersionId ?? null,
-      matchedRule: policyResult.matchedRule ?? null,
-      openFgaResult: { exactAllowed, wildcardAllowed },
-    });
-    return { decision: 'ALLOW' };
+    };
   }
 }

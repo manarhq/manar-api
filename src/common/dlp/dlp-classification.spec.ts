@@ -11,6 +11,7 @@ import {
 const blocks: Array<[string, string]> = [
   [
     'jwt',
+    // nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token (synthetic DLP fixture, signature is "signature-value")
     'token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl',
   ],
   [
