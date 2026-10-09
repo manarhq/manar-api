@@ -9,13 +9,40 @@ stages:
 include:
   - local: deploy/ci/fleet-deploy.gitlab-ci.yml
 
+# One pipeline per change on the shared runner: a branch with an open merge request runs only
+# the merge request pipeline. main, tags, branches without an MR and manar-fleet trigger
+# pipelines run as before.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - when: always
+
 # The ordinary jobs never run in a manar-fleet deploy pipeline (FLEET_MODE set).
 .ci-rules:
   rules:
     - if: $FLEET_MODE
       when: never
-    # Same as before rules existed: branch pipelines only, no duplicate merge request pipelines.
+    - when: on_success
+
+# The app build and e2e: skipped in a merge request that only changes docs/. Every other
+# pipeline (main, tags, branches) always runs them.
+.code-rules:
+  rules:
+    - if: $FLEET_MODE
+      when: never
     - if: $CI_PIPELINE_SOURCE != "merge_request_event"
+    - changes:
+        # Every path except docs/: root files, then any top-level directory not named docs.
+        - '*'
+        - '[!d]*/**/*'
+        - 'd[!o]*/**/*'
+        - 'do[!c]*/**/*'
+        - 'doc[!s]*/**/*'
+        - 'docs?*/**/*'
+        - '{d,do,doc}/**/*'
 
 variables:
   PNPM_HOME: '$CI_PROJECT_DIR/.pnpm'
@@ -25,9 +52,13 @@ variables:
 # version pinned in package.json's "packageManager" field from the npm
 # registry, which verifies package integrity - no unpinned remote script
 # execution.
+# Job and service images are pinned by digest (@sha256:...): the shared runner reuses images
+# already on the VM, and a digest cannot be satisfied by a retagged local copy.
 default:
   tags: [manar]
-  image: node:24.14.1
+  # A newer pipeline on the same ref cancels this one (deploy and publish jobs opt out).
+  interruptible: true
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/node:24.14.1@sha256:80fc934952c8f1b2b4d39907af7211f8a9fff1a4c2cf673fb49099292c251cec
   before_script:
     - export PATH="$PNPM_HOME/bin:$PATH"
     - corepack enable
@@ -39,28 +70,35 @@ default:
     # unresolved imports until they are compiled.
     - pnpm packages:build
 
-cache:
+# Jobs only read the pnpm store; lint is the one job that writes it back.
+cache: &pnpm-cache
   key:
     files:
       - pnpm-lock.yaml
   paths:
     - .pnpm-store
+  policy: pull
 
 lint:
   rules: !reference [.ci-rules, rules]
   stage: lint
+  cache:
+    <<: *pnpm-cache
+    policy: pull-push
   script:
     - pnpm lint
 
 typecheck:
   rules: !reference [.ci-rules, rules]
   stage: typecheck
+  needs: []
   script:
     - pnpm typecheck
 
 test:unit:
   rules: !reference [.ci-rules, rules]
   stage: test
+  needs: []
   # Phase 2's tenant-isolation tests run against a real Postgres (never
   # mocked — see docs/tenant-isolation.md), so this job needs a live
   # database service, unlike lint/typecheck/build which only need the
@@ -71,7 +109,7 @@ test:unit:
     # plus every tenant migration) is fsync-bound and stalled past its 60 s
     # hook timeout on the shared runner host.
     - &postgres-service
-      name: postgres:18.6-alpine
+      name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
       alias: postgres
       command:
         [
@@ -84,7 +122,7 @@ test:unit:
           'full_page_writes=off',
         ]
     - &redis-service
-      name: redis:8.10-alpine
+      name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/redis:8.10-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
       alias: redis
   variables:
     POSTGRES_USER: manar
@@ -98,8 +136,9 @@ test:unit:
     - pnpm test:cov
 
 test:e2e:
-  rules: !reference [.ci-rules, rules]
+  rules: !reference [.code-rules, rules]
   stage: test
+  needs: []
   # Phase 3's auth e2e suite (test/auth.e2e-spec.ts) provisions real
   # tenants — a real database via Postgres and a real Keycloak realm via
   # the Admin REST API — and validates tokens from a real Resource Owner
@@ -137,10 +176,10 @@ test:e2e:
   # OpenFGA) complete the deploy/docker-compose.yml stack the suite runs on.
   services:
     - *postgres-service
-    - name: quay.io/keycloak/keycloak:26.7.1
+    - name: quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6
       alias: keycloak
       command: ['start-dev']
-    - name: openbao/openbao:2.6.1
+    - name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/openbao/openbao:2.6.1@sha256:5b2486ab0fb90bbc788cc345b0a08616dfb375873ee8be5df3a2fd4d378a67e0
       alias: openbao
       command: ['server', '-dev']
     - *redis-service
@@ -149,7 +188,7 @@ test:e2e:
     # in the script, not set as a job variable, because job variables are
     # passed to every service and this image turns any KAFKA_* variable
     # into a broker setting.
-    - name: apache/kafka:4.3.1
+    - name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
       alias: kafka
       variables:
         KAFKA_NODE_ID: '1'
@@ -164,7 +203,7 @@ test:e2e:
         KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
         KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
         KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
-    - name: opensearchproject/opensearch:3.8.0
+    - name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/opensearchproject/opensearch:3.8.0@sha256:fafe3fc3587088674669235575aa166228c48bdb940294a8cdbbc1da75236a40
       alias: opensearch
       # discovery.type has a dot, which a CI variable name cannot carry;
       # the image's entrypoint passes -E flags through to OpenSearch.
@@ -360,8 +399,9 @@ test:e2e:
     - pnpm test:e2e
 
 build:
-  rules: !reference [.ci-rules, rules]
+  rules: !reference [.code-rules, rules]
   stage: build
+  needs: []
   script:
     - pnpm build
   artifacts:
@@ -439,10 +479,11 @@ docker:build-images:
 gitleaks:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
+  needs: []
   image:
-    name: ghcr.io/gitleaks/gitleaks:v8.30.1
+    name: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
     entrypoint: ['']
   # A full, non-shallow clone: the default depth would hide all but the last commits.
   variables:
@@ -460,10 +501,11 @@ gitleaks:
 semgrep:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
+  needs: []
   image:
-    name: semgrep/semgrep:1.172.0
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/semgrep/semgrep:1.172.0@sha256:65dcd4408adda7c183a6b4550cb1e9b19f7f627a6fbb7e0559bd466bedc44d7b
     entrypoint: ['']
   variables:
     GIT_DEPTH: 0
@@ -485,10 +527,11 @@ semgrep:
 trivy-fs:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
+  needs: []
   image:
-    name: aquasec/trivy:0.71.0
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/aquasec/trivy:0.71.0@sha256:016eae51fdcf989332a5404af7e8f625cd5d95d7c0907a221d080a996f556500
     entrypoint: ['']
   script:
     # Dependencies plus Dockerfile and Helm misconfigurations. Secrets are gitleaks' job here: the
@@ -508,10 +551,11 @@ trivy-fs:
 k8s-manifests:render:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
+  needs: []
   image:
-    name: alpine/helm:4.2.3
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/alpine/helm:4.2.3
     entrypoint: ['']
   script:
     - mkdir -p rendered
@@ -529,10 +573,10 @@ k8s-manifests:render:
 kubeconform:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
   image:
-    name: ghcr.io/yannh/kubeconform:v0.8.0-alpine
+    name: ghcr.io/yannh/kubeconform:v0.8.0-alpine@sha256:6b90a5f23d846140ce0194fe050b1995e546eba938f3a6bf10c039dd5e24588f
     entrypoint: ['']
   needs:
     - k8s-manifests:render
@@ -548,10 +592,10 @@ kubeconform:
 kube-linter:
   rules: !reference [.ci-rules, rules]
   inherit:
-    default: [tags]
+    default: [tags, interruptible]
   stage: security
   image:
-    name: stackrox/kube-linter:v0.8.3-alpine
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/stackrox/kube-linter:v0.8.3-alpine@sha256:b8311611c27032d4922bc67719225e373e4a0ab0c767bbdcf5f20a9306b1a3bb
     entrypoint: ['']
   needs:
     - k8s-manifests:render

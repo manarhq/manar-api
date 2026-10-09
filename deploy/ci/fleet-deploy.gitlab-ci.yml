@@ -17,8 +17,10 @@
 
 .fleet-deploy:
   stage: deploy
+  # Never cancelled by a newer pipeline halfway through a Helm upgrade or rollback.
+  interruptible: false
   image:
-    name: alpine/helm:4.2.3
+    name: alpine/helm:4.2.3@sha256:b97ba4f9b27fe7af16ee3d37e6815783c9d4a51289b6240a9024ec471611ae9b
     entrypoint: ['']
   before_script:
     - apk add --no-cache bash curl git >/dev/null
@@ -42,9 +44,11 @@
 fleet-inputs:test:
   stage: lint
   image:
-    name: alpine/helm:4.2.3
+    name: alpine/helm:4.2.3@sha256:b97ba4f9b27fe7af16ee3d37e6815783c9d4a51289b6240a9024ec471611ae9b
     entrypoint: ['']
   before_script: []
+  # A shell test: no pnpm store needed.
+  cache: []
   rules: !reference [.ci-rules, rules]
   script:
     - sh deploy/ci/validate-fleet-inputs.test.sh
