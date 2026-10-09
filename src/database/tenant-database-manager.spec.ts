@@ -31,6 +31,7 @@ function fakeConfigService(
   const values: AppConfig = {
     PORT: 3000,
     METRICS_PORT: 0,
+    WORKER_METRICS_PORT: 0,
     NODE_ENV: 'test',
     LOG_LEVEL: 'info',
     CONTROL_DATABASE_URL: process.env.CONTROL_DATABASE_URL ?? '',

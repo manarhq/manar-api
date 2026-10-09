@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { NativeConnection, Runtime, Worker } from '@temporalio/worker';
+import { NativeConnection, Worker } from '@temporalio/worker';
+import { installWorkerMetrics } from './metrics/worker-metrics';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Logger } from '@nestjs/common';
@@ -99,26 +100,10 @@ async function bootstrap(): Promise<void> {
     ...appContext.get(WebhookDeliveryActivitiesFactory).build(),
   };
 
-  // Temporal's own Prometheus exporter (worker task latency, slots, polls)
-  // on the internal metrics port; must be installed before the first
-  // connection creates the Runtime.
-  const metricsPort = configService.get('METRICS_PORT', { infer: true });
-  if (metricsPort !== 0) {
-    Runtime.install({
-      telemetryOptions: {
-        metrics: {
-          // Replaces core's own service_name="temporal-core-sdk" (two
-          // service_name labels would make the scrape invalid).
-          attachServiceName: false,
-          globalTags: { service_name: 'manar-api-worker' },
-          prometheus: {
-            bindAddress: `0.0.0.0:${metricsPort}`,
-            useSecondsForDurations: true,
-          },
-        },
-      },
-    });
-  }
+  installWorkerMetrics(
+    configService.get('WORKER_METRICS_PORT', { infer: true }),
+    logger,
+  );
 
   const connection = await NativeConnection.connect({ address });
 

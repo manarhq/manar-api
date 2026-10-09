@@ -22,6 +22,8 @@ import {
 export const MetricsConfigSchema = z.object({
   /** Internal-only /metrics listener. 0 disables it. Never exposed by the ingress. */
   METRICS_PORT: z.coerce.number().int().min(0).max(65535).default(9464),
+  /** The Temporal worker's own metrics port, so an API and a worker on one host never collide. 0 disables. */
+  WORKER_METRICS_PORT: z.coerce.number().int().min(0).max(65535).default(9465),
 });
 
 /** OTel's recommended http.server.request.duration buckets, in seconds. */

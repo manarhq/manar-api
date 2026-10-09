@@ -17,8 +17,10 @@ import { ManarAgent } from '../packages/sdk-node/dist/index.js';
 
 const API = process.env.LOAD_API ?? 'http://localhost:3900';
 const KEYCLOAK = process.env.KEYCLOAK_BASE_URL ?? 'http://localhost:8081';
+// demo:seed writes a non-demo tenant under .manar-demo/<slug>/.
 const CREDS =
-  process.env.LOAD_CREDENTIALS ?? '.manar-demo/tenant-credentials.json';
+  process.env.LOAD_CREDENTIALS ??
+  `.manar-demo/${process.env.MANAR_SEED_TENANT_SLUG ?? 'p3-load'}/tenant-credentials.json`;
 const COUNT = Number(process.env.LOAD_AGENTS ?? 10);
 const OUT = 'load/.identities';
 const DEMO_TENANT = 'vax-security-ops-demo';

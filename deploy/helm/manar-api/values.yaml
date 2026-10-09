@@ -147,13 +147,18 @@ terminationGracePeriodSeconds: 45
 # Kubernetes Service name instead of the compose service name — override
 # per-environment as needed, e.g. a managed Postgres/Kafka's real host).
 # Internal Prometheus listener (src/metrics/metrics.ts, METRICS_PORT).
-# Never routed by the ingress; the NetworkPolicy admits only the monitoring
-# namespace below.
+# Never routed by the ingress; the NetworkPolicy admits only the Prometheus pods
+# selected below.
 metrics:
   port: 9464
+  # On-prem Prometheus runs in `observability` (default deny there too);
+  # only its pods may scrape.
   scraperNamespaceSelector:
     labels:
-      kubernetes.io/metadata.name: monitoring
+      kubernetes.io/metadata.name: observability
+  scraperPodSelector:
+    labels:
+      app.kubernetes.io/name: prometheus
 
 config:
   METRICS_PORT: '9464'

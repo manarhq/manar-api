@@ -10,6 +10,7 @@ import { TenantDatabaseManager } from '../../database/tenant-database-manager.se
 import { TenantProvisioningService } from '../../keycloak/tenant-provisioning.service';
 import { KeycloakAdminClient } from '../../keycloak/keycloak-admin.client';
 import { OpenBaoKvClient } from '../../openbao/openbao-kv.client';
+import { DEMO_TENANT_SLUG, seedPaths } from './demo-seed-paths';
 import {
   ensureMicrosoftFixtureTools,
   MICROSOFT_DEFENDER_TOOL,
@@ -30,8 +31,7 @@ interface DemoSeedOptions {
 }
 
 /** Fixed, deterministic identifiers — never randomized — so re-running this command finds and reuses everything a prior run already created (Section 85: "idempotently provisions"). */
-const TENANT_SLUG =
-  process.env.MANAR_SEED_TENANT_SLUG ?? 'vax-security-ops-demo';
+const TENANT_SLUG = process.env.MANAR_SEED_TENANT_SLUG ?? DEMO_TENANT_SLUG;
 const TENANT_NAME =
   process.env.MANAR_SEED_TENANT_NAME ?? 'VAX Security Operations Demo';
 
@@ -361,7 +361,8 @@ const SOC_LLM_TASK_NAME =
  * purely as an ordinary API/SDK client using credentials it was given —
  * it never touches Postgres/Keycloak admin APIs directly.
  */
-const CREDENTIALS_FILE_PATH = '.manar-demo/tenant-credentials.json';
+const SEED_PATHS = seedPaths(TENANT_SLUG);
+const CREDENTIALS_FILE_PATH = SEED_PATHS.credentials;
 
 interface DemoTenantCredentials {
   tenantId: string;
@@ -777,7 +778,7 @@ export class DemoSeedCommand extends CommandRunner {
       );
 
       const identityStore = new FileIdentityStore(
-        `.manar-demo/identities/${agent.slug}.identity`,
+        SEED_PATHS.identity(agent.slug),
         'manar-demo-seed-identity-not-for-production',
       );
       const manar = new ManarAgent({

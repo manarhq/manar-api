@@ -27,6 +27,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               {{- toYaml .Values.metrics.scraperNamespaceSelector.labels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.metrics.scraperPodSelector.labels | nindent 14 }}
   egress:
     - ports:
         - port: 53
