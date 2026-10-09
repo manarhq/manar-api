@@ -93,6 +93,11 @@ which branch. Policy resource patterns matched exactly or `*` only, so a policy 
 - A `*` task selector plus the policy is the project restriction; a tenant that publishes no policy
   for the tool still has the project pin and the token's own scope (a project access token).
 - A project access token can read public projects on the instance; the project pin refuses them.
+- **Mixed builds on one tenant.** The migration adds the enum value `GITLAB` to `ToolProtocol`. The
+  value alone is harmless, but an API built before this change cannot read a `GITLAB` tool row:
+  its `GET /tools` (console Tools page) fails with 500 as soon as one exists in its tenant (seen on
+  9 Oct on the shared demo tenant; the row was removed again). Register a GitLab tool only in a
+  tenant whose every API and worker runs this build or later.
 - Rollback: revert the commits; the enum value stays (PostgreSQL cannot drop one, see the migration).
 
 ## Enforcement-label impact

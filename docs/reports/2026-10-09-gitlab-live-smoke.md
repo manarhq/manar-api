@@ -58,6 +58,14 @@ After the run `~/manar-demo/coding/reset-demo-repo.sh` put the project back to i
 3. **Gitaly "Deadline Exceeded" on writes** (while creating the demo project): GitLab answered 400
    although the commit had landed. The connector treats that answer to a mutation as `UNKNOWN`.
 
+## Shared demo tenant
+
+The runs used the shared demo tenant. Its other API (:3000) was an older build that cannot read a
+`GITLAB` tool row, so its `GET /tools` failed with 500 while `gitlab-demo` was registered. After the
+runs the tool row, its 13 actions and its 63 tool-invocation rows were deleted and the three coding
+tasks revoked; `GET /tools` on :3000 answered 200 again. Decisions, approvals and audit events of the
+runs were kept. See ADR-0012 ("Mixed builds on one tenant").
+
 ## Not covered by this run
 
 - Protection change and CI variable set were refused by the person, so not executed live. With the
