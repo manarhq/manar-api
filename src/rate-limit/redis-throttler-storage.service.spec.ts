@@ -4,9 +4,11 @@ import type { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import { RedisThrottlerStorageService } from './redis-throttler-storage.service';
 
-function fakeConfigService(): ConfigService<AppConfig, true> {
+function fakeConfigService(
+  url = process.env.REDIS_URL ?? 'redis://localhost:6379',
+): ConfigService<AppConfig, true> {
   return {
-    get: () => process.env.REDIS_URL ?? 'redis://localhost:6379',
+    get: (key: string) => (key === 'RATE_LIMIT_REDIS_TIMEOUT_MS' ? 250 : url),
   } as unknown as ConfigService<AppConfig, true>;
 }
 

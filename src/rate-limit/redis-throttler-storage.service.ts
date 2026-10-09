@@ -120,10 +120,14 @@ export class RedisThrottlerStorageService
 {
   private readonly logger = new Logger(RedisThrottlerStorageService.name);
   private readonly url: string;
+  private readonly timeoutMs: number;
   private client: RedisClientType | undefined;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.url = this.configService.get('REDIS_URL', { infer: true });
+    this.timeoutMs = this.configService.get('RATE_LIMIT_REDIS_TIMEOUT_MS', {
+      infer: true,
+    });
   }
 
   async onModuleInit(): Promise<void> {
@@ -138,7 +142,9 @@ export class RedisThrottlerStorageService
 
   async onModuleDestroy(): Promise<void> {
     try {
-      await this.client?.quit();
+      // quit() waits for a reply a reconnecting client never gets.
+      if (this.client?.isReady) await this.client.quit();
+      else this.client?.destroy();
     } catch (error) {
       this.logger.warn(
         `Error closing Redis throttler connection: ${errorMessage(error)}`,
@@ -183,8 +189,17 @@ export class RedisThrottlerStorageService
     };
   }
 
+  /**
+   * Fails fast whenever Redis is not ready: a client that is reconnecting
+   * rejects at once (no offline queue), and a new connection attempt or a
+   * command never waits longer than RATE_LIMIT_REDIS_TIMEOUT_MS. The agent
+   * surface turns any of these into a 503 enforcement_dependency_unavailable.
+   */
   private async getClient(): Promise<RedisClientType> {
-    if (this.client?.isOpen) return this.client;
+    if (this.client?.isReady) return this.client;
+    if (this.client?.isOpen) {
+      throw new Error('Redis throttler storage: reconnecting');
+    }
     await this.connect();
     if (!this.client) {
       throw new Error('Redis throttler storage: no connection available');
@@ -193,13 +208,41 @@ export class RedisThrottlerStorageService
   }
 
   private async connect(): Promise<void> {
-    this.client = createClient({ url: this.url });
-    this.client.on('error', (error: unknown) => {
+    const client: RedisClientType = createClient({
+      url: this.url,
+      disableOfflineQueue: true,
+      socket: { connectTimeout: this.timeoutMs },
+      commandOptions: { timeout: this.timeoutMs },
+    });
+    client.on('error', (error: unknown) => {
       this.logger.warn(
         `Redis throttler connection error: ${errorMessage(error)}`,
       );
     });
-    await this.client.connect();
+    this.client = client;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        client.connect(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(`Redis connect timed out after ${this.timeoutMs} ms`),
+              ),
+            this.timeoutMs,
+          );
+        }),
+      ]);
+    } catch (error) {
+      // Drop the half-open client so the next request starts a fresh,
+      // bounded attempt instead of waiting on this one.
+      this.client = undefined;
+      client.destroy();
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 

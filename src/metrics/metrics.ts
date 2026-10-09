@@ -5,6 +5,7 @@ import { z } from 'zod';
 import {
   collectDefaultMetrics,
   Counter,
+  Gauge,
   Histogram,
   Registry,
 } from 'prom-client';
@@ -62,6 +63,28 @@ const decisionDuration = new Histogram({
   buckets: DURATION_BUCKETS,
   registers: [registry],
 });
+
+const fallbackActive = new Gauge({
+  name: 'manar_rate_limit_fallback_active',
+  help: '1 while a fail-open rate-limit surface uses in-memory limits because Redis is unavailable.',
+  labelNames: ['surface'],
+  registers: [registry],
+});
+
+const fallbackRequests = new Counter({
+  name: 'manar_rate_limit_fallback_requests_total',
+  help: 'Requests limited in memory because Redis was unavailable.',
+  labelNames: ['surface'],
+  registers: [registry],
+});
+
+export function recordRateLimitFallback(
+  surface: string,
+  active: boolean,
+): void {
+  fallbackActive.set({ surface }, active ? 1 : 0);
+  if (active) fallbackRequests.inc({ surface });
+}
 
 const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
