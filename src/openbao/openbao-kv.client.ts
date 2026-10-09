@@ -76,6 +76,20 @@ export class OpenBaoKvClient {
     await this.request('POST', `${this.mountPath}/data/${path}`, { data });
   }
 
+  /**
+   * Reads only the KV v2 metadata of `path` (never the secret value) and returns its
+   * `custom_metadata`, or null when the path has none. Used for credential expiry dates that an
+   * operator records with `bao kv metadata put -custom-metadata=expires_at=<ISO date> <path>`.
+   */
+  async readCustomMetadata(
+    path: string,
+  ): Promise<Record<string, string> | null> {
+    const response = await this.request<{
+      custom_metadata?: Record<string, string> | null;
+    }>('GET', `${this.mountPath}/metadata/${path}`);
+    return response.custom_metadata ?? null;
+  }
+
   private async request<T>(
     method: 'GET' | 'POST',
     apiPath: string,

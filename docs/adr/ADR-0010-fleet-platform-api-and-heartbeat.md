@@ -86,3 +86,32 @@ manar-api stays the security control plane, so the addition has to be small and 
 -s standardFlowEnabled=false -s publicClient=false`, create realm role `manar-platform-admin`,
   add it to the client's service account, then put the client secret in manar-fleet's env var
   named by that deployment's `platformSecretEnv`. The secret is never committed or printed.
+
+## Addendum (9 Oct 2026): ops routes and heartbeat sections for admin v2
+
+- **Platform kill switch** for manar-fleet: `GET /platform/v1/kill-switch`,
+  `POST .../kill-switch/engage` `{reason, staff}`, `POST .../kill-switch/release`
+  `{staff, proposedBy?, expectedEngagementId}`. Same control-DB row as
+  `POST /kill-switches/platform`. Each engagement is named by its activation time
+  (`engagementId`); a release ends only the engagement it names, with one conditional update
+  (`WHERE active AND activatedAt = expected`), else 409 `engagement_changed`. So a release
+  proposed in manar-fleet for one incident can never end a later stop. Who may engage (one owner,
+  at once) and release (proposed, then approved by someone else) is enforced in manar-fleet.
+  Residual: the older `POST /kill-switches/platform/deactivate` (tenant admin plus the operator
+  token) can still turn it off without a second person.
+- **Tenant ops view** `GET /platform/v1/tenants/:id/ops` (ACTIVE tenants): active kill switches
+  with who and when (`platform: true` for the suspension row), quarantines active or released in
+  the last 30 days with the detector's reason code (the watcher's generated explanation is left
+  out), decisions per UTC month for 6 months, agents enrolled, and each tool's credential expiry.
+  The expiry is the `expires_at` an operator records in the OpenBao KV metadata, never read from
+  the secret: `bao kv metadata put -custom-metadata=expires_at=2026-11-08T00:00:00Z secret/<path>`.
+- **Audit chain check** `POST /platform/v1/tenants/:id/audit/verify`: the full chain walk, with
+  the event count; the result is kept in manar-fleet.
+- **Heartbeat sections** (all optional, strict on both ends; the sender validates with the same
+  schema before signing, so nothing outside it is ever sent): `health.openbaoSealed`
+  (`/v1/sys/seal-status`), `backup.lastRestoreTestStatus` (from the backup file),
+  `expiries[{kind: agent_ca | tls_server | tool_credential, notAfter}]` (no names),
+  `auditChain {status, tenantsChecked, tenantsBroken, verifiedAt}` (recomputed at most every
+  `FLEET_AUDIT_VERIFY_MINUTES`, default 60), `usage.months[{month, decisions}]` (whole
+  deployment) and `killSwitch {active, activatedAt}`. A section that cannot be read is left out.
+  Deploy manar-fleet first: it rejects unknown fields.

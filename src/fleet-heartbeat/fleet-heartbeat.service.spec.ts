@@ -6,13 +6,17 @@ import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import type { ReadinessService } from '../health/readiness.service';
 import type { OpenBaoKvClient } from '../openbao/openbao-kv.client';
+import type { PlatformOpsService } from '../platform/platform-ops.service';
 import { FleetHeartbeatService } from './fleet-heartbeat.service';
 
 const keys = generateKeyPairSync('ed25519');
 const TENANT_ID = '11111111-2222-4333-8444-555555555555';
 const DEPLOYMENT_ID = '99999999-8888-4777-8666-555555555555';
 
-function service(env: Record<string, unknown>) {
+function service(
+  env: Record<string, unknown>,
+  opsOverride: Partial<Record<keyof PlatformOpsService, unknown>> = {},
+) {
   const values: Record<string, unknown> = {
     FLEET_HEARTBEAT_INTERVAL_MINUTES: 5,
     FLEET_HEARTBEAT_KEY_PATH: 'fleet/heartbeat-signing-key',
@@ -65,7 +69,32 @@ function service(env: Record<string, unknown>) {
           .toString(),
       }),
   } as unknown as OpenBaoKvClient;
-  return new FleetHeartbeatService(config, readiness, control, tenants, kv);
+  const ops = {
+    openbaoSealed: () => Promise.resolve(false),
+    expiries: () =>
+      Promise.resolve([
+        { kind: 'tool_credential', notAfter: '2026-11-08T00:00:00.000Z' },
+      ]),
+    auditChain: () =>
+      Promise.resolve({
+        status: 'ok',
+        tenantsChecked: 1,
+        tenantsBroken: 0,
+        verifiedAt: '2026-10-09T08:00:00.000Z',
+      }),
+    usageMonths: () => Promise.resolve([{ month: '2026-10', decisions: 1200 }]),
+    killSwitchState: () =>
+      Promise.resolve({ active: false, activatedAt: null }),
+    ...opsOverride,
+  } as unknown as PlatformOpsService;
+  return new FleetHeartbeatService(
+    config,
+    readiness,
+    control,
+    tenants,
+    kv,
+    ops,
+  );
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -98,13 +127,17 @@ describe('FleetHeartbeatService', () => {
     ).toBe(true);
     const payload = JSON.parse(bytes.toString()) as Record<string, unknown>;
     expect(Object.keys(payload).sort()).toEqual([
+      'auditChain',
       'backup',
       'counts',
       'deploymentId',
+      'expiries',
       'gitSha',
       'health',
+      'killSwitch',
       'nonce',
       'timestamp',
+      'usage',
       'v',
       'version',
     ]);
@@ -115,12 +148,20 @@ describe('FleetHeartbeatService', () => {
       health: {
         status: 'degraded',
         checks: { 'postgres-control': 'up', openbao: 'down' },
+        openbaoSealed: false,
       },
       backup: {
         status: 'unknown',
         lastBackupAt: null,
         lastRestoreTestAt: null,
+        lastRestoreTestStatus: null,
       },
+      expiries: [
+        { kind: 'tool_credential', notAfter: '2026-11-08T00:00:00.000Z' },
+      ],
+      auditChain: { status: 'ok', tenantsChecked: 1, tenantsBroken: 0 },
+      usage: { months: [{ month: '2026-10', decisions: 1200 }] },
+      killSwitch: { active: false, activatedAt: null },
       counts: { tenants: 1, tenantsActive: 1, agents: 3, agentsActive: 2 },
     });
     const text = bytes.toString();
@@ -134,5 +175,38 @@ describe('FleetHeartbeatService', () => {
     const b = await s.payload();
     expect(a.nonce).not.toBe(b.nonce);
     expect(a.nonce).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('leaves out an ops section it cannot read, and still sends', async () => {
+    const p = await service(
+      { FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID },
+      {
+        expiries: () => Promise.reject(new Error('openbao down')),
+        auditChain: () => Promise.reject(new Error('db down')),
+      },
+    ).payload();
+    expect(p.expiries).toBeUndefined();
+    expect(p.auditChain).toBeUndefined();
+    expect(p.usage).toBeDefined();
+  });
+
+  it('validates before signing: a field outside the schema is never sent', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    const s = service(
+      { FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID },
+      {
+        expiries: () =>
+          Promise.resolve([
+            {
+              kind: 'tool_credential',
+              notAfter: '2026-11-08T00:00:00.000Z',
+              name: 'acme-graph',
+            },
+          ]),
+      },
+    );
+    await expect(s.payload()).rejects.toThrow();
+    expect(await s.send('http://fleet.internal/heartbeats')).toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
