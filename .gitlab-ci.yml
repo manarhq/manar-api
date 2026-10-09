@@ -26,6 +26,7 @@ variables:
 # registry, which verifies package integrity - no unpinned remote script
 # execution.
 default:
+  tags: [manar]
   image: node:24.14.1
   before_script:
     - export PATH="$PNPM_HOME/bin:$PATH"
