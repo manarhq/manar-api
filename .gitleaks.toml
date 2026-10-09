@@ -8,7 +8,7 @@ title = "manar-api gitleaks config"
 [extend]
 useDefault = true
 
-[[allowlists]]
+[allowlist]
 description = "Triaged false positives — confirmed non-secrets, not redacted history"
 
 # One-time full-history scan run 2026-08-19 (Phase 12b) found exactly one
@@ -28,23 +28,3 @@ paths = [
 regexes = [
   '''nestjs/nest/master\?token=abc123def456''',
 ]
-
-# Triaged 2026-10-09 (25 findings once the job scans the full history): synthetic fixtures
-# the DLP floor, DLP classification, credential broker, LLM proxy, assistant and JWT guard
-# specs feed to the detectors and redaction (sample JWTs, Azure connection-string keys,
-# placeholder PEM headers, keyboard-pattern client secrets, fake Keycloak subjects). None was
-# ever issued, so nothing to rotate. Scoped to spec files and the four rules they trip.
-# ponytail: path scope, so a real secret pasted into a spec under these four rules would pass;
-# CI fixtures come from env or fakes, never real credentials.
-[[allowlists]]
-description = "Synthetic detector fixtures in unit and e2e specs"
-targetRules = ["azure-ad-client-secret", "generic-api-key", "private-key", "jwt"]
-paths = ['''\.spec\.ts$''', '''\.e2e-spec\.ts$''']
-
-# docs/kubernetes.md quotes the README badge URL triaged above (NestJS's sample token).
-[[allowlists]]
-description = "docs/kubernetes.md quoting the NestJS sample badge token"
-regexTarget = "match"
-paths = ['''^docs/kubernetes\.md$''']
-regexes = ['''token=abc123def456''']
-condition = "AND"
