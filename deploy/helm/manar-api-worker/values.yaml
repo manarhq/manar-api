@@ -196,30 +196,141 @@ podDisruptionBudget:
   maxUnavailable: 1
 
 networkPolicy:
+  # Per-app allow rules (templates/networkpolicy.yaml). Each entry is
+  # { name, ports, from } (ingress) or { name, ports, to } (egress) with raw
+  # NetworkPolicy peers, so a cluster with other labels overrides the list.
+  # Namespaces: manar-prod (apps), manar-platform (backing services),
+  # kube-system (Traefik ingress, DNS); labels as set by manar/manar-infra.
+  # An ingress entry without `from` admits any source on its ports.
   enabled: true
-  # No ingress rules at all: no Service, nothing ever initiates a
-  # connection to this pod.
-  egressTargets:
+  # No Service: nothing connects to the worker.
+  ingress: []
+  egress:
+    # DNS (CoreDNS in kube-system). Kept even though the namespace policy in
+    # manar/manar-infra also allows it, so the chart works on its own.
+    - name: dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+    # Backing services in manar-platform, selected by the labels the operators
+    # set (manar/manar-infra). NetworkPolicy matches pods, not Service names:
+    # manar-pg-rw/-ro/-r are CNPG instances, valkey-primary is the HAProxy in
+    # front of Valkey (never the servers or the sentinel directly).
     - name: postgres
-      port: 5432
+      ports: [{ port: 5432, protocol: TCP }]
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-platform }
+          podSelector:
+            matchLabels:
+              { cnpg.io/cluster: manar-pg, cnpg.io/podRole: instance }
     - name: openbao
-      port: 8200
+      ports: [{ port: 8200, protocol: TCP }]
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-platform }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: openbao
+              app.kubernetes.io/instance: openbao
+              app.kubernetes.io/component: server
+    - name: valkey
+      ports: [{ port: 6379, protocol: TCP }]
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-platform }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey-primary
+              app.kubernetes.io/component: proxy
+    - name: keycloak
+      ports: [{ port: 8080, protocol: TCP }]
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-platform }
+          podSelector:
+            matchLabels:
+              {
+                app.kubernetes.io/name: keycloak,
+                app.kubernetes.io/instance: keycloak,
+              }
+    - name: openfga
+      ports:
+        - { port: 8080, protocol: TCP }
+        - { port: 8081, protocol: TCP }
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-platform }
+          podSelector:
+            matchLabels:
+              {
+                app.kubernetes.io/name: openfga,
+                app.kubernetes.io/instance: openfga,
+              }
     - name: temporal
-      port: 7233
+      ports: [{ port: 7233, protocol: TCP }]
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-platform }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: temporal
+              app.kubernetes.io/instance: temporal
+              app.kubernetes.io/component: frontend
     - name: kafka
-      port: 9092
+      ports: [{ port: 9092, protocol: TCP }]
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-platform }
+          podSelector:
+            matchLabels: { strimzi.io/cluster: manar-kafka }
     - name: opensearch
-      port: 9200
+      ports: [{ port: 9200, protocol: TCP }]
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-platform }
+          podSelector:
+            matchLabels:
+              {
+                app.kubernetes.io/name: opensearch,
+                app.kubernetes.io/instance: opensearch,
+              }
     - name: manar-ai
-      port: 50051
+      ports: [{ port: 50051, protocol: TCP }]
+      to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-prod }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: manar-ai }
+    # The scripted demo's fixture tools, installed by this repo's demo-soc-tools
+    # chart into the same namespace. Remove in a deployment without it.
     - name: demo-soc-tools
-      port: 3100
-  dnsNamespaceSelector:
-    labels:
-      kubernetes.io/metadata.name: kube-system
-  dnsPodSelector:
-    labels:
-      k8s-app: kube-dns
+      ports: [{ port: 3100, protocol: TCP }]
+      to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: demo-soc-tools }
+    # Connectors and hosted model upstreams (Microsoft Graph and Defender,
+    # Azure OpenAI, Core42 Compass, GitLab, GitHub, Business Central): HTTPS to
+    # public addresses only. Narrow the CIDR to the providers' published ranges
+    # or route through an egress proxy where the platform has one.
+    - name: external-https
+      ports: [{ port: 443, protocol: TCP }]
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              [
+                10.0.0.0/8,
+                172.16.0.0/12,
+                192.168.0.0/16,
+                169.254.0.0/16,
+                100.64.0.0/10,
+              ]
 
 nodeSelector: {}
 tolerations: []

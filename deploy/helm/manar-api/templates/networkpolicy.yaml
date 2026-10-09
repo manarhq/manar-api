@@ -1,11 +1,10 @@
-{{/*
-Default-deny-by-omission: only the traffic listed below is allowed, in
-either direction. See docs/kubernetes.md for the full dependency-graph
-diagram this mirrors (deploy/docker-compose.yml's local-dev equivalent).
-Dependency pods are matched by app.kubernetes.io/name within *this
-policy's own namespace* — the assumed single-`manar`-namespace deployment
-model documented in docs/kubernetes.md. If a real deployment splits
-dependencies across namespaces, add a namespaceSelector per egress rule.
+{{- /*
+Per-app allow rules, values-driven (values.yaml networkPolicy.ingress and
+networkPolicy.egress, each a list of { name, ports, from|to } with raw
+NetworkPolicy peers). An ingress rule with no `from` admits any source on its
+ports. The namespace-level default-deny lives in the platform repo
+(manar/manar-infra); this policy lists what this app needs on its own, so it
+also works in a namespace without one.
 */}}
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
@@ -22,50 +21,23 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Human-facing REST API: only manar-web and the ingress-controller/
-    # gateway namespace may reach it.
+    {{- range .Values.networkPolicy.ingress }}
     - ports:
-        - port: http
-          protocol: TCP
+        {{- toYaml .ports | nindent 8 }}
+      {{- with .from }}
       from:
-        - namespaceSelector:
-            matchLabels:
-              {{- toYaml .Values.networkPolicy.webNamespaceSelector.labels | nindent 14 }}
-          podSelector:
-            matchLabels:
-              {{- toYaml .Values.networkPolicy.webPodSelector.labels | nindent 14 }}
-        - namespaceSelector:
-            matchLabels:
-              {{- toYaml .Values.networkPolicy.ingressNamespaceSelector.labels | nindent 14 }}
-    # Agent-facing mTLS listener: not source-restricted at the network
-    # layer (see values.yaml's service.agentMtlsPort comment — client-cert
-    # auth is the real trust boundary here, agents are workload identities
-    # that may run anywhere the cluster's ingress/gateway routes from).
-    - ports:
-        - port: agent-mtls
-          protocol: TCP
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- else }} []
+    {{- end }}
   egress:
-    # DNS
+    {{- range .Values.networkPolicy.egress }}
     - ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
+        {{- toYaml .ports | nindent 8 }}
+      {{- with .to }}
       to:
-        - namespaceSelector:
-            matchLabels:
-              {{- toYaml .Values.networkPolicy.dnsNamespaceSelector.labels | nindent 14 }}
-          podSelector:
-            matchLabels:
-              {{- toYaml .Values.networkPolicy.dnsPodSelector.labels | nindent 14 }}
-    # The real dependency graph (values.yaml's networkPolicy.egressTargets)
-    {{- range .Values.networkPolicy.egressTargets }}
-    - ports:
-        - port: {{ .port }}
-          protocol: TCP
-      to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .name }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- else }} []
     {{- end }}
 {{- end }}
