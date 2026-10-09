@@ -43,6 +43,7 @@ import {
 } from '../common/pagination/cursor-pagination';
 import { ApprovalRequestNotFoundError } from './approvals.errors';
 import { HandoverStore } from '../tools/handover.store';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ApprovalRequestService } from './approval-request.service';
@@ -362,7 +363,7 @@ export class ApprovalsController {
   @ApiOperation({
     summary: 'Collect, once, what an approved action produced for its approver',
     description:
-      'ADR-0011. Some actions produce a value only the approving person may see, never the agent: the temporary password of entra.user.password.reset and entra.user.create. Only the person who approved this request can collect it, exactly once; it is then deleted from OpenBao. 404 when there is nothing to collect (not executed yet, already collected, expired after 24 h, or the action produces nothing).',
+      'ADR-0011. Some actions produce a value only the approving person may see, never the agent: the temporary password of entra.user.password.reset and entra.user.create. Only the person who approved this request can collect it, exactly once; it is then deleted from OpenBao (KV v1, no versions). 404 when there is nothing to collect (not executed yet, already collected, expired after 24 h, or the action produces nothing). 503 when OpenBao is unavailable; there is no other store.',
   })
   @ApiParam({ name: 'id', description: 'ApprovalRequest ID', format: 'uuid' })
   @ApiResponse({ status: 200, description: '`{ approvalRequestId, value }`' })
@@ -386,7 +387,10 @@ export class ApprovalsController {
         'only the person who approved this request can collect its handover',
       );
     }
-    const value = await this.handoverStore.take(auth.tenant.id, id);
+    // Fail closed: OpenBao is the only store; when it fails this is a 503, never a fallback.
+    const value = await failClosed('openbao', () =>
+      this.handoverStore.take(auth.tenant.id, id),
+    );
     if (!value) throw new NotFoundException('nothing to collect');
     await this.auditService.recordSafely(tenantClient, auth.tenant.id, {
       eventType: AUDIT_EVENT_TYPES.APPROVAL_HANDOVER_COLLECTED,

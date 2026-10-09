@@ -25,6 +25,7 @@ import { TenantDatabaseManager } from '../src/database/tenant-database-manager.s
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
 import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
+import { HANDOVER_TTL_MS, HandoverStore } from '../src/tools/handover.store';
 import { AiAdvisoryClient } from '../src/ai-advisory/ai-advisory-client.service';
 import type { AppConfig } from '../src/config/env.validation';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
@@ -682,6 +683,19 @@ describe('Microsoft connector through the gateway (DEMO FIXTURE e2e)', () => {
       approvalRequestId: resetApproval.approvalId,
       value: { temporaryPassword: password },
     });
+    await collect(approverToken).expect(404);
+    // KV v1: the collected value is gone from OpenBao, with no version to undelete.
+    const kv = humanApp.get(OpenBaoKvClient);
+    const handoverPath = `handover/${tenant.id}/${resetApproval.approvalId}`;
+    expect(await kv.readV1(handoverPath)).toBeNull();
+
+    // An uncollected value older than 24 h is deleted by the sweep, for good.
+    await kv.writeV1(handoverPath, {
+      value: JSON.stringify({ temporaryPassword: 'expired-fixture-value' }),
+      createdAt: Date.now() - HANDOVER_TTL_MS - 1,
+    });
+    expect(await humanApp.get(HandoverStore).sweep()).toBeGreaterThanOrEqual(1);
+    expect(await kv.readV1(handoverPath)).toBeNull();
     await collect(approverToken).expect(404);
 
     // ---- 3. Group change: approval, then executed ----

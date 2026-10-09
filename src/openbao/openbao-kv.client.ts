@@ -51,9 +51,7 @@ export class OpenBaoKvClient {
       metadata: { version: number; deletion_time?: string };
     }>('GET', `${this.mountPath}/data/${path}`);
 
-    // With `delete_version_after` set, `deletion_time` is a future time.
-    const deletionTime = response.metadata?.deletion_time;
-    if (deletionTime && new Date(deletionTime).getTime() <= Date.now()) {
+    if (response.metadata?.deletion_time) {
       throw new Error(
         `OpenBao KV secret at "${path}" has been deleted (version ${response.metadata.version})`,
       );
@@ -74,25 +72,43 @@ export class OpenBaoKvClient {
   async writeSecret(
     path: string,
     data: Record<string, unknown>,
-    options: { deleteVersionAfter?: string } = {},
   ): Promise<void> {
-    if (options.deleteVersionAfter) {
-      await this.request('POST', `${this.mountPath}/metadata/${path}`, {
-        delete_version_after: options.deleteVersionAfter,
-      });
-    }
     await this.request('POST', `${this.mountPath}/data/${path}`, { data });
   }
 
-  /** Deletes every version and the metadata of the secret at `path` (KV v2 `metadata` delete): nothing is left to undelete. */
-  async destroySecret(path: string): Promise<void> {
-    await this.request('DELETE', `${this.mountPath}/metadata/${path}`);
+  /**
+   * KV v1 (no versions, delete is permanent), for values that must not
+   * survive their deletion, such as an approval handover (ADR-0011). `path`
+   * includes the mount, e.g. `handover/<tenant>/<id>`. Reads and lists
+   * return `null` for a missing path; any other failure throws.
+   */
+  async readV1(path: string): Promise<Record<string, unknown> | null> {
+    return this.request<Record<string, unknown>>('GET', path, undefined, true);
+  }
+
+  async writeV1(path: string, data: Record<string, unknown>): Promise<void> {
+    await this.request('POST', path, data);
+  }
+
+  async deleteV1(path: string): Promise<void> {
+    await this.request('DELETE', path);
+  }
+
+  async listV1(path: string): Promise<string[]> {
+    const data = await this.request<{ keys?: string[] }>(
+      'GET',
+      `${path}?list=true`,
+      undefined,
+      true,
+    );
+    return data?.keys ?? [];
   }
 
   private async request<T>(
     method: 'GET' | 'POST' | 'DELETE',
     apiPath: string,
     body?: unknown,
+    nullOn404 = false,
   ): Promise<T> {
     const response = await fetch(`${this.baseUrl}/v1/${apiPath}`, {
       method,
@@ -103,6 +119,10 @@ export class OpenBaoKvClient {
       body: body ? JSON.stringify(body) : undefined,
     });
 
+    if (nullOn404 && response.status === 404) {
+      await response.body?.cancel();
+      return null as T;
+    }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       this.logger.error(
