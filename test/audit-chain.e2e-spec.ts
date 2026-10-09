@@ -78,6 +78,7 @@ function fakeConfigService(
     PLATFORM_API_CLIENT_ID: 'manar-fleet',
     PLATFORM_API_ROLE: 'manar-platform-admin',
     FLEET_HEARTBEAT_INTERVAL_MINUTES: 5,
+    FLEET_AUDIT_VERIFY_MINUTES: 60,
     FLEET_HEARTBEAT_KEY_PATH: 'fleet/heartbeat-signing-key',
     APPROVAL_GRANT_TTL_MS: 300_000,
     APPROVAL_REQUEST_TTL_MS: 1_800_000,

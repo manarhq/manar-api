@@ -77,23 +77,4 @@ export class PlatformKillSwitchService {
       },
     });
   }
-
-  /** Idempotent: deactivating an already-inactive (or never-activated) switch is a no-op beyond recording who last called it. */
-  async deactivate(deactivatedBy: string): Promise<PlatformKillSwitchState> {
-    const now = new Date();
-    return this.control.platformKillSwitch.upsert({
-      where: { id: PLATFORM_KILL_SWITCH_SINGLETON_ID },
-      create: {
-        id: PLATFORM_KILL_SWITCH_SINGLETON_ID,
-        active: false,
-        deactivatedBy,
-        deactivatedAt: now,
-      },
-      update: {
-        active: false,
-        deactivatedBy,
-        deactivatedAt: now,
-      },
-    });
-  }
 }

@@ -86,3 +86,54 @@ manar-api stays the security control plane, so the addition has to be small and 
 -s standardFlowEnabled=false -s publicClient=false`, create realm role `manar-platform-admin`,
   add it to the client's service account, then put the client secret in manar-fleet's env var
   named by that deployment's `platformSecretEnv`. The secret is never committed or printed.
+
+## Addendum (9 Oct 2026): ops routes and heartbeat sections for admin v2
+
+- **Platform kill switch** for manar-fleet: `GET /platform/v1/kill-switch`,
+  `POST .../kill-switch/engage` `{reason, staff}`, `POST .../kill-switch/release`
+  `{staff, proposedBy?, expectedEngagementId}`. Same control-DB row as
+  `POST /kill-switches/platform`. Each engagement is named by its activation time
+  (`engagementId`); a release ends only the engagement it names, with one conditional update
+  (`WHERE active AND activatedAt = expected`), else 409 `engagement_changed`. So a release
+  proposed in manar-fleet for one incident can never end a later stop. Who may engage (one owner,
+  at once) and release (proposed, then approved by someone else) is enforced in manar-fleet.
+  The older `POST /kill-switches/platform/deactivate` (tenant admin plus the operator token) now
+  answers 403 `platform_release_requires_two_person`: one person could otherwise end any stop.
+  `POST /kill-switches/platform` still engages, so stopping stays easy.
+- **Tenant ops view** `GET /platform/v1/tenants/:id/ops` (ACTIVE tenants): active kill switches
+  with who and when (`platform: true` for the suspension row), quarantines active or released in
+  the last 30 days with the detector's reason code (the watcher's generated explanation is left
+  out), decisions per UTC month for 6 months, agents enrolled, and each tool's credential expiry.
+  The expiry is the `expires_at` an operator records in the OpenBao KV metadata, never read from
+  the secret: `bao kv metadata put -custom-metadata=expires_at=2026-11-08T00:00:00Z secret/<path>`.
+- **Audit chain check** `POST /platform/v1/tenants/:id/audit/verify`: the full chain walk, with
+  the event count; the result is kept in manar-fleet.
+- **Heartbeat sections** (all optional, strict on both ends; the sender validates with the same
+  schema before signing, so nothing outside it is ever sent): `health.openbaoSealed`
+  (`/v1/sys/seal-status`), `backup.lastRestoreTestStatus` (from the backup file),
+  `expiries[{kind: agent_ca | tls_server | tool_credential, notAfter}]` (no names),
+  `auditChain {status, tenantsChecked, tenantsBroken, verifiedAt}` (recomputed at most every
+  `FLEET_AUDIT_VERIFY_MINUTES`, default 60), `usage.months[{month, decisions}]` (whole
+  deployment) and `killSwitch {active, activatedAt}`. A section that cannot be read is left out.
+  Deploy manar-fleet first: it rejects unknown fields.
+- **Timed restore drill:** the backup file may carry `lastRestoreTestSeconds`; it rides in
+  `backup.lastRestoreTestSeconds`.
+- **Per-tenant catalog sections** (catalog workstream, for installs without a platform
+  connection): `tenants[{tenantId, catalog {features, packs, model}, llmTokensMonth {month,
+tokens}, connectors [{name, type, protocol, enabled, credentialExpiresAt}]}]`. This is the one
+  place the heartbeat names tenants (by id) and tools; still config and counts only, built field by
+  field so a credential or its reference can never ride along, and strict on both ends. The source
+  is bound to `HEARTBEAT_TENANT_CATALOG` (`CatalogService` once the catalog module is on main);
+  unbound, the section is left out. A tenant whose section fails is left out and logged by id.
+- **Usage tiers (assumption):** PRICING.md gives 250k decisions per month in the platform and "next
+  tier at +25%" without a tier width. manar-fleet and the admin treat each tier as a further 250k
+  per month until the founder sets the width; the usage screen says so.
+- **Tenant audit chains:** every engage and release through `/platform/v1/kill-switch` is also
+  written into each ACTIVE tenant's own audit chain (`kill_switch.activated` / `.deactivated`,
+  scope `PLATFORM`, the staff member's name and the engagement id), so the customer's
+  tamper-evident log shows Manar staff stopping and releasing its agents. The switch is in the
+  control DB, so this is not one transaction: a tenant that cannot be written is logged by id and
+  never undoes the stop.
+- **Size and time bounds:** the heartbeat payload is at most 262,144 base64 characters on both
+  ends; the sender drops the per-tenant section (logged) rather than exceed it. Every OpenBao KV
+  call times out after 10 seconds, so a hung OpenBao cannot hold the heartbeat or a request.
