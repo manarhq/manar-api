@@ -11,7 +11,7 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 `@modelcontextprotocol/sdk` (client), gRPC client for manar-ai. Vitest. pnpm 11 workspace
 (`packages/*`), Node 24.
 
-## Commands (verified 2026-09-17)
+## Commands (verified 2026-09-17; unit tests and coverage 2026-10-09)
 
 | Task                  | Command                                                                                                  | Baseline                                         |
 | --------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
