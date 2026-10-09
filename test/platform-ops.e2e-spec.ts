@@ -223,6 +223,48 @@ describe('Platform API ops routes (e2e)', () => {
       tenantId = b(res).id;
     }, 120_000);
 
+    it("writes staff engage and release into the tenant's own audit chain", async () => {
+      const on = await http()
+        .post('/platform/v1/kill-switch/engage')
+        .set(auth())
+        .send({ reason: 'e2e tenant chain', staff: 'Mohamed' })
+        .expect(200);
+      await http()
+        .post('/platform/v1/kill-switch/release')
+        .set(auth())
+        .send({
+          staff: 'Ali',
+          proposedBy: 'Mohamed',
+          expectedEngagementId: b(on).engagementId,
+        })
+        .expect(200);
+      const db = await app.get(TenantDatabaseManager).getClient(tenantId!);
+      const events = await db.auditEvent.findMany({
+        where: {
+          eventType: {
+            in: ['kill_switch.activated', 'kill_switch.deactivated'],
+          },
+        },
+        orderBy: { sequence: 'asc' },
+      });
+      const platform = events.filter(
+        (e) => (e.data as { scope?: string }).scope === 'PLATFORM',
+      );
+      expect(
+        platform.map((e) => [
+          e.eventType,
+          (e.data as { staff?: string }).staff,
+        ]),
+      ).toEqual([
+        ['kill_switch.activated', 'Mohamed'],
+        ['kill_switch.deactivated', 'Ali'],
+      ]);
+      expect(platform[1]!.data).toMatchObject({
+        proposedBy: 'Mohamed',
+        engagementId: b(on).engagementId,
+      });
+    }, 60_000);
+
     it('the legacy route still engages, but can no longer release the platform switch alone', async () => {
       const tenant = await control.tenant.findUniqueOrThrow({
         where: { id: tenantId },

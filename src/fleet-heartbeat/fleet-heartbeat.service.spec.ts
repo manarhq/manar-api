@@ -12,6 +12,7 @@ import type { OpenBaoKvClient } from '../openbao/openbao-kv.client';
 import type { PlatformOpsService } from '../platform/platform-ops.service';
 import {
   FleetHeartbeatService,
+  HEARTBEAT_MAX_PAYLOAD_CHARS,
   type TenantCatalogSource,
 } from './fleet-heartbeat.service';
 
@@ -328,5 +329,58 @@ describe('FleetHeartbeatService', () => {
       lastRestoreTestStatus: 'ok',
       lastRestoreTestSeconds: 1260,
     });
+  });
+});
+
+describe('FleetHeartbeatService envelope size', () => {
+  it('leaves out the per-tenant section rather than send more than manar-fleet accepts', async () => {
+    const connectors = Array.from({ length: 100 }, (_, j) => ({
+      name: `connector-with-a-long-name-${j}`,
+      type: 'IAM',
+      protocol: 'MICROSOFT',
+      enabled: true,
+      credentialExpiresAt: '2026-11-08T00:00:00.000Z',
+    }));
+    const s = service(
+      { FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID },
+      {},
+      {
+        view: () =>
+          Promise.resolve({
+            features: {
+              assistant: true,
+              watcher: true,
+              packs: true,
+              llm_proxy: true,
+            },
+            packs: [],
+            model: null,
+            usage: { month: '2026-10', tokens: 0 },
+            connectors,
+          }),
+      },
+    );
+    const many = Array.from({ length: 200 }, (_, i) => ({
+      id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+      status: 'ACTIVE',
+    }));
+    (s as unknown as { control: unknown }).control = {
+      tenant: { findMany: () => Promise.resolve(many) },
+    };
+    const env = await s.signedEnvelope();
+    expect(env.payload.length).toBeLessThanOrEqual(HEARTBEAT_MAX_PAYLOAD_CHARS);
+    const payload = JSON.parse(
+      Buffer.from(env.payload, 'base64').toString(),
+    ) as Record<string, unknown>;
+    expect(payload.tenants).toBeUndefined();
+    expect(payload.counts).toMatchObject({ tenants: 200 });
+    expect(
+      verify(
+        null,
+        Buffer.from(env.payload, 'base64'),
+        keys.publicKey,
+        Buffer.from(env.signature, 'base64'),
+      ),
+    ).toBe(true);
   });
 });

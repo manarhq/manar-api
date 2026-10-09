@@ -128,3 +128,12 @@ tokens}, connectors [{name, type, protocol, enabled, credentialExpiresAt}]}]`. T
 - **Usage tiers (assumption):** PRICING.md gives 250k decisions per month in the platform and "next
   tier at +25%" without a tier width. manar-fleet and the admin treat each tier as a further 250k
   per month until the founder sets the width; the usage screen says so.
+- **Tenant audit chains:** every engage and release through `/platform/v1/kill-switch` is also
+  written into each ACTIVE tenant's own audit chain (`kill_switch.activated` / `.deactivated`,
+  scope `PLATFORM`, the staff member's name and the engagement id), so the customer's
+  tamper-evident log shows Manar staff stopping and releasing its agents. The switch is in the
+  control DB, so this is not one transaction: a tenant that cannot be written is logged by id and
+  never undoes the stop.
+- **Size and time bounds:** the heartbeat payload is at most 262,144 base64 characters on both
+  ends; the sender drops the per-tenant section (logged) rather than exceed it. Every OpenBao KV
+  call times out after 10 seconds, so a hung OpenBao cannot hold the heartbeat or a request.

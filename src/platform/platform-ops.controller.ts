@@ -21,6 +21,7 @@ import {
 } from '@nestjs/swagger';
 import { z } from 'zod';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { PlatformKillSwitchService } from '../kill-switches/platform-kill-switch.service';
 import {
@@ -149,8 +150,17 @@ export class PlatformOpsController {
       b.reason,
       `${caller(req)}: ${b.staff}`,
     );
+    const audit = await this.ops.auditPlatformSwitch(
+      AUDIT_EVENT_TYPES.KILL_SWITCH_ACTIVATED,
+      caller(req),
+      {
+        reason: b.reason,
+        staff: b.staff,
+        engagementId: s.activatedAt?.toISOString() ?? null,
+      },
+    );
     this.logger.warn(
-      `platform kill switch ENGAGED by ${caller(req)} (staff ${b.staff})`,
+      `platform kill switch ENGAGED by ${caller(req)} (staff ${b.staff}); tenant audit chains: ${audit.audited} written, ${audit.failed} failed`,
     );
     return view(s);
   }
@@ -190,8 +200,17 @@ export class PlatformOpsController {
         message: 'engagement_changed',
       });
     }
+    const audit = await this.ops.auditPlatformSwitch(
+      AUDIT_EVENT_TYPES.KILL_SWITCH_DEACTIVATED,
+      caller(req),
+      {
+        staff: b.staff,
+        proposedBy: b.proposedBy ?? null,
+        engagementId: b.expectedEngagementId,
+      },
+    );
     this.logger.warn(
-      `platform kill switch RELEASED by ${caller(req)} (staff ${b.staff}, proposed by ${b.proposedBy ?? 'unknown'})`,
+      `platform kill switch RELEASED by ${caller(req)} (staff ${b.staff}, proposed by ${b.proposedBy ?? 'unknown'}); tenant audit chains: ${audit.audited} written, ${audit.failed} failed`,
     );
     return view(await this.killSwitch.getState());
   }

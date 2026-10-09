@@ -24,6 +24,9 @@ import { AppConfig } from '../config/env.validation';
  */
 @Injectable()
 export class OpenBaoKvClient {
+  /** Upper bound for one OpenBao KV call. */
+  static REQUEST_TIMEOUT_MS = 10_000;
+
   private readonly logger = new Logger(OpenBaoKvClient.name);
   private readonly baseUrl: string;
   private readonly token: string;
@@ -131,6 +134,8 @@ export class OpenBaoKvClient {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
+      // A hung OpenBao fails the call instead of holding it (and the heartbeat) forever.
+      signal: AbortSignal.timeout(OpenBaoKvClient.REQUEST_TIMEOUT_MS),
     });
 
     if (nullOn404 && response.status === 404) {

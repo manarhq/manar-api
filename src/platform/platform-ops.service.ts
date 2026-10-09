@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuditService } from '../audit/audit.service';
+import type { AuditEventType } from '../audit/audit-event-types';
 import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
@@ -257,6 +258,50 @@ export class PlatformOpsService {
         };
       }),
     );
+  }
+
+  /**
+   * Writes a platform kill switch change into every ACTIVE tenant's own audit chain, so each
+   * customer's tamper-evident log shows Manar staff stopping and releasing its agents. The switch
+   * lives in the control DB, so this cannot share its transaction: a tenant that cannot be written
+   * is logged by id and counted, and never undoes the stop.
+   */
+  async auditPlatformSwitch(
+    eventType: AuditEventType,
+    caller: string,
+    data: Record<string, unknown>,
+  ): Promise<{ audited: number; failed: number }> {
+    const rows = await this.control.tenant.findMany({
+      where: { status: 'ACTIVE' },
+      select: { id: true },
+    });
+    let audited = 0;
+    let failed = 0;
+    for (const { id } of rows) {
+      try {
+        const db = await this.tenants.getClient(id);
+        const publish = await db.$transaction((tx) =>
+          this.audit.recordInTransaction(tx, id, {
+            eventType,
+            actor: { type: 'system', id: caller },
+            data: {
+              killSwitchId: 'platform',
+              scope: 'PLATFORM',
+              targetId: null,
+              ...data,
+            },
+          }),
+        );
+        publish();
+        audited++;
+      } catch {
+        failed++;
+        this.logger.error(
+          `platform kill switch change not written to tenant ${id} audit chain`,
+        );
+      }
+    }
+    return { audited, failed };
   }
 
   // Deployment-wide figures for the signed heartbeat. No tenant ids or names leave here.

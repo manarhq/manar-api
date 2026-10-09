@@ -221,6 +221,9 @@ export const HeartbeatPayloadSchema = z
 
 export type HeartbeatPayload = z.infer<typeof HeartbeatPayloadSchema>;
 
+/** manar-fleet's EnvelopeSchema bound on the base64 payload; change both together. */
+export const HEARTBEAT_MAX_PAYLOAD_CHARS = 262_144;
+
 export interface SignedEnvelope {
   payload: string;
   signature: string;
@@ -295,7 +298,22 @@ export class FleetHeartbeatService
   }
 
   async signedEnvelope(): Promise<SignedEnvelope> {
-    return signPayload(await this.payload(), await this.signingKey());
+    const key = await this.signingKey();
+    const payload = await this.payload();
+    let env = signPayload(payload, key);
+    // manar-fleet refuses a larger payload, which would silence the whole heartbeat: the
+    // per-tenant section goes first, then nothing is sent.
+    if (env.payload.length > HEARTBEAT_MAX_PAYLOAD_CHARS && payload.tenants) {
+      this.logger.warn(
+        `Fleet heartbeat: per-tenant section left out (${payload.tenants.length} tenants, payload over ${HEARTBEAT_MAX_PAYLOAD_CHARS} characters)`,
+      );
+      env = signPayload({ ...payload, tenants: undefined }, key);
+    }
+    if (env.payload.length > HEARTBEAT_MAX_PAYLOAD_CHARS)
+      throw new Error(
+        'Fleet heartbeat payload over the size manar-fleet accepts',
+      );
+    return env;
   }
 
   /** Builds the payload and validates it against the strict schema; throws if it does not fit. */
