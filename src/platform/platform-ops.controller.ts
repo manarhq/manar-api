@@ -21,7 +21,10 @@ import {
 } from '@nestjs/swagger';
 import { z } from 'zod';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
-import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import {
+  AUDIT_EVENT_TYPES,
+  type AuditEventType,
+} from '../audit/audit-event-types';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { PlatformKillSwitchService } from '../kill-switches/platform-kill-switch.service';
 import {
@@ -150,7 +153,11 @@ export class PlatformOpsController {
       b.reason,
       `${caller(req)}: ${b.staff}`,
     );
-    const audit = await this.ops.auditPlatformSwitch(
+    this.logger.warn(
+      `platform kill switch ENGAGED by ${caller(req)} (staff ${b.staff})`,
+    );
+    this.auditInBackground(
+      'ENGAGED',
       AUDIT_EVENT_TYPES.KILL_SWITCH_ACTIVATED,
       caller(req),
       {
@@ -158,9 +165,6 @@ export class PlatformOpsController {
         staff: b.staff,
         engagementId: s.activatedAt?.toISOString() ?? null,
       },
-    );
-    this.logger.warn(
-      `platform kill switch ENGAGED by ${caller(req)} (staff ${b.staff}); tenant audit chains: ${audit.audited} written, ${audit.failed} failed`,
     );
     return view(s);
   }
@@ -200,7 +204,11 @@ export class PlatformOpsController {
         message: 'engagement_changed',
       });
     }
-    const audit = await this.ops.auditPlatformSwitch(
+    this.logger.warn(
+      `platform kill switch RELEASED by ${caller(req)} (staff ${b.staff}, proposed by ${b.proposedBy ?? 'unknown'})`,
+    );
+    this.auditInBackground(
+      'RELEASED',
       AUDIT_EVENT_TYPES.KILL_SWITCH_DEACTIVATED,
       caller(req),
       {
@@ -209,10 +217,31 @@ export class PlatformOpsController {
         engagementId: b.expectedEngagementId,
       },
     );
-    this.logger.warn(
-      `platform kill switch RELEASED by ${caller(req)} (staff ${b.staff}, proposed by ${b.proposedBy ?? 'unknown'}); tenant audit chains: ${audit.audited} written, ${audit.failed} failed`,
-    );
     return view(await this.killSwitch.getState());
+  }
+
+  /**
+   * The switch row is committed before this runs, so the answer never waits on tenant chains (that
+   * wait would grow with the tenant count). Failed tenants are logged by id in the service.
+   */
+  private auditInBackground(
+    what: string,
+    eventType: AuditEventType,
+    by: string,
+    data: Record<string, unknown>,
+  ): void {
+    void this.ops
+      .auditPlatformSwitch(eventType, by, data)
+      .then((r) =>
+        this.logger.log(
+          `platform kill switch ${what}: tenant audit chains ${r.audited} written, ${r.failed} failed`,
+        ),
+      )
+      .catch(() =>
+        this.logger.error(
+          `platform kill switch ${what}: tenant audit chains not written`,
+        ),
+      );
   }
 
   @Get('tenants/:id/ops')

@@ -238,18 +238,24 @@ describe('Platform API ops routes (e2e)', () => {
           expectedEngagementId: b(on).engagementId,
         })
         .expect(200);
+      // Written after the answer, in the background: wait for both.
       const db = await app.get(TenantDatabaseManager).getClient(tenantId!);
-      const events = await db.auditEvent.findMany({
-        where: {
-          eventType: {
-            in: ['kill_switch.activated', 'kill_switch.deactivated'],
-          },
-        },
-        orderBy: { sequence: 'asc' },
-      });
-      const platform = events.filter(
-        (e) => (e.data as { scope?: string }).scope === 'PLATFORM',
-      );
+      const read = async () =>
+        (
+          await db.auditEvent.findMany({
+            where: {
+              eventType: {
+                in: ['kill_switch.activated', 'kill_switch.deactivated'],
+              },
+            },
+            orderBy: { sequence: 'asc' },
+          })
+        ).filter((e) => (e.data as { scope?: string }).scope === 'PLATFORM');
+      let platform = await read();
+      for (let i = 0; i < 50 && platform.length < 2; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        platform = await read();
+      }
       expect(
         platform.map((e) => [
           e.eventType,
