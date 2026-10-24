@@ -37,6 +37,13 @@ export const OpenFgaConfigSchema = z.object({
    * docs/authorization-model.md's "known limitation" on tenant scoping).
    */
   OPENFGA_STORE_NAME: z.string().min(1).default('manar'),
+  /**
+   * Bound on one relationship check, retries included. An OpenFGA outage
+   * fails closed (DENY enforcement_dependency_unavailable) within this
+   * long instead of after the SDK's default retry backoff (about 2 s) or,
+   * for a server that accepts and never answers, never.
+   */
+  OPENFGA_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1000),
 
   /** Pins a specific store ID, skipping name-based discovery/creation entirely. */
   OPENFGA_STORE_ID: z.string().min(1).optional(),

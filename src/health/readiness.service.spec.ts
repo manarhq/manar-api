@@ -104,7 +104,7 @@ function makeService(
 describe('ReadinessService probe list', () => {
   it('covers every dependency the chart’s NetworkPolicy egress list allows', () => {
     // Ten probes for the nine dependencies in
-    // deploy/helm/manar-api/values.yaml's `networkPolicy.egressTargets`
+    // deploy/helm/manar-api/values.yaml's `networkPolicy.egress`
     // (minus the demo tool server): Postgres gets two, because the control
     // plane and a tenant's own database fail independently and carry
     // different consequences.

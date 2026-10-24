@@ -1,0 +1,12 @@
+{
+  "authorize": [100, 250],
+  "invoke_read": [300, 800],
+  "mcp_list": [100, 250],
+  "mcp_call": [300, 800],
+  "approval_create": [300, 800],
+  "approval_decide": [500, 1500],
+  "audit_list": [300, 800],
+  "audit_search": [300, 800],
+  "console": [300, 800],
+  "audit_verify": [1000, 3000]
+}

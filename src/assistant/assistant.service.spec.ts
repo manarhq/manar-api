@@ -13,6 +13,7 @@ import {
 
 const ID = '11111111-2222-4333-8444-555555555555';
 const JWT =
+  // nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token (synthetic fixture for the assistant's redaction test)
   'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXZhbHVl';
 
 const auth = (tenant = 't-acme', user = 'u-1'): AuthContext => ({

@@ -25,6 +25,13 @@ export const FleetHeartbeatConfigSchema = z.object({
     .default('fleet/heartbeat-signing-key'),
   /** JSON written by the backup job: {status, lastBackupAt, lastRestoreTestAt}. Unset = unknown. */
   FLEET_BACKUP_STATUS_FILE: optional,
+  /** A full audit chain check of every tenant runs at most this often for the heartbeat. */
+  FLEET_AUDIT_VERIFY_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(5)
+    .max(1440)
+    .default(60),
   /** Set at image build (see Dockerfile). */
   MANAR_GIT_SHA: optional,
 });

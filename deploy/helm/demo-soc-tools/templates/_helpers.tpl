@@ -36,6 +36,7 @@ Common labels
 {{- define "demo-soc-tools.labels" -}}
 helm.sh/chart: {{ include "demo-soc-tools.chart" . }}
 {{ include "demo-soc-tools.selectorLabels" . }}
+app.kubernetes.io/part-of: manar
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}

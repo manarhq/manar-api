@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { NativeConnection, Worker } from '@temporalio/worker';
+import { installWorkerMetrics } from './metrics/worker-metrics';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Logger } from '@nestjs/common';
@@ -98,6 +99,11 @@ async function bootstrap(): Promise<void> {
     ...appContext.get(AuditRetentionActivitiesFactory).build(),
     ...appContext.get(WebhookDeliveryActivitiesFactory).build(),
   };
+
+  installWorkerMetrics(
+    configService.get('WORKER_METRICS_PORT', { infer: true }),
+    logger,
+  );
 
   const connection = await NativeConnection.connect({ address });
 

@@ -236,7 +236,7 @@ implements the pipeline exactly as designed, fail-closed at every step
 5. `OpenFgaClientService.check()` against the exact-resource and `"*"`
    wildcard grant objects (see above). A transport/server failure here
    (OpenFGA down, wrong port, network partition) is caught and treated as
-   DENY (`authorization_backend_unavailable`) — **never** as ALLOW.
+   DENY (`enforcement_dependency_unavailable`, the product fail-closed reason; decisions recorded before 9 Oct 2026 carry `authorization_backend_unavailable`) within `OPENFGA_CHECK_TIMEOUT_MS` (default 1000 ms, retries included) — **never** as ALLOW.
 6. On ALLOW, atomically increment `executionCount` — a single conditional
    `UPDATE ... WHERE executionCount < maxExecutions` when a limit is set
    (the same race-closing pattern `AgentsService.enroll` uses for

@@ -24,6 +24,9 @@ import { AppConfig } from '../config/env.validation';
  */
 @Injectable()
 export class OpenBaoKvClient {
+  /** Upper bound for one OpenBao KV call. */
+  static REQUEST_TIMEOUT_MS = 10_000;
+
   private readonly logger = new Logger(OpenBaoKvClient.name);
   private readonly baseUrl: string;
   private readonly token: string;
@@ -104,6 +107,20 @@ export class OpenBaoKvClient {
     return data?.keys ?? [];
   }
 
+  /**
+   * Reads only the KV v2 metadata of `path` (never the secret value) and returns its
+   * `custom_metadata`, or null when the path has none. Used for credential expiry dates that an
+   * operator records with `bao kv metadata put -custom-metadata=expires_at=<ISO date> <path>`.
+   */
+  async readCustomMetadata(
+    path: string,
+  ): Promise<Record<string, string> | null> {
+    const response = await this.request<{
+      custom_metadata?: Record<string, string> | null;
+    } | null>('GET', `${this.mountPath}/metadata/${path}`, undefined, true);
+    return response?.custom_metadata ?? null;
+  }
+
   private async request<T>(
     method: 'GET' | 'POST' | 'DELETE',
     apiPath: string,
@@ -117,6 +134,8 @@ export class OpenBaoKvClient {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
+      // A hung OpenBao fails the call instead of holding it (and the heartbeat) forever.
+      signal: AbortSignal.timeout(OpenBaoKvClient.REQUEST_TIMEOUT_MS),
     });
 
     if (nullOn404 && response.status === 404) {

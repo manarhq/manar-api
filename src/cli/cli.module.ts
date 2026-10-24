@@ -5,6 +5,9 @@ import { KeycloakModule } from '../keycloak/keycloak.module';
 import { OpenSearchIndexModule } from '../audit/opensearch/opensearch-index.module';
 import { TenantCreateCommand } from './commands/tenant-create.command';
 import { AuditReindexCommand } from './commands/audit-reindex.command';
+import { AuditVerifyCommand } from './commands/audit-verify.command';
+import { AuditService } from '../audit/audit.service';
+import { KafkaPublisherService } from '../audit/kafka-publisher.service';
 import { DemoSeedCommand } from './commands/demo-seed.command';
 import { TenantsMigrateCommand } from './commands/tenants-migrate.command';
 import { ManarConnectorRegisterCommand } from './commands/manar-connector-register.command';
@@ -45,6 +48,16 @@ import { FleetHeartbeatModule } from '../fleet-heartbeat/fleet-heartbeat.module'
   providers: [
     TenantCreateCommand,
     AuditReindexCommand,
+    AuditVerifyCommand,
+    // audit:verify only reads the chain; the CLI never publishes audit events.
+    AuditService,
+    {
+      provide: KafkaPublisherService,
+      useValue: {
+        publish: () =>
+          Promise.reject(new Error('the CLI does not publish audit events')),
+      },
+    },
     DemoSeedCommand,
     TenantsMigrateCommand,
     ManarConnectorRegisterCommand,

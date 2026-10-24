@@ -18,6 +18,17 @@ export const IdempotencyConfigSchema = z.object({
     .int()
     .positive()
     .default(24 * 60 * 60 * 1000),
+  /**
+   * Lifetime of the in-progress marker a claim writes. store() replaces it
+   * with the result for IDEMPOTENCY_KEY_TTL_MS; if Redis fails after the
+   * handler committed, the marker expires after this instead of answering
+   * 409 for a day.
+   */
+  IDEMPOTENCY_IN_PROGRESS_TTL_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60_000),
 });
 
 export type IdempotencyConfig = z.infer<typeof IdempotencyConfigSchema>;

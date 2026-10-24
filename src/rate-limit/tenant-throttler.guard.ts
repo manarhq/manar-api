@@ -123,6 +123,11 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
    *   the operator's real "stop this tenant now" control, since it depends
    *   on Postgres rather than Redis.
    *
+   * Since 9 Oct 2026 the storage itself falls back to per-instance
+   * in-memory limits (`LocalFallbackThrottlerStorage`), so a Redis outage
+   * no longer reaches this catch and tenants stay limited; this path is
+   * left for a failure of the fallback itself.
+   *
    * Only *storage/infrastructure* failures fail open. A genuine
    * `ThrottlerException` — the 429 raised by
    * `ThrottlerGuard.throwThrottlingException` once a caller is over its

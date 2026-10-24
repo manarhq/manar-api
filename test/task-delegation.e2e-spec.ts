@@ -743,7 +743,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     );
     expect(duringOutage.decision).toBe('DENY');
     expect((duringOutage as { reason: string }).reason).toBe(
-      'authorization_backend_unavailable',
+      'enforcement_dependency_unavailable',
     );
 
     // The real, healthy app/OpenFGA is completely unaffected -- the exact
