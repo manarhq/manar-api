@@ -24,16 +24,19 @@ overrides:
   fastify: ^5.12.2
   # Fixed HIGH/CRITICAL advisories (Trivy) in transitive dependencies whose
   # parents pin the vulnerable version: prisma 7.x (deepmerge-ts, mysql2),
-  # @openfga/sdk (axios), @nestjs/platform-express (multer), and the
+  # @openfga/sdk (axios, follow-redirects), @nestjs/platform-express (multer,
+  # body-parser), and the
   # tooling chain (brace-expansion, fast-uri, js-yaml, proxy-addr,
   # source-map-js). Drop each once its parent ships the fix.
   axios: ^1.20.0
+  body-parser@2: ^2.4.0
   brace-expansion@5: ^5.0.11
   deepmerge-ts: ^8.0.0
   fast-uri@3: ^3.1.7
   fast-uri@4: ^4.1.4
+  follow-redirects: ^1.16.1
   js-yaml@4: ^4.3.2
-  multer: ^2.3.0
+  multer: ^2.5.0
   mysql2: ^3.22.0
   proxy-addr: ^2.0.8
   source-map-js: ^1.2.2
