@@ -13,6 +13,7 @@ import { validate } from './config/env.validation';
 import type { AppConfig } from './config/env.validation';
 import { setupOpenApiDocs } from './openapi/setup-openapi-docs';
 import { setupCors, setupHelmet } from './security/setup-security';
+import { instrumentHttp, startMetricsServer } from './metrics/metrics';
 
 async function bootstrap(): Promise<void> {
   // Validated once, directly against process.env, before either Nest
@@ -32,6 +33,7 @@ async function bootstrap(): Promise<void> {
 
   const configService = app.get(ConfigService<AppConfig, true>);
   const port = configService.get('PORT', { infer: true });
+  instrumentHttp(app.getHttpAdapter().getInstance(), 'human');
   setupHelmet(app);
   setupCors(app, configService);
   setupOpenApiDocs(app, configService);
@@ -58,9 +60,11 @@ async function bootstrap(): Promise<void> {
     { bufferLogs: true },
   );
   agentMtlsApp.useLogger(agentMtlsApp.get(WINSTON_MODULE_NEST_PROVIDER));
+  instrumentHttp(agentMtlsApp.getHttpAdapter().getInstance(), 'agent');
   setupHelmet(agentMtlsApp);
   enableGracefulShutdown(agentMtlsApp);
   await agentMtlsApp.listen(bootstrapConfig.AGENT_MTLS_PORT, '0.0.0.0');
+  startMetricsServer(bootstrapConfig.METRICS_PORT);
 }
 
 /**

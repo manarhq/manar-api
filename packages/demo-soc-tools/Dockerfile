@@ -22,6 +22,7 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/sdk-node/package.json ./packages/sdk-node/package.json
+COPY packages/manar-ai-client/package.json ./packages/manar-ai-client/package.json
 COPY packages/demo-soc-tools/package.json ./packages/demo-soc-tools/package.json
 RUN pnpm install --frozen-lockfile --ignore-scripts --filter @manar/demo-soc-tools...
 
@@ -32,6 +33,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts --filter @manar/demo-soc-too
 FROM base AS build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/sdk-node/package.json ./packages/sdk-node/package.json
+COPY packages/manar-ai-client/package.json ./packages/manar-ai-client/package.json
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/packages/demo-soc-tools/node_modules ./packages/demo-soc-tools/node_modules
 COPY packages/demo-soc-tools ./packages/demo-soc-tools
@@ -41,6 +43,7 @@ RUN pnpm --filter @manar/demo-soc-tools build
 FROM base AS prod-deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/sdk-node/package.json ./packages/sdk-node/package.json
+COPY packages/manar-ai-client/package.json ./packages/manar-ai-client/package.json
 COPY packages/demo-soc-tools/package.json ./packages/demo-soc-tools/package.json
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts --filter @manar/demo-soc-tools...
 

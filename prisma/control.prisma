@@ -104,6 +104,7 @@ model Tenant {
 
   databaseBinding  TenantDatabaseBinding?
   secretReferences SecretReference[]
+  catalog          TenantCatalog?
 
   @@map("tenants")
 }
@@ -195,4 +196,25 @@ model PlatformKillSwitch {
   updatedAt DateTime @updatedAt
 
   @@map("platform_kill_switches")
+}
+
+/// What Manar staff turned on for this tenant through manar-fleet (src/platform/catalog.*):
+/// feature flags, enabled packs and the LLM route. Read on every gated request; a read failure
+/// or a malformed row denies. No row means the tenant is unmanaged: every feature keeps its
+/// pre-catalog default (on), no pack is enabled, and the LLM proxy uses the deployment's model.
+model TenantCatalog {
+  tenantId  String @id
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// `{ assistant?, watcher?, packs?, llm_proxy? }` booleans; a missing key keeps the default.
+  features  Json   @default("{}")
+  /// `{ id, version, enabled }[]`, one entry per pack staff have decided on.
+  packs     Json   @default("[]")
+  /// `{ provider, model, uaeResidency, monthlyTokenQuota }` or null for the deployment default.
+  model     Json?
+  /// The platform caller (manar-fleet client id) that last wrote the row.
+  updatedBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("tenant_catalogs")
 }

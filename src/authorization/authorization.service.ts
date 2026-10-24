@@ -8,6 +8,7 @@ import { RiskEngine } from '../risk/risk-engine.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
+import { CatalogService } from '../platform/catalog.service';
 import { parseToolActions } from './grant-triples';
 import {
   ENFORCEMENT_DEPENDENCY_UNAVAILABLE,
@@ -22,6 +23,7 @@ import {
 } from './openfga-object-id.util';
 import { OpenFgaClientService } from './openfga-client.service';
 import type { AuthorizeRequest } from './authorize-request.validation';
+import { recordDecision } from '../metrics/metrics';
 
 type Verdict =
   | { decision: 'ALLOW' }
@@ -157,8 +159,9 @@ function correlationIdForRecord(): string {
  * state, safe to expose). Step 5's DENY is deliberately generic
  * (`not_authorized`) — never surfacing *why* OpenFGA denied, so a caller
  * can't probe the shape of the authorization model. An OpenFGA outage
- * (network failure, wrong port, container down) is caught and treated as
- * DENY too (`authorization_backend_unavailable`) — never as ALLOW, and
+ * (network failure, wrong port, container down, or no answer within
+ * OPENFGA_CHECK_TIMEOUT_MS) is caught and treated as DENY with the product
+ * rule's reason (`enforcement_dependency_unavailable`) — never as ALLOW, and
  * never as an unhandled 5xx that could be mistaken for anything but a
  * definite non-ALLOW. Steps 6-7 (Phase 6) are inserted strictly *after*
  * Phase 5's own OpenFGA check and *before* its `executionCount` increment
@@ -186,6 +189,7 @@ export class AuthorizationService {
     private readonly riskEngine: RiskEngine,
     private readonly auditService: AuditService,
     private readonly killSwitchService: KillSwitchService,
+    private readonly catalog: CatalogService,
   ) {}
 
   /**
@@ -203,6 +207,7 @@ export class AuthorizationService {
     request: AuthorizeRequest,
     context: DecisionContext = { channel: 'AUTHORIZE' },
   ): Promise<AuthorizeDecision> {
+    const startedAt = process.hrtime.bigint();
     const evaluation = await this.evaluateFailClosed(
       tenantClient,
       tenantId,
@@ -218,6 +223,7 @@ export class AuthorizationService {
       context,
       evaluation,
       { stage: 'REQUEST' },
+      startedAt,
     );
   }
 
@@ -249,6 +255,7 @@ export class AuthorizationService {
     context: DecisionContext,
     grant: GrantCheck,
   ): Promise<AuthorizeDecision> {
+    const startedAt = process.hrtime.bigint();
     const evaluation = grant.valid
       ? await this.evaluateFailClosed(
           tenantClient,
@@ -269,6 +276,7 @@ export class AuthorizationService {
         stage: 'GRANT_REDEMPTION',
         grantId: grant.valid ? grant.grantId : undefined,
       },
+      startedAt,
     );
   }
 
@@ -306,6 +314,40 @@ export class AuthorizationService {
    * a decision it could execute under without a durable record of it.
    */
   private async commit(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    agentId: string,
+    request: AuthorizeRequest,
+    context: DecisionContext,
+    evaluation: Evaluation,
+    kind: DecisionRecordKind,
+    startedAt: bigint,
+  ): Promise<AuthorizeDecision> {
+    try {
+      const result = await this.commitAndAudit(
+        tenantClient,
+        tenantId,
+        agentId,
+        request,
+        context,
+        evaluation,
+        kind,
+      );
+      recordDecision(
+        startedAt,
+        result.decision,
+        'reason' in result ? result.reason : undefined,
+      );
+      return result;
+    } catch (error) {
+      // The decision could not be recorded: the caller gets a 503 and must
+      // not act, so it counts against availability, never as an ALLOW.
+      recordDecision(startedAt, 'ERROR', ENFORCEMENT_DEPENDENCY_UNAVAILABLE);
+      throw error;
+    }
+  }
+
+  private async commitAndAudit(
     tenantClient: TenantPrismaClient,
     tenantId: string,
     agentId: string,
@@ -482,6 +524,17 @@ export class AuthorizationService {
     );
     if (!liveness.ok) return deny(liveness.reason as string);
 
+    // Step 3b: the tenant's catalog (src/platform/catalog.*). The watcher's built-in connector
+    // needs the `watcher` feature and a pack-bound task needs its pack enabled by Manar staff.
+    // A catalog read failure throws, and `evaluateFailClosed` denies with
+    // `enforcement_dependency_unavailable`.
+    const catalogDeny = await this.catalog.taskDenyReason(
+      tenantId,
+      task,
+      request.toolId,
+    );
+    if (catalogDeny) return deny(catalogDeny);
+
     // Step 4.
     const forbidden = parseToolActions(task.forbiddenActions);
     const isForbidden = forbidden.some(
@@ -526,7 +579,7 @@ export class AuthorizationService {
         `OpenFGA check failed for task "${task.id}" — failing closed (DENY)`,
         error instanceof Error ? error.stack : undefined,
       );
-      return deny('authorization_backend_unavailable');
+      return deny(ENFORCEMENT_DEPENDENCY_UNAVAILABLE);
     }
     const openFgaResult = { exactAllowed, wildcardAllowed };
     if (!exactAllowed && !wildcardAllowed) {

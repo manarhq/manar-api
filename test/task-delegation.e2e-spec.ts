@@ -39,6 +39,7 @@ import {
   deleteRealm,
   getUserToken,
 } from './support/keycloak-test-helpers';
+import { allowAllCatalog } from '../src/platform/catalog.fakes';
 
 /**
  * Mandatory Phase 5 (Tasks, Delegation & OpenFGA) scenarios — design
@@ -730,6 +731,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       {
         checkAll: () => Promise.resolve({ killed: false }),
       } as unknown as KillSwitchService,
+      allowAllCatalog(),
     );
 
     const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
@@ -741,7 +743,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
     );
     expect(duringOutage.decision).toBe('DENY');
     expect((duringOutage as { reason: string }).reason).toBe(
-      'authorization_backend_unavailable',
+      'enforcement_dependency_unavailable',
     );
 
     // The real, healthy app/OpenFGA is completely unaffected -- the exact

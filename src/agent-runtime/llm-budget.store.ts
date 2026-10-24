@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient, type RedisClientType } from 'redis';
+import { redisClientOptions } from '../audit/live/redis.config';
 import type { AppConfig } from '../config/env.validation';
 
 /** Keep a counter a day past the task's expiry, so a late call still sees it. */
@@ -16,11 +17,13 @@ const RETENTION_AFTER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 @Injectable()
 export class LlmBudgetStore implements OnModuleDestroy {
   private readonly logger = new Logger(LlmBudgetStore.name);
-  private readonly url: string;
+  private readonly redisOptions: ReturnType<typeof redisClientOptions>;
   private client: RedisClientType | undefined;
 
   constructor(configService: ConfigService<AppConfig, true>) {
-    this.url = configService.get('REDIS_URL', { infer: true });
+    this.redisOptions = redisClientOptions((key) =>
+      configService.get(key, { infer: true }),
+    );
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -56,9 +59,13 @@ export class LlmBudgetStore implements OnModuleDestroy {
     if (this.client?.isOpen) return this.client;
     // Fail fast rather than queue: a down Redis must deny now, not hang.
     this.client = createClient({
-      url: this.url,
+      ...this.redisOptions,
       disableOfflineQueue: true,
-      socket: { connectTimeout: 2_000, reconnectStrategy: false },
+      socket: {
+        ...this.redisOptions.socket,
+        connectTimeout: 2_000,
+        reconnectStrategy: false,
+      },
     });
     this.client.on('error', (error: unknown) => {
       this.logger.warn(

@@ -70,6 +70,10 @@ COPY --chown=manar:nodejs package.json ./
 # config, and migrations must exist on disk at runtime, not just at build
 # time. This does not include src/generated (already compiled into dist).
 COPY --chown=manar:nodejs prisma ./prisma
+# OpenFgaClientService reads the authorization model DSL from disk at boot
+# (OPENFGA_MODEL_FILE_PATH, default src/authorization/model/manar.fga, also
+# the Helm default); it is not compiled into dist. Root-owned: the app only reads it.
+COPY src/authorization/model/manar.fga ./src/authorization/model/manar.fga
 
 USER manar
 

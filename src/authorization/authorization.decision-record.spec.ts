@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { computeParameterHash } from '../approvals/parameter-hash.util';
 import { EnforcementDependencyUnavailableException } from '../common/fail-closed/fail-closed';
 import { makeDecisionHarness } from './decision-pipeline.fakes';
+import { registry } from '../metrics/metrics';
+
+async function decisionCount(decision: string): Promise<number> {
+  const metric = await registry
+    .getSingleMetric('manar_authorization_decisions_total')
+    ?.get();
+  return (metric?.values ?? [])
+    .filter((v) => v.labels.decision === decision)
+    .reduce((sum, v) => sum + v.value, 0);
+}
 
 /**
  * ADR-003 / security finding S1: a durable `Decision` row commits for every
@@ -168,6 +178,8 @@ describe('AuthorizationService.authorize records a durable Decision (ADR-003, S1
 
   it('fails closed with 503 when the decision cannot be written, and never reports ALLOW', async () => {
     const h = makeDecisionHarness({ decisionWriteFails: true });
+    const errorsBefore = await decisionCount('ERROR');
+    const allowsBefore = await decisionCount('ALLOW');
 
     await expect(
       h.service.authorize(h.tenantClient, 'tenant-1', 'agent-1', REQUEST, {
@@ -180,5 +192,8 @@ describe('AuthorizationService.authorize records a durable Decision (ADR-003, S1
       expect.anything(),
       expect.objectContaining({ eventType: 'authorization.allowed' }),
     );
+    // The metric agrees: an unrecorded decision is an ERROR, never an ALLOW.
+    expect(await decisionCount('ERROR')).toBe(errorsBefore + 1);
+    expect(await decisionCount('ALLOW')).toBe(allowsBefore);
   });
 });

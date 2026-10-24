@@ -21,15 +21,29 @@ import { EnforcementDependencyUnavailableException } from '../common/fail-closed
  * provisions real databases via `TenantDatabaseManager.provisionTenant`,
  * which spawns a real `prisma migrate deploy` child process.
  *
- * Requires `CONTROL_DATABASE_URL` / `TENANT_DB_BASE_URL` to point at a
- * running Postgres (see .env / .env.example and deploy/docker-compose.yml).
+ * Requires `CONTROL_DATABASE_URL` to point at a running Postgres (see .env /
+ * .env.example and deploy/docker-compose.yml). `TENANT_DB_BASE_URL` defaults
+ * to the same server's `postgres` database, as in .env.example and CI.
  */
+
+if (!process.env.CONTROL_DATABASE_URL) {
+  throw new Error(
+    'tenant-database-manager.spec needs CONTROL_DATABASE_URL (a running Postgres, see .env.example)',
+  );
+}
+if (!process.env.TENANT_DB_BASE_URL) {
+  const base = new URL(process.env.CONTROL_DATABASE_URL);
+  base.pathname = '/postgres';
+  process.env.TENANT_DB_BASE_URL = base.toString();
+}
 
 function fakeConfigService(
   overrides: Partial<AppConfig> = {},
 ): ConfigService<AppConfig, true> {
   const values: AppConfig = {
     PORT: 3000,
+    METRICS_PORT: 0,
+    WORKER_METRICS_PORT: 0,
     NODE_ENV: 'test',
     LOG_LEVEL: 'info',
     CONTROL_DATABASE_URL: process.env.CONTROL_DATABASE_URL ?? '',
@@ -63,6 +77,7 @@ function fakeConfigService(
     OPENFGA_API_URL: process.env.OPENFGA_API_URL ?? 'http://localhost:8080',
     OPENFGA_STORE_NAME: process.env.OPENFGA_STORE_NAME ?? 'manar',
     OPENFGA_STORE_ID: process.env.OPENFGA_STORE_ID,
+    OPENFGA_CHECK_TIMEOUT_MS: 1000,
     OPENFGA_AUTHORIZATION_MODEL_ID: process.env.OPENFGA_AUTHORIZATION_MODEL_ID,
     OPENFGA_MODEL_FILE_PATH:
       process.env.OPENFGA_MODEL_FILE_PATH ??
@@ -81,6 +96,7 @@ function fakeConfigService(
     PLATFORM_API_CLIENT_ID: 'manar-fleet',
     PLATFORM_API_ROLE: 'manar-platform-admin',
     FLEET_HEARTBEAT_INTERVAL_MINUTES: 5,
+    FLEET_AUDIT_VERIFY_MINUTES: 60,
     FLEET_HEARTBEAT_KEY_PATH: 'fleet/heartbeat-signing-key',
     APPROVAL_GRANT_TTL_MS: 300_000,
     APPROVAL_REQUEST_TTL_MS: 1_800_000,
@@ -109,15 +125,18 @@ function fakeConfigService(
     RATE_LIMIT_HUMAN_LIMIT: 300,
     RATE_LIMIT_AGENT_TTL_MS: 60_000,
     RATE_LIMIT_AGENT_LIMIT: 120,
+    REDIS_TIMEOUT_MS: 1000,
     CORS_ALLOWED_ORIGINS: '*',
     WEBHOOK_SIGNATURE_TOLERANCE_MS: 300_000,
     WEBHOOK_DELIVERY_TASK_QUEUE: 'manar-webhooks',
     WEBHOOK_DELIVERY_TIMEOUT_MS: 10_000,
     WEBHOOK_DELIVERY_MAX_ATTEMPTS: 6,
     IDEMPOTENCY_KEY_TTL_MS: 86_400_000,
+    IDEMPOTENCY_IN_PROGRESS_TTL_MS: 60_000,
     SSRF_ALLOWED_HOSTS: '127.0.0.1,localhost',
     SSRF_ALLOW_LOOPBACK: true,
     LLM_PROVIDER: 'ollama',
+    LLM_DEFAULT_UAE_RESIDENT: 'false',
     LLM_OLLAMA_BASE_URL: 'http://localhost:11434/v1',
     LLM_MODEL: 'qwen3.5:9b',
     LLM_AZURE_OPENAI_API_VERSION: '2024-10-21',

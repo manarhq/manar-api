@@ -6,9 +6,15 @@ import { AgentMtlsConfigSchema } from '../agent-mtls/agent-mtls.config';
 import { OpenFgaConfigSchema } from '../authorization/openfga.config';
 import { TemporalConfigSchema } from '../temporal/temporal.config';
 import { ApprovalsConfigSchema } from '../approvals/approvals.config';
-import { KafkaConfigSchema } from '../audit/kafka.config';
-import { OpenSearchConfigSchema } from '../audit/opensearch/opensearch.config';
-import { RedisConfigSchema } from '../audit/live/redis.config';
+import { KafkaConfigSchema, kafkaConfigIssues } from '../audit/kafka.config';
+import {
+  OpenSearchConfigSchema,
+  openSearchConfigIssues,
+} from '../audit/opensearch/opensearch.config';
+import {
+  RedisConfigSchema,
+  redisConfigIssues,
+} from '../audit/live/redis.config';
 import { AiAdvisoryConfigSchema } from '../ai-advisory/ai-advisory.config';
 import { KillSwitchesConfigSchema } from '../kill-switches/kill-switches.config';
 import { RateLimitConfigSchema } from '../rate-limit/rate-limit.config';
@@ -20,6 +26,7 @@ import { TenantsConfigSchema } from '../tenants/tenants.config';
 import { LlmProxyConfigSchema } from '../agent-runtime/llm-proxy.config';
 import { PlatformConfigSchema } from '../platform/platform.config';
 import { FleetHeartbeatConfigSchema } from '../fleet-heartbeat/fleet-heartbeat.config';
+import { MetricsConfigSchema } from '../metrics/metrics';
 
 /**
  * Application-level environment schema.
@@ -64,7 +71,18 @@ export const AppConfigSchema = z
   .extend(TenantsConfigSchema.shape)
   .extend(LlmProxyConfigSchema.shape)
   .extend(PlatformConfigSchema.shape)
-  .extend(FleetHeartbeatConfigSchema.shape);
+  .extend(FleetHeartbeatConfigSchema.shape)
+  .extend(MetricsConfigSchema.shape)
+  // Backing-service connections: a half-configured or plaintext-credential setting stops
+  // startup here, rather than in a best-effort consumer that would keep the pod ready.
+  .superRefine((c, ctx) => {
+    for (const message of [
+      ...kafkaConfigIssues(c),
+      ...openSearchConfigIssues(c),
+      ...redisConfigIssues(c),
+    ])
+      ctx.addIssue({ code: 'custom', message });
+  });
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 

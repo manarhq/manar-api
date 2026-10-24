@@ -30,6 +30,7 @@ import { IdempotencyModule } from './idempotency/idempotency.module';
 import { ToolsHttpModule } from './tools/tools-http.module';
 import { TenantsModule } from './tenants/tenants.module';
 import { PlatformModule } from './platform/platform.module';
+import { CatalogHttpModule } from './platform/catalog.module';
 import { FleetHeartbeatModule } from './fleet-heartbeat/fleet-heartbeat.module';
 import { UsersModule } from './users/users.module';
 import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
@@ -67,6 +68,7 @@ import { AssistantModule } from './assistant/assistant.module';
     ToolsHttpModule,
     TenantsModule,
     PlatformModule,
+    CatalogHttpModule,
     FleetHeartbeatModule,
     // Phase 14: UsersService needs KeycloakAdminClient at runtime (role
     // grant/revoke keeps Keycloak's realm role mappings in sync -- see
