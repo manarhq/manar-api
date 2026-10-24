@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient, type RedisClientType } from 'redis';
+import { redisClientOptions } from '../audit/live/redis.config';
 import type { AppConfig } from '../config/env.validation';
 
 /** Keep a month's counter long enough for the fleet to read last month's total. */
@@ -21,11 +22,13 @@ export function usageMonth(at: Date = new Date()): string {
 @Injectable()
 export class CatalogUsageStore implements OnModuleDestroy {
   private readonly logger = new Logger(CatalogUsageStore.name);
-  private readonly url: string;
+  private readonly redisOptions: ReturnType<typeof redisClientOptions>;
   private client: RedisClientType | undefined;
 
   constructor(config: ConfigService<AppConfig, true>) {
-    this.url = config.get('REDIS_URL', { infer: true });
+    this.redisOptions = redisClientOptions((key) =>
+      config.get(key, { infer: true }),
+    );
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -53,9 +56,13 @@ export class CatalogUsageStore implements OnModuleDestroy {
     if (this.client?.isOpen) return this.client;
     // Fail fast rather than queue: a down Redis must deny now, not hang.
     this.client = createClient({
-      url: this.url,
+      ...this.redisOptions,
       disableOfflineQueue: true,
-      socket: { connectTimeout: 2_000, reconnectStrategy: false },
+      socket: {
+        ...this.redisOptions.socket,
+        connectTimeout: 2_000,
+        reconnectStrategy: false,
+      },
     });
     this.client.on('error', (error: unknown) => {
       this.logger.warn(
