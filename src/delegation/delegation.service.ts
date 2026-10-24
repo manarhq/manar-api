@@ -219,6 +219,8 @@ export class DelegationService {
         expiresAt,
         maxExecutions,
         riskCeiling,
+        // A child of a pack-bound task stays bound to the same pack.
+        packId: parentTask.packId ?? null,
         // The delegating agent, not the root human requester — see
         // CreateTaskInput.actor's doc comment.
         actor: { type: 'agent', id: callerAgentId },

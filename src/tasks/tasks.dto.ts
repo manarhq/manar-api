@@ -89,6 +89,14 @@ export class CreateTaskRequestDto {
     description: 'Conservative default — see Task.riskCeiling.',
   })
   riskCeiling!: number;
+
+  @ApiProperty({
+    required: false,
+    example: 'it-helpdesk',
+    description:
+      'Binds the task to a pack. Refused (403) unless Manar staff enabled that pack for this tenant; the task then acts only while it stays enabled.',
+  })
+  packId?: string;
 }
 
 /**

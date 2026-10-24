@@ -7,10 +7,13 @@ import { TasksService } from '../tasks/tasks.service';
 import type { TaskRecord } from '../tasks/tasks.service';
 import { TaskNotFoundError } from '../tasks/tasks.errors';
 import { failClosed } from '../common/fail-closed/fail-closed';
+import { CatalogService } from '../platform/catalog.service';
 
 export interface TaskAccess {
   tenantClient: TenantPrismaClient;
   task: TaskRecord;
+  /** Tools the tenant's catalog keeps out of the manifest (the watcher's connector when off). */
+  hiddenTools: string[];
 }
 
 /** 403 in the same shape `POST /agent/v1/tools/invoke` uses for a DENY. */
@@ -23,7 +26,7 @@ export function denied(reason: string): ForbiddenException {
  * tool manifest, MCP server; ADR-0002): kill switches (platform, tenant,
  * agent, agent group, AI system), then the task exists, is assigned to the
  * mTLS-authenticated agent, and it and every ancestor is ACTIVE, inside its
- * time window and under its execution limit. The same checks and reason
+ * time window and under its execution limit, and, for a pack-bound task, its pack is enabled. The same checks and reason
  * codes as steps 0-3 of `AuthorizationService`, reusing the same services.
  *
  * DENY -> 403 `{ decision: 'DENY', reason }`. Any store failure -> 503
@@ -35,6 +38,7 @@ export class AgentTaskAccessService {
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly killSwitchService: KillSwitchService,
     private readonly tasksService: TasksService,
+    private readonly catalog: CatalogService,
   ) {}
 
   async assertTaskAccess(
@@ -76,6 +80,15 @@ export class AgentTaskAccessService {
     );
     if (!liveness.ok) throw denied(liveness.reason ?? 'task_not_live');
 
-    return { tenantClient, task };
+    // A pack-bound task stops when staff disable its pack (src/platform/catalog.*).
+    const catalogDeny = await failClosed('catalog-store', () =>
+      this.catalog.taskDenyReason(agent.tenant.id, task),
+    );
+    if (catalogDeny) throw denied(catalogDeny);
+    const hiddenTools = await failClosed('catalog-store', () =>
+      this.catalog.hiddenTools(agent.tenant.id),
+    );
+
+    return { tenantClient, task, hiddenTools };
   }
 }

@@ -21,6 +21,7 @@ import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { AgentTaskAccessService, denied } from './agent-task-access.service';
 import { classifyDlp } from '../common/dlp/dlp-classification';
 import { LlmBudgetStore } from './llm-budget.store';
+import { CatalogService, catalogGate } from '../platform/catalog.service';
 import { LlmUpstreamClient, LlmUpstreamError } from './llm-upstream.client';
 import type { UpstreamChatResponse } from './llm-upstream.client';
 
@@ -73,8 +74,8 @@ interface CallRecord {
 
 /**
  * `POST /agent/v1/llm/chat/completions` (ADR-0002). In order, each step
- * fail-closed: task access (kill switches, task assigned/live) -> token
- * budget -> DLP (floor, manar-ai with a `null` blocking here, generic PII redacted per leaf)
+ * fail-closed: task access (kill switches, task assigned/live, pack enabled) -> the tenant's
+ * catalog (proxy on, model allowed, monthly quota) -> token budget -> DLP (floor, manar-ai with a `null` blocking here, generic PII redacted per leaf)
  * -> upstream -> count usage -> audit `llm.request` (metadata only) -> reply.
  * None of this is on the authorization decision path.
  */
@@ -88,6 +89,7 @@ export class LlmProxyService {
     private readonly audit: AuditService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly config: ConfigService<AppConfig, true>,
+    private readonly catalog: CatalogService,
   ) {}
 
   async complete(
@@ -112,6 +114,11 @@ export class LlmProxyService {
       const { tenantClient, task } = await this.access.assertTaskAccess(
         agent,
         taskId,
+      );
+
+      // Staff's catalog: proxy on, model allowed for this tenant, monthly quota left.
+      const { route } = await catalogGate(() =>
+        this.catalog.llmGate(agent.tenant.id, 'llm_proxy'),
       );
 
       const limit = this.config.get('LLM_TASK_TOKEN_BUDGET', { infer: true });
@@ -143,22 +150,25 @@ export class LlmProxyService {
 
       let response: UpstreamChatResponse;
       try {
-        response = await this.upstream.chat({
-          messages: dlp.value.messages,
-          ...(dlp.value.tools ? { tools: dlp.value.tools } : {}),
-          ...(request.tool_choice !== undefined
-            ? { tool_choice: request.tool_choice }
-            : {}),
-          ...(request.temperature !== undefined
-            ? { temperature: request.temperature }
-            : {}),
-          ...(request.max_tokens !== undefined
-            ? { max_tokens: request.max_tokens }
-            : {}),
-          ...(request.reasoning_effort !== undefined
-            ? { reasoning_effort: request.reasoning_effort }
-            : {}),
-        });
+        response = await this.upstream.chat(
+          {
+            messages: dlp.value.messages,
+            ...(dlp.value.tools ? { tools: dlp.value.tools } : {}),
+            ...(request.tool_choice !== undefined
+              ? { tool_choice: request.tool_choice }
+              : {}),
+            ...(request.temperature !== undefined
+              ? { temperature: request.temperature }
+              : {}),
+            ...(request.max_tokens !== undefined
+              ? { max_tokens: request.max_tokens }
+              : {}),
+            ...(request.reasoning_effort !== undefined
+              ? { reasoning_effort: request.reasoning_effort }
+              : {}),
+          },
+          route,
+        );
       } catch (error) {
         if (error instanceof LlmUpstreamError) {
           record.outcome = 'UPSTREAM_ERROR';
@@ -184,6 +194,9 @@ export class LlmProxyService {
           ));
       const total = await failClosed('limits-store', () =>
         this.budget.add(agent.tenant.id, task.id, totalTokens, task.expiresAt),
+      );
+      await failClosed('limits-store', () =>
+        this.catalog.recordTokens(agent.tenant.id, totalTokens),
       );
 
       Object.assign(record, {

@@ -7,6 +7,7 @@ import { AuthModule } from '../auth/auth.module';
 import { RedisThrottlerStorageService } from './redis-throttler-storage.service';
 import { RedisThrottlerStorageModule } from './redis-throttler-storage.module';
 import { TenantThrottlerGuard } from './tenant-throttler.guard';
+import { LocalFallbackThrottlerStorage } from './local-fallback-throttler-storage';
 
 /**
  * Phase 12a: the human-facing JWT surface's rate limiting (`AppModule`
@@ -28,7 +29,8 @@ import { TenantThrottlerGuard } from './tenant-throttler.guard';
         configService: ConfigService<AppConfig, true>,
         storage: RedisThrottlerStorageService,
       ) => ({
-        storage,
+        // Never unlimited: a Redis outage falls back to per-instance limits.
+        storage: new LocalFallbackThrottlerStorage(storage, 'human'),
         throttlers: [
           {
             name: 'human',

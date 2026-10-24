@@ -51,6 +51,8 @@ export interface TaskRecord {
   forbiddenActions: unknown;
   /** 0-100 — activated by `RiskEngine`/`AuthorizationService` starting Phase 6 (see docs/policy-model.md); Phase 5 defined this field but nothing consulted it yet. */
   riskCeiling: number;
+  /** The pack this task runs, or null (src/platform/catalog.*). Optional for older fixtures. */
+  packId?: string | null;
   createdAt: Date;
 }
 
@@ -67,6 +69,8 @@ export interface CreateTaskInput {
   expiresAt: Date;
   maxExecutions?: number | null;
   riskCeiling?: number;
+  /** Binds the task to a pack; it then acts only while that pack is enabled for the tenant. */
+  packId?: string | null;
   /**
    * Who actually caused this task to be created — Phase 9a's audit `actor`.
    * Defaults to `{ type: 'human', id: requesterId }` when omitted (a root
@@ -146,6 +150,7 @@ export class TasksService {
         expiresAt: input.expiresAt,
         maxExecutions: input.maxExecutions ?? null,
         riskCeiling: input.riskCeiling ?? DEFAULT_RISK_CEILING,
+        packId: input.packId ?? null,
       },
     });
 
@@ -178,6 +183,7 @@ export class TasksService {
         expiresAt: task.expiresAt,
         maxExecutions: task.maxExecutions,
         riskCeiling: task.riskCeiling,
+        packId: task.packId,
       },
     });
 

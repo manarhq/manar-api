@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import type { AppConfig } from '../config/env.validation';
+import { kafkaClientConfig } from '../audit/kafka.config';
 import {
   AUDIT_EVENTS_TOPIC,
   DomainEventEnvelope,
@@ -85,15 +86,12 @@ export class WebhookDeliveryConsumerService
   }
 
   private async start(): Promise<void> {
-    const brokers = this.configService
-      .get('KAFKA_BROKERS', { infer: true })
-      .split(',')
-      .map((broker) => broker.trim())
-      .filter(Boolean);
-
-    const kafka = new KafkaJS.Kafka({
-      kafkaJS: { brokers, clientId: `manar-webhook-delivery-${randomUUID()}` },
-    });
+    const kafka = new KafkaJS.Kafka(
+      kafkaClientConfig(
+        (key) => this.configService.get(key, { infer: true }),
+        `manar-webhook-delivery-${randomUUID()}`,
+      ),
+    );
 
     const admin = kafka.admin();
     try {

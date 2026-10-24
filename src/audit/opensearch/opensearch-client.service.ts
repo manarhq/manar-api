@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Client } from '@opensearch-project/opensearch';
 import type { AppConfig } from '../../config/env.validation';
+import { openSearchClientOptions } from './opensearch.config';
 
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 300;
@@ -106,9 +107,11 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
     this.indexName = this.configService.get('OPENSEARCH_AUDIT_INDEX', {
       infer: true,
     });
-    this.client = new Client({
-      node: this.configService.get('OPENSEARCH_NODE', { infer: true }),
-    });
+    this.client = new Client(
+      openSearchClientOptions((key) =>
+        this.configService.get(key, { infer: true }),
+      ),
+    );
   }
 
   /**

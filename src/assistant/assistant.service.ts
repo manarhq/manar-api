@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
 import type { AppConfig } from '../config/env.validation';
@@ -14,6 +19,13 @@ import {
   LlmUpstreamClient,
   LlmUpstreamError,
 } from '../agent-runtime/llm-upstream.client';
+import { chargedTokens } from '../agent-runtime/llm-upstream.client';
+import {
+  CatalogService,
+  catalogGate,
+  type LlmRoute,
+} from '../platform/catalog.service';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import { RedisThrottlerStorageService } from '../rate-limit/redis-throttler-storage.service';
 import { AssistantReader } from './assistant-reader.service';
 import { cleanAnswer, dataBlock, systemPrompt } from './assistant.prompt';
@@ -103,6 +115,7 @@ export class AssistantService {
     private readonly audit: AuditService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly config: ConfigService<AppConfig, true>,
+    private readonly catalog: CatalogService,
   ) {}
 
   async chat(
@@ -112,6 +125,10 @@ export class AssistantService {
   ): Promise<AssistantChatResponse> {
     const body = parseBodyOrThrow(AssistantChatSchema, rawBody);
     await this.enforceRateLimit(auth);
+    const { route, quota } = await catalogGate(() =>
+      this.catalog.llmGate(auth.tenant.id, 'assistant'),
+    );
+    const budget = { quota, spent: false };
 
     const started = Date.now();
     const locale = body.locale;
@@ -181,7 +198,13 @@ export class AssistantService {
       for (let round = 0; round < MAX_ROUNDS; round++) {
         meta.rounds = round + 1;
         const last = round === MAX_ROUNDS - 1;
-        const reply = await this.callModel(messages, last ? undefined : tools);
+        const reply = await this.callModel(
+          auth.tenant.id,
+          route,
+          budget,
+          messages,
+          last ? undefined : tools,
+        );
         const calls = reply.tool_calls?.slice(0, MAX_CALLS_PER_ROUND) ?? [];
         if (calls.length === 0 || last) {
           answer = cleanAnswer(reply.content ?? '');
@@ -287,17 +310,36 @@ export class AssistantService {
   }
 
   private async callModel(
+    tenantId: string,
+    route: LlmRoute['route'],
+    budget: { quota: number | null; spent: boolean },
     messages: unknown[],
     tools: ReturnType<typeof toolSchemas> | undefined,
   ): Promise<ModelMessage> {
+    // A chat runs several model rounds; once the month's quota is spent, the next one is refused.
+    if (budget.spent)
+      throw new ForbiddenException({
+        decision: 'DENY',
+        reason: 'llm_token_quota_exhausted',
+      });
     const ollama =
-      this.config.get('LLM_PROVIDER', { infer: true }) === 'ollama';
-    const response = await this.upstream.chat({
-      messages,
-      ...(tools ? { tools, tool_choice: 'auto' } : {}),
-      // Small local models answer faster and stay on task without a thinking pass.
-      ...(ollama ? { reasoning_effort: 'none', temperature: 0.2 } : {}),
-    });
+      (route?.provider ?? this.config.get('LLM_PROVIDER', { infer: true })) ===
+      'ollama';
+    const response = await this.upstream.chat(
+      {
+        messages,
+        ...(tools ? { tools, tool_choice: 'auto' } : {}),
+        // Small local models answer faster and stay on task without a thinking pass.
+        ...(ollama ? { reasoning_effort: 'none', temperature: 0.2 } : {}),
+      },
+      route,
+    );
+    // Counts toward the tenant's monthly quota; an unwritable counter refuses the answer.
+    const monthTotal = await failClosed('limits-store', () =>
+      this.catalog.recordTokens(tenantId, chargedTokens(response, messages)),
+    );
+    if (budget.quota !== null && monthTotal >= budget.quota)
+      budget.spent = true;
     const choices = response.body.choices as
       { message?: ModelMessage }[] | undefined;
     return choices?.[0]?.message ?? {};

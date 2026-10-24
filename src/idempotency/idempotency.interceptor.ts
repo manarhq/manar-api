@@ -3,6 +3,7 @@ import {
   ConflictException,
   ExecutionContext,
   Injectable,
+  Logger,
   NestInterceptor,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -10,6 +11,7 @@ import type { FastifyRequest } from 'fastify';
 import { firstValueFrom, Observable, of } from 'rxjs';
 import type { AppConfig } from '../config/env.validation';
 import { IdempotencyStoreService } from './idempotency-store.service';
+import { failClosed } from '../common/fail-closed/fail-closed';
 
 interface RequestWithOptionalContexts extends FastifyRequest {
   authContext?: { tenant?: { id?: string } };
@@ -48,6 +50,8 @@ interface RequestWithOptionalContexts extends FastifyRequest {
  */
 @Injectable()
 export class IdempotencyInterceptor implements NestInterceptor {
+  private readonly logger = new Logger(IdempotencyInterceptor.name);
+
   constructor(
     private readonly store: IdempotencyStoreService,
     private readonly configService: ConfigService<AppConfig, true>,
@@ -77,9 +81,20 @@ export class IdempotencyInterceptor implements NestInterceptor {
       infer: true,
     });
 
-    const claimed = await this.store.claim(redisKey, ttlMs);
+    const inProgressTtlMs = this.configService.get(
+      'IDEMPOTENCY_IN_PROGRESS_TTL_MS',
+      { infer: true },
+    );
+
+    // Without the store replay protection cannot be given, so nothing
+    // runs: 503 enforcement_dependency_unavailable, never a bare 500.
+    const claimed = await failClosed('idempotency-store', () =>
+      this.store.claim(redisKey, inProgressTtlMs),
+    );
     if (!claimed) {
-      const cached = await this.store.getCached(redisKey);
+      const cached = await failClosed('idempotency-store', () =>
+        this.store.getCached(redisKey),
+      );
       if (cached !== undefined) {
         return of(cached);
       }
@@ -88,15 +103,35 @@ export class IdempotencyInterceptor implements NestInterceptor {
       );
     }
 
+    let value: unknown;
     try {
-      const value: unknown = await firstValueFrom(next.handle(), {
-        defaultValue: null,
-      });
-      await this.store.store(redisKey, value, ttlMs);
-      return of(value);
+      value = await firstValueFrom(next.handle(), { defaultValue: null });
     } catch (error) {
-      await this.store.release(redisKey);
+      try {
+        await this.store.release(redisKey);
+      } catch (releaseError) {
+        // The marker expires after IDEMPOTENCY_IN_PROGRESS_TTL_MS; the
+        // caller still gets the handler's own error.
+        this.logger.warn(
+          `Idempotency key not released (expires in ${inProgressTtlMs} ms): ${errorMessage(releaseError)}`,
+        );
+      }
       throw error;
     }
+
+    // The change is committed: answer with it even if caching the result
+    // fails. A retry then sees 409 until the in-progress marker expires.
+    try {
+      await this.store.store(redisKey, value, ttlMs);
+    } catch (storeError) {
+      this.logger.warn(
+        `Idempotency result not cached (key expires in ${inProgressTtlMs} ms): ${errorMessage(storeError)}`,
+      );
+    }
+    return of(value);
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -14,7 +14,7 @@ import { checkTcpReachable, parseTcpEndpoint } from './tcp-reachability';
  *
  * The dependency set is the same nine the deployment's own NetworkPolicy
  * egress list enumerates (deploy/helm/manar-api/values.yaml
- * `networkPolicy.egressTargets`, minus the demo tool server): the control
+ * `networkPolicy.egress`, minus the demo tool server): the control
  * and tenant Postgres databases, OpenFGA, OpenBao, Keycloak, Temporal,
  * Kafka, OpenSearch, Redis, and the manar-ai advisory service. Keeping the
  * two lists aligned is deliberate — a dependency you are allowed to talk to
