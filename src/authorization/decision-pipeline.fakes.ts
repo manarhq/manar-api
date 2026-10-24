@@ -13,6 +13,8 @@ import type { RiskEngine } from '../risk/risk-engine.service';
 import { TasksService, type TaskRecord } from '../tasks/tasks.service';
 import { AuthorizationService } from './authorization.service';
 import type { OpenFgaClientService } from './openfga-client.service';
+import { allowAllCatalog } from '../platform/catalog.fakes';
+import type { CatalogService } from '../platform/catalog.service';
 
 /**
  * Test-only harness: a real `AuthorizationService` and a real `TasksService`
@@ -31,6 +33,8 @@ export interface DecisionHarnessOptions {
   decisionWriteFails?: boolean;
   incrementLoses?: boolean;
   grantConsumeCount?: number;
+  /** Default: an unmanaged tenant (everything on). */
+  catalog?: CatalogService;
 }
 
 export function makeTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
@@ -139,6 +143,7 @@ export function makeDecisionHarness(options: DecisionHarnessOptions = {}) {
     { score: riskScore } as unknown as RiskEngine,
     { recordSafely } as unknown as AuditService,
     { checkAll } as unknown as KillSwitchService,
+    options.catalog ?? allowAllCatalog(),
   );
 
   return {

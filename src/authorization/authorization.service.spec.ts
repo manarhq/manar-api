@@ -7,6 +7,7 @@ import type { RiskEngine } from '../risk/risk-engine.service';
 import type { TasksService } from '../tasks/tasks.service';
 import { AuthorizationService } from './authorization.service';
 import type { OpenFgaClientService } from './openfga-client.service';
+import { allowAllCatalog } from '../platform/catalog.fakes';
 
 /** Only what the fail-closed path touches: the `Decision` insert. */
 const tenantClient = {
@@ -37,6 +38,7 @@ function makeService(overrides: {
       checkAll:
         overrides.checkAll ?? (() => Promise.resolve({ killed: false })),
     } as unknown as KillSwitchService,
+    allowAllCatalog(),
   );
   return { service, recordSafely };
 }

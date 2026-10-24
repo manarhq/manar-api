@@ -9,6 +9,19 @@ import { z } from 'zod';
 export const LlmProxyConfigSchema = z.object({
   /** `ollama` (local, the sovereignty path) or `azure_openai` (the pilot's customer deployment). */
   LLM_PROVIDER: z.enum(['ollama', 'azure_openai']).default('ollama'),
+  /**
+   * Whether the deployment's default model (LLM_PROVIDER) runs in the UAE. Ollama runs inside the
+   * deployment and follows its residency; set this for an Azure OpenAI deployment in UAE North.
+   * The tenant residency rule (src/platform/catalog.*) applies to the default model too.
+   */
+  LLM_DEFAULT_UAE_RESIDENT: z.enum(['true', 'false']).default('false'),
+  /** Core42 Compass, OpenAI-compatible base URL (`/chat/completions` is appended). Used only by a tenant whose catalog picks it. */
+  LLM_CORE42_BASE_URL: z
+    .string()
+    .url()
+    .refine((v) => v.startsWith('https://'), 'must be https')
+    .optional(),
+  CORE42_API_KEY: z.string().min(1).optional(),
   /** OpenAI-compatible base URL of Ollama, `/chat/completions` is appended. */
   LLM_OLLAMA_BASE_URL: z.string().url().default('http://localhost:11434/v1'),
   /** Model sent upstream for `ollama`; the agent's own `model` field is ignored. */

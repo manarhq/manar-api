@@ -4,6 +4,7 @@ import { TasksModule } from '../tasks/tasks.module';
 import { PolicyModule } from '../policy/policy.module';
 import { RiskModule } from '../risk/risk.module';
 import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
+import { CatalogModule } from '../platform/catalog.module';
 import { AuthorizationModule } from './authorization.module';
 import { AuthorizationService } from './authorization.service';
 import { AuthorizeController } from './authorize.controller';
@@ -27,6 +28,7 @@ import { AuthorizeController } from './authorize.controller';
     PolicyModule,
     RiskModule,
     KillSwitchesModule,
+    CatalogModule,
   ],
   providers: [AuthorizationService],
   controllers: [AuthorizeController],

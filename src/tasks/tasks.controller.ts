@@ -33,6 +33,7 @@ import {
 import { RevokeStatusResponseDto } from '../agents/agents.dto';
 import { TaskNotFoundError } from './tasks.errors';
 import { TasksService } from './tasks.service';
+import { CatalogService, catalogGate } from '../platform/catalog.service';
 import {
   CreateTaskRequestSchema,
   RevokeTaskRequestSchema,
@@ -73,6 +74,7 @@ export class TasksController {
   constructor(
     private readonly tasksService: TasksService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly catalog: CatalogService,
   ) {}
 
   @Post()
@@ -93,6 +95,15 @@ export class TasksController {
   @ApiResponse({ status: 403, type: ErrorResponseDto })
   async createTask(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const input = parseBodyOrThrow(CreateTaskRequestSchema, body);
+    // The task's pack: requested, or the one staff bound its agent to (refused on a mismatch or
+    // a pack that is not enabled).
+    const packId = await catalogGate(() =>
+      this.catalog.resolveTaskPack(
+        auth.tenant.id,
+        input.assignedAgentId,
+        input.packId,
+      ),
+    );
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
@@ -121,6 +132,7 @@ export class TasksController {
         expiresAt: input.expiresAt,
         maxExecutions: input.maxExecutions,
         riskCeiling: input.riskCeiling,
+        packId,
       },
     );
 

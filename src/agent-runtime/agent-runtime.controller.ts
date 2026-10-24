@@ -186,11 +186,9 @@ export class AgentRuntimeController {
     @CurrentAgent() agent: AgentContext,
     @Param('taskId') taskId: string,
   ) {
-    const { tenantClient, task } = await this.access.assertTaskAccess(
-      agent,
-      taskId,
-    );
-    return this.manifest.build(tenantClient, task);
+    const { tenantClient, task, hiddenTools } =
+      await this.access.assertTaskAccess(agent, taskId);
+    return this.manifest.build(tenantClient, task, hiddenTools);
   }
 
   /**
@@ -240,11 +238,9 @@ export class AgentRuntimeController {
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       let manifest;
       try {
-        const { tenantClient, task } = await this.access.assertTaskAccess(
-          agent,
-          taskId,
-        );
-        manifest = await this.manifest.build(tenantClient, task);
+        const { tenantClient, task, hiddenTools } =
+          await this.access.assertTaskAccess(agent, taskId);
+        manifest = await this.manifest.build(tenantClient, task, hiddenTools);
       } catch (error) {
         if (error instanceof HttpException) {
           const reason = reasonOf(error);

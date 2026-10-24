@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PACK_ID } from '../platform/catalog.validation';
 import {
   GrantableToolActionSchema,
   ResourceSelectorSchema,
@@ -28,6 +29,8 @@ export const CreateTaskRequestSchema = z
     maxExecutions: z.number().int().positive().nullable().optional(),
     /** 0-100, conservative default — see Task.riskCeiling's schema doc comment. */
     riskCeiling: z.number().int().min(0).max(100).default(20),
+    /** Binds the task to a pack (e.g. `it-helpdesk`), which must be enabled for the tenant. */
+    packId: PACK_ID.optional(),
   })
   .refine((body) => body.expiresAt.getTime() > Date.now(), {
     message: 'expiresAt must be in the future',

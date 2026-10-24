@@ -4,6 +4,7 @@ import type { AppConfig } from '../config/env.validation';
 import { RedisThrottlerStorageService } from '../rate-limit/redis-throttler-storage.service';
 import { IdempotencyStoreService } from '../idempotency/idempotency-store.service';
 import { LlmBudgetStore } from '../agent-runtime/llm-budget.store';
+import { CatalogUsageStore } from '../platform/catalog.usage';
 import { RedisPubSubService } from './live/redis-pubsub.service';
 import { KafkaPublisherService } from './kafka-publisher.service';
 import { AuditIndexerService } from './opensearch/audit-indexer.service';
@@ -112,6 +113,11 @@ describe('Redis clients use redisClientOptions', () => {
 
   it('LLM budget store', async () => {
     await new LlmBudgetStore(config).used('t', 'task');
+    expect(calls.redis[0]).toMatchObject(redisAuth);
+  });
+
+  it('catalog usage store', async () => {
+    await new CatalogUsageStore(config).used('t');
     expect(calls.redis[0]).toMatchObject(redisAuth);
   });
 
