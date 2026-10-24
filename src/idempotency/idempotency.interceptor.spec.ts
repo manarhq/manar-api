@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ConflictException, type ExecutionContext } from '@nestjs/common';
+import { EnforcementDependencyUnavailableException } from '../common/fail-closed/fail-closed';
 import type { ConfigService } from '@nestjs/config';
 import { of, throwError, type Observable } from 'rxjs';
 import type { AppConfig } from '../config/env.validation';
@@ -227,3 +228,71 @@ function firstValue<T>(observable: Observable<T>): Promise<T> {
     observable.subscribe({ next: resolve, error: reject });
   });
 }
+
+describe('IdempotencyInterceptor when Redis fails (review, 9 Oct)', () => {
+  const config = {
+    get: (key: string) =>
+      key === 'IDEMPOTENCY_IN_PROGRESS_TTL_MS' ? 60_000 : 86_400_000,
+  } as unknown as ConfigService<AppConfig, true>;
+  const redisDown = () => Promise.reject(new Error('Redis reconnecting'));
+
+  it('claims with the short in-progress TTL; store() keeps the result for the full TTL', async () => {
+    const ttls: Record<string, number> = {};
+    const store = {
+      claim: (_k: string, ttl: number) => {
+        ttls.claim = ttl;
+        return Promise.resolve(true);
+      },
+      store: (_k: string, _v: unknown, ttl: number) => {
+        ttls.store = ttl;
+        return Promise.resolve();
+      },
+    } as unknown as IdempotencyStoreService;
+    const result = await new IdempotencyInterceptor(store, config).intercept(
+      fakeContext({ 'idempotency-key': 'k1' }),
+      handlerReturning({ ok: true }, { n: 0 }),
+    );
+    await expect(firstValue(result)).resolves.toEqual({ ok: true });
+    expect(ttls).toEqual({ claim: 60_000, store: 86_400_000 });
+  });
+
+  it('a committed change is answered even when caching its result fails', async () => {
+    const store = {
+      claim: () => Promise.resolve(true),
+      store: redisDown,
+    } as unknown as IdempotencyStoreService;
+    const calls = { n: 0 };
+    const result = await new IdempotencyInterceptor(store, config).intercept(
+      fakeContext({ 'idempotency-key': 'k2' }),
+      handlerReturning({ activated: true }, calls),
+    );
+    await expect(firstValue(result)).resolves.toEqual({ activated: true });
+    expect(calls.n).toBe(1);
+  });
+
+  it("a failed release does not hide the handler's own error", async () => {
+    const store = {
+      claim: () => Promise.resolve(true),
+      release: redisDown,
+    } as unknown as IdempotencyStoreService;
+    const original = new ConflictException('policy version already published');
+    await expect(
+      new IdempotencyInterceptor(store, config).intercept(
+        fakeContext({ 'idempotency-key': 'k3' }),
+        { handle: () => throwError(() => original) },
+      ),
+    ).rejects.toBe(original);
+  });
+
+  it('a failed claim runs nothing and is a 503 enforcement_dependency_unavailable', async () => {
+    const store = { claim: redisDown } as unknown as IdempotencyStoreService;
+    const calls = { n: 0 };
+    await expect(
+      new IdempotencyInterceptor(store, config).intercept(
+        fakeContext({ 'idempotency-key': 'k4' }),
+        handlerReturning({ ok: true }, calls),
+      ),
+    ).rejects.toBeInstanceOf(EnforcementDependencyUnavailableException);
+    expect(calls.n).toBe(0);
+  });
+});

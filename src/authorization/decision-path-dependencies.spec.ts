@@ -163,6 +163,20 @@ describe('ADR-004 — synchronous decision path dependencies', () => {
     );
   });
 
+  /**
+   * The decision metrics (src/metrics/metrics.ts) are on the path by design.
+   * They must stay in-process counters: no first-party import that could
+   * pull a network client or a new dependency onto the path.
+   */
+  it('the metrics module is reachable but imports no first-party module', () => {
+    const metrics = resolve(SRC, 'metrics/metrics.ts');
+    expect(graph.has(metrics)).toBe(true);
+    const specifiers = [
+      ...readFileSync(metrics, 'utf8').matchAll(IMPORT_RE),
+    ].map((m) => m[1]);
+    expect(specifiers.filter((s) => s?.startsWith('.'))).toEqual([]);
+  });
+
   it('no module on the decision path calls fetch (the LLM upstream is HTTP)', () => {
     const offenders = [...graph.keys()]
       .filter((file) => /\bfetch\(/.test(readFileSync(file, 'utf8')))

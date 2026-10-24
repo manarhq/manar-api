@@ -1,3 +1,6 @@
+import { Agent as HttpAgent } from 'node:http';
+import { Agent as HttpsAgent } from 'node:https';
+import axios from 'axios';
 import { readFileSync } from 'node:fs';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -50,6 +53,8 @@ export interface TupleKey {
 export class OpenFgaClientService implements OnModuleInit {
   private readonly logger = new Logger(OpenFgaClientService.name);
   private client: OpenFgaClient | null = null;
+  /** Checks only: its HTTP timeout is the check bound, so a timed-out check never leaves its socket open. */
+  private checkClient: OpenFgaClient | null = null;
   private _storeId: string | null = null;
   private _authorizationModelId: string | null = null;
 
@@ -73,6 +78,11 @@ export class OpenFgaClientService implements OnModuleInit {
       const storeId = await this.resolveStoreId(bootstrapClient);
       const client = new OpenFgaClient({ apiUrl, storeId });
       this.client = client;
+      this.checkClient = buildCheckClient(
+        apiUrl,
+        storeId,
+        this.configService.get('OPENFGA_CHECK_TIMEOUT_MS', { infer: true }),
+      );
       this._storeId = storeId;
       this._authorizationModelId =
         await this.resolveAuthorizationModelId(client);
@@ -118,10 +128,36 @@ export class OpenFgaClientService implements OnModuleInit {
 
   /** A single relationship check — throws on any transport/server failure, deliberately not swallowed here (see class doc comment). */
   async check(tuple: TupleKey): Promise<boolean> {
-    const result = await this.requireClient().check(tuple, {
-      authorizationModelId: this.requireModelId(),
+    const timeoutMs = this.configService.get('OPENFGA_CHECK_TIMEOUT_MS', {
+      infer: true,
     });
-    return result.allowed ?? false;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const result = await Promise.race([
+        this.requireCheckClient().check(tuple, {
+          authorizationModelId: this.requireModelId(),
+          // One quick retry for a blip; the race below bounds the total.
+          retryParams: { maxRetry: 1, minWaitInMs: 50 },
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(`OpenFGA check timed out after ${timeoutMs} ms`),
+              ),
+            timeoutMs,
+          );
+        }),
+      ]);
+      return result.allowed ?? false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private requireCheckClient(): OpenFgaClient {
+    if (!this.checkClient) return this.requireClient();
+    return this.checkClient;
   }
 
   private requireClient(): OpenFgaClient {
@@ -219,4 +255,24 @@ function sameModel(a: TypeDefinition[], b: TypeDefinition[]): boolean {
   const normalize = (defs: TypeDefinition[]) =>
     JSON.stringify([...defs].sort((x, y) => x.type.localeCompare(y.type)));
   return normalize(a) === normalize(b);
+}
+
+/**
+ * An OpenFGA client for checks whose HTTP timeout equals the check bound
+ * (OPENFGA_CHECK_TIMEOUT_MS): the SDK's default is 10 s, so during an outage
+ * every timed-out check would otherwise hold a socket for 10 s and pile up.
+ */
+export function buildCheckClient(
+  apiUrl: string,
+  storeId: string,
+  timeoutMs: number,
+): OpenFgaClient {
+  return new OpenFgaClient(
+    { apiUrl, storeId },
+    axios.create({
+      httpAgent: new HttpAgent({ keepAlive: true }),
+      httpsAgent: new HttpsAgent({ keepAlive: true }),
+      timeout: timeoutMs,
+    }),
+  );
 }

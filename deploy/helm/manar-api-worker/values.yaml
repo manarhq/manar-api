@@ -116,7 +116,22 @@ livenessProbe:
 # deployment's Activities get slower.
 terminationGracePeriodSeconds: 120
 
+# Internal Prometheus listener: the Temporal SDK exporter (src/metrics/worker-metrics.ts, WORKER_METRICS_PORT).
+# Never routed by the ingress; the NetworkPolicy admits only the Prometheus pods
+# selected below.
+metrics:
+  port: 9465
+  # On-prem Prometheus runs in `observability` (default deny there too);
+  # only its pods may scrape.
+  scraperNamespaceSelector:
+    labels:
+      kubernetes.io/metadata.name: observability
+  scraperPodSelector:
+    labels:
+      app.kubernetes.io/name: prometheus
+
 config:
+  WORKER_METRICS_PORT: '9465'
   NODE_ENV: production
   LOG_LEVEL: info
   # Structurally required by the shared AppConfigSchema but never dialed
@@ -139,6 +154,7 @@ config:
   AGENT_MTLS_SERVER_KEY_PATH: deploy/openbao/server-key.pem
   AGENT_MTLS_CLIENT_CA_PATH: deploy/openbao/ca-chain.pem
   OPENFGA_API_URL: http://openfga.manar-platform.svc:8080
+  OPENFGA_CHECK_TIMEOUT_MS: '1000'
   OPENFGA_STORE_NAME: manar
   OPENFGA_MODEL_FILE_PATH: src/authorization/model/manar.fga
   TEMPORAL_ADDRESS: temporal-frontend.manar-platform.svc:7233
@@ -152,6 +168,7 @@ config:
   OPENSEARCH_NODE: http://opensearch.manar-platform.svc:9200
   OPENSEARCH_AUDIT_INDEX: manar-audit-events
   REDIS_URL: redis://valkey-primary.manar-platform.svc:6379
+  REDIS_TIMEOUT_MS: '1000'
   AI_ADVISORY_GRPC_TARGET: manar-ai.manar-prod.svc:50051
   AI_ADVISORY_TIMEOUT_MS: '2000'
   AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: '5'
@@ -232,8 +249,16 @@ networkPolicy:
   # kube-system (Traefik ingress, DNS); labels as set by manar/manar-infra.
   # An ingress entry without `from` admits any source on its ports.
   enabled: true
-  # No Service: nothing connects to the worker.
-  ingress: {}
+  # Only Prometheus connects to the worker (Temporal SDK metrics).
+  ingress:
+    # Prometheus scrape of the internal metrics listener, Prometheus pods only.
+    metrics:
+      ports: [{ port: metrics, protocol: TCP }]
+      from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
   egress:
     # DNS (CoreDNS in kube-system). Kept even though the namespace policy in
     # manar/manar-infra also allows it, so the chart works on its own.

@@ -43,6 +43,8 @@ function fakeConfigService(
 ): ConfigService<AppConfig, true> {
   const values: AppConfig = {
     PORT: 3000,
+    METRICS_PORT: 0,
+    WORKER_METRICS_PORT: 0,
     NODE_ENV: 'test',
     LOG_LEVEL: 'info',
     CONTROL_DATABASE_URL: process.env.CONTROL_DATABASE_URL ?? '',
@@ -76,6 +78,7 @@ function fakeConfigService(
     OPENFGA_API_URL: process.env.OPENFGA_API_URL ?? 'http://localhost:8080',
     OPENFGA_STORE_NAME: process.env.OPENFGA_STORE_NAME ?? 'manar',
     OPENFGA_STORE_ID: process.env.OPENFGA_STORE_ID,
+    OPENFGA_CHECK_TIMEOUT_MS: 1000,
     OPENFGA_AUTHORIZATION_MODEL_ID: process.env.OPENFGA_AUTHORIZATION_MODEL_ID,
     OPENFGA_MODEL_FILE_PATH:
       process.env.OPENFGA_MODEL_FILE_PATH ??
@@ -123,12 +126,14 @@ function fakeConfigService(
     RATE_LIMIT_HUMAN_LIMIT: 300,
     RATE_LIMIT_AGENT_TTL_MS: 60_000,
     RATE_LIMIT_AGENT_LIMIT: 120,
+    REDIS_TIMEOUT_MS: 1000,
     CORS_ALLOWED_ORIGINS: '*',
     WEBHOOK_SIGNATURE_TOLERANCE_MS: 300_000,
     WEBHOOK_DELIVERY_TASK_QUEUE: 'manar-webhooks',
     WEBHOOK_DELIVERY_TIMEOUT_MS: 10_000,
     WEBHOOK_DELIVERY_MAX_ATTEMPTS: 6,
     IDEMPOTENCY_KEY_TTL_MS: 86_400_000,
+    IDEMPOTENCY_IN_PROGRESS_TTL_MS: 60_000,
     SSRF_ALLOWED_HOSTS: '127.0.0.1,localhost',
     SSRF_ALLOW_LOOPBACK: true,
     LLM_PROVIDER: 'ollama',

@@ -6,9 +6,9 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { ThrottlerStorage } from '@nestjs/throttler';
-import { createClient, type RedisClientType } from 'redis';
-import { redisClientOptions } from '../audit/live/redis.config';
 import type { AppConfig } from '../config/env.validation';
+import { redisClientOptions } from '../audit/live/redis.config';
+import { BoundedRedis } from '../common/redis/bounded-redis';
 
 /**
  * Mirrors `@nestjs/throttler`'s own `ThrottlerStorageRecord` shape exactly
@@ -120,18 +120,20 @@ export class RedisThrottlerStorageService
   implements ThrottlerStorage, OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger(RedisThrottlerStorageService.name);
-  private readonly redisOptions: ReturnType<typeof redisClientOptions>;
-  private client: RedisClientType | undefined;
+  private readonly redis: BoundedRedis;
 
-  constructor(private readonly configService: ConfigService<AppConfig, true>) {
-    this.redisOptions = redisClientOptions((key) =>
-      this.configService.get(key, { infer: true }),
+  constructor(configService: ConfigService<AppConfig, true>) {
+    this.redis = new BoundedRedis(
+      redisClientOptions((key) => configService.get(key, { infer: true })),
+      configService.get('REDIS_TIMEOUT_MS', { infer: true }),
+      this.logger,
+      'Rate-limit store',
     );
   }
 
   async onModuleInit(): Promise<void> {
     try {
-      await this.connect();
+      await this.redis.connect();
     } catch (error) {
       this.logger.warn(
         `Could not connect to Redis at startup (will retry lazily on first increment): ${errorMessage(error)}`,
@@ -140,13 +142,7 @@ export class RedisThrottlerStorageService
   }
 
   async onModuleDestroy(): Promise<void> {
-    try {
-      await this.client?.quit();
-    } catch (error) {
-      this.logger.warn(
-        `Error closing Redis throttler connection: ${errorMessage(error)}`,
-      );
-    }
+    await this.redis.close();
   }
 
   /**
@@ -163,7 +159,7 @@ export class RedisThrottlerStorageService
     blockDuration: number,
     throttlerName: string,
   ): Promise<ThrottlerStorageRecord> {
-    const client = await this.getClient();
+    const client = await this.redis.get();
     const redisKey = `manar:throttle:${throttlerName}:${key}`;
 
     const result = (await client.eval(INCREMENT_SCRIPT, {
@@ -184,25 +180,6 @@ export class RedisThrottlerStorageService
       isBlocked: isBlocked === 1,
       timeToBlockExpire: Math.max(0, Math.ceil(timeToBlockExpireMs / 1000)),
     };
-  }
-
-  private async getClient(): Promise<RedisClientType> {
-    if (this.client?.isOpen) return this.client;
-    await this.connect();
-    if (!this.client) {
-      throw new Error('Redis throttler storage: no connection available');
-    }
-    return this.client;
-  }
-
-  private async connect(): Promise<void> {
-    this.client = createClient(this.redisOptions);
-    this.client.on('error', (error: unknown) => {
-      this.logger.warn(
-        `Redis throttler connection error: ${errorMessage(error)}`,
-      );
-    });
-    await this.client.connect();
   }
 }
 

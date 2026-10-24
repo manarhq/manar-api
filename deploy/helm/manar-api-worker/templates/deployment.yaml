@@ -51,6 +51,10 @@ spec:
           command:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
           envFrom:
             - configMapRef:
                 name: {{ include "manar-api-worker.fullname" . }}-config
