@@ -170,15 +170,27 @@ Every `NetworkPolicy` in this repo is default-deny-by-omission
 nothing gets unrestricted egress, and DNS (CoreDNS/kube-dns) is always
 listed as its own explicit rule rather than assumed.
 
-Assumption baked into every chart (documented, not hidden): dependency
-pods are matched by `app.kubernetes.io/name` **within the policy's own
-namespace** — i.e., a single `manar` namespace holding manar-api's three
-Deployments plus Postgres/Keycloak/OpenBao/OpenFGA/Temporal/Kafka/Redis/
-OpenSearch/`manar-ai`/`demo-soc-tools`, matching the single-Docker-network
-posture `deploy/docker-compose.yml` already has locally. A real
-deployment that splits dependencies across namespaces needs a
-`namespaceSelector` added per egress rule — not done here since it isn't
-this repo's call to make about a cluster topology that doesn't exist yet.
+Namespaces and labels (October 2026, agreed with the platform repo
+`manar/manar-infra`): apps run in `manar-prod`, backing services in
+`manar-platform`, the Traefik ingress and CoreDNS in `kube-system`. Every rule
+selects its peer by namespace (`kubernetes.io/metadata.name`) plus the pod
+labels the backing-service operators set (CNPG `cnpg.io/cluster: manar-pg`,
+Strimzi `strimzi.io/cluster: manar-kafka`, the Valkey HAProxy
+`app.kubernetes.io/name: valkey-primary`, and `app.kubernetes.io/name` for the
+rest). The rules are maps keyed by name in `values.yaml` (`networkPolicy.ingress`,
+`networkPolicy.egress`), so an overlay switches one off with
+`networkPolicy.egress.<name>.enabled: false`, changes its peers or adds one
+without restating the others (Helm and Flux merge maps but replace lists).
+`keycloak-public` (Traefik websecure, 8443, on by default) carries Keycloak calls to the public issuer, which manar-infra rewrites in-cluster; `backingServiceTls.caSecretName` must name the internal CA Secret. Outbound HTTPS to public addresses (connectors,
+hosted model upstreams, a remote manar-fleet) is the `external-https` entry:
+TCP 443 to `0.0.0.0/0` minus private, link-local and CGNAT ranges. The
+namespace-wide default-deny is the platform repo's; these policies list what
+each app needs on its own.
+
+The worker's egress also allows Valkey, OpenFGA and Keycloak (requested by the
+platform owner): `WorkerAppModule` imports the kill-switch, policy, tools,
+approvals and webhooks modules, and allowing those three is cheaper than
+proving on every change that none of them reach a client.
 
 ## Secrets
 
@@ -217,17 +229,19 @@ per problem (no redundant pair solving the same problem twice):
 
 | Tool        | Version (pinned image)                    | Problem                                                                                                                                                        | Threshold                                                                                                                        |
 | ----------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Trivy       | `aquasec/trivy:0.71.0`                    | Dependency scan (`trivy fs`) **and** container image scan (`trivy image`, all three built images)                                                              | Fail on **HIGH/CRITICAL** only (`--ignore-unfixed`); full JSON report always uploaded regardless of outcome                      |
+| Trivy       | `aquasec/trivy:0.71.0`                    | Dependency scan (`trivy fs`) **and** container image scan (`trivy image`, all three built images; 0.74.0 by digest, inside `docker:build-images`)              | Fail on **HIGH/CRITICAL** only (`--ignore-unfixed`); full JSON report always uploaded regardless of outcome                      |
 | Gitleaks    | `ghcr.io/gitleaks/gitleaks:v8.30.1`       | Secret scanning, full git history every run (`--log-opts="--all"`), not just the diff                                                                          | Fail on **any** finding not already in `.gitleaks.toml`'s allowlist — no acceptable severity tier for a leaked credential        |
 | Semgrep     | `semgrep/semgrep:1.172.0`                 | SAST                                                                                                                                                           | Fail on **ERROR** severity only (`--config auto`'s highest tier); WARNING/INFO still reported in the JSON artifact, non-blocking |
-| Syft        | `anchore/syft:v1.51.0`                    | SBOM generation (CycloneDX), all three built images                                                                                                            | Artifact-only job — never fails the pipeline                                                                                     |
+| Syft        | `anchore/syft:v1.51.0`                    | SBOM generation (CycloneDX), all three built images, inside `docker:build-images`                                                                              | A Syft failure fails `docker:build-images`; the SBOMs are uploaded as artifacts                                                  |
 | kubeconform | `ghcr.io/yannh/kubeconform:v0.8.0-alpine` | Kubernetes manifest **schema** validity                                                                                                                        | Fail on **any** `-strict` violation                                                                                              |
 | kube-linter | `stackrox/kube-linter:v0.8.3`             | Kubernetes manifest **best-practice/security lint** (non-root, resource limits, anti-affinity, `:latest`, ...) — complements kubeconform, doesn't duplicate it | Fail on any default-profile finding                                                                                              |
 
-`docker:build-images` (in the existing `build` stage, so its artifacts —
-three `docker save` tarballs — exist before any `security`-stage job that
-`needs:` them) builds all three images with the same `--target`/`-f`
-invocations documented above.
+`docker:build-images` (in the `build` stage) builds all three images with
+the same `--target`/`-f` invocations documented above, then scans each
+`docker save` tarball with Trivy and Syft in the same job. The tarballs
+(about 900 MB each) are not artifacts: the instance artifact limit is
+100 MB. Only the Trivy JSON reports and the SBOMs are uploaded. Trivy, Syft
+and the docker images are pinned by digest.
 
 **Verified locally before wiring into CI** (all commands above run
 directly against this repo, not assumed to work):

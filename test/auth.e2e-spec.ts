@@ -165,6 +165,42 @@ describe('Auth (e2e) — JwtAuthGuard / RolesGuard', () => {
     await control.$disconnect();
   }, 60_000);
 
+  it('8. concurrent first requests from a new user all succeed and bind each role once', async () => {
+    // Load test finding (9 Oct): two simultaneous first requests both saw
+    // no RoleBinding and both inserted it; the loser hit the (userId, role)
+    // unique constraint and the request returned 500.
+    const username = `first-${randomUUID().slice(0, 8)}`;
+    const userId = await createRealmUser(tenantA.keycloakRealm!, {
+      username,
+      email: `${username}@example.test`,
+      password: USER_PASSWORD,
+    });
+    await assignRealmRole(tenantA.keycloakRealm!, userId, 'SECURITY_ADMIN');
+    const token = await getUserToken({
+      realm: tenantA.keycloakRealm!,
+      clientId: tenantA.keycloakClientId!,
+      clientSecret: clientSecretA,
+      username,
+      password: USER_PASSWORD,
+    });
+
+    const statuses = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        request(app.getHttpServer() as App)
+          .get('/__test-protected/security-admin-only')
+          .set('Authorization', `Bearer ${token}`)
+          .then((r) => r.status),
+      ),
+    );
+
+    expect(statuses).toEqual(Array.from({ length: 20 }, () => 200));
+    const tenantAClient = await tenantDatabaseManager.getClient(tenantA.id);
+    const bindings = await tenantAClient.roleBinding.findMany({
+      where: { user: { keycloakSubject: userId } },
+    });
+    expect(bindings.map((b) => b.role)).toEqual(['SECURITY_ADMIN']);
+  }, 30_000);
+
   it('1. a valid token from a known tenant realm succeeds with the correct AuthContext', async () => {
     const token = await getUserToken({
       realm: tenantA.keycloakRealm!,
