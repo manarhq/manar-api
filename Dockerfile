@@ -1,7 +1,5 @@
-# syntax=docker/dockerfile:1
-
 # ---- Base: pnpm-enabled Node image shared by the build stages ----
-FROM node:24-alpine AS base
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS base
 RUN npm install --global pnpm@11.20.0
 WORKDIR /app
 
@@ -47,7 +45,7 @@ RUN pnpm install --frozen-lockfile --prod --ignore-scripts \
   && pnpm rebuild @prisma/engines prisma
 
 # ---- runtime: minimal image, no build toolchain, non-root user ----
-FROM node:24-alpine AS runtime
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS runtime
 ENV NODE_ENV=production
 # Reported in the manar-fleet heartbeat (ADR-0010). CI passes the commit sha.
 ARG MANAR_GIT_SHA=unknown

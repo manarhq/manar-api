@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 #
 # Build context for this Dockerfile is the REPO ROOT (see
 # deploy/docker-compose.yml's `demo-soc-tools` service: `context: ..`),
@@ -11,7 +10,7 @@
 # the root Dockerfile (manar-api's own).
 
 # ---- Base: pnpm-enabled Node image shared by the build stages ----
-FROM node:24-alpine AS base
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS base
 RUN npm install --global pnpm@11.20.0
 WORKDIR /app
 
@@ -49,7 +48,7 @@ COPY packages/demo-soc-tools/package.json ./packages/demo-soc-tools/package.json
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts --filter @manar/demo-soc-tools...
 
 # ---- runtime: minimal image, no build toolchain, non-root user ----
-FROM node:24-alpine AS runtime
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
