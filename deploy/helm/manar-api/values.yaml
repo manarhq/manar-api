@@ -172,8 +172,8 @@ config:
   KEYCLOAK_CLIENT_ID: manar-api
   OPENBAO_ADDR: https://openbao-active.manar-platform.svc:8200
   OPENBAO_KV_MOUNT_PATH: secret
-  OPENBAO_PKI_ROOT_PATH: pki-root
-  OPENBAO_PKI_INTERMEDIATE_PATH: pki-int
+  OPENBAO_PKI_ROOT_PATH: pki
+  OPENBAO_PKI_INTERMEDIATE_PATH: pki_int
   OPENBAO_PKI_AGENT_ROLE: manar-agent
   AGENT_MTLS_PORT: '3443'
   AGENT_MTLS_SERVER_CERT_PATH: deploy/openbao/server-cert.pem
@@ -181,7 +181,7 @@ config:
   AGENT_MTLS_CLIENT_CA_PATH: deploy/openbao/ca-chain.pem
   OPENFGA_API_URL: http://openfga.manar-platform.svc:8080
   OPENFGA_STORE_NAME: manar
-  OPENFGA_MODEL_FILE_PATH: authorization/model.fga
+  OPENFGA_MODEL_FILE_PATH: src/authorization/model/manar.fga
   TEMPORAL_ADDRESS: temporal-frontend.manar-platform.svc:7233
   TEMPORAL_NAMESPACE: default
   TEMPORAL_TASK_QUEUE: manar-approvals

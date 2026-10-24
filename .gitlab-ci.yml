@@ -450,6 +450,11 @@ docker:build-images:
     - docker build --build-arg MANAR_GIT_SHA=$CI_COMMIT_SHORT_SHA --target runtime -t manar-api:ci .
     - docker build --build-arg MANAR_GIT_SHA=$CI_COMMIT_SHORT_SHA --target worker -t manar-api-worker:ci .
     - docker build -t demo-soc-tools:ci -f packages/demo-soc-tools/Dockerfile .
+    # Files the app opens by path at runtime must be in the image, not only in the repo.
+    - >
+      for img in manar-api:ci manar-api-worker:ci; do
+        docker run --rm --entrypoint sh "$img" -c 'test -f src/authorization/model/manar.fga' || { echo "$img has no src/authorization/model/manar.fga"; exit 1; };
+      done
     - docker save manar-api:ci -o manar-api.tar
     - docker save manar-api-worker:ci -o manar-api-worker.tar
     - docker save demo-soc-tools:ci -o demo-soc-tools.tar
