@@ -1,5 +1,6 @@
 import type { Logger } from '@nestjs/common';
 import { createClient, type RedisClientType } from 'redis';
+import type { redisClientOptions } from '../../audit/live/redis.config';
 
 /**
  * One Redis connection on a request path, bounded: no offline queue (a
@@ -13,7 +14,7 @@ export class BoundedRedis {
   private client: RedisClientType | undefined;
 
   constructor(
-    private readonly url: string,
+    private readonly options: ReturnType<typeof redisClientOptions>,
     private readonly timeoutMs: number,
     private readonly logger: Logger,
     private readonly label: string,
@@ -33,9 +34,9 @@ export class BoundedRedis {
 
   async connect(): Promise<void> {
     const client: RedisClientType = createClient({
-      url: this.url,
+      ...this.options,
       disableOfflineQueue: true,
-      socket: { connectTimeout: this.timeoutMs },
+      socket: { ...this.options.socket, connectTimeout: this.timeoutMs },
       commandOptions: { timeout: this.timeoutMs },
     });
     client.on('error', (error: unknown) => {

@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient, type RedisClientType } from 'redis';
+import { redisClientOptions } from './redis.config';
 import type { AppConfig } from '../../config/env.validation';
 import type { DomainEventEnvelope } from '../domain-event-envelope';
 
@@ -37,11 +38,13 @@ export interface LiveSubscription {
 @Injectable()
 export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisPubSubService.name);
-  private readonly url: string;
+  private readonly redisOptions: ReturnType<typeof redisClientOptions>;
   private publisher: RedisClientType | undefined;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
-    this.url = this.configService.get('REDIS_URL', { infer: true });
+    this.redisOptions = redisClientOptions((key) =>
+      this.configService.get(key, { infer: true }),
+    );
   }
 
   /**
@@ -51,7 +54,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
    */
   async onModuleInit(): Promise<void> {
     try {
-      this.publisher = createClient({ url: this.url });
+      this.publisher = createClient(this.redisOptions);
       this.publisher.on('error', (error: unknown) => {
         this.logger.warn(
           `Redis publisher connection error: ${errorMessage(error)}`,
@@ -83,7 +86,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   async publish(envelope: DomainEventEnvelope): Promise<void> {
     try {
       if (!this.publisher) {
-        this.publisher = createClient({ url: this.url });
+        this.publisher = createClient(this.redisOptions);
         this.publisher.on('error', (error: unknown) => {
           this.logger.warn(
             `Redis publisher connection error: ${errorMessage(error)}`,
@@ -115,7 +118,7 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
     tenantId: string,
     onMessage: (envelope: DomainEventEnvelope) => void,
   ): Promise<LiveSubscription> {
-    const base = this.publisher ?? createClient({ url: this.url });
+    const base = this.publisher ?? createClient(this.redisOptions);
     const subscriber = base.duplicate() as RedisClientType;
     subscriber.on('error', (error: unknown) => {
       this.logger.warn(

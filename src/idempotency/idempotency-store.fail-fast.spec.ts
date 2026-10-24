@@ -14,7 +14,11 @@ describe('IdempotencyStoreService is bounded when Redis does not answer', () => 
     const { port } = blackHole.address() as AddressInfo;
     const store = new IdempotencyStoreService({
       get: (key: string) =>
-        key === 'REDIS_TIMEOUT_MS' ? 250 : `redis://127.0.0.1:${port}`,
+        key === 'REDIS_TIMEOUT_MS'
+          ? 250
+          : key === 'REDIS_URL'
+            ? `redis://127.0.0.1:${port}`
+            : undefined,
     } as unknown as ConfigService<AppConfig, true>);
 
     const started = Date.now();

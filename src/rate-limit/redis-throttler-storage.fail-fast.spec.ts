@@ -16,7 +16,12 @@ const REDIS = new URL(process.env.REDIS_URL ?? 'redis://localhost:6379');
 
 function config(url: string): ConfigService<AppConfig, true> {
   return {
-    get: (key: string) => (key === 'REDIS_TIMEOUT_MS' ? TIMEOUT_MS : url),
+    get: (key: string) =>
+      key === 'REDIS_TIMEOUT_MS'
+        ? TIMEOUT_MS
+        : key === 'REDIS_URL'
+          ? url
+          : undefined,
   } as unknown as ConfigService<AppConfig, true>;
 }
 

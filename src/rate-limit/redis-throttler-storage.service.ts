@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { ThrottlerStorage } from '@nestjs/throttler';
 import type { AppConfig } from '../config/env.validation';
+import { redisClientOptions } from '../audit/live/redis.config';
 import { BoundedRedis } from '../common/redis/bounded-redis';
 
 /**
@@ -123,7 +124,7 @@ export class RedisThrottlerStorageService
 
   constructor(configService: ConfigService<AppConfig, true>) {
     this.redis = new BoundedRedis(
-      configService.get('REDIS_URL', { infer: true }),
+      redisClientOptions((key) => configService.get(key, { infer: true })),
       configService.get('REDIS_TIMEOUT_MS', { infer: true }),
       this.logger,
       'Rate-limit store',

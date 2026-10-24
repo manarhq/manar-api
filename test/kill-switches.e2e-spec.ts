@@ -387,12 +387,15 @@ describe('Kill Switches (e2e)', () => {
       .expect(201);
     return res.body as PlatformKillSwitchStatusBody;
   }
-  async function deactivatePlatformKillSwitch(token: string): Promise<void> {
-    await request(humanApp.getHttpServer() as App)
-      .post('/kill-switches/platform/deactivate')
-      .set('Authorization', `Bearer ${token}`)
-      .set('X-Platform-Operator-Token', PLATFORM_OPERATOR_TOKEN)
-      .expect(201);
+  /**
+   * Test cleanup only: the legacy deactivate route is refused (two-person release through the
+   * platform API), so the suite resets the control-DB row itself.
+   */
+  async function resetPlatformKillSwitch(): Promise<void> {
+    await control.platformKillSwitch.updateMany({
+      where: { id: 'singleton' },
+      data: { active: false },
+    });
   }
 
   interface RawResponse {
@@ -591,13 +594,13 @@ describe('Kill Switches (e2e)', () => {
 
     // Safety net: force the process-wide platform switch off in case a
     // previously crashed run left it active — see class doc comment.
-    await deactivatePlatformKillSwitch(adminToken);
+    await resetPlatformKillSwitch();
   }, 180_000);
 
   afterAll(async () => {
     // Belt-and-suspenders: never leave the shared, cross-tenant platform
     // switch active for any other concurrently/subsequently running suite.
-    await deactivatePlatformKillSwitch(adminToken).catch(() => undefined);
+    await resetPlatformKillSwitch().catch(() => undefined);
 
     temporalWorker?.shutdown();
     await temporalWorkerRunPromise;
@@ -1009,8 +1012,23 @@ describe('Kill Switches (e2e)', () => {
       expect((denied2 as { reason: string }).reason).toBe(
         'platform_kill_switch_active',
       );
+
+      // One tenant admin with the operator token can no longer end the stop alone: release is
+      // two-person, through the platform API for one named engagement.
+      const refused = await request(humanApp.getHttpServer() as App)
+        .post('/kill-switches/platform/deactivate')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .set('X-Platform-Operator-Token', PLATFORM_OPERATOR_TOKEN)
+        .expect(403);
+      expect((refused.body as { code: string }).code).toBe(
+        'platform_release_requires_two_person',
+      );
+      const still = await agent1.manar.authorize(request1);
+      expect((still as { reason: string }).reason).toBe(
+        'platform_kill_switch_active',
+      );
     } finally {
-      await deactivatePlatformKillSwitch(adminToken);
+      await resetPlatformKillSwitch();
     }
 
     const after1 = await agent1.manar.authorize(request1);

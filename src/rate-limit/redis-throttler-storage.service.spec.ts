@@ -8,7 +8,8 @@ function fakeConfigService(
   url = process.env.REDIS_URL ?? 'redis://localhost:6379',
 ): ConfigService<AppConfig, true> {
   return {
-    get: (key: string) => (key === 'REDIS_TIMEOUT_MS' ? 250 : url),
+    get: (key: string) =>
+      key === 'REDIS_TIMEOUT_MS' ? 250 : key === 'REDIS_URL' ? url : undefined,
   } as unknown as ConfigService<AppConfig, true>;
 }
 

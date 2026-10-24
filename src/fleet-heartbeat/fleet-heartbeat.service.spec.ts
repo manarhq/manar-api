@@ -1,4 +1,7 @@
 import { generateKeyPairSync, verify } from 'node:crypto';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ConfigService } from '@nestjs/config';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config/env.validation';
@@ -6,13 +9,22 @@ import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import type { ReadinessService } from '../health/readiness.service';
 import type { OpenBaoKvClient } from '../openbao/openbao-kv.client';
-import { FleetHeartbeatService } from './fleet-heartbeat.service';
+import type { PlatformOpsService } from '../platform/platform-ops.service';
+import {
+  FleetHeartbeatService,
+  HEARTBEAT_MAX_PAYLOAD_CHARS,
+  type TenantCatalogSource,
+} from './fleet-heartbeat.service';
 
 const keys = generateKeyPairSync('ed25519');
 const TENANT_ID = '11111111-2222-4333-8444-555555555555';
 const DEPLOYMENT_ID = '99999999-8888-4777-8666-555555555555';
 
-function service(env: Record<string, unknown>) {
+function service(
+  env: Record<string, unknown>,
+  opsOverride: Partial<Record<keyof PlatformOpsService, unknown>> = {},
+  catalog?: TenantCatalogSource,
+) {
   const values: Record<string, unknown> = {
     FLEET_HEARTBEAT_INTERVAL_MINUTES: 5,
     FLEET_HEARTBEAT_KEY_PATH: 'fleet/heartbeat-signing-key',
@@ -65,7 +77,33 @@ function service(env: Record<string, unknown>) {
           .toString(),
       }),
   } as unknown as OpenBaoKvClient;
-  return new FleetHeartbeatService(config, readiness, control, tenants, kv);
+  const ops = {
+    openbaoSealed: () => Promise.resolve(false),
+    expiries: () =>
+      Promise.resolve([
+        { kind: 'tool_credential', notAfter: '2026-11-08T00:00:00.000Z' },
+      ]),
+    auditChain: () =>
+      Promise.resolve({
+        status: 'ok',
+        tenantsChecked: 1,
+        tenantsBroken: 0,
+        verifiedAt: '2026-10-09T08:00:00.000Z',
+      }),
+    usageMonths: () => Promise.resolve([{ month: '2026-10', decisions: 1200 }]),
+    killSwitchState: () =>
+      Promise.resolve({ active: false, activatedAt: null }),
+    ...opsOverride,
+  } as unknown as PlatformOpsService;
+  return new FleetHeartbeatService(
+    config,
+    readiness,
+    control,
+    tenants,
+    kv,
+    ops,
+    catalog,
+  );
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -98,13 +136,17 @@ describe('FleetHeartbeatService', () => {
     ).toBe(true);
     const payload = JSON.parse(bytes.toString()) as Record<string, unknown>;
     expect(Object.keys(payload).sort()).toEqual([
+      'auditChain',
       'backup',
       'counts',
       'deploymentId',
+      'expiries',
       'gitSha',
       'health',
+      'killSwitch',
       'nonce',
       'timestamp',
+      'usage',
       'v',
       'version',
     ]);
@@ -115,12 +157,20 @@ describe('FleetHeartbeatService', () => {
       health: {
         status: 'degraded',
         checks: { 'postgres-control': 'up', openbao: 'down' },
+        openbaoSealed: false,
       },
       backup: {
         status: 'unknown',
         lastBackupAt: null,
         lastRestoreTestAt: null,
+        lastRestoreTestStatus: null,
       },
+      expiries: [
+        { kind: 'tool_credential', notAfter: '2026-11-08T00:00:00.000Z' },
+      ],
+      auditChain: { status: 'ok', tenantsChecked: 1, tenantsBroken: 0 },
+      usage: { months: [{ month: '2026-10', decisions: 1200 }] },
+      killSwitch: { active: false, activatedAt: null },
       counts: { tenants: 1, tenantsActive: 1, agents: 3, agentsActive: 2 },
     });
     const text = bytes.toString();
@@ -134,5 +184,203 @@ describe('FleetHeartbeatService', () => {
     const b = await s.payload();
     expect(a.nonce).not.toBe(b.nonce);
     expect(a.nonce).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('leaves out an ops section it cannot read, and still sends', async () => {
+    const p = await service(
+      { FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID },
+      {
+        expiries: () => Promise.reject(new Error('openbao down')),
+        auditChain: () => Promise.reject(new Error('db down')),
+      },
+    ).payload();
+    expect(p.expiries).toBeUndefined();
+    expect(p.auditChain).toBeUndefined();
+    expect(p.usage).toBeDefined();
+  });
+
+  it('validates before signing: a field outside the schema is never sent', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    const s = service(
+      { FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID },
+      {
+        expiries: () =>
+          Promise.resolve([
+            {
+              kind: 'tool_credential',
+              notAfter: '2026-11-08T00:00:00.000Z',
+              name: 'acme-graph',
+            },
+          ]),
+      },
+    );
+    await expect(s.payload()).rejects.toThrow();
+    expect(await s.send('http://fleet.internal/heartbeats')).toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('adds one catalog section per ACTIVE tenant: config and counts only, never a reference', async () => {
+    const catalog: TenantCatalogSource = {
+      view: () =>
+        Promise.resolve({
+          features: {
+            assistant: true,
+            watcher: true,
+            packs: true,
+            llm_proxy: false,
+          },
+          packs: [{ id: 'soc', version: 2, enabled: true }],
+          model: {
+            provider: 'azure_openai',
+            model: 'gpt-5-mini',
+            uaeResidency: true,
+            monthlyTokenQuota: null,
+          },
+          usage: { month: '2026-10', tokens: 900 },
+          connectors: [
+            Object.assign(
+              {
+                name: 'microsoft-graph',
+                type: 'IAM',
+                protocol: 'MICROSOFT',
+                enabled: true,
+                credentialExpiresAt: new Date('2026-11-08T00:00:00Z'),
+              },
+              {
+                credentialReference: {
+                  provider: 'OPENBAO',
+                  reference: 'tools/x',
+                },
+              },
+            ),
+          ],
+        }),
+    };
+    const p = await service(
+      { FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID },
+      {},
+      catalog,
+    ).payload();
+    expect(p.tenants).toEqual([
+      {
+        tenantId: TENANT_ID,
+        catalog: {
+          features: {
+            assistant: true,
+            watcher: true,
+            packs: true,
+            llm_proxy: false,
+          },
+          packs: [{ id: 'soc', version: 2, enabled: true }],
+          model: {
+            provider: 'azure_openai',
+            model: 'gpt-5-mini',
+            uaeResidency: true,
+            monthlyTokenQuota: null,
+          },
+        },
+        llmTokensMonth: { month: '2026-10', tokens: 900 },
+        connectors: [
+          {
+            name: 'microsoft-graph',
+            type: 'IAM',
+            protocol: 'MICROSOFT',
+            enabled: true,
+            credentialExpiresAt: '2026-11-08T00:00:00.000Z',
+          },
+        ],
+      },
+    ]);
+    expect(JSON.stringify(p)).not.toContain('tools/x');
+  });
+
+  it('leaves out a tenant whose catalog cannot be read, and still sends', async () => {
+    const p = await service(
+      { FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID },
+      {},
+      { view: () => Promise.reject(new Error('catalog store down')) },
+    ).payload();
+    expect(p.tenants).toEqual([]);
+    expect(p.counts).toBeDefined();
+  });
+
+  it('without a catalog source, the section is absent', async () => {
+    const p = await service({ FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID }).payload();
+    expect(p.tenants).toBeUndefined();
+  });
+
+  it('carries the restore drill duration from the backup file', async () => {
+    const file = join(await mkdtemp(join(tmpdir(), 'hb-')), 'backup.json');
+    await writeFile(
+      file,
+      JSON.stringify({
+        status: 'ok',
+        lastBackupAt: '2026-10-09T01:00:00Z',
+        lastRestoreTestAt: '2026-10-01T09:00:00Z',
+        lastRestoreTestStatus: 'ok',
+        lastRestoreTestSeconds: 1260,
+      }),
+    );
+    const p = await service({
+      FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID,
+      FLEET_BACKUP_STATUS_FILE: file,
+    }).payload();
+    expect(p.backup).toMatchObject({
+      lastRestoreTestStatus: 'ok',
+      lastRestoreTestSeconds: 1260,
+    });
+  });
+});
+
+describe('FleetHeartbeatService envelope size', () => {
+  it('leaves out the per-tenant section rather than send more than manar-fleet accepts', async () => {
+    const connectors = Array.from({ length: 100 }, (_, j) => ({
+      name: `connector-with-a-long-name-${j}`,
+      type: 'IAM',
+      protocol: 'MICROSOFT',
+      enabled: true,
+      credentialExpiresAt: '2026-11-08T00:00:00.000Z',
+    }));
+    const s = service(
+      { FLEET_DEPLOYMENT_ID: DEPLOYMENT_ID },
+      {},
+      {
+        view: () =>
+          Promise.resolve({
+            features: {
+              assistant: true,
+              watcher: true,
+              packs: true,
+              llm_proxy: true,
+            },
+            packs: [],
+            model: null,
+            usage: { month: '2026-10', tokens: 0 },
+            connectors,
+          }),
+      },
+    );
+    const many = Array.from({ length: 200 }, (_, i) => ({
+      id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+      status: 'ACTIVE',
+    }));
+    (s as unknown as { control: unknown }).control = {
+      tenant: { findMany: () => Promise.resolve(many) },
+    };
+    const env = await s.signedEnvelope();
+    expect(env.payload.length).toBeLessThanOrEqual(HEARTBEAT_MAX_PAYLOAD_CHARS);
+    const payload = JSON.parse(
+      Buffer.from(env.payload, 'base64').toString(),
+    ) as Record<string, unknown>;
+    expect(payload.tenants).toBeUndefined();
+    expect(payload.counts).toMatchObject({ tenants: 200 });
+    expect(
+      verify(
+        null,
+        Buffer.from(env.payload, 'base64'),
+        keys.publicKey,
+        Buffer.from(env.signature, 'base64'),
+      ),
+    ).toBe(true);
   });
 });

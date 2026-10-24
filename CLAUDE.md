@@ -11,24 +11,23 @@ Kafka, OpenSearch, Keycloak (human OIDC), `@peculiar/x509` (agent CA), `jose`, z
 `@modelcontextprotocol/sdk` (client), gRPC client for manar-ai. Vitest. pnpm 11 workspace
 (`packages/*`), Node 24.
 
-## Commands (verified 2026-09-17)
+## Commands (verified 2026-09-17; unit tests and coverage 2026-10-09)
 
-| Task                  | Command                                                                                                  | Baseline                                           |
-| --------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| Backing services      | `pnpm infra:up` (Compose `deploy/docker-compose.yml`) then `pnpm infra:openbao-init`                     | all healthy                                        |
-| Lint                  | `pnpm lint` (gating, no auto-fix; `pnpm lint:fix` to fix)                                                | clean on tracked source                            |
-| Typecheck             | `pnpm typecheck` (builds `packages/manar-ai-client` and `packages/sdk-node` first, then api + scripts)   | pass                                               |
-| Unit tests            | `pnpm test` / `pnpm test:cov`                                                                            | 36 files, 318 tests; lines 57.35%, branches 39.75% |
-| E2E tests             | `pnpm test:e2e` (needs the stack and OpenBao PKI; stop any host worker first, the specs start their own) | 27 files, 168 tests                                |
-| Build                 | `pnpm build`                                                                                             | pass                                               |
-| API                   | `pnpm start:dev` / `pnpm start:prod` — HTTP `:3000`, agent mTLS `:3443`                                  |                                                    |
-| Temporal worker       | `pnpm worker:dev` / `pnpm worker:prod`                                                                   |                                                    |
-| OpenFGA model tests   | `pnpm fga:test`                                                                                          |                                                    |
-| Prisma client         | `pnpm db:generate` (runs on install)                                                                     |                                                    |
-| Control DB migrations | `pnpm db:migrate:control` (dev) / `pnpm db:migrate:control:deploy`                                       | 3 migrations                                       |
-| Tenant DB migrations  | `pnpm manar tenants:migrate` (every ACTIVE tenant; run on every upgrade, after the control migrations)   |                                                    |
-| Demo reseed           | `pnpm manar demo:seed` (idempotent; only needed after wiping the OpenBao volume)                         |                                                    |
-| Load tests (k6)       | `load/run.sh <smoke, steady, stress or soak>` against a dedicated instance; setup in `load/README.md`    | `docs/reports/LOAD-TEST-*.md` (workspace)          |
+| Task                  | Command                                                                                                  | Baseline                                         |
+| --------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Backing services      | `pnpm infra:up` (Compose `deploy/docker-compose.yml`) then `pnpm infra:openbao-init`                     | all healthy                                      |
+| Lint                  | `pnpm lint` (gating, no auto-fix; `pnpm lint:fix` to fix)                                                | clean on tracked source                          |
+| Typecheck             | `pnpm typecheck` (builds `packages/manar-ai-client` and `packages/sdk-node` first, then api + scripts)   | pass                                             |
+| Unit tests            | `pnpm test` / `pnpm test:cov` (CI; fails under the floor in `vitest.config.mts`)                         | 62 files, 663 tests; lines 52.9%, branches 50.5% |
+| E2E tests             | `pnpm test:e2e` (needs the stack and OpenBao PKI; stop any host worker first, the specs start their own) | 27 files, 168 tests                              |
+| Build                 | `pnpm build`                                                                                             | pass                                             |
+| API                   | `pnpm start:dev` / `pnpm start:prod` — HTTP `:3000`, agent mTLS `:3443`                                  |                                                  |
+| Temporal worker       | `pnpm worker:dev` / `pnpm worker:prod`                                                                   |                                                  |
+| OpenFGA model tests   | `pnpm fga:test`                                                                                          |                                                  |
+| Prisma client         | `pnpm db:generate` (runs on install)                                                                     |                                                  |
+| Control DB migrations | `pnpm db:migrate:control` (dev) / `pnpm db:migrate:control:deploy`                                       | 3 migrations                                     |
+| Tenant DB migrations  | `pnpm manar tenants:migrate` (every ACTIVE tenant; run on every upgrade, after the control migrations)   |                                                  |
+| Demo reseed           | `pnpm manar demo:seed` (idempotent; only needed after wiping the OpenBao volume)                         |                                                  |
 
 **OpenBao is persistent locally** (file storage on the `manar-openbao-data` volume;
 `deploy/openbao-entrypoint.sh` inits once and unseals on every start). Restarts keep the CA and

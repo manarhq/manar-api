@@ -1,7 +1,9 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
+  Logger,
   NotFoundException,
   Param,
   Post,
@@ -67,6 +69,8 @@ import {
 @UseGuards(JwtAuthGuard, RolesGuard)
 @RequireRole('SECURITY_ADMIN', 'TENANT_OWNER')
 export class KillSwitchesController {
+  private readonly logger = new Logger(KillSwitchesController.name);
+
   constructor(
     private readonly killSwitchService: KillSwitchService,
     private readonly platformKillSwitchService: PlatformKillSwitchService,
@@ -109,22 +113,30 @@ export class KillSwitchesController {
     return state;
   }
 
+  /**
+   * Refused (HQ-PLAN section 5, admin v2): turning the platform switch off is a two-person action,
+   * proposed in the Manar staff console and applied through `POST /platform/v1/kill-switch/release`
+   * for one named engagement. A tenant admin with the operator token could otherwise end any stop
+   * alone. Engaging stays open here: stopping must stay easy.
+   */
   @Post('kill-switches/platform/deactivate')
   @UseGuards(PlatformOperatorGuard)
-  @ApiOperation({ summary: 'Deactivate the platform-wide kill switch' })
-  @ApiResponse({ status: 201, type: PlatformKillSwitchStatusResponseDto })
-  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiOperation({
+    summary:
+      'Refused: the platform kill switch is released only through the two-person flow',
+  })
   @ApiResponse({ status: 403, type: ErrorResponseDto })
-  async deactivatePlatform(
-    @CurrentAuth() auth: AuthContext,
-  ): Promise<PlatformKillSwitchStatusResponseDto> {
-    const state = await this.platformKillSwitchService.deactivate(auth.user.id);
-    await this.auditPlatformAction(
-      auth,
-      AUDIT_EVENT_TYPES.KILL_SWITCH_DEACTIVATED,
-      {},
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  deactivatePlatform(@CurrentAuth() auth: AuthContext): never {
+    this.logger.warn(
+      `platform kill switch deactivation refused for ${auth.user.id}: two-person release only`,
     );
-    return state;
+    throw new ForbiddenException({
+      statusCode: 403,
+      code: 'platform_release_requires_two_person',
+      message:
+        'Turning off the platform kill switch needs two people: propose it in the Manar staff console (Ops, Security) and another person approves it.',
+    });
   }
 
   // ---------------------------------------------------------------------

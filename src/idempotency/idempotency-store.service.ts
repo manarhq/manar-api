@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
+import { redisClientOptions } from '../audit/live/redis.config';
 import { BoundedRedis } from '../common/redis/bounded-redis';
 
 /** Placeholder value stored the instant a key is claimed, before the real response is known — distinguishes "a request with this key is genuinely still in flight" from "no request has ever used this key." */
@@ -24,7 +25,7 @@ export class IdempotencyStoreService implements OnModuleInit, OnModuleDestroy {
 
   constructor(configService: ConfigService<AppConfig, true>) {
     this.redis = new BoundedRedis(
-      configService.get('REDIS_URL', { infer: true }),
+      redisClientOptions((key) => configService.get(key, { infer: true })),
       configService.get('REDIS_TIMEOUT_MS', { infer: true }),
       this.logger,
       'Idempotency store',

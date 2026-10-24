@@ -1,8 +1,10 @@
-{{/*
-One ingress rule: Prometheus scraping the metrics port. Nothing else
-initiates a connection to this pod (see values.yaml's chart doc comment and
-docs/kubernetes.md). Egress is scoped to what WorkerAppModule actually
-calls at runtime, not the full structurally-required config surface.
+{{- /*
+Per-app allow rules, values-driven (values.yaml networkPolicy.ingress and
+networkPolicy.egress, maps of name -> { enabled?, ports, from|to } with raw
+NetworkPolicy peers). An ingress rule with no `from` admits any source on its
+ports. The namespace-level default-deny lives in the platform repo
+(manar/manar-infra); this policy lists what this app needs on its own, so it
+also works in a namespace without one.
 */}}
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
@@ -19,37 +21,29 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Only Prometheus, on the metrics port (Temporal SDK exporter).
+    {{- range $name, $rule := .Values.networkPolicy.ingress }}
+    {{- if ne (toString $rule.enabled) "false" }}
+    # {{ $name }}
     - ports:
-        - port: metrics
-          protocol: TCP
+        {{- toYaml .ports | nindent 8 }}
+      {{- with .from }}
       from:
-        - namespaceSelector:
-            matchLabels:
-              {{- toYaml .Values.metrics.scraperNamespaceSelector.labels | nindent 14 }}
-          podSelector:
-            matchLabels:
-              {{- toYaml .Values.metrics.scraperPodSelector.labels | nindent 14 }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- else }} []
+    {{- end }}
   egress:
+    {{- range $name, $rule := .Values.networkPolicy.egress }}
+    {{- if ne (toString $rule.enabled) "false" }}
+    # {{ $name }}
     - ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
+        {{- toYaml .ports | nindent 8 }}
+      {{- with .to }}
       to:
-        - namespaceSelector:
-            matchLabels:
-              {{- toYaml .Values.networkPolicy.dnsNamespaceSelector.labels | nindent 14 }}
-          podSelector:
-            matchLabels:
-              {{- toYaml .Values.networkPolicy.dnsPodSelector.labels | nindent 14 }}
-    {{- range .Values.networkPolicy.egressTargets }}
-    - ports:
-        - port: {{ .port }}
-          protocol: TCP
-      to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .name }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- else }} []
     {{- end }}
 {{- end }}
