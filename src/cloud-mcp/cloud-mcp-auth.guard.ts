@@ -91,6 +91,9 @@ export class CloudMcpAuthGuard implements CanActivate {
   private readonly logger = new Logger(CloudMcpAuthGuard.name);
   // ponytail: per-process sampling map, cleared when large; good enough for log volume control.
   private readonly lastLogged = new Map<string, number>();
+  // ponytail: per-replica memory of blocked failure budgets (learned from the shared store on the
+  // refusal that crossed the limit); another replica pays one full check before it learns too.
+  private readonly blockedUntil = new Map<string, number>();
 
   constructor(
     private readonly config: ConfigService<AppConfig, true>,
@@ -126,17 +129,59 @@ export class CloudMcpAuthGuard implements CanActivate {
     const token = /^Bearer\s+(\S+)\s*$/i.exec(
       request.headers.authorization ?? '',
     )?.[1];
+    const addressKey = `cloud-mcp-fail:${tenantSlug}:${request.ip}`;
+    const tenantKey = `cloud-mcp-fail-tenant:${tenantSlug}`;
     if (!token) {
-      await this.countFailure(reply, tenantSlug, request.ip, 'missing_token');
+      // OAuth discovery starts here: always the cheap 401, counted for this caller only.
+      recordCloudMcpRejection('missing_token');
+      await this.count(addressKey, FAILURES_PER_ADDRESS);
       reply.header('WWW-Authenticate', challenge());
       throw new UnauthorizedException('Bearer token required');
     }
+    // A caller over its failure budget is turned away before any key, database or Keycloak work.
+    this.shedIfBlocked(reply, addressKey);
 
-    let unverified: JWTPayload = {};
+    const refuse = async (
+      rejection: Rejection,
+      unverified: JWTPayload,
+      tenantBudget: boolean,
+    ): Promise<never> => {
+      recordCloudMcpRejection(rejection.reason);
+      const blocked =
+        (await this.count(addressKey, FAILURES_PER_ADDRESS)) ||
+        (tenantBudget && (await this.count(tenantKey, FAILURES_PER_TENANT)));
+      if (blocked) this.tooMany(reply, blocked);
+      if (rejection.tenantId) {
+        await this.recordRejection(
+          rejection.tenantId,
+          agentSlug,
+          token,
+          unverified,
+          rejection.reason,
+        );
+      } else {
+        this.sampledLog(tenantSlug, request.ip, rejection.reason);
+      }
+      reply.header(
+        'WWW-Authenticate',
+        challenge(
+          rejection.status === 401 ? 'invalid_token' : 'insufficient_scope',
+        ),
+      );
+      throw rejection.status === 401
+        ? new UnauthorizedException({
+            statusCode: 401,
+            reason: rejection.reason,
+          })
+        : new ForbiddenException({ statusCode: 403, reason: rejection.reason });
+    };
+
+    let unverified: JWTPayload;
     try {
       unverified = decodeJwt(token);
     } catch {
-      // Not a JWT: refused below as unknown_issuer.
+      // Not a JWT: cheap to refuse, so it counts for this caller only.
+      return refuse({ status: 401, reason: 'malformed_token' }, {}, false);
     }
     const outcome = await this.check(
       token,
@@ -147,29 +192,7 @@ export class CloudMcpAuthGuard implements CanActivate {
       resource,
       scope,
     );
-    if ('status' in outcome) {
-      await this.countFailure(reply, tenantSlug, request.ip, outcome.reason);
-      if (outcome.tenantId) {
-        await this.recordRejection(
-          outcome.tenantId,
-          agentSlug,
-          token,
-          unverified,
-          outcome.reason,
-        );
-      } else {
-        this.sampledLog(tenantSlug, request.ip, outcome.reason);
-      }
-      reply.header(
-        'WWW-Authenticate',
-        challenge(
-          outcome.status === 401 ? 'invalid_token' : 'insufficient_scope',
-        ),
-      );
-      throw outcome.status === 401
-        ? new UnauthorizedException({ statusCode: 401, reason: outcome.reason })
-        : new ForbiddenException({ statusCode: 403, reason: outcome.reason });
-    }
+    if ('status' in outcome) return refuse(outcome, unverified, true);
 
     const { context: agentContext } = outcome;
     await this.limit(
@@ -182,25 +205,39 @@ export class CloudMcpAuthGuard implements CanActivate {
   }
 
   /**
-   * Counts a refusal in the failure budgets (metric always); over either budget the caller gets
-   * 429 and nothing is audited or logged for it.
+   * Counts one refusal in a failure budget. Returns the seconds the key stays blocked (0 when it
+   * is not), and remembers a block so the next request is shed before any work.
    */
-  private async countFailure(
-    reply: FastifyReply,
-    tenantSlug: string,
-    ip: string,
-    reason: string,
-  ): Promise<void> {
-    recordCloudMcpRejection(reason);
-    await this.limit(
-      reply,
-      `cloud-mcp-fail:${tenantSlug}:${ip}`,
-      FAILURES_PER_ADDRESS,
+  private async count(key: string, limit: number): Promise<number> {
+    const usage = await failClosed('rate-limit-store', () =>
+      this.limits.increment(
+        key,
+        RATE_WINDOW_MS,
+        limit,
+        RATE_WINDOW_MS,
+        'cloud-mcp',
+      ),
     );
-    await this.limit(
-      reply,
-      `cloud-mcp-fail-tenant:${tenantSlug}`,
-      FAILURES_PER_TENANT,
+    if (!usage.isBlocked) return 0;
+    const seconds = Math.max(1, Math.ceil(usage.timeToBlockExpire));
+    if (this.blockedUntil.size > 10_000) this.blockedUntil.clear();
+    this.blockedUntil.set(key, Date.now() + seconds * 1000);
+    return seconds;
+  }
+
+  private shedIfBlocked(reply: FastifyReply, key: string): void {
+    const until = this.blockedUntil.get(key) ?? 0;
+    if (until > Date.now()) {
+      this.tooMany(reply, Math.ceil((until - Date.now()) / 1000));
+    }
+  }
+
+  private tooMany(reply: FastifyReply, seconds: number): never {
+    recordCloudMcpRejection('rate_limited');
+    reply.header('Retry-After', String(Math.max(1, seconds)));
+    throw new HttpException(
+      { statusCode: 429, reason: 'rate_limited' },
+      HttpStatus.TOO_MANY_REQUESTS,
     );
   }
 

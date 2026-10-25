@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { httpAdapterOptions, parseCidrs } from './trusted-proxy';
+import {
+  httpAdapterOptions,
+  parseCidrs,
+  trustedProxyIssues,
+} from './trusted-proxy';
 
 describe('trusted proxies', () => {
   it('takes addresses and CIDR ranges, refuses anything else', () => {
@@ -20,5 +24,19 @@ describe('trusted proxies', () => {
     ).toEqual({
       trustProxy: ['10.42.0.0/16'],
     });
+  });
+
+  it('the public MCP endpoint does not start without the proxies named, or none', () => {
+    expect(trustedProxyIssues({ MANAR_MCP_ENABLED: 'true' })).toHaveLength(1);
+    expect(
+      trustedProxyIssues({
+        MANAR_MCP_ENABLED: 'true',
+        MANAR_TRUSTED_PROXY_CIDRS: 'none',
+      }),
+    ).toEqual([]);
+    expect(trustedProxyIssues({ MANAR_MCP_ENABLED: 'false' })).toEqual([]);
+    expect(httpAdapterOptions({ MANAR_TRUSTED_PROXY_CIDRS: 'none' })).toEqual(
+      {},
+    );
   });
 });

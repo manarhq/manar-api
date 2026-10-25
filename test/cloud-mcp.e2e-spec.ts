@@ -5,6 +5,9 @@ import { vi } from 'vitest';
 vi.hoisted(() => {
   process.env.MANAR_MCP_ENABLED = 'true';
   process.env.MANAR_MCP_HOST = 'mcp.manar.test';
+  // The test client is the trusted proxy: X-Forwarded-For stands in for the caller.
+  process.env.MANAR_TRUSTED_PROXY_CIDRS =
+    '127.0.0.1/32,::1/128,::ffff:127.0.0.1/128';
 });
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
@@ -224,12 +227,7 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
     app = moduleFixture.createNestApplication<NestFastifyApplication>(
       // As main.ts builds it; here the test client is the trusted proxy, so X-Forwarded-For
       // stands in for the caller cloudflared and Traefik would report.
-      new FastifyAdapter(
-        httpAdapterOptions({
-          MANAR_TRUSTED_PROXY_CIDRS:
-            '127.0.0.1/32,::1/128,::ffff:127.0.0.1/128',
-        }),
-      ),
+      new FastifyAdapter(httpAdapterOptions(process.env)),
     );
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
@@ -579,10 +577,13 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
         last = (await from('198.51.100.10', 'not-a-jwt')).status;
       }
       expect(last).toBe(429);
-      // Another caller behind the same proxies has its own budget...
+      // The blocked caller is turned away before any token work, a valid token included...
+      expect((await from('198.51.100.10', token)).status).toBe(429);
+      // ...but still gets the 401 that starts OAuth discovery.
+      expect((await from('198.51.100.10')).status).toBe(401);
+      // Another caller behind the same proxies has its own budget, and the agent's is untouched.
       expect((await from('198.51.100.11', 'not-a-jwt')).status).toBe(401);
-      // ...and a valid token from the throttled address still works: separate budgets.
-      expect((await from('198.51.100.10', token)).status).toBe(200);
+      expect((await from('198.51.100.12', token)).status).toBe(200);
     });
 
     it('the callback URL and the standing task can be replaced; the client keeps its audience scope', async () => {
@@ -826,6 +827,30 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
       // The last ChatGPT agent is gone: anonymous registration is closed again.
       expect((await register(CHATGPT_CALLBACK, codeOnly)).status).toBe(403);
     }, 90_000);
+  });
+
+  describe('tenant failure budget', () => {
+    it('exhausted by failing tokens from many callers, tokenless discovery still gets its 401', async () => {
+      const path = `/mcp/${tenantB.slug}/any-agent`;
+      const forged = `${Buffer.from('{"alg":"RS256"}').toString('base64url')}.${Buffer.from(
+        JSON.stringify({ iss: 'https://evil.test/realms/x' }),
+      ).toString('base64url')}.c2ln`;
+      const from = (ip: string, bearer?: string) =>
+        mcp(path, bearer, 'tools/list').set('X-Forwarded-For', ip);
+      // 11 callers x 60 refusals: past the 600 a minute the tenant allows.
+      for (let caller = 1; caller <= 11; caller += 1) {
+        await Promise.all(
+          Array.from({ length: 60 }, () => from(`203.0.113.${caller}`, forged)),
+        );
+      }
+      const fresh = '203.0.113.200';
+      expect((await from(fresh, forged)).status).toBe(429);
+      const discovery = await from(fresh);
+      expect(discovery.status).toBe(401);
+      expect(discovery.headers['www-authenticate']).toContain(
+        'resource_metadata=',
+      );
+    }, 120_000);
   });
 
   describe('connecting', () => {

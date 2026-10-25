@@ -138,6 +138,9 @@ function registeredAt(client: KeycloakClientRepresentation): number {
 @Injectable()
 export class CloudAgentsService {
   private readonly logger = new Logger(CloudAgentsService.name);
+  // ponytail: per-replica, one minute: a refused self-registered client is not looked up in
+  // Keycloak again on every call (tenant + agent + client).
+  private readonly refusedClients = new Map<string, number>();
 
   constructor(
     private readonly config: ConfigService<AppConfig, true>,
@@ -444,9 +447,13 @@ export class CloudAgentsService {
     if (binding.pendingClientId) {
       return binding.pendingClientId === clientId ? 'pending' : 'refused';
     }
+    const cacheKey = `${tenantId}:${agentId}:${clientId}`;
+    if ((this.refusedClients.get(cacheKey) ?? 0) > Date.now()) return 'refused';
     const { realm } = await this.realmOf(tenantId);
     const client = await this.keycloak.findClient(realm, clientId);
     if (!client || !this.isEligibleDcrClient(client, binding.createdAt)) {
+      if (this.refusedClients.size > 10_000) this.refusedClients.clear();
+      this.refusedClients.set(cacheKey, Date.now() + 60_000);
       return 'refused';
     }
     const pending: PendingClient = {

@@ -28,7 +28,7 @@ import { PlatformConfigSchema } from '../platform/platform.config';
 import { FleetHeartbeatConfigSchema } from '../fleet-heartbeat/fleet-heartbeat.config';
 import { MetricsConfigSchema } from '../metrics/metrics';
 import { LicensingConfigSchema } from '../licensing/licensing.config';
-import { TrustedProxyConfigSchema } from './trusted-proxy';
+import { TrustedProxyConfigSchema, trustedProxyIssues } from './trusted-proxy';
 import {
   CloudMcpConfigSchema,
   cloudMcpConfigIssues,
@@ -90,6 +90,7 @@ export const AppConfigSchema = z
       ...openSearchConfigIssues(c),
       ...redisConfigIssues(c),
       ...cloudMcpConfigIssues(c),
+      ...trustedProxyIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });
   });

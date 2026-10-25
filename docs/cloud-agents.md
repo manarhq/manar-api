@@ -65,10 +65,15 @@ metric only): reason, agent slug, the client id and the first 16 hex of the toke
 the token.
 
 **Budgets.** An accepted call spends only its agent's budget (`MANAR_MCP_RATE_LIMIT_PER_MINUTE`).
-A refused call (no token, or any refusal above) spends only the failure budgets: 60 a minute per
-caller address and tenant, 600 a minute per tenant; past them the answer is 429 and nothing is
-audited. So refused calls, from anyone, never use up an agent's limit. Protected resource metadata
-is limited to 120 requests a minute per caller address and caches the tenant lookup for a minute.
+A request without a token always gets the cheap 401 with `WWW-Authenticate` (it is how a client
+starts OAuth discovery) and counts only for its caller. A presented token that is refused spends
+the failure budgets: 60 a minute per caller address and tenant, and, once the token parsed as a
+JWT, 600 a minute per tenant. Past either, the answer is 429 and nothing is audited; a caller
+over its own budget is turned away before any key, database or Keycloak work, valid token or not.
+Exhausting the tenant budget never blocks tokenless discovery or valid tokens. A self-registered
+client found ineligible is not looked up in Keycloak again for a minute. Protected resource
+metadata is limited to 120 requests a minute per caller address and caches the tenant lookup for
+a minute.
 
 Then `AgentRuntimeController.serveMcp` runs the governed MCP server for the agent and its standing
 task. A quarantined agent, any kill switch (platform, tenant, group, agent, AI system) or a lapsed
@@ -88,12 +93,11 @@ The public endpoint is not counted in the human API's per-tenant rate limit.
    MCP clients look for `https://<keycloak>/.well-known/oauth-authorization-server/realms/<realm>`
    first.
 4. Set `MANAR_TRUSTED_PROXY_CIDRS` to the pod ranges of cloudflared and Traefik (comma-separated
-   addresses or CIDRs). cloudflared sets `CF-Connecting-IP` and `X-Forwarded-For` to the caller's
+   addresses or CIDRs), or `none` when the API is reached directly; with the endpoint on, startup
+   fails while it is unset. cloudflared sets `CF-Connecting-IP` and `X-Forwarded-For` to the caller's
    address; Traefik appends the cloudflared hop to `X-Forwarded-For` (its entry point must trust
    cloudflared in `forwardedHeaders.trustedIPs`). With the proxies listed, Fastify's `trustProxy`
-   takes `request.ip` from that chain, so the per-address budgets see real callers. Unset,
-   `request.ip` is the proxy pod and every caller shares one per-address budget (the per-agent
-   budget is unaffected). Never list a range callers can reach the API from directly.
+   takes `request.ip` from that chain, so the per-address budgets see real callers. Never list a range callers can reach the API from directly.
 
 ## Tenant admin: broker the tenant's Entra ID (once per tenant)
 

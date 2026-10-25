@@ -13,10 +13,28 @@ export const TrustedProxyConfigSchema = z.object({
     .string()
     .optional()
     .refine(
-      (value) => value === undefined || parseCidrs(value) !== null,
-      'comma-separated IP addresses or CIDR ranges',
+      (value) =>
+        value === undefined || value === 'none' || parseCidrs(value) !== null,
+      'comma-separated IP addresses or CIDR ranges, or none',
     ),
 });
+
+/**
+ * The public MCP endpoint limits callers per address, so with it on the proxies must be named
+ * (or `none` for an API exposed directly): an unset value would silently make every caller the
+ * proxy pod.
+ */
+export function trustedProxyIssues(config: {
+  MANAR_TRUSTED_PROXY_CIDRS?: string;
+  MANAR_MCP_ENABLED?: string;
+}): string[] {
+  return config.MANAR_MCP_ENABLED === 'true' &&
+    !config.MANAR_TRUSTED_PROXY_CIDRS?.trim()
+    ? [
+        'MANAR_TRUSTED_PROXY_CIDRS: required when MANAR_MCP_ENABLED is true (the cloudflared and Traefik pod ranges, or "none" when the API is exposed directly)',
+      ]
+    : [];
+}
 
 /** `a.b.c.d`, `a.b.c.d/n`, IPv6 likewise; null when any entry is not one. */
 export function parseCidrs(value: string): string[] | null {
@@ -41,6 +59,7 @@ export function parseCidrs(value: string): string[] | null {
 export function httpAdapterOptions(env: {
   MANAR_TRUSTED_PROXY_CIDRS?: string;
 }): { trustProxy?: string[] } {
-  const cidrs = parseCidrs(env.MANAR_TRUSTED_PROXY_CIDRS ?? '') ?? [];
+  const value = env.MANAR_TRUSTED_PROXY_CIDRS ?? '';
+  const cidrs = value.trim() === 'none' ? [] : (parseCidrs(value) ?? []);
   return cidrs.length ? { trustProxy: cidrs } : {};
 }

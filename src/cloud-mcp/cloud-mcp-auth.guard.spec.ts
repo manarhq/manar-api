@@ -129,13 +129,12 @@ function setup(
     [ISSUER]: { tenantId: 't-acme', tenantSlug: 'acme' },
     [OTHER_ISSUER]: { tenantId: 't-globex', tenantSlug: 'globex' },
   };
-  const knownIssuers = {
-    resolveByIssuer: (iss: string) =>
-      Promise.resolve(
-        issuers[iss] ? { ...issuers[iss], issuerUrl: iss } : null,
-      ),
-  } as unknown as KnownIssuerRegistry;
-  const jwksCache = { getJwks: () => jwks } as unknown as JwksCacheService;
+  const resolveByIssuer = vi.fn((iss: string) =>
+    Promise.resolve(issuers[iss] ? { ...issuers[iss], issuerUrl: iss } : null),
+  );
+  const knownIssuers = { resolveByIssuer } as unknown as KnownIssuerRegistry;
+  const getJwks = vi.fn(() => jwks);
+  const jwksCache = { getJwks } as unknown as JwksCacheService;
   const tenantClient = {
     agent: {
       findUnique: () =>
@@ -180,6 +179,8 @@ function setup(
     increment,
     getClient,
     proposeDcrClient,
+    resolveByIssuer,
+    getJwks,
   };
 }
 
@@ -189,10 +190,11 @@ function context(
     tenantSlug: 'acme',
     agentSlug: 'copilot-1',
   },
+  ip = '203.0.113.7',
 ) {
   const request = {
     params,
-    ip: '203.0.113.7',
+    ip,
     headers: authorization ? { authorization } : {},
   } as unknown as CloudMcpRequest;
   const replyHeaders: Record<string, string> = {};
@@ -289,7 +291,7 @@ describe('CloudMcpAuthGuard', () => {
       () => token({}, { key: strangerKey }),
       'invalid_token',
     ],
-    ['garbage', () => Promise.resolve('not-a-jwt'), 'unknown_issuer'],
+    ['garbage', () => Promise.resolve('not-a-jwt'), 'malformed_token'],
   ])(
     '401 for %s before the signature verified: a metric, no tenant database, no audit',
     async (_label, make, reason) => {
@@ -434,13 +436,20 @@ describe('CloudMcpAuthGuard', () => {
       expect(keys(g)).toEqual(['cloud-mcp:t-acme:agent-1']);
     });
 
-    it('a refused call uses only the failure budgets, never the agent budget', async () => {
+    it('a refused call uses only the failure budgets, never the agent budget; the tenant budget only for parsed tokens', async () => {
       const g = setup();
-      await refusal(g.guard.canActivate(context('Bearer not-a-jwt').ctx));
       await refusal(g.guard.canActivate(context().ctx));
+      await refusal(g.guard.canActivate(context('Bearer not-a-jwt').ctx));
+      await refusal(
+        g.guard.canActivate(
+          context(
+            `Bearer ${await token({}, { issuer: 'https://evil.test/realms/x' })}`,
+          ).ctx,
+        ),
+      );
       expect(keys(g)).toEqual([
         'cloud-mcp-fail:acme:203.0.113.7',
-        'cloud-mcp-fail-tenant:acme',
+        'cloud-mcp-fail:acme:203.0.113.7',
         'cloud-mcp-fail:acme:203.0.113.7',
         'cloud-mcp-fail-tenant:acme',
       ]);
@@ -453,16 +462,55 @@ describe('CloudMcpAuthGuard', () => {
       expect(call.replyHeaders['Retry-After']).toBe('30');
     });
 
-    it('over a failure budget: 429 and nothing audited, while valid tokens still pass', async () => {
-      const g = setup({ blocked: (k) => k.startsWith('cloud-mcp-fail') });
+    it('a caller over its failure budget gets 429 before any key, database or Keycloak work', async () => {
+      const g = setup({
+        blocked: (k) => k === 'cloud-mcp-fail:acme:203.0.113.7',
+      });
       const bad = context(
         `Bearer ${await token({}, { aud: 'https://mcp.manar.test/mcp/acme/other' })}`,
       );
       expect((await refusal(g.guard.canActivate(bad.ctx))).status).toBe(429);
       expect(g.recordSafely).not.toHaveBeenCalled();
+      g.getJwks.mockClear();
+      g.resolveByIssuer.mockClear();
+      g.getClient.mockClear();
+      const next = context(`Bearer ${await token()}`);
+      expect((await refusal(g.guard.canActivate(next.ctx))).status).toBe(429);
+      expect(next.replyHeaders['Retry-After']).toBeDefined();
+      expect(g.getJwks).not.toHaveBeenCalled();
+      expect(g.resolveByIssuer).not.toHaveBeenCalled();
+      expect(g.getClient).not.toHaveBeenCalled();
+      // Another caller is not affected.
       await expect(
-        g.guard.canActivate(context(`Bearer ${await token()}`).ctx),
+        g.guard.canActivate(
+          context(`Bearer ${await token()}`, undefined, '198.51.100.20').ctx,
+        ),
       ).resolves.toBe(true);
+    });
+
+    it('with the tenant failure budget exhausted: tokenless discovery still gets 401, valid tokens pass, failing tokens get 429', async () => {
+      const g = setup({ blocked: (k) => k === 'cloud-mcp-fail-tenant:acme' });
+      const discovery = context(undefined, undefined, '198.51.100.30');
+      expect((await refusal(g.guard.canActivate(discovery.ctx))).status).toBe(
+        401,
+      );
+      expect(discovery.replyHeaders['WWW-Authenticate']).toContain(
+        'resource_metadata=',
+      );
+      await expect(
+        g.guard.canActivate(
+          context(`Bearer ${await token()}`, undefined, '198.51.100.31').ctx,
+        ),
+      ).resolves.toBe(true);
+      const failing = context(
+        `Bearer ${await token({}, { expiresIn: '-1s' })}`,
+        undefined,
+        '198.51.100.32',
+      );
+      expect((await refusal(g.guard.canActivate(failing.ctx))).status).toBe(
+        429,
+      );
+      expect(g.recordSafely).not.toHaveBeenCalled();
     });
 
     it('a validly signed refused token is audited once a minute per tenant, client and reason', async () => {
