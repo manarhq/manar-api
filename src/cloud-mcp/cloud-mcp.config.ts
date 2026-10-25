@@ -1,0 +1,99 @@
+import type { ConfigService } from '@nestjs/config';
+import { z } from 'zod';
+import type { AppConfig } from '../config/env.validation';
+
+/**
+ * Public MCP endpoint for cloud agents (docs/cloud-agents.md). Off by default: with
+ * `MANAR_MCP_ENABLED` unset or false the `/mcp/*` and protected resource metadata routes answer
+ * 404 and cloud agents cannot be connected. All optional; defaults are applied by
+ * `cloudMcpSettings`.
+ */
+export const CloudMcpConfigSchema = z.object({
+  MANAR_MCP_ENABLED: z.enum(['true', 'false']).optional(),
+  /** Public host of the endpoint, e.g. `mcp.manar.example.com`. MCP URLs are `https://<host>/mcp/<tenant>/<agent>`. */
+  MANAR_MCP_HOST: z.preprocess(
+    // An empty value (the chart default) means unset.
+    (value) => (value === '' ? undefined : value),
+    z
+      .string()
+      .regex(/^[a-z0-9.-]+(:\d+)?$/, 'a host name, no scheme or path')
+      .optional(),
+  ),
+  /**
+   * Redirect URI hosts a self-registering client (DCR, ChatGPT) may use; written to the realm's
+   * anonymous Trusted Hosts policy when a ChatGPT agent is connected. Comma-separated, default
+   * `chatgpt.com`.
+   */
+  MANAR_MCP_DCR_TRUSTED_HOSTS: z.string().optional(),
+  /** Requests per cloud agent per minute, all MCP methods (default 60). */
+  MANAR_MCP_RATE_LIMIT_PER_MINUTE: z.coerce
+    .number()
+    .int()
+    .positive()
+    .optional(),
+  /** Largest accepted request body in bytes (default 256 KiB, at most 1 MiB); bigger is 413. */
+  MANAR_MCP_MAX_BODY_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(1_048_576)
+    .optional(),
+});
+
+export type CloudMcpConfig = z.infer<typeof CloudMcpConfigSchema>;
+
+export function cloudMcpConfigIssues(config: CloudMcpConfig): string[] {
+  return config.MANAR_MCP_ENABLED === 'true' && !config.MANAR_MCP_HOST
+    ? ['MANAR_MCP_HOST: required when MANAR_MCP_ENABLED is true']
+    : [];
+}
+
+export interface CloudMcpSettings {
+  /** Null when the endpoint is off. */
+  host: string | null;
+  dcrTrustedHosts: string[];
+  ratePerMinute: number;
+  maxBodyBytes: number;
+}
+
+export function cloudMcpSettings(
+  config: ConfigService<AppConfig, true>,
+): CloudMcpSettings {
+  const get = <K extends keyof CloudMcpConfig>(key: K) =>
+    config.get(key, { infer: true });
+  return {
+    host:
+      get('MANAR_MCP_ENABLED') === 'true'
+        ? (get('MANAR_MCP_HOST') ?? null)
+        : null,
+    dcrTrustedHosts: (get('MANAR_MCP_DCR_TRUSTED_HOSTS') ?? 'chatgpt.com')
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
+    ratePerMinute: get('MANAR_MCP_RATE_LIMIT_PER_MINUTE') ?? 60,
+    maxBodyBytes: get('MANAR_MCP_MAX_BODY_BYTES') ?? 262_144,
+  };
+}
+
+/** The canonical MCP URL of one cloud agent: the token audience and the protected resource. */
+export function cloudMcpResourceUrl(
+  host: string,
+  tenantSlug: string,
+  agentSlug: string,
+): string {
+  return `https://${host}/mcp/${tenantSlug}/${agentSlug}`;
+}
+
+/** RFC 9728 metadata URL for a resource URL (path-suffixed form, MCP spec discovery order). */
+export function cloudMcpMetadataUrl(
+  host: string,
+  tenantSlug: string,
+  agentSlug: string,
+): string {
+  return `https://${host}/.well-known/oauth-protected-resource/mcp/${tenantSlug}/${agentSlug}`;
+}
+
+/** The Keycloak client scope that puts one agent's MCP URL in the token audience. */
+export function cloudMcpScope(agentSlug: string): string {
+  return `manar-mcp-${agentSlug}`;
+}

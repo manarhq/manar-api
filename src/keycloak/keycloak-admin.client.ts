@@ -2,6 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../config/env.validation';
 
+/** Alias of the Entra ID identity provider in a tenant realm (docs/cloud-agents.md). */
+export const ENTRA_IDP_ALIAS = 'entra';
+
 /**
  * Minimal wrapper around Keycloak's Admin REST API
  * (https://www.keycloak.org/docs-api/latest/rest-api/index.html), covering
@@ -226,6 +229,237 @@ export class KeycloakAdminClient {
       );
     }
     return secret;
+  }
+
+  /**
+   * Cloud agents (docs/cloud-agents.md): a client scope whose audience mapper adds `audience`
+   * (the agent's MCP URL) to access tokens. With `forDcr` it is also made a realm default
+   * optional scope, the only way a client that registers itself (DCR) can be given it and the
+   * only kind of scope the realm's anonymous "Allowed Client Scopes" policy lets it ask for.
+   * Returns the scope id.
+   */
+  async createAudienceClientScope(
+    realmName: string,
+    name: string,
+    audience: string,
+    forDcr: boolean,
+  ): Promise<string> {
+    const realm = encodeURIComponent(realmName);
+    const created = await this.adminRequest(
+      'POST',
+      `/admin/realms/${realm}/client-scopes`,
+      {
+        name,
+        protocol: 'openid-connect',
+        attributes: {
+          'include.in.token.scope': 'true',
+          'display.on.consent.screen': 'true',
+        },
+        protocolMappers: [
+          {
+            name: 'mcp-audience',
+            protocol: 'openid-connect',
+            protocolMapper: 'oidc-audience-mapper',
+            config: {
+              'included.custom.audience': audience,
+              'access.token.claim': 'true',
+              'id.token.claim': 'false',
+              'introspection.token.claim': 'true',
+            },
+          },
+        ],
+      },
+      { returnLocation: true },
+    );
+    const scopeId = created.location?.split('/').pop();
+    if (!scopeId) {
+      throw new Error(
+        `Keycloak did not return an id for client scope "${name}"`,
+      );
+    }
+    if (forDcr) {
+      await this.adminRequest(
+        'PUT',
+        `/admin/realms/${realm}/default-optional-client-scopes/${scopeId}`,
+      );
+    }
+    return scopeId;
+  }
+
+  /**
+   * A confidential authorization-code client (PKCE S256) for one cloud agent, with the agent's
+   * audience scope as a default scope so every token it gets carries the MCP URL. No password
+   * grant, no service account. Returns the secret, shown to the admin once and not stored.
+   */
+  async createMcpClient(
+    realmName: string,
+    clientId: string,
+    scopeId: string,
+    redirectUris: string[],
+  ): Promise<string> {
+    const realm = encodeURIComponent(realmName);
+    const created = await this.adminRequest(
+      'POST',
+      `/admin/realms/${realm}/clients`,
+      {
+        clientId,
+        protocol: 'openid-connect',
+        publicClient: false,
+        standardFlowEnabled: true,
+        directAccessGrantsEnabled: false,
+        implicitFlowEnabled: false,
+        serviceAccountsEnabled: false,
+        enabled: true,
+        redirectUris,
+        webOrigins: [],
+        attributes: { 'pkce.code.challenge.method': 'S256' },
+      },
+      { returnLocation: true },
+    );
+    const clientUuid = created.location?.split('/').pop();
+    if (!clientUuid) {
+      throw new Error(`Keycloak did not return an id for client "${clientId}"`);
+    }
+    await this.adminRequest(
+      'PUT',
+      `/admin/realms/${realm}/clients/${clientUuid}/default-client-scopes/${scopeId}`,
+    );
+    const secret = (
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${realm}/clients/${clientUuid}/client-secret`,
+      )
+    ).body as { value?: string } | undefined;
+    if (!secret?.value) {
+      throw new Error(
+        `Keycloak did not return a secret for client "${clientId}"`,
+      );
+    }
+    return secret.value;
+  }
+
+  /** Replaces a client's redirect URIs (the callback Copilot Studio shows after the connector is created). */
+  async setClientRedirectUris(
+    realmName: string,
+    clientId: string,
+    redirectUris: string[],
+  ): Promise<void> {
+    const realm = encodeURIComponent(realmName);
+    const found = (
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${realm}/clients?clientId=${encodeURIComponent(clientId)}`,
+      )
+    ).body as Array<Record<string, unknown> & { id: string }> | undefined;
+    const client = found?.[0];
+    if (!client) throw new Error(`Keycloak client "${clientId}" not found`);
+    await this.adminRequest(
+      'PUT',
+      `/admin/realms/${realm}/clients/${client.id}`,
+      {
+        ...client,
+        redirectUris,
+      },
+    );
+  }
+
+  /**
+   * Opens anonymous dynamic client registration to `hosts` only: the realm's anonymous Trusted
+   * Hosts policy accepts a registration from any address but requires every redirect URI to be
+   * on one of `hosts` (Keycloak's default policy accepts none, which keeps DCR closed).
+   */
+  async allowDcrRedirectHosts(
+    realmName: string,
+    hosts: string[],
+  ): Promise<void> {
+    const realm = encodeURIComponent(realmName);
+    const policies = (
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${realm}/components?type=${encodeURIComponent(
+          'org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy',
+        )}`,
+      )
+    ).body as Array<{
+      id: string;
+      providerId: string;
+      subType?: string;
+      config?: Record<string, string[]>;
+    }>;
+    const trusted = policies.find(
+      (p) => p.providerId === 'trusted-hosts' && p.subType === 'anonymous',
+    );
+    if (!trusted) {
+      throw new Error(
+        `Realm "${realmName}" has no anonymous Trusted Hosts policy`,
+      );
+    }
+    const current = trusted.config?.['trusted-hosts'] ?? [];
+    await this.adminRequest(
+      'PUT',
+      `/admin/realms/${realm}/components/${trusted.id}`,
+      {
+        ...trusted,
+        config: {
+          ...trusted.config,
+          'trusted-hosts': [...new Set([...current, ...hosts])],
+          'host-sending-registration-request-must-match': ['false'],
+          'client-uris-must-match': ['true'],
+        },
+      },
+    );
+  }
+
+  /**
+   * Creates or updates the realm's `entra` OIDC identity provider for one Entra ID directory
+   * (single tenant). The client secret goes to Keycloak only; Manar does not keep it.
+   */
+  async upsertEntraIdentityProvider(
+    realmName: string,
+    input: { directoryId: string; clientId: string; clientSecret: string },
+  ): Promise<void> {
+    const realm = encodeURIComponent(realmName);
+    const alias = ENTRA_IDP_ALIAS;
+    const authority = `https://login.microsoftonline.com/${input.directoryId}`;
+    const representation = {
+      alias,
+      displayName: 'Microsoft Entra ID',
+      providerId: 'oidc',
+      enabled: true,
+      trustEmail: true,
+      firstBrokerLoginFlowAlias: 'first broker login',
+      config: {
+        clientId: input.clientId,
+        clientSecret: input.clientSecret,
+        clientAuthMethod: 'client_secret_post',
+        authorizationUrl: `${authority}/oauth2/v2.0/authorize`,
+        tokenUrl: `${authority}/oauth2/v2.0/token`,
+        logoutUrl: `${authority}/oauth2/v2.0/logout`,
+        issuer: `${authority}/v2.0`,
+        jwksUrl: `${authority}/discovery/v2.0/keys`,
+        useJwksUrl: 'true',
+        validateSignature: 'true',
+        pkceEnabled: 'true',
+        pkceMethod: 'S256',
+        defaultScope: 'openid profile email',
+        syncMode: 'IMPORT',
+      },
+    };
+    try {
+      await this.adminRequest(
+        'POST',
+        `/admin/realms/${realm}/identity-provider/instances`,
+        representation,
+      );
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('HTTP 409'))
+        throw error;
+      await this.adminRequest(
+        'PUT',
+        `/admin/realms/${realm}/identity-provider/instances/${alias}`,
+        representation,
+      );
+    }
   }
 
   /**

@@ -216,6 +216,15 @@ config:
   AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'
   TENANT_DB_CLIENT_CACHE_MAX: '50'
   TENANT_DB_CLIENT_IDLE_TTL_MS: '600000'
+  # Public MCP endpoint for cloud agents (Copilot Studio, ChatGPT; docs/cloud-agents.md). Off by
+  # default. To turn it on set MANAR_MCP_ENABLED 'true' and MANAR_MCP_HOST (e.g.
+  # mcp.manar.example.com), and route only the paths /mcp/ and
+  # /.well-known/oauth-protected-resource/ on that host to `httpPort` (manar-infra ingress).
+  MANAR_MCP_ENABLED: 'false'
+  MANAR_MCP_HOST: ''
+  MANAR_MCP_DCR_TRUSTED_HOSTS: chatgpt.com
+  MANAR_MCP_RATE_LIMIT_PER_MINUTE: '60'
+  MANAR_MCP_MAX_BODY_BYTES: '262144'
 
 # Secret application configuration (credentials, connection strings that
 # embed a password, signing keys, static tokens). templates/secret.yaml

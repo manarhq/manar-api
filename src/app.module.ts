@@ -40,6 +40,7 @@ import { ComplianceModule } from './compliance/compliance.module';
 import { IncidentsModule } from './incidents/incidents.module';
 import { AiSystemsModule } from './ai-systems/ai-systems.module';
 import { AssistantModule } from './assistant/assistant.module';
+import { CloudMcpModule } from './cloud-mcp/cloud-mcp.module';
 
 @Module({
   imports: [
@@ -88,6 +89,8 @@ import { AssistantModule } from './assistant/assistant.module';
     AiSystemsModule,
     // Read-only console assistant (ADR-0008); never on the decision path.
     AssistantModule,
+    // Public OAuth MCP endpoint for cloud agents (docs/cloud-agents.md); off by default.
+    CloudMcpModule,
   ],
   controllers: [AppController],
   providers: [

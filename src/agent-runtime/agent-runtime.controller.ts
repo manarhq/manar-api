@@ -153,7 +153,7 @@ function okResult(structuredContent: Record<string, unknown>): CallToolResult {
   };
 }
 
-function methodNotAllowed(reply: FastifyReply): void {
+export function methodNotAllowed(reply: FastifyReply): void {
   void reply
     .status(405)
     .header('Allow', 'POST')
@@ -203,6 +203,17 @@ export class AgentRuntimeController {
     @Body() body: unknown,
     @Req() request: FastifyRequest,
     @Res() reply: FastifyReply,
+  ): Promise<void> {
+    await this.serveMcp(agent, taskId, body, request, reply);
+  }
+
+  /** Also the public cloud-agent MCP endpoint's handler (src/cloud-mcp/), after its OAuth guard. */
+  async serveMcp(
+    agent: AgentContext,
+    taskId: string,
+    body: unknown,
+    request: FastifyRequest,
+    reply: FastifyReply,
   ): Promise<void> {
     const server = this.buildMcpServer(agent, taskId);
     const transport = new StreamableHTTPServerTransport({

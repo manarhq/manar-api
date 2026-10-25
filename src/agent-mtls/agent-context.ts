@@ -16,7 +16,8 @@ export interface AgentContext {
     slug: string;
     identifier: string;
   };
-  certificate: {
+  /** Absent for a CLOUD agent, which authenticates with an OAuth token (docs/cloud-agents.md). */
+  certificate?: {
     /** Canonical form: uppercase hex, no separators — see serial-number.util.ts. */
     serialNumber: string;
   };

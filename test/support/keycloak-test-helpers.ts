@@ -40,7 +40,7 @@ async function getMasterAdminToken(): Promise<string> {
   return body.access_token;
 }
 
-async function adminFetch(
+export async function adminFetch(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {

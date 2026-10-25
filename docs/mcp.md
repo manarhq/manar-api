@@ -6,6 +6,9 @@ the identical authorization/credential-broker pipeline — no separate,
 weaker path"). See `docs/tool-gateway.md` for the broader
 registry/credential-broker/wiring picture this fits into.
 
+Cloud agents (Copilot Studio, ChatGPT) reach the same governed MCP server through a public
+OAuth endpoint: `docs/cloud-agents.md`.
+
 ## SDK: `@modelcontextprotocol/sdk`
 
 The official Model Context Protocol TypeScript SDK — one package,
