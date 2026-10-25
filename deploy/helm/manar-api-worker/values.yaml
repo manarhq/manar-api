@@ -33,6 +33,9 @@ image:
   # command differs (see below). Keep this tag in lockstep with that
   # chart's image.tag in any real deployment (same build, two rollouts).
   tag: ''
+  # sha256:... of a released image. When set the image is pulled as
+  # repository@digest and `tag` is ignored.
+  digest: ''
 
 # The Dockerfile's `worker` stage bakes this CMD in already
 # (["node", "dist/worker.main.js"]) — this override exists only so a
@@ -232,6 +235,26 @@ backingServiceTls:
   # mounted and only public CAs are trusted.
   caSecretName: ''
   caKey: ca.crt
+
+# mTLS client for manar-ai's gRPC AnalysisService (port 50051), which requires a
+# client certificate (Gate-0 finding S18; src/ai-advisory/ai-advisory.config.ts).
+# secretName: a Secret with this service's client certificate and key and the CA that
+# issued manar-ai's server certificate, such as the Secret of a cert-manager
+# Certificate. The certificate's CN or DNS SAN must be `manar-api-worker`. When set, the
+# Secret is mounted read-only at /etc/manar/ai-advisory-tls and AI_ADVISORY_TLS_*
+# point at its keys. Empty: plaintext gRPC, which manar-ai refuses in staging and
+# production.
+aiAdvisoryTls:
+  secretName: ''
+  certKey: tls.crt
+  keyKey: tls.key
+  caKey: ca.crt
+
+# Added to the container as given: lists of EnvVar, Volume and VolumeMount, for
+# settings this chart has no value for.
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
 
 # Voluntary disruptions (node drains, cluster upgrades) take at most this many
 # pods at once. With one replica a drain still proceeds.

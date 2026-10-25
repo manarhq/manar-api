@@ -19,6 +19,9 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   # A real deployment pins this to a CI-built digest/tag — never `latest`.
   tag: ''
+  # sha256:... of a released image. When set the image is pulled as
+  # repository@digest and `tag` is ignored.
+  digest: ''
 
 imagePullSecrets: []
 nameOverride: ''
@@ -286,6 +289,44 @@ backingServiceTls:
   # mounted and only public CAs are trusted.
   caSecretName: ''
   caKey: ca.crt
+
+# mTLS client for manar-ai's gRPC AnalysisService (port 50051), which requires a
+# client certificate (Gate-0 finding S18; src/ai-advisory/ai-advisory.config.ts).
+# secretName: a Secret with this service's client certificate and key and the CA that
+# issued manar-ai's server certificate, such as the Secret of a cert-manager
+# Certificate. The certificate's CN or DNS SAN must be `manar-api`. When set, the
+# Secret is mounted read-only at /etc/manar/ai-advisory-tls and AI_ADVISORY_TLS_*
+# point at its keys. Empty: plaintext gRPC, which manar-ai refuses in staging and
+# production.
+aiAdvisoryTls:
+  secretName: ''
+  certKey: tls.crt
+  keyKey: tls.key
+  caKey: ca.crt
+
+# Added to the container as given: lists of EnvVar, Volume and VolumeMount, for
+# settings this chart has no value for. The migration Job gets them too.
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+# Database migrations as a Helm hook Job (templates/migration-job.yaml): after install
+# and before every upgrade it runs `prisma migrate deploy` on the control database, then
+# `tenants:migrate` on every ACTIVE tenant database. Same image, ConfigMap, Secret, CA
+# mount and extra* values as the Deployment. Its pod carries
+# `manar.vax.sh/migration: "true"` for the namespace NetworkPolicy that admits it to
+# PostgreSQL, and is not selected by this chart's NetworkPolicy. A pre-upgrade hook runs
+# before the upgrade applies, so it reads the ConfigMap and Secret of the release
+# being upgraded. Off by default: migrations are then run by hand.
+migration:
+  enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 # Voluntary disruptions (node drains, cluster upgrades) take at most this many
 # pods at once. With one replica a drain still proceeds.

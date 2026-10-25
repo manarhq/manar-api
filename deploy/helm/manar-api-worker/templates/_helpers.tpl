@@ -75,3 +75,15 @@ Name of the (unused-by-worker, structurally-required) agent-mTLS Secret.
 {{- define "manar-api-worker.agentMtlsCertsSecretName" -}}
 {{- default (printf "%s-agent-mtls-certs" (include "manar-api-worker.fullname" .)) .Values.agentMtls.certs.name }}
 {{- end }}
+
+{{/*
+Container image: repository@digest when image.digest is set, else
+repository:tag (tag defaults to the chart appVersion).
+*/}}
+{{- define "manar-api-worker.image" -}}
+{{- if .Values.image.digest }}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else }}
+{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) }}
+{{- end }}
+{{- end }}

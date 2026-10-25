@@ -9,6 +9,9 @@ stages:
 
 include:
   - local: deploy/ci/fleet-deploy.gitlab-ci.yml
+  # release-publish (sign images, push and sign the charts) and release-bump (manar-infra
+  # digest MR) after release-image, on protected main (ADR-0007 in manar/manar-infra).
+  - { project: manar/manar-infra, ref: main, file: ci/release.yml }
 
 # One pipeline per change on the shared runner: a branch with an open merge request runs only
 # the merge request pipeline. main, tags, branches without an MR and manar-fleet trigger
@@ -47,6 +50,8 @@ workflow:
 
 variables:
   PNPM_HOME: '$CI_PROJECT_DIR/.pnpm'
+  # Charts ci/release.yml packages and pushes as OCI artifacts.
+  RELEASE_CHARTS: deploy/helm/manar-api deploy/helm/manar-api-worker deploy/helm/demo-soc-tools
 
 # Install pnpm via Corepack (bundled with Node) instead of piping the
 # get.pnpm.io install script into a shell: Corepack fetches the exact
@@ -644,6 +649,10 @@ release-image:
     matrix:
       - { IMAGE: manar-api, TARGET: 'runtime' }
       - { IMAGE: manar-api-worker, TARGET: 'worker' }
+      # Same Dockerfile as docker:build-images; it has no target.
+      - IMAGE: demo-soc-tools
+        TARGET: '-'
+        DOCKERFILE: packages/demo-soc-tools/Dockerfile
   script:
     - |
       set -eu
@@ -659,7 +668,7 @@ release-image:
       set -- --opt platform=linux/amd64 --opt build-arg:MANAR_GIT_SHA="$CI_COMMIT_SHORT_SHA"
       if [ "$TARGET" != "-" ]; then set -- "$@" --opt target="$TARGET"; fi
       buildctl-daemonless.sh build --progress plain --frontend dockerfile.v0 \
-        --local context=. --local dockerfile=. --opt filename=Dockerfile "$@" \
+        --local context=. --local dockerfile=. --opt filename="${DOCKERFILE:-Dockerfile}" "$@" \
         --output type=docker,name="$REF",dest="$TAR"
       SUM="$(sha256sum "$TAR" | cut -d' ' -f1)"
       trivy image --input "$TAR" --format json --output "release-$IMAGE.trivy.json" --ignore-unfixed --no-progress
