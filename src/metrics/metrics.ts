@@ -86,6 +86,53 @@ export function recordRateLimitFallback(
   if (active) fallbackRequests.inc({ surface });
 }
 
+const licenseStatus = new Gauge({
+  name: 'manar_license_status',
+  help: 'Licence status: 1 for the current status, 0 for the others. Soft limit, never enforced.',
+  labelNames: ['status'],
+  registers: [registry],
+});
+
+const licenseExpiry = new Gauge({
+  name: 'manar_license_expiry_timestamp_seconds',
+  help: 'Expiry of the verified licence, Unix seconds; 0 when no licence is verified.',
+  registers: [registry],
+});
+
+const licenseLimit = new Gauge({
+  name: 'manar_license_limit',
+  help: 'Licensed amount per resource; absent when unlimited or no licence is verified.',
+  labelNames: ['resource'],
+  registers: [registry],
+});
+
+const licenseUsage = new Gauge({
+  name: 'manar_license_usage',
+  help: 'Current usage per licensed resource; absent when it could not be counted.',
+  labelNames: ['resource'],
+  registers: [registry],
+});
+
+/** Sets the licence gauges (src/licensing). Label values are fixed sets, never tenant data. */
+export function recordLicense(
+  status: string,
+  statuses: readonly string[],
+  expiresAt: string | null,
+  limits: Record<string, number | null> | null,
+  usage: Record<string, number | null>,
+): void {
+  for (const s of statuses)
+    licenseStatus.set({ status: s }, s === status ? 1 : 0);
+  licenseExpiry.set(expiresAt ? Date.parse(expiresAt) / 1000 : 0);
+  for (const [resource, used] of Object.entries(usage)) {
+    const max = limits?.[resource] ?? null;
+    if (max === null) licenseLimit.remove({ resource });
+    else licenseLimit.set({ resource }, max);
+    if (used === null) licenseUsage.remove({ resource });
+    else licenseUsage.set({ resource }, used);
+  }
+}
+
 const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /** Bounded label: a reason code passes through, anything else is "other". */

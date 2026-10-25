@@ -27,6 +27,7 @@ import { LlmProxyConfigSchema } from '../agent-runtime/llm-proxy.config';
 import { PlatformConfigSchema } from '../platform/platform.config';
 import { FleetHeartbeatConfigSchema } from '../fleet-heartbeat/fleet-heartbeat.config';
 import { MetricsConfigSchema } from '../metrics/metrics';
+import { LicensingConfigSchema } from '../licensing/licensing.config';
 
 /**
  * Application-level environment schema.
@@ -73,6 +74,7 @@ export const AppConfigSchema = z
   .extend(PlatformConfigSchema.shape)
   .extend(FleetHeartbeatConfigSchema.shape)
   .extend(MetricsConfigSchema.shape)
+  .extend(LicensingConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {

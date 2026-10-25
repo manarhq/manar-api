@@ -16,6 +16,7 @@ import { GitLabConnectorRegisterCommand } from './commands/gitlab-connector-regi
 import { FleetKeygenCommand } from './commands/fleet-keygen.command';
 import { FleetReportCommand } from './commands/fleet-report.command';
 import { FleetHeartbeatModule } from '../fleet-heartbeat/fleet-heartbeat.module';
+import { LicenseVerifyCommand } from './commands/license-verify.command';
 
 /**
  * Root module for the `pnpm manar` CLI (see src/cli.ts). Deliberately
@@ -65,6 +66,7 @@ import { FleetHeartbeatModule } from '../fleet-heartbeat/fleet-heartbeat.module'
     GitLabConnectorRegisterCommand,
     FleetKeygenCommand,
     FleetReportCommand,
+    LicenseVerifyCommand,
   ],
 })
 export class CliModule {}
