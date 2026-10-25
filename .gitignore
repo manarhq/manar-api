@@ -73,3 +73,7 @@ pids
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 load/.identities/
 load/results/
+
+# Local agent and package-manager state, never committed
+.claude/
+.pnpm-store/
