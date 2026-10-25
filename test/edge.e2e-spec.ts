@@ -458,6 +458,18 @@ describe('Manar edge (e2e)', () => {
           edge: { wgPublicKey: key },
         })
         .expect(409);
+      // A guessed token reveals nothing about keys: the same uniform 401, never 409.
+      const probe = await http()
+        .post('/agents/enroll')
+        .send({
+          token: `${t2.slug}:${other.slug}:${'A'.repeat(43)}`,
+          csr: csr.csrPem,
+          edge: { wgPublicKey: key },
+        })
+        .expect(401);
+      expect(probe.body).toMatchObject({ message: 'Invalid enrollment token' });
+      // Refused before the token was spent: the same token enrolls with the agent's own key.
+      await enrollEdge(t2, other);
       const third = await newAgent(admin1);
       await http()
         .post('/agents/enroll')
@@ -537,6 +549,16 @@ describe('Manar edge (e2e)', () => {
         .post('/internal/v1/edge/events')
         .send({ events: [] })
         .expect(401);
+      // Through an ingress (forwarding headers): absent, even with the right token.
+      for (const header of ['X-Forwarded-For', 'Forwarded', 'X-Real-IP'])
+        await http()
+          .get('/internal/v1/edge/peers?after=0')
+          .set(gateway)
+          .set(
+            header,
+            header === 'Forwarded' ? 'for=203.0.113.9' : '203.0.113.9',
+          )
+          .expect(404);
       const full = await snapshot(0);
       expect(full.full).toBe(true);
       expect(full.peers.some((p) => p.id === agent.edge.peerId)).toBe(true);
@@ -596,6 +618,13 @@ describe('Manar edge (e2e)', () => {
     it('a change on one API instance wakes a long poll waiting on the other within 2 s', async () => {
       await snapshot(0, appA); // the first poll opens instance A's LISTEN connection
       await new Promise((r) => setTimeout(r, 500));
+      // A lost LISTEN connection comes back by itself, without waiting for a poll.
+      const serviceA = appA.get(EdgePeerService);
+      expect(serviceA.listening).toBe(true);
+      serviceA.dropListenerForTest();
+      expect(serviceA.listening).toBe(false);
+      await new Promise((r) => setTimeout(r, 1_500));
+      expect(serviceA.listening).toBe(true);
       const { version } = await snapshot(0, appA);
       const started = Date.now();
       const waiting = http(appA)
@@ -664,7 +693,7 @@ describe('Manar edge (e2e)', () => {
           ],
         })
         .expect(200);
-      expect(res.body).toEqual({ accepted: 2, skipped: 4 });
+      expect(res.body).toEqual({ accepted: 2, skipped: 4, duplicates: 0 });
 
       const db1 = await tenants.getClient(t1.id);
       const db2 = await tenants.getClient(t2.id);
@@ -699,6 +728,79 @@ describe('Manar edge (e2e)', () => {
           ),
         })
         .expect(400);
+    });
+
+    it('records a retried batch once, and one tenant failing does not fail the others', async () => {
+      const other = await enrollEdge(t2, await newAgent(admin2));
+      const at = new Date().toISOString();
+      const event = (peerId: string, host: string) => ({
+        peerId,
+        at,
+        host,
+        port: 443,
+        decision: 'allowed',
+        reason: 'allowed',
+        bytesUp: 1,
+        bytesDown: 1,
+        durationMs: 1,
+      });
+      const count = async (tenantId: string, host: string) =>
+        (await tenants.getClient(tenantId)).auditEvent.count({
+          where: {
+            eventType: AUDIT_EVENT_TYPES.AGENT_EGRESS_ALLOWED,
+            data: { path: ['host'], equals: host },
+          },
+        });
+      const batch = {
+        batchId: `b-${randomUUID()}`,
+        events: [
+          event(agent.edge.peerId, 'once.example.com'),
+          event(other.edge.peerId, 'once.example.com'),
+        ],
+      };
+      const first = await http()
+        .post('/internal/v1/edge/events')
+        .set(gateway)
+        .send(batch)
+        .expect(200);
+      expect(first.body).toEqual({ accepted: 2, skipped: 0, duplicates: 0 });
+      const retry = await http()
+        .post('/internal/v1/edge/events')
+        .set(gateway)
+        .send(batch)
+        .expect(200);
+      expect(retry.body).toEqual({ accepted: 0, skipped: 0, duplicates: 2 });
+      expect(await count(t1.id, 'once.example.com')).toBe(1);
+      expect(await count(t2.id, 'once.example.com')).toBe(1);
+
+      // Tenant two suspended (its database refused): tenant one's events still land.
+      await http(appA)
+        .post(`/platform/v1/tenants/${t2.id}/suspend`)
+        .set('Authorization', `Bearer ${platformToken}`)
+        .expect(200);
+      try {
+        const partial = await http()
+          .post('/internal/v1/edge/events')
+          .set(gateway)
+          .send({
+            events: [
+              event(agent.edge.peerId, 'part.example.com'),
+              event(other.edge.peerId, 'part.example.com'),
+            ],
+          })
+          .expect(200);
+        expect(partial.body).toEqual({
+          accepted: 1,
+          skipped: 1,
+          duplicates: 0,
+        });
+      } finally {
+        await http(appA)
+          .post(`/platform/v1/tenants/${t2.id}/resume`)
+          .set('Authorization', `Bearer ${platformToken}`)
+          .expect(200);
+      }
+      expect(await count(t1.id, 'part.example.com')).toBe(1);
     });
   });
 
@@ -884,6 +986,67 @@ describe('Manar edge (e2e)', () => {
         .expect(201);
       await expectState(bystander.edge.peerId, 'cut', 'agent_status_revoked');
     });
+
+    it("a hanging tenant database cuts that tenant's peers and does not delay another tenant's cut beyond 3 s", async () => {
+      const hung = await enrollEdge(t1, await newAgent(admin1));
+      await expectState(hung.edge.peerId, 'active');
+      await expectState(otherTenant.edge.peerId, 'active');
+      // Hold a lock every peer read of tenant one needs, as a stuck database would.
+      const base = new URL(process.env.TENANT_DB_BASE_URL!);
+      base.pathname = `/${t1.databaseBinding!.databaseName}`;
+      const locker = new PgClient({ connectionString: base.toString() });
+      await locker.connect();
+      await locker.query('BEGIN');
+      await locker.query(
+        'LOCK TABLE agent_egress_rules IN ACCESS EXCLUSIVE MODE',
+      );
+      try {
+        const service = appA.get(EdgePeerService);
+        const everything = service.allChanged(); // stuck on tenant one
+        const started = Date.now();
+        await http()
+          .post(`/agents/${otherTenant.agentId}/kill-switch`)
+          .set(as(admin2))
+          .send({})
+          .expect(201);
+        await expectState(
+          otherTenant.edge.peerId,
+          'cut',
+          'agent_kill_switch_active',
+        );
+        expect(Date.now() - started).toBeLessThan(3_000);
+        await everything;
+        // Fail closed: tenant one could not be read, so its peers are cut.
+        await expectState(
+          hung.edge.peerId,
+          'cut',
+          'enforcement_dependency_unavailable',
+        );
+      } finally {
+        await locker.query('ROLLBACK');
+        await locker.end();
+      }
+      await appA.get(EdgePeerService).allChanged();
+      await expectState(hung.edge.peerId, 'active');
+      await http()
+        .post(`/agents/${otherTenant.agentId}/kill-switch/deactivate`)
+        .set(as(admin2))
+        .expect(201);
+      await expectState(otherTenant.edge.peerId, 'active');
+    });
+
+    it('an expired certificate cuts the peer, at the expiry, without any other change', async () => {
+      const expiring = await enrollEdge(t1, await newAgent(admin1));
+      const db = await tenants.getClient(t1.id);
+      await db.agentCertificate.updateMany({
+        where: { agentId: expiring.agentId },
+        data: { notAfter: new Date(Date.now() + 2_000) },
+      });
+      await appA.get(EdgePeerService).agentChanged(t1.id, expiring.agentId);
+      await expectState(expiring.edge.peerId, 'active');
+      await new Promise((r) => setTimeout(r, 3_500));
+      await expectState(expiring.edge.peerId, 'cut', 'certificate_expired');
+    });
   });
 
   describe('egress allow-list', () => {
@@ -931,6 +1094,13 @@ describe('Manar edge (e2e)', () => {
         'a.*.com',
         '*',
         '',
+        '*.co.uk',
+        '*.github.io',
+        'db.internal',
+        'printer.local',
+        'api.svc',
+        'nas.lan',
+        'git.corp',
       ])
         await http()
           .post(path())

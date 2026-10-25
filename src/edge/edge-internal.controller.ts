@@ -26,10 +26,14 @@ export const EDGE_LONG_POLL_MS = 25_000;
 
 const digest = (value: string) => createHash('sha256').update(value).digest();
 
+/** Headers an ingress or proxy adds; the gateway calls the pod directly and sends none. */
+const PROXY_HEADERS = ['x-forwarded-for', 'forwarded', 'x-real-ip'];
+
 /**
- * Bearer `MANAR_EDGE_GATEWAY_TOKEN`, compared in constant time (both sides hashed first, so the
- * length leaks nothing either). 401 without detail. 404 while the edge is off, as if the routes
- * did not exist.
+ * 404, as if the routes did not exist, while the edge is off or when the request carries a
+ * forwarding header (it came through an ingress, so a public route was misconfigured; a leaked
+ * token is not enough). Otherwise bearer `MANAR_EDGE_GATEWAY_TOKEN`, compared in constant time
+ * (both sides hashed first, so the length leaks nothing either), 401 without detail.
  */
 @Injectable()
 export class EdgeGatewayGuard implements CanActivate {
@@ -38,12 +42,13 @@ export class EdgeGatewayGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     if (this.config.get('MANAR_EDGE_ENABLED', { infer: true }) !== 'true')
       throw new NotFoundException();
+    const { headers } = context.switchToHttp().getRequest<FastifyRequest>();
+    if (PROXY_HEADERS.some((name) => headers[name] !== undefined))
+      throw new NotFoundException();
     const expected = this.config.get('MANAR_EDGE_GATEWAY_TOKEN', {
       infer: true,
     });
-    const header = context.switchToHttp().getRequest<FastifyRequest>()
-      .headers.authorization;
-    const match = /^Bearer (.+)$/.exec(header ?? '');
+    const match = /^Bearer (.+)$/.exec(headers.authorization ?? '');
     if (
       !expected ||
       !match ||
@@ -76,6 +81,11 @@ const EgressEventSchema = z.object({
 });
 
 const EgressBatchSchema = z.object({
+  /** Optional: the gateway's id for this batch; a retried batch with the same id is not recorded twice. */
+  batchId: z
+    .string()
+    .regex(/^[A-Za-z0-9._:-]{1,128}$/)
+    .optional(),
   events: z.array(z.unknown()).max(500),
 });
 
@@ -108,7 +118,7 @@ export class EdgeInternalController {
       if (parsed.success) valid.push(parsed.data);
       else invalid++;
     }
-    const result = await this.peers.recordEgress(valid);
-    return { accepted: result.accepted, skipped: result.skipped + invalid };
+    const result = await this.peers.recordEgress(valid, batch.batchId);
+    return { ...result, skipped: result.skipped + invalid };
   }
 }

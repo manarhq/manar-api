@@ -247,6 +247,14 @@ model EdgePeer {
   allowHosts String[]      @default([])
   /// `EdgeState.version` when this row last changed.
   version    Int
+  /// Refresh tickets: a refresher takes `refreshSeq + 1` before it reads the tenant database and
+  /// writes only if no fresher read was applied (`appliedSeq`), so a stale read never overwrites a
+  /// newer one.
+  refreshSeq   Int       @default(0)
+  appliedSeq   Int       @default(0)
+  /// Expiry of the agent's newest unrevoked certificate as last read; the next recompute is
+  /// scheduled at the earliest one.
+  certNotAfter DateTime?
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
@@ -260,6 +268,20 @@ model EdgePeer {
 model EdgeState {
   id      String @id
   version Int    @default(0)
+  /// The replica holding this lease runs the periodic reconcile.
+  reconcileLeaseUntil DateTime?
 
   @@map("edge_state")
+}
+
+/// Gateway event batches already written, per tenant, so a retried batch (same `batchId`) is not
+/// recorded twice. Rows older than a day are deleted on the next batch.
+model EdgeEventBatch {
+  batchId   String
+  tenantId  String
+  createdAt DateTime @default(now())
+
+  @@id([batchId, tenantId])
+  @@index([createdAt])
+  @@map("edge_event_batches")
 }

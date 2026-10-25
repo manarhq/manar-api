@@ -1,3 +1,5 @@
+import { ICANN_SUFFIX_RULES, PRIVATE_SUFFIX_RULES } from './public-suffix-list';
+
 /**
  * Pure helpers for the Manar edge (docs/edge.md): overlay addressing, WireGuard key shape and the
  * egress allow-list host syntax. No I/O; the config schema and the services both use them.
@@ -67,19 +69,81 @@ export function isWgPublicKey(value: string): boolean {
 
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
+/** Special-use and non-public names (RFC 6761, 6762, 7686, 9476 and `.internal`): never reachable through the proxy. */
+const RESERVED_TLDS = new Set([
+  'local',
+  'internal',
+  'localhost',
+  'onion',
+  'arpa',
+  'test',
+  'invalid',
+  'alt',
+]);
+
+interface SuffixRules {
+  exact: Set<string>;
+  wild: Set<string>;
+  except: Set<string>;
+}
+
+function parseRules(text: string): SuffixRules {
+  const rules: SuffixRules = {
+    exact: new Set(),
+    wild: new Set(),
+    except: new Set(),
+  };
+  for (const rule of text.split('\n')) {
+    if (!rule) continue;
+    if (rule.startsWith('!')) rules.except.add(rule.slice(1));
+    else if (rule.startsWith('*.')) rules.wild.add(rule.slice(2));
+    else rules.exact.add(rule);
+  }
+  return rules;
+}
+
+let icann: SuffixRules | undefined;
+let privateRules: SuffixRules | undefined;
+
+function matches(rules: SuffixRules, name: string): boolean {
+  if (rules.except.has(name)) return false;
+  if (rules.exact.has(name)) return true;
+  const dot = name.indexOf('.');
+  return dot > 0 && rules.wild.has(name.slice(dot + 1));
+}
+
+/** True when `name` is a public suffix (Public Suffix List, ICANN and private sections). */
+export function isPublicSuffix(name: string): boolean {
+  icann ??= parseRules(ICANN_SUFFIX_RULES);
+  privateRules ??= parseRules(PRIVATE_SUFFIX_RULES);
+  return matches(icann, name) || matches(privateRules, name);
+}
+
+/** True when the top-level label is a delegated ICANN TLD (`com`, `uk`, `ae`, ...). */
+export function isIcannTld(tld: string): boolean {
+  icann ??= parseRules(ICANN_SUFFIX_RULES);
+  return icann.exact.has(tld) || icann.wild.has(tld);
+}
+
 /**
  * Normalizes an allow-list host (trim, lowercase) and returns it, or null when it is not a DNS
  * name or `*.` + a DNS name: no IPs, ports, paths or other wildcards, at most 253 characters, at
- * least two labels after any `*.`, and a top-level label that is not all digits (so an IPv4
- * literal never passes).
+ * least two labels after any `*.`, a top-level label that is not all digits (so an IPv4 literal
+ * never passes), a TLD the ICANN section of the Public Suffix List delegates (so internal names
+ * like `.svc`, `.lan`, `.corp`, `.home` never pass) and not a special-use name (`.local`,
+ * `.internal`, `.localhost`, `.onion`, `.arpa`, ...). A wildcard must not cover a whole public
+ * suffix (`*.co.uk`, `*.github.io`).
  */
 export function normalizeEgressHost(input: string): string | null {
   const host = input.trim().toLowerCase();
   if (host.length === 0 || host.length > 253) return null;
-  const name = host.startsWith('*.') ? host.slice(2) : host;
+  const wildcard = host.startsWith('*.');
+  const name = wildcard ? host.slice(2) : host;
   const labels = name.split('.');
   if (labels.length < 2) return null;
   if (!labels.every((label) => LABEL.test(label))) return null;
-  if (/^[0-9]+$/.test(labels[labels.length - 1] ?? '')) return null;
+  const tld = labels[labels.length - 1] ?? '';
+  if (RESERVED_TLDS.has(tld) || !isIcannTld(tld)) return null;
+  if (wildcard && isPublicSuffix(name)) return null;
   return host;
 }

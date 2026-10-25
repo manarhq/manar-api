@@ -27,15 +27,23 @@ the HTTP port (sync API).
 
 ## Enrollment
 
-`POST /agents/enroll` takes an optional `edge: { wgPublicKey }`. The key is checked before the
-enrollment token is looked at, so a refused edge request never burns the token:
+`POST /agents/enroll` takes an optional `edge: { wgPublicKey }`. These are refused before the
+enrollment token is spent:
 
 - edge off: 400 `{ code: "edge_not_enabled" }`;
 - not canonical base64 of 32 bytes: 400;
-- the key belongs to another agent: 409.
+- the key belongs to another agent, or the agent has no peer and no address is free: 409. This
+  read-only check runs only after the token verifies (known, unused, unexpired, for this agent;
+  not consumed), scoped to that agent; any token that does not verify gets the uniform 401, so an
+  unauthenticated caller learns nothing about keys or the address pool.
 
-After the certificate is issued, the agent's peer is created, or replaced on re-enrollment (new key,
-same peer id and address: one peer per agent), and the response carries the `edge` object of the
+If the edge step still fails after the certificate is signed (a race the read-only check could not
+see), that certificate is revoked before the answer (audited as `agent.enrollment_failed`,
+reason `edge_failed`), so no live certificate exists that was never handed out. The token is spent
+then; a person issues a new one.
+
+After the certificate is issued, the agent's peer is created (cut, `enrolling`, then refreshed), or
+replaced on re-enrollment (new key, same peer id and address: one peer per agent), and the response carries the `edge` object of the
 contract (`peerId`, `address`, `gatewayPublicKey`, `gatewayEndpoint`, `manarAddress`,
 `manarServerName`, `proxyAddress`, `keepaliveSeconds`). The host tool `host.claude-code` is
 registered in the tenant at the same time (see below).
@@ -48,8 +56,16 @@ address is never reused while a row holds it.
 ## Peer state
 
 `edge_peers` (control database) is the platform registry the gateway reads. It is a projection: the
-tenant database stays the source of truth. `EdgePeerService` recomputes a peer from it, under the
-`edge_state` row lock, and writes `state`, `cutReason` and `allowHosts`. A peer is `cut` while any of
+tenant database stays the source of truth. `EdgePeerService` recomputes a peer from it and writes
+`state`, `cutReason` and `allowHosts`.
+
+How a refresh runs: it takes a ticket per peer (`refreshSeq + 1`), then reads the control and
+tenant databases outside any lock. Tenants are read in parallel (8 at a time), each read under a
+2.5 s timeout; a tenant that does not answer in time, or a read that fails, cuts that tenant's peers
+(`enforcement_dependency_unavailable`) and delays nobody else. Only the write takes the
+`edge_state` row lock, and a peer is written only if no fresher ticket was applied (`appliedSeq`),
+so a slow, stale read never overwrites a newer one. Large refreshes run in batches of 200 peers,
+one short write transaction each. A peer is `cut` while any of
 these holds, else `active` (the first one found is the `cutReason`):
 
 | Stop condition                                                    | `cutReason`                                |
@@ -63,6 +79,7 @@ these holds, else `active` (the first one found is the `cutReason`):
 | Agent group kill switch                                           | `agent_group_kill_switch_active`           |
 | Owning AI system suspended or retired                             | `ai_system_suspended`, `ai_system_retired` |
 | No unrevoked certificate                                          | `certificate_revoked`                      |
+| Newest unrevoked certificate expired                              | `certificate_expired`                      |
 | A lookup failed (fail closed)                                     | `enforcement_dependency_unavailable`       |
 
 The agent-level checks are `KillSwitchService.checkAgent`, the same function the decision path uses
@@ -83,9 +100,11 @@ and before it answers:
 | AI system state change; agent linked or unlinked | `AiSystemsService`                      | the system's agents; the agent             |
 | Egress rule added or removed                     | `EgressRulesController`                 | the agent                                  |
 
-The hooks never fail the action they follow. If a refresh fails, or something changes the tenant
-database without going through these paths, the reconcile (every 60 s, on one replica at a time)
-recomputes every peer. Back to `active` happens only when a recompute finds nothing that stops the
+The hooks never fail the action they follow. A failed refresh is retried twice (100 ms, 300 ms); if
+it still fails, a full recompute runs 5 s later on that replica. The reconcile recomputes every peer
+at boot and then every 60 s on the replica holding the lease, which also covers changes made to a
+tenant database outside these paths. A timer fires at the earliest certificate expiry among active
+peers, so an expired certificate cuts its peer at expiry without any other change. Back to `active` happens only when a recompute finds nothing that stops the
 agent, and every way back (release, deactivation, resume, AI system back to ACTIVE) is a human API
 call.
 
@@ -101,14 +120,20 @@ On the HTTP port only. `EdgeHttpModule` is imported by `AppModule` and never by
 `Authorization: Bearer <MANAR_EDGE_GATEWAY_TOKEN>`, compared in constant time; anything else is a
 bare 401. They are left out of the OpenAPI document.
 
+Public ingress must never route `/internal/*` (manar-infra adds an explicit deny). As a second
+line, the routes answer 404 to any request carrying `X-Forwarded-For`, `Forwarded` or `X-Real-IP`,
+which an ingress or proxy adds and the gateway, calling the pod directly, never sends: a misrouted
+public path cannot reach them even with a leaked token.
+
 - `GET /internal/v1/edge/peers?after=<version>`: `after=0`, a missing value or a version the server
   does not have (higher than its own) returns `full: true` with every peer, cut ones included.
   Otherwise the peers changed since `after`, at once if any, else after waiting up to 25 s (then
   200 with the same version and no peers). History is never pruned, so a lower version is always
   answered with a delta. Waiting holds no database connection: a waiter is woken by its own
   instance's commits, by Postgres `NOTIFY manar_edge_peers` (one `LISTEN` connection per API
-  instance, opened on the first poll, so a change on any replica wakes waiters on every replica),
-  and re-reads the version every 5 s in case a notification is lost.
+  instance, opened on the first poll and reopened a second after it drops, so a change on any
+  replica wakes waiters on every replica), and re-reads the version every 5 s in case a
+  notification is lost.
 - `POST /internal/v1/edge/events`: `{ events: [...] }`, at most 500 (400 above). Each valid record
   becomes an `agent.egress.allowed` or `agent.egress.denied` audit event in the peer's tenant, actor
   the agent, data: peer id, time, host (lowercased; hostnames or address literals only, never paths
@@ -116,8 +141,12 @@ bare 401. They are left out of the OpenAPI document.
   carried encrypted_client_hello; `null` when the gateway did not say). `reason` is an open set
   matching `^[a-z_]{1,40}$` (`allowed`, `host_not_allowed`, `port_not_allowed`, `sni_mismatch`,
   `ech_not_allowed`, `private_address`, `peer_cut`, `dns_failed`, `dial_failed`, ...). Records
-  with an unknown peer, an invalid shape, or whose tenant database is gone are skipped; the answer
-  is `{ accepted, skipped }`. One transaction per tenant.
+  with an unknown peer or an invalid shape are skipped; so are a tenant's records when writing them
+  fails (database gone, suspended, unavailable), without failing the other tenants. The answer is
+  `{ accepted, skipped, duplicates }`, one transaction per tenant. Optional `batchId`
+  (`^[A-Za-z0-9._:-]{1,128}$`): each tenant's part of a batch is claimed once in
+  `edge_event_batches` (kept a day), so a retried batch is not recorded twice (`duplicates`); a
+  part that failed is unclaimed, so the retry writes it.
 
 ## Egress allow-list
 
@@ -125,8 +154,13 @@ Tenant database `agent_egress_rules`. `GET/POST /agents/:id/egress-rules` and
 `DELETE /agents/:id/egress-rules/:ruleId`, JWT plus `SECURITY_ADMIN` or `TENANT_OWNER` (the same gate
 as the rest of `/agents`). Agents cannot call them (they exist only on the HTTP app) and no AI tool
 writes them. `host` is lowercased and must be a DNS name or `*.` plus a DNS name of two labels or
-more; IPs, ports, paths and other wildcards are refused (400), a duplicate is 409, at most 200 rules
-per agent. Each change commits together with its `agent.egress_rule.added` / `.removed` audit event,
+more, under a top-level domain the ICANN section of the Public Suffix List delegates (so internal
+names such as `.svc`, `.lan`, `.corp`, `.home`, `cluster.local` never pass); IPs, ports, paths and
+other wildcards are refused (400), as are special-use names (`.local`,
+`.internal`, `.localhost`, `.onion`, `.arpa`, `.test`, `.invalid`, `.alt`) and a wildcard over a
+public suffix (`*.co.uk`, `*.github.io`). The suffixes come from a vendored, dated snapshot of the
+Public Suffix List (`src/edge/public-suffix-list.ts`, MPL-2.0; no runtime dependency, refresh by
+regenerating it). A duplicate is 409, at most 200 rules per agent. Each change commits together with its `agent.egress_rule.added` / `.removed` audit event,
 then the peer's `allowHosts` is recomputed and the version bumped.
 
 ## Claude Code on a governed host
@@ -182,6 +216,5 @@ Setting up an agent, as a tenant admin:
 ## Not done here
 
 - The gateway itself, the host binary and the console panel are other repos.
-- Expired certificates do not cut a peer (the mTLS listener refuses them anyway); revocation does.
 - `edge_peers` lives in the control database although it names agents: the gateway serves every
   tenant and needs one registry. It holds slugs, keys, addresses and allowed hostnames only.

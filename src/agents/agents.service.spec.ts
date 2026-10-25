@@ -119,3 +119,33 @@ describe('AgentsService terminal states (R4)', () => {
     });
   }
 });
+
+describe('AgentsService.verifyEnrollmentToken (edge preflight gate)', () => {
+  it('verifies a usable token for the agent it names, without consuming or auditing it', async () => {
+    const { service, client, audited } = setup('PENDING_ENROLLMENT');
+    await expect(
+      service.verifyEnrollmentToken(client, RAW_TOKEN, 'a1'),
+    ).resolves.toEqual({ agentId: 'agent-1' });
+    expect(audited).toEqual([]);
+  });
+
+  it('refuses a token naming another agent, a terminal agent, an unknown hash', async () => {
+    const pending = setup('PENDING_ENROLLMENT');
+    await expect(
+      pending.service.verifyEnrollmentToken(pending.client, RAW_TOKEN, 'other'),
+    ).resolves.toBeNull();
+    const revoked = setup('REVOKED');
+    await expect(
+      revoked.service.verifyEnrollmentToken(revoked.client, RAW_TOKEN, 'a1'),
+    ).resolves.toBeNull();
+    const unknown = setup('PENDING_ENROLLMENT');
+    (
+      unknown.client.agentEnrollmentToken as unknown as {
+        findUnique: () => Promise<null>;
+      }
+    ).findUnique = () => Promise.resolve(null);
+    await expect(
+      unknown.service.verifyEnrollmentToken(unknown.client, RAW_TOKEN, 'a1'),
+    ).resolves.toBeNull();
+  });
+});

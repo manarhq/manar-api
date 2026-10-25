@@ -50,7 +50,8 @@ export class AgentEnrollController {
   @Post('enroll')
   async enroll(@Body() body: unknown) {
     const input = parseBodyOrThrow(EnrollAgentRequestSchema, body);
-    // Checked before the token is looked at, so a refused edge request never burns the token.
+    // Edge off and a malformed key are refused before the token is looked at; key ownership and
+    // address capacity are checked read-only before the token is spent (see below).
     if (input.edge) {
       if (!this.edgePeers.enabled) {
         throw new BadRequestException({
@@ -82,6 +83,33 @@ export class AgentEnrollController {
       tenant.id,
     );
 
+    // The edge preflight runs only for a token that verifies (read-only, not consumed), scoped to
+    // the agent it names: an unauthenticated caller learns nothing about keys or the address pool.
+    // A token that does not verify goes on to `enroll`, which refuses it (uniform 401) and audits.
+    const verified = input.edge
+      ? await this.agentsService.verifyEnrollmentToken(
+          tenantClient,
+          input.token,
+          tokenParts.agentSlug,
+        )
+      : null;
+    if (input.edge && verified) {
+      try {
+        await this.edgePeers.preflight({
+          tenantId: tenant.id,
+          agentId: verified.agentId,
+          publicKey: input.edge.wgPublicKey,
+        });
+      } catch (error) {
+        if (
+          error instanceof EdgeKeyInUseError ||
+          error instanceof EdgeAddressPoolExhaustedError
+        )
+          throw new ConflictException(error.message);
+        throw error;
+      }
+    }
+
     try {
       const issued = await this.agentsService.enroll(
         tenantClient,
@@ -98,14 +126,33 @@ export class AgentEnrollController {
         notAfter: issued.notAfter,
       };
       if (!input.edge) return response;
-      // One peer per agent; a re-enrollment replaces its key and keeps its address.
-      const edge = await this.edgePeers.enroll({
-        tenantId: tenant.id,
-        tenantSlug: tenant.slug,
-        agentId: issued.agentId,
-        agentSlug: issued.agentSlug,
-        publicKey: input.edge.wgPublicKey,
-      });
+      // One peer per agent; a re-enrollment replaces its key and keeps its address. Should the
+      // edge step still fail (a race the preflight could not see), the certificate just signed
+      // is revoked before answering, so no live certificate exists that was never returned.
+      let edge;
+      try {
+        edge = await this.edgePeers.enroll({
+          tenantId: tenant.id,
+          tenantSlug: tenant.slug,
+          agentId: issued.agentId,
+          agentSlug: issued.agentSlug,
+          publicKey: input.edge.wgPublicKey,
+        });
+      } catch (edgeError) {
+        await this.agentsService
+          .revokeEnrollmentCertificate(
+            tenantClient,
+            tenant.id,
+            issued.agentId,
+            issued.serialNumber,
+          )
+          .catch((revokeError: Error) =>
+            this.logger.error(
+              `could not revoke certificate ${issued.serialNumber} after a failed edge enrollment: ${revokeError.message}`,
+            ),
+          );
+        throw edgeError;
+      }
       // The host's local actions (Claude Code hook) get their risk metadata in this tenant.
       await ensureHostClaudeCodeTool(tenantClient).catch((error: Error) =>
         this.logger.error(`host tool registration failed: ${error.message}`),

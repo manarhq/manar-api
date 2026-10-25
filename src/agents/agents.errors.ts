@@ -18,7 +18,12 @@ export class AgentTerminatedError extends Error {
 }
 
 export type EnrollmentFailureReason =
-  'not_found' | 'used' | 'expired' | 'agent_terminated';
+  | 'not_found'
+  | 'used'
+  | 'expired'
+  | 'agent_terminated'
+  /** docs/edge.md: the certificate was signed but the edge peer could not be set up; it was revoked. */
+  | 'edge_failed';
 
 /**
  * Thrown by `AgentsService.enroll` for any reason an enrollment token isn't

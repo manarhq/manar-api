@@ -312,6 +312,55 @@ export class AgentsService {
     });
   }
 
+  /**
+   * Read-only token check (docs/edge.md): the same conditions `enroll` applies (known hash, not
+   * used, not expired, agent not terminal, the agent the token names), nothing consumed and nothing
+   * audited. Null on any failure; the caller then lets `enroll` refuse and audit it.
+   */
+  async verifyEnrollmentToken(
+    tenantClient: TenantPrismaClient,
+    rawToken: string,
+    agentSlug: string,
+  ): Promise<{ agentId: string } | null> {
+    const row = await tenantClient.agentEnrollmentToken.findUnique({
+      where: { tokenHash: hashEnrollmentToken(rawToken) },
+      include: { agent: { select: { slug: true, status: true } } },
+    });
+    if (
+      !row ||
+      row.usedAt ||
+      row.expiresAt.getTime() < Date.now() ||
+      isTerminal(row.agent.status) ||
+      row.agent.slug !== agentSlug
+    )
+      return null;
+    return { agentId: row.agentId };
+  }
+
+  /**
+   * docs/edge.md: the certificate of an enrollment whose edge step failed after signing is revoked
+   * at once (it was never returned), and the failure is audited. The token stays spent; a person
+   * issues a new one.
+   */
+  async revokeEnrollmentCertificate(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    agentId: string,
+    serialNumber: string,
+  ): Promise<void> {
+    await this.certificateAuthority.revokeCertificate(
+      tenantClient,
+      serialNumber,
+      'edge_enrollment_failed',
+    );
+    await this.edgePeers?.agentChanged(tenantId, agentId);
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.AGENT_ENROLLMENT_FAILED,
+      actor: { type: 'agent', id: agentId },
+      data: { reason: 'edge_failed', serialNumber },
+    });
+  }
+
   /** `agent.enrollment_failed` — actor is `system:unauthenticated` (Section 14: `POST /agents/enroll` has no JWT/human identity to attribute this to) unless a specific agent could still be resolved (a stale/reused token still names a real agent — see call sites above). */
   private async recordEnrollmentFailure(
     tenantClient: TenantPrismaClient,

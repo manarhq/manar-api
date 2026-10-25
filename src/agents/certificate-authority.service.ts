@@ -166,6 +166,32 @@ export class CertificateAuthorityService {
   }
 
   /**
+   * Revokes one certificate, local state first (`AgentMtlsGuard` refuses it on its next request),
+   * then OpenBao. An OpenBao failure is logged, not thrown; revoking the agent retries it.
+   */
+  async revokeCertificate(
+    tenantClient: TenantPrismaClient,
+    serialNumber: string,
+    reason: string,
+  ): Promise<void> {
+    await tenantClient.agentCertificate.updateMany({
+      where: { serialNumber, revokedAt: null },
+      data: { revokedAt: new Date(), revocationReason: reason },
+    });
+    try {
+      await this.openBao.revoke(toColonSeparatedHex(serialNumber));
+      await tenantClient.agentCertificate.updateMany({
+        where: { serialNumber },
+        data: { caRevokedAt: new Date() },
+      });
+    } catch (error) {
+      this.logger.error(
+        `OpenBao revoke failed for certificate ${serialNumber}; it is refused locally: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /**
    * The actual security boundary (see class doc comment). Parses the CSR,
    * verifies its self-signature (proof that the requester actually holds
    * the private key matching the CSR's public key — without this, anyone

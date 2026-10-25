@@ -9,14 +9,23 @@ import type { AppConfig } from '../config/env.validation';
 import { validate } from '../config/env.validation';
 import { AgentEnrollController } from '../agents/agent-enroll.controller';
 import type { AgentsService } from '../agents/agents.service';
+import { EnrollmentTokenInvalidError } from '../agents/agents.errors';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { EdgeGatewayGuard } from './edge-internal.controller';
-import type { EdgePeerService } from './edge-peer.service';
+import type { ModuleRef } from '@nestjs/core';
+import { vi } from 'vitest';
+import type { AuditService } from '../audit/audit.service';
+import {
+  EdgeAddressPoolExhaustedError,
+  EdgeKeyInUseError,
+  EdgePeerService,
+} from './edge-peer.service';
 import {
   gatewayIp,
   isWgPublicKey,
   nextFreeAddress,
+  isPublicSuffix,
   normalizeEgressHost,
   parseCidr,
 } from './edge-net';
@@ -82,6 +91,42 @@ describe('edge-net', () => {
     ])
       expect(normalizeEgressHost(bad), bad).toBeNull();
   });
+
+  it('refuses wildcards over a public suffix and special-use names', () => {
+    for (const bad of [
+      '*.co.uk',
+      '*.github.io',
+      '*.com.au',
+      '*.foo.ck', // under the `*.ck` rule
+      'printer.local',
+      'api.internal',
+      '*.svc.internal',
+      'app.localhost',
+      'abc.onion',
+      '1.0.0.10.in-addr.arpa',
+      // Not delegated by ICANN: internal and search-domain style names.
+      'api.svc',
+      'nas.lan',
+      'git.corp',
+      'router.home',
+      'kube-dns.kube-system.svc.cluster.local',
+      'host.example.notatld',
+    ])
+      expect(normalizeEgressHost(bad), bad).toBeNull();
+    for (const good of [
+      '*.example.co.uk',
+      '*.myorg.github.io',
+      'github.io', // an exact host never covers anyone else
+      'co.uk',
+      '*.www.ck', // `!www.ck` is an exception: not a public suffix
+      'www.ck',
+      'portal.gov.ae',
+      'example.xn--mgbaam7a8h', // an IDN ccTLD in punycode
+    ])
+      expect(normalizeEgressHost(good), good).toBe(good);
+    expect(isPublicSuffix('github.io')).toBe(true);
+    expect(isPublicSuffix('example.com')).toBe(false);
+  });
 });
 
 describe('edge config', () => {
@@ -124,10 +169,13 @@ describe('edge config', () => {
   });
 });
 
-function guardContext(authorization?: string): ExecutionContext {
+function guardContext(
+  authorization?: string,
+  extra: Record<string, string> = {},
+): ExecutionContext {
   return {
     switchToHttp: () => ({
-      getRequest: () => ({ headers: { authorization } }),
+      getRequest: () => ({ headers: { authorization, ...extra } }),
     }),
   } as unknown as ExecutionContext;
 }
@@ -169,6 +217,17 @@ describe('EdgeGatewayGuard', () => {
     });
   });
 
+  it.each(['x-forwarded-for', 'forwarded', 'x-real-ip'])(
+    'answers 404 to a request that came through a proxy (%s), even with the right token',
+    (name) => {
+      expect(() =>
+        guard.canActivate(
+          guardContext(`Bearer ${TOKEN}`, { [name]: '1.2.3.4' }),
+        ),
+      ).toThrow(NotFoundException);
+    },
+  );
+
   it('answers 404 while the edge is off, even with the right token', () => {
     const off = new EdgeGatewayGuard(
       config({ MANAR_EDGE_ENABLED: 'false', MANAR_EDGE_GATEWAY_TOKEN: TOKEN }),
@@ -180,28 +239,54 @@ describe('EdgeGatewayGuard', () => {
 });
 
 describe('POST /agents/enroll with edge', () => {
-  function controller(enabled: boolean) {
+  function controller(
+    enabled: boolean,
+    edge: Partial<EdgePeerService> = {},
+    tenant: { id: string; slug: string } | null = null,
+    tokenValid = true,
+  ) {
     const touched: string[] = [];
     const c = new AgentEnrollController(
       {
+        verifyEnrollmentToken: () => {
+          touched.push('verify');
+          return Promise.resolve(tokenValid ? { agentId: 'agent-1' } : null);
+        },
         enroll: () => {
           touched.push('enroll');
-          return Promise.reject(new Error('not reached'));
+          if (!tokenValid)
+            return Promise.reject(new EnrollmentTokenInvalidError('not_found'));
+          return Promise.resolve({
+            certificatePem: 'cert',
+            caChainPem: 'chain',
+            serialNumber: 'ab12',
+            notBefore: new Date(),
+            notAfter: new Date(),
+            agentId: 'agent-1',
+            agentSlug: 'a1',
+          });
+        },
+        revokeEnrollmentCertificate: (...args: unknown[]) => {
+          touched.push(`revoke:${String(args[3])}`);
+          return Promise.resolve();
         },
       } as unknown as AgentsService,
       {
         tenant: {
           findUnique: () => {
             touched.push('tenant');
-            return Promise.resolve(null);
+            return Promise.resolve(tenant);
           },
         },
       } as unknown as ControlPrismaService,
-      {} as TenantDatabaseManager,
-      { enabled } as EdgePeerService,
+      {
+        getClient: () => Promise.resolve({}),
+      } as unknown as TenantDatabaseManager,
+      { enabled, ...edge } as EdgePeerService,
     );
     return { c, touched };
   }
+  const t = { id: 'tenant-1', slug: 'acme' };
 
   it('400 edge_not_enabled when the install has the edge off, before the token is used', async () => {
     const { c, touched } = controller(false);
@@ -219,5 +304,94 @@ describe('POST /agents/enroll with edge', () => {
       c.enroll({ token: 't', csr: 'c', edge: { wgPublicKey: 'abc' } }),
     ).rejects.toMatchObject({ status: 400 });
     expect(touched).toEqual([]);
+  });
+
+  it("409 on another agent's key or a full address pool before the token is spent", async () => {
+    const { c, touched } = controller(
+      true,
+      { preflight: () => Promise.reject(new EdgeKeyInUseError()) },
+      t,
+    );
+    await expect(
+      c.enroll({ token: 'acme:a1:x', csr: 'c', edge: { wgPublicKey: KEY } }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(touched).toEqual(['tenant', 'verify']);
+  });
+
+  it('runs no edge check for a token that does not verify: the same 401 as any bad token', async () => {
+    const preflight = vi.fn();
+    const { c, touched } = controller(true, { preflight }, t, false);
+    await expect(
+      c.enroll({ token: 'acme:a1:x', csr: 'c', edge: { wgPublicKey: KEY } }),
+    ).rejects.toMatchObject({
+      status: 401,
+      response: { message: 'Invalid enrollment token' },
+    });
+    expect(preflight).not.toHaveBeenCalled();
+    expect(touched).toEqual(['tenant', 'verify', 'enroll']);
+  });
+
+  it('revokes the just-signed certificate when the edge step fails after signing', async () => {
+    const { c, touched } = controller(
+      true,
+      {
+        preflight: () => Promise.resolve(),
+        enroll: () => Promise.reject(new EdgeAddressPoolExhaustedError()),
+      },
+      t,
+    );
+    await expect(
+      c.enroll({ token: 'acme:a1:x', csr: 'c', edge: { wgPublicKey: KEY } }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(touched).toEqual(['tenant', 'verify', 'enroll', 'revoke:ab12']);
+  });
+});
+
+describe('EdgePeerService hooks', () => {
+  function service(failures: number) {
+    let calls = 0;
+    const control = {
+      edgePeer: {
+        findMany: () => {
+          calls++;
+          return calls <= failures
+            ? Promise.reject(new Error('db down'))
+            : Promise.resolve([]);
+        },
+      },
+    } as unknown as ControlPrismaService;
+    const svc = new EdgePeerService(
+      control,
+      {} as TenantDatabaseManager,
+      config({ MANAR_EDGE_ENABLED: 'false' }),
+      {} as ModuleRef,
+      {} as AuditService,
+    );
+    return { svc, calls: () => calls };
+  }
+
+  it('retries a failed refresh and succeeds without a full recompute', async () => {
+    const { svc, calls } = service(2);
+    const reconcile = vi.spyOn(svc, 'reconcile');
+    await svc.agentChanged('t', 'a');
+    expect(calls()).toBe(3);
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it('after three failures schedules a full recompute instead of dropping the change', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+      const { svc, calls } = service(10);
+      const reconcile = vi.spyOn(svc, 'reconcile').mockResolvedValue(undefined);
+      const done = svc.agentChanged('t', 'a');
+      await vi.advanceTimersByTimeAsync(1_000);
+      await done;
+      expect(calls()).toBe(3);
+      expect(reconcile).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(reconcile).toHaveBeenCalledWith(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
