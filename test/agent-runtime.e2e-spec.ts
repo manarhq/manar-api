@@ -1408,6 +1408,17 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
         reason: 'not_assigned_agent',
       });
       expect(anthropicUpstream.calls.length).toBe(before);
+      // Refused at the task check: the audit row never carries the claimed task id.
+      const rows = await tenantClientRef.auditEvent.findMany({
+        where: { eventType: AUDIT_EVENT_TYPES.LLM_REQUEST },
+      });
+      const refusal = rows
+        .map((e) => e.data as Record<string, unknown>)
+        .find(
+          (d) => d.format === 'anthropic' && d.reason === 'not_assigned_agent',
+        );
+      expect(refusal?.taskId).toBeUndefined();
+      expect(refusal?.claimedTaskIdSha256).toMatch(/^[0-9a-f]{64}$/);
     });
 
     it('lists the models this install serves', async () => {

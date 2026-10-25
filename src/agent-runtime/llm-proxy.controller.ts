@@ -103,6 +103,8 @@ export class LlmProxyController {
         .header('x-accel-buffering', 'no')
         .send(Readable.from(result.stream));
     } catch (error) {
+      // The client is gone: nothing to answer (the call is already recorded).
+      if (closed.signal.aborted) return;
       const { status, body: errorBody } = anthropicError(error);
       if (status < 500) void reply.header('x-should-retry', 'false');
       return reply.status(status).send(errorBody);

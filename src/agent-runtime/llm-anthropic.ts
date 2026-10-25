@@ -21,10 +21,7 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
 const Block = z.object({ type: z.string() }).passthrough();
 
-/**
- * Required fields are checked; every other field passes through unchanged (Claude Code adds
- * fields paired with `anthropic-beta` values, and stripping one breaks the pair).
- */
+/** Required fields are checked here; the allowed set of top-level fields is `requestRefusal`'s. */
 export const AnthropicMessagesRequestSchema = z
   .object({
     model: z.string().min(1).max(256),
@@ -73,6 +70,31 @@ export function usageTokens(usage: AnthropicUsage): number {
 }
 
 /**
+ * Top-level request fields passed on to the upstream (all scanned by DLP). Any other field is
+ * refused with Anthropic's own wording, so a client that knows how drops it and retries.
+ * `mcp_servers` and `container` are absent on purpose: the provider would reach the network.
+ */
+const PASSED_FIELDS = new Set([
+  'model',
+  'max_tokens',
+  'messages',
+  'system',
+  'stream',
+  'tools',
+  'tool_choice',
+  'temperature',
+  'top_p',
+  'top_k',
+  'stop_sequences',
+  'metadata',
+  'thinking',
+  'output_config',
+  'output_format',
+  'context_management',
+  'service_tier',
+]);
+
+/**
  * Tool types that run on the agent's side: custom tools, Anthropic-defined client tools, and
  * tool search over the request's own tools. Server tools (web search, web fetch, code
  * execution, MCP connector) let the provider reach the network outside the agent's egress policy.
@@ -80,37 +102,71 @@ export function usageTokens(usage: AnthropicUsage): number {
 const CLIENT_TOOL_TYPE =
   /^(custom|(bash|text_editor|computer|memory)_\d{8}|tool_search_tool_(regex|bm25)(_\d{8})?)$/;
 
+const invalid = (message: string, reason: string) =>
+  new BadRequestException({
+    type: 'error',
+    error: { type: 'invalid_request_error', message },
+    reason,
+  });
+
 /**
- * Refusals decided by the request's shape, before any gate: a server tool or provider-side
- * connector (400 in the wording Claude Code recognises, so it retries without that tool), or
- * content DLP cannot read (images, PDFs, file references: 403 `dlp_unscannable_content`).
+ * Refusals decided by the request's shape (run after the task access check): a top-level field
+ * outside `PASSED_FIELDS` (400 `llm_request_field_not_allowed`), a server tool (400 in the
+ * wording Claude Code recognises, so it retries without that tool), or content DLP cannot read
+ * (images, PDFs, file references: 403 `dlp_unscannable_content`).
  */
 export function requestRefusal(
   request: AnthropicMessagesRequest,
 ): HttpException | null {
-  const notAllowed = (message: string) =>
-    new BadRequestException({
-      type: 'error',
-      error: { type: 'invalid_request_error', message },
-      reason: 'llm_server_tool_not_allowed',
-    });
+  const extra = Object.keys(request).find((k) => !PASSED_FIELDS.has(k));
+  if (extra !== undefined) {
+    return invalid(
+      `${extra.slice(0, 64)}: Extra inputs are not permitted`,
+      'llm_request_field_not_allowed',
+    );
+  }
   for (const [i, tool] of (request.tools ?? []).entries()) {
     if (tool.type !== undefined && !CLIENT_TOOL_TYPE.test(tool.type)) {
-      return notAllowed(
+      return invalid(
         `tools.${i}: Input tag '${tool.type.slice(0, 64)}' is not allowed by Manar: server tools reach the network outside the agent's egress policy`,
-      );
-    }
-  }
-  for (const field of ['mcp_servers', 'container']) {
-    if (request[field] !== undefined) {
-      return notAllowed(
-        `${field}: not allowed by Manar: the provider would reach the network outside the agent's egress policy`,
+        'llm_server_tool_not_allowed',
       );
     }
   }
   const content = [request.system, ...request.messages.map((m) => m.content)];
   if (content.some(unscannable)) return denied('dlp_unscannable_content');
   return null;
+}
+
+const VERSION = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The client headers the upstream gets: `anthropic-version` as a date (else 400), and only the
+ * `anthropic-beta` values in `allowed` (others are dropped; a body field that needed one is then
+ * refused by the upstream, and Claude Code retries without it).
+ */
+export function clientHeaders(
+  raw: { version?: string; beta?: string },
+  allowed: ReadonlySet<string>,
+): { version?: string; beta?: string } {
+  if (raw.version !== undefined && !VERSION.test(raw.version)) {
+    throw invalid(
+      'anthropic-version: expected a date such as 2023-06-01',
+      'invalid_anthropic_version',
+    );
+  }
+  const betas = [
+    ...new Set(
+      (raw.beta ?? '')
+        .split(',')
+        .map((b) => b.trim())
+        .filter((b) => allowed.has(b)),
+    ),
+  ];
+  return {
+    ...(raw.version ? { version: raw.version } : {}),
+    ...(betas.length ? { beta: betas.join(',') } : {}),
+  };
 }
 
 /** Content blocks DLP cannot read: base64, URL or file sources, and file uploads. */
@@ -127,44 +183,86 @@ function unscannable(blocks: unknown): boolean {
   });
 }
 
-/** Model-signed fields: not text the model reads, and they must reach the upstream unchanged. */
-const OPAQUE: Record<string, string> = {
-  thinking: 'signature',
-  redacted_thinking: 'data',
-  signature_delta: 'signature',
-};
+/** A path to a value inside a JSON document. */
+type Slot = (string | number)[];
 
-function eachOpaque(node: unknown, visit: (o: Json, key: string) => void) {
-  if (Array.isArray(node)) node.forEach((n) => eachOpaque(n, visit));
-  else if (node !== null && typeof node === 'object') {
-    const o = node as Json;
-    const key = OPAQUE[o.type as string];
-    if (key && typeof o[key] === 'string') visit(o, key);
-    Object.values(o).forEach((v) => eachOpaque(v, visit));
-  }
+/** What a thinking signature or redacted-thinking payload looks like: base64, bounded. */
+function opaqueValue(v: unknown): v is string {
+  return (
+    typeof v === 'string' &&
+    v.length > 0 &&
+    v.length <= 65_536 &&
+    /^[A-Za-z0-9+/=_-]+$/.test(v)
+  );
 }
 
-/**
- * A copy of `value` with thinking signatures and redacted-thinking data emptied, for DLP;
- * `restore` puts them back into the scanned copy (same shape, same order).
- */
-export function holdOpaque<T>(value: T): {
-  held: T;
-  restore: (scanned: T) => T;
-} {
-  const saved: string[] = [];
-  const held = structuredClone(value);
-  eachOpaque(held, (o, k) => {
-    saved.push(o[k] as string);
-    o[k] = '';
+/** `signature` of a thinking block and `data` of a redacted-thinking block, when well formed. */
+function blockSlot(block: unknown): string | undefined {
+  const b = (block ?? {}) as Json;
+  const key =
+    b.type === 'thinking'
+      ? 'signature'
+      : b.type === 'redacted_thinking'
+        ? 'data'
+        : undefined;
+  return key && opaqueValue(b[key]) ? key : undefined;
+}
+
+function directSlots(blocks: unknown, base: Slot): Slot[] {
+  if (!Array.isArray(blocks)) return [];
+  return blocks.flatMap((b, i) => {
+    const key = blockSlot(b);
+    return key ? [[...base, i, key]] : [];
   });
+}
+
+/** Request: only blocks directly in an assistant message's `content`. */
+export const requestSlots = (prompt: { messages?: unknown }): Slot[] =>
+  ((prompt.messages ?? []) as Json[]).flatMap((m, i) =>
+    m?.role === 'assistant'
+      ? directSlots(m.content, ['messages', i, 'content'])
+      : [],
+  );
+
+/** Response: only blocks directly in `content`. */
+export const contentSlots = (content: unknown): Slot[] =>
+  directSlots(content, []);
+
+/** Stream: a thinking block's start, and a `signature_delta`. */
+export function eventSlots(data: Json): Slot[] {
+  if (data.type === 'content_block_start') {
+    const key = blockSlot(data.content_block);
+    return key ? [['content_block', key]] : [];
+  }
+  const d = (data.delta ?? {}) as Json;
+  return data.type === 'content_block_delta' &&
+    d.type === 'signature_delta' &&
+    opaqueValue(d.signature)
+    ? [['delta', 'signature']]
+    : [];
+}
+
+const at = (root: unknown, path: Slot): Json =>
+  path.slice(0, -1).reduce((n: unknown, k) => (n as Json)[k], root) as Json;
+
+/**
+ * A copy of `value` with the model-signed fields `slots` finds (thinking signatures, redacted
+ * thinking) emptied for DLP; `restore` puts them back into the scanned copy by path. They are
+ * not text the model reads and must reach the upstream unchanged. Anything else, including a
+ * thinking-shaped object nested in a tool input or result, is scanned.
+ */
+export function holdOpaque<T>(
+  value: T,
+  slots: (v: T) => Slot[],
+): { held: T; restore: (scanned: T) => T } {
+  const held = structuredClone(value);
+  const paths = slots(held);
+  const saved = paths.map((p) => at(held, p)[p.at(-1)!]);
+  paths.forEach((p) => (at(held, p)[p.at(-1)!] = ''));
   return {
     held,
     restore: (scanned) => {
-      let i = 0;
-      eachOpaque(scanned, (o, k) => {
-        o[k] = saved[i++];
-      });
+      paths.forEach((p, i) => (at(scanned, p)[p.at(-1)!] = saved[i]));
       return scanned;
     },
   };
@@ -178,7 +276,7 @@ export interface ScannedMessage {
 
 /** Response DLP on a whole message: the deterministic floor (credentials block, UAE PII redacted). */
 export function scanMessage(message: Json): ScannedMessage {
-  const { held, restore } = holdOpaque(message.content);
+  const { held, restore } = holdOpaque(message.content, contentSlots);
   const floor = applyDlpFloor(held);
   return {
     message: { ...message, content: restore(floor.value) },
@@ -268,43 +366,54 @@ export const errorEvent = (error: HttpException): SseEvent => ({
   data: anthropicError(error).body,
 });
 
-/** Credential shapes are looked for in this much of a block's latest text. */
-const CREDENTIAL_WINDOW = 8192;
 /**
- * Characters a UAE PII match can contain (digits, separators, the `AE` of an IBAN). Streamed
- * text is released up to the last character outside this set, so a match is never split
- * between what was sent and what is still held.
+ * Streamed text is always this far behind what the upstream sent: room for the plain-text part
+ * of a credential pattern (a PEM header, `"client_secret": "`, `AccountKey=`, `Bearer `) to
+ * complete before any of the secret after it is released.
  */
+const CREDENTIAL_LOOKAHEAD = 512;
+/** Characters of token-like secrets (JWT, bearer and SAS values, Entra client secrets). */
+const TOKEN_CHAR = /[A-Za-z0-9_~.+/=%-]/;
+/** A token-like run is held whole until it ends; one longer than this is treated as data. */
+const TOKEN_RUN_MAX = 65_536;
+/** Characters a UAE PII match can contain (digits, separators, the `AE` of an IBAN). */
 const PII_CHAR = /[0-9AaEe +-]/;
-/**
- * ponytail: a run of PII characters longer than this is released anyway (a match split there
- * goes out unredacted); hold per pattern if that ever matters.
- */
-const HOLD_MAX = 512;
+/** A run of PII characters longer than this is not a single PII value; it is released. */
+const PII_RUN_MAX = 512;
 
-interface OpenBlock {
-  json: boolean;
-  field?: 'text' | 'thinking';
-  pending: string;
-  seen: string;
+/** How much of `pending` can go out: nothing a credential or PII match could still grow into. */
+function safeCut(pending: string): number {
+  const end = pending.length;
+  let pii = end;
+  while (pii > 0 && PII_CHAR.test(pending[pii - 1]!)) pii--;
+  if (end - pii > PII_RUN_MAX) pii = end;
+  let token = end;
+  while (token > 0 && TOKEN_CHAR.test(pending[token - 1]!)) token--;
+  if (end - token > TOKEN_RUN_MAX) token = end;
+  return Math.max(0, Math.min(pii, token, end - CREDENTIAL_LOOKAHEAD));
 }
 
+type Queued =
+  | { kind: 'event'; event: SseEvent }
+  | { kind: 'text'; index: number; field: 'text' | 'thinking'; text: string };
+
 /**
- * Response DLP over a streamed message, event by event: text and thinking deltas are held back
- * only as far as a PII match could still be growing, then released redacted; a tool call's
- * input is held whole until its block ends and released in one `input_json_delta`; a credential
- * shape anywhere throws `DlpBlocked`. `message_delta` and `message_stop` are kept in `held` for
- * the caller to release after the call is charged and audited.
- *
- * ponytail: a credential is found once it is complete, so its first characters may already be
- * out in a text delta; hold text like tool input if that ever matters.
+ * Response DLP over a streamed message. Events leave in order through one message-level queue:
+ * text and thinking deltas are held as long as a credential or PII match could still be growing
+ * (`safeCut`), and every check reads the queued text of all blocks plus the tail already sent,
+ * so a secret split across deltas or blocks is caught before any of it goes out. A tool call's
+ * input is held whole until its block ends. A credential throws `DlpBlocked`. `message_delta` and
+ * `message_stop` are kept in `held` for the caller to release after the call is charged and
+ * audited.
  */
 export class AnthropicStreamGuard {
   readonly usage: AnthropicUsage = {};
   readonly piiTypes = new Set<string>();
   readonly held: SseEvent[] = [];
   outputChars = 0;
-  private readonly blocks = new Map<number, OpenBlock>();
+  private readonly toolInput = new Map<number, string>();
+  private readonly queue: Queued[] = [];
+  private sentTail = '';
 
   push(e: SseEvent): SseEvent[] {
     const d = e.data;
@@ -313,87 +422,108 @@ export class AnthropicStreamGuard {
         return [e];
       case 'message_start':
         this.addUsage((d.message as Json | undefined)?.usage);
-        return [this.scan(e)];
+        break;
       case 'message_delta':
         this.addUsage(d.usage);
         this.held.push(this.scan(e));
         return [];
       case 'message_stop':
         this.held.push(e);
-        return [];
+        return this.release(true);
       case 'content_block_start': {
         const type = (d.content_block as Json | undefined)?.type;
-        this.blocks.set(d.index as number, {
-          json: type === 'tool_use' || type === 'server_tool_use',
-          pending: '',
-          seen: '',
-        });
-        return [this.scan(e)];
+        if (type === 'tool_use' || type === 'server_tool_use')
+          this.toolInput.set(d.index as number, '');
+        break;
       }
       case 'content_block_delta': {
         const index = d.index as number;
         const delta = (d.delta ?? {}) as Json;
-        const block = this.blocks.get(index);
-        if (
-          block &&
-          (delta.type === 'text_delta' || delta.type === 'thinking_delta')
-        ) {
+        if (delta.type === 'text_delta' || delta.type === 'thinking_delta') {
           const field = delta.type === 'text_delta' ? 'text' : 'thinking';
-          return this.text(index, block, field, str(delta[field]));
+          this.queueText(index, field, str(delta[field]));
+          this.check();
+          return this.release(false);
         }
-        if (block?.json && delta.type === 'input_json_delta') {
+        const input = this.toolInput.get(index);
+        if (input !== undefined && delta.type === 'input_json_delta') {
           const part = str(delta.partial_json);
-          block.pending += part;
+          this.toolInput.set(index, input + part);
           this.outputChars += part.length;
           return [];
         }
-        return [this.scan(e)];
+        break;
       }
       case 'content_block_stop': {
         const index = d.index as number;
-        const out = this.flush(index);
-        this.blocks.delete(index);
-        return [...out, e];
+        const input = this.toolInput.get(index);
+        this.toolInput.delete(index);
+        if (input) {
+          // The input JSON as one string: a redaction placeholder is JSON-safe inside a string.
+          this.queue.push({
+            kind: 'event',
+            event: delta(index, {
+              type: 'input_json_delta',
+              partial_json: this.redact(input),
+            }),
+          });
+        }
+        this.queue.push({ kind: 'event', event: e });
+        return this.release(false);
       }
-      default:
-        return [this.scan(e)];
     }
+    this.queue.push({ kind: 'event', event: this.scan(e) });
+    return this.release(false);
   }
 
-  private text(
-    index: number,
-    block: OpenBlock,
-    field: 'text' | 'thinking',
-    chunk: string,
-  ): SseEvent[] {
-    block.field = field;
-    this.outputChars += chunk.length;
-    block.seen = (block.seen + chunk).slice(-CREDENTIAL_WINDOW);
-    const found = applyDlpFloor(block.seen).credentialTypes;
+  private queueText(index: number, field: 'text' | 'thinking', text: string) {
+    if (!text) return;
+    this.outputChars += text.length;
+    const last = this.queue.at(-1);
+    if (last?.kind === 'text' && last.index === index && last.field === field)
+      last.text += text;
+    else this.queue.push({ kind: 'text', index, field, text });
+  }
+
+  private pendingText(): string {
+    return this.queue.map((q) => (q.kind === 'text' ? q.text : '')).join('');
+  }
+
+  /** Credential shapes in what was last sent plus everything held, across blocks. */
+  private check(): void {
+    const found = applyDlpFloor(
+      this.sentTail + this.pendingText(),
+    ).credentialTypes;
     if (found.length) throw new DlpBlocked(found);
-    block.pending += chunk;
-    let cut = block.pending.length;
-    while (cut > 0 && PII_CHAR.test(block.pending[cut - 1]!)) cut--;
-    if (block.pending.length - cut > HOLD_MAX) cut = block.pending.length;
-    return this.release(index, block, cut);
   }
 
-  private release(index: number, block: OpenBlock, cut: number): SseEvent[] {
-    if (cut === 0) return [];
-    const text = this.redact(block.pending.slice(0, cut));
-    block.pending = block.pending.slice(cut);
-    const field = block.field ?? 'text';
-    return [delta(index, { type: `${field}_delta`, [field]: text })];
-  }
-
-  private flush(index: number): SseEvent[] {
-    const block = this.blocks.get(index);
-    if (!block?.pending) return [];
-    if (!block.json) return this.release(index, block, block.pending.length);
-    // The input JSON as one string: a redaction placeholder is JSON-safe inside a string.
-    const json = this.redact(block.pending);
-    block.pending = '';
-    return [delta(index, { type: 'input_json_delta', partial_json: json })];
+  private release(final: boolean): SseEvent[] {
+    if (final) this.check();
+    const pending = this.pendingText();
+    let cut = final ? pending.length : safeCut(pending);
+    const out: SseEvent[] = [];
+    while (this.queue.length) {
+      const q = this.queue[0]!;
+      if (q.kind === 'event') {
+        out.push(q.event);
+        this.queue.shift();
+        continue;
+      }
+      if (cut <= 0) break;
+      const part = q.text.slice(0, cut);
+      cut -= part.length;
+      q.text = q.text.slice(part.length);
+      if (!q.text) this.queue.shift();
+      this.sentTail = (this.sentTail + part).slice(-CREDENTIAL_LOOKAHEAD);
+      out.push(
+        delta(q.index, {
+          type: `${q.field}_delta`,
+          [q.field]: this.redact(part),
+        }),
+      );
+      if (q.text) break;
+    }
+    return out;
   }
 
   private redact(text: string): string {
@@ -405,7 +535,7 @@ export class AnthropicStreamGuard {
   }
 
   private scan(e: SseEvent): SseEvent {
-    const { held, restore } = holdOpaque(e.data);
+    const { held, restore } = holdOpaque(e.data, eventSlots);
     const floor = applyDlpFloor(held);
     if (floor.credentialTypes.length)
       throw new DlpBlocked(floor.credentialTypes);

@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   BadGatewayException,
+  BadRequestException,
   HttpException,
   Injectable,
   NotFoundException,
@@ -15,6 +16,7 @@ import { denied } from './agent-task-access.service';
 import {
   AnthropicMessagesRequestSchema,
   AnthropicStreamGuard,
+  clientHeaders,
   DlpBlocked,
   errorEvent,
   fromOpenAiChat,
@@ -23,6 +25,7 @@ import {
   parseSse,
   PING,
   requestRefusal,
+  requestSlots,
   scanMessage,
   sse,
   toOpenAiChat,
@@ -52,13 +55,17 @@ export type AnthropicReply =
 const PING_MS = 10_000;
 const EVENT_END = /\r?\n\r?\n/;
 
+/** The client left before the answer; the call is already charged and recorded `INCOMPLETE`. */
+class ClientClosed extends Error {}
+
 /**
  * `POST /agent/v1/llm/anthropic/v1/messages` (manar-edge design section 6): the Anthropic
  * Messages format for Claude Code and other Anthropic clients, through the same gates as chat
- * completions (`LlmProxyService.admit`: task access, catalog with this upstream's own residency,
- * token budget, DLP on system, messages, tool results and tools), then the upstream chosen by
- * `LLM_ANTHROPIC_PROVIDER`, then response DLP (floor) before anything reaches the agent, budget
- * from the reported usage (cache tokens included) and the `llm.request` audit.
+ * completions (`LlmProxyService.admit`: task access first, then this path's request checks,
+ * catalog with this upstream's own residency and the tenant's pinned model, token budget, DLP
+ * on every string passed on), then the upstream chosen by `LLM_ANTHROPIC_PROVIDER`, then
+ * response DLP (floor) before anything reaches the agent, budget from the reported usage (cache
+ * tokens included) and the `llm.request` audit.
  *
  * Streaming is passed through event by event (`AnthropicStreamGuard`); the final
  * `message_delta`/`message_stop` go out only after the call is charged and audited, and a
@@ -77,7 +84,7 @@ export class LlmAnthropicService {
     agent: AgentContext,
     taskId: string,
     rawBody: unknown,
-    client: { version?: string; beta?: string },
+    rawHeaders: { version?: string; beta?: string },
     signal: AbortSignal,
   ): Promise<AnthropicReply> {
     const provider = this.upstream.anthropicProvider();
@@ -88,7 +95,7 @@ export class LlmAnthropicService {
     const started = Date.now();
     const stream = request.stream === true;
     const record: CallRecord = {
-      taskId,
+      claimedTaskIdSha256: sha256(taskId),
       outcome: 'DENIED',
       format: 'anthropic',
       stream,
@@ -100,22 +107,31 @@ export class LlmAnthropicService {
         messages: request.messages,
       }),
     };
+    const translate = provider === 'openai_translate';
+    let client: { version?: string; beta?: string } = {};
+    // Every top-level field passed on is scanned; `model` is checked against the served list.
+    const { model, ...passed } = request;
+    let recordedAlready = false;
 
     try {
-      const refusal = requestRefusal(request);
-      if (refusal) throw refusal;
-      const translate = provider === 'openai_translate';
-      const { held, restore } = holdOpaque({
-        system: request.system,
-        messages: request.messages,
-        tools: request.tools,
-      });
-      const call = await this.proxy.admit(
-        agent,
-        taskId,
-        record,
-        held,
-        translate
+      const { held, restore } = holdOpaque(passed, requestSlots);
+      const call = await this.proxy.admit(agent, taskId, record, held, () => {
+        record.taskId = taskId;
+        delete record.claimedTaskIdSha256;
+        const refusal = requestRefusal(request);
+        if (refusal) throw refusal;
+        client = clientHeaders(rawHeaders, this.betas());
+        if (!this.upstream.anthropicModels().includes(model)) {
+          throw new BadRequestException({
+            type: 'error',
+            error: {
+              type: 'invalid_request_error',
+              message: `model: ${model.slice(0, 128)} is not served by this install`,
+            },
+            reason: 'llm_model_not_served',
+          });
+        }
+        return translate
           ? undefined
           : {
               external: true,
@@ -123,46 +139,54 @@ export class LlmAnthropicService {
                 this.config.get('LLM_ANTHROPIC_UAE_RESIDENT', {
                   infer: true,
                 }) === 'true',
-            },
-      );
-      const body = {
-        ...request,
-        ...restore(call.dlp.value),
-        model: this.pickModel(request.model),
-      };
+              model,
+            };
+      });
+      const body = { ...restore(call.dlp.value), model };
 
       if (translate) {
         const chat = toOpenAiChat(body);
-        const pending = this.upstream.chat(chat, call.route).then(
-          (res) => {
-            record.provider = res.provider;
-            record.model = res.body.model ?? res.model;
-            return fromOpenAiChat(res.body, record.model);
-          },
-          (error: unknown) => {
-            throw upstreamFailure(record, error);
-          },
-        );
-        if (!stream) {
-          return {
-            json: await this.deliver(
-              agent,
-              call,
-              record,
-              await pending,
-              chat,
-              started,
-            ),
-          };
-        }
-        pending.catch(() => undefined); // observed by the generator; never unhandled
-        return {
-          stream: this.synthesize(agent, call, record, pending, chat, started),
-        };
+        // Charged and audited here, whether or not the client is still reading.
+        const settled = this.upstream
+          .chat(chat, call.route, signal)
+          .then(
+            (res) => {
+              record.provider = res.provider;
+              record.model = res.body.model ?? res.model;
+              const message = fromOpenAiChat(res.body, record.model);
+              return this.deliver(agent, call, record, message, chat, started);
+            },
+            async (error: unknown) => {
+              if (signal.aborted) {
+                await this.cut(
+                  agent,
+                  call,
+                  record,
+                  'INCOMPLETE',
+                  'client_closed',
+                  {
+                    sent: chat,
+                    outputChars: 0,
+                    started,
+                  },
+                );
+                throw new ClientClosed();
+              }
+              throw upstreamFailure(record, error);
+            },
+          )
+          .catch(async (error: unknown) => {
+            recordedAlready = true;
+            await this.proxy.recordRefusal(agent, record, error, started);
+            throw error;
+          });
+        if (!stream) return { json: await settled };
+        settled.catch(() => undefined); // observed by the generator; never unhandled
+        return { stream: this.synthesize(settled) };
       }
 
       record.provider = provider;
-      record.model = body.model;
+      record.model = model;
       const timeoutMs = this.config.get('LLM_UPSTREAM_TIMEOUT_MS', {
         infer: true,
       });
@@ -184,10 +208,14 @@ export class LlmAnthropicService {
         };
       }
 
-      const idle = new IdleAbort(timeoutMs, signal);
+      const limits = new StreamLimits(
+        timeoutMs,
+        this.config.get('LLM_STREAM_MAX_MS', { infer: true }),
+        signal,
+      );
       try {
         const { response } = await this.upstreamCall(record, () =>
-          this.upstream.anthropicMessages(body, client, idle.signal),
+          this.upstream.anthropicMessages(body, client, limits.signal),
         );
         return {
           stream: this.relay(
@@ -195,18 +223,20 @@ export class LlmAnthropicService {
             call,
             record,
             response,
-            idle,
+            limits,
             signal,
             body,
             started,
           ),
         };
       } catch (error) {
-        idle.clear();
+        limits.clear();
         throw error;
       }
     } catch (error) {
-      await this.proxy.recordRefusal(agent, record, error, started);
+      if (!recordedAlready) {
+        await this.proxy.recordRefusal(agent, record, error, started);
+      }
       throw error;
     }
   }
@@ -224,7 +254,7 @@ export class LlmAnthropicService {
     const anthropic =
       this.upstream.anthropicProvider() === 'none'
         ? []
-        : this.anthropicModels();
+        : this.upstream.anthropicModels();
     const ids = [
       ...new Set([openAi, ...anthropic].filter((id): id is string => !!id)),
     ];
@@ -247,20 +277,14 @@ export class LlmAnthropicService {
     };
   }
 
-  private anthropicModels(): string[] {
-    return this.config
-      .get('LLM_ANTHROPIC_MODELS', { infer: true })
-      .split(',')
-      .map((m) => m.trim())
-      .filter(Boolean);
-  }
-
-  /** The client's model when this install serves it (or lists none), else the install's default. */
-  private pickModel(requested: string): string {
-    const models = this.anthropicModels();
-    return models.length === 0 || models.includes(requested)
-      ? requested
-      : models[0]!;
+  private betas(): Set<string> {
+    return new Set(
+      this.config
+        .get('LLM_ANTHROPIC_BETAS', { infer: true })
+        .split(',')
+        .map((b) => b.trim())
+        .filter(Boolean),
+    );
   }
 
   /** Upstream failures as the client sees them: the upstream's own 4xx error, else 502. */
@@ -303,44 +327,62 @@ export class LlmAnthropicService {
       agent,
       call,
       record,
-      tokens(usage, sent, JSON.stringify(message.content).length),
+      usageTokens(usage) ||
+        estimate(usage, sent, JSON.stringify(message.content).length),
     );
     if (scanned.credentialTypes.length) throw denied('dlp_policy_violation');
     await this.proxy.recordSuccess(agent, call.tenantClient, record, started);
     return scanned.message;
   }
 
-  /** `openai_translate` with `stream: true`: pings while the upstream works, then the whole message as events. */
-  private async *synthesize(
+  /**
+   * A call that ended without a complete answer still used tokens: charge the larger of what
+   * was reported and the reported input plus the output seen so far (best effort), and record why.
+   */
+  private async cut(
     agent: AgentContext,
     call: Call,
     record: CallRecord,
-    pending: Promise<Json>,
-    sent: unknown,
-    started: number,
-  ): AsyncGenerator<string> {
+    outcome: CallRecord['outcome'],
+    reason: string,
+    seen: {
+      usage?: AnthropicUsage;
+      sent: unknown;
+      outputChars: number;
+      started: number;
+    },
+  ): Promise<void> {
+    const usage = seen.usage ?? {};
+    Object.assign(record, {
+      outcome,
+      reason,
+      latencyMs: Date.now() - seen.started,
+    });
+    applyUsage(record, usage);
+    const tokens = Math.max(
+      usageTokens(usage),
+      estimate(usage, seen.sent, seen.outputChars),
+    );
+    await this.proxy.charge(agent, call, record, tokens).catch(() => undefined);
+    await this.proxy.recordFailure(agent, record);
+  }
+
+  /** `openai_translate` with `stream: true`: pings while the upstream works, then the whole message as events. */
+  private async *synthesize(settled: Promise<Json>): AsyncGenerator<string> {
     try {
       let message: Json | undefined;
       while (!message) {
         message = await Promise.race([
-          pending,
+          settled,
           sleep(PING_MS, undefined, { ref: false }),
         ]);
         if (!message) yield sse(PING);
       }
-      const delivered = await this.deliver(
-        agent,
-        call,
-        record,
-        message,
-        sent,
-        started,
-      );
-      for (const e of messageEvents(delivered)) yield sse(e);
+      for (const e of messageEvents(message)) yield sse(e);
     } catch (error) {
+      if (error instanceof ClientClosed) return;
       if (!(error instanceof HttpException)) throw error;
-      await this.proxy.recordRefusal(agent, record, error, started);
-      yield sse(errorEvent(error));
+      yield sse(errorEvent(error)); // already charged and recorded by `settled`
     }
   }
 
@@ -350,7 +392,7 @@ export class LlmAnthropicService {
     call: Call,
     record: CallRecord,
     response: Response,
-    idle: IdleAbort,
+    limits: StreamLimits,
     clientSignal: AbortSignal,
     sent: unknown,
     started: number,
@@ -360,28 +402,18 @@ export class LlmAnthropicService {
     const decoder = new TextDecoder();
     let buffer = '';
     let ended = false;
-    // A cut stream still used tokens: count them (best effort) and record why it ended.
     const cut = async (outcome: CallRecord['outcome'], reason: string) => {
       ended = true;
-      Object.assign(record, {
-        outcome,
-        reason,
-        latencyMs: Date.now() - started,
-      });
-      applyUsage(record, guard.usage);
       record.responseDlp ??= {
         credentialTypes: [],
         piiTypes: [...guard.piiTypes].sort(),
       };
-      await this.proxy
-        .charge(
-          agent,
-          call,
-          record,
-          tokens(guard.usage, sent, guard.outputChars),
-        )
-        .catch(() => undefined);
-      await this.proxy.recordFailure(agent, record);
+      await this.cut(agent, call, record, outcome, reason, {
+        usage: guard.usage,
+        sent,
+        outputChars: guard.outputChars,
+        started,
+      });
     };
 
     try {
@@ -389,7 +421,7 @@ export class LlmAnthropicService {
         const { done, value } = await reader.read();
         if (done)
           throw new LlmUpstreamError('stream ended before message_stop');
-        idle.touch();
+        limits.touch();
         buffer += decoder.decode(value, { stream: true });
         for (let m = EVENT_END.exec(buffer); m; m = EVENT_END.exec(buffer)) {
           const event = parseSse(buffer.slice(0, m.index));
@@ -418,7 +450,8 @@ export class LlmAnthropicService {
               agent,
               call,
               record,
-              tokens(guard.usage, sent, guard.outputChars),
+              usageTokens(guard.usage) ||
+                estimate(guard.usage, sent, guard.outputChars),
             );
             await this.proxy.recordSuccess(
               agent,
@@ -449,11 +482,13 @@ export class LlmAnthropicService {
       } else {
         await cut(
           'UPSTREAM_ERROR',
-          error instanceof LlmUpstreamError
-            ? error.detail
-            : error instanceof Error
-              ? error.name
-              : 'stream failed',
+          limits.deadlineHit()
+            ? 'stream_deadline'
+            : error instanceof LlmUpstreamError
+              ? error.detail
+              : error instanceof Error
+                ? error.name
+                : 'stream failed',
         );
         yield sse(
           errorEvent(
@@ -462,7 +497,7 @@ export class LlmAnthropicService {
         );
       }
     } finally {
-      idle.clear();
+      limits.clear();
       void reader.cancel().catch(() => undefined);
       // The client went away while we waited on the upstream.
       if (!ended) await cut('INCOMPLETE', 'client_closed');
@@ -479,41 +514,53 @@ function applyUsage(record: CallRecord, usage: AnthropicUsage): void {
   });
 }
 
-/** Reported tokens, else a length/4 estimate of what was sent and received (never 0). */
-function tokens(
+/**
+ * Reported input (with cache) plus a length/4 estimate of the output seen; without reported
+ * input, a length/4 estimate of what was sent. Never 0.
+ */
+function estimate(
   usage: AnthropicUsage,
   sent: unknown,
   outputChars: number,
 ): number {
-  return (
-    usageTokens(usage) ||
-    Math.ceil((JSON.stringify(sent).length + outputChars) / 4)
-  );
+  const input =
+    (usage.input_tokens ?? 0) +
+      (usage.cache_creation_input_tokens ?? 0) +
+      (usage.cache_read_input_tokens ?? 0) ||
+    Math.ceil(JSON.stringify(sent).length / 4);
+  return Math.max(1, input + Math.ceil(outputChars / 4));
 }
 
-/** Aborts when the client goes away or the upstream is silent for `ms` (reset on every chunk). */
-class IdleAbort {
-  private readonly controller = new AbortController();
+/**
+ * Aborts a streamed upstream call when the client goes away, when the upstream is silent for
+ * `idleMs` (reset on every chunk), or after `maxMs` in all.
+ */
+class StreamLimits {
+  private readonly idle = new AbortController();
+  private readonly deadline: AbortSignal;
   private timer: NodeJS.Timeout | undefined;
   readonly signal: AbortSignal;
 
   constructor(
-    private readonly ms: number,
+    private readonly idleMs: number,
+    maxMs: number,
     client: AbortSignal,
   ) {
-    this.signal = AbortSignal.any([client, this.controller.signal]);
+    this.deadline = AbortSignal.timeout(maxMs);
+    this.signal = AbortSignal.any([client, this.idle.signal, this.deadline]);
     this.touch();
   }
 
   touch(): void {
     clearTimeout(this.timer);
     this.timer = setTimeout(
-      () =>
-        this.controller.abort(
-          new DOMException('upstream idle', 'TimeoutError'),
-        ),
-      this.ms,
+      () => this.idle.abort(new DOMException('upstream idle', 'TimeoutError')),
+      this.idleMs,
     );
+  }
+
+  deadlineHit(): boolean {
+    return this.deadline.aborted;
   }
 
   clear(): void {

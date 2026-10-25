@@ -103,6 +103,8 @@ export class LlmUpstreamClient {
   async chat(
     request: UpstreamChatRequest,
     route?: LlmRouteOverride | null,
+    /** Aborts the call (the client went away); the timeout applies either way. */
+    signal?: AbortSignal,
   ): Promise<UpstreamChatResponse> {
     const provider: LlmProvider =
       route?.provider ??
@@ -158,7 +160,9 @@ export class LlmUpstreamClient {
         method: 'POST',
         headers,
         body: JSON.stringify({ ...request, model, stream: false }),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+          : AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       throw new LlmUpstreamError(
@@ -181,8 +185,21 @@ export class LlmUpstreamClient {
     return { body, provider, model };
   }
 
-  /** The Anthropic-format upstream actually usable: a provider without its key or endpoint is `none`. */
+  /** Model ids served in Anthropic format (`LLM_ANTHROPIC_MODELS`). */
+  anthropicModels(): string[] {
+    return this.config
+      .get('LLM_ANTHROPIC_MODELS', { infer: true })
+      .split(',')
+      .map((m) => m.trim())
+      .filter(Boolean);
+  }
+
+  /**
+   * The Anthropic-format upstream actually usable: `none` without a model list, and for a
+   * provider without its key or endpoint.
+   */
   anthropicProvider(): AnthropicProvider {
+    if (this.anthropicModels().length === 0) return 'none';
     const provider = this.config.get('LLM_ANTHROPIC_PROVIDER', { infer: true });
     if (provider === 'anthropic' && !this.anthropicTarget('anthropic'))
       return 'none';

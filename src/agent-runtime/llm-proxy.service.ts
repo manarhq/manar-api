@@ -62,7 +62,10 @@ export class LlmBudgetExhaustedException extends HttpException {
 
 /** The `llm.request` audit payload: metadata only, never prompt or completion text. */
 export interface CallRecord {
-  taskId: string;
+  /** Set once the task access check passed (the Anthropic path never records an unverified id). */
+  taskId?: string;
+  /** Anthropic path, refused before the task was verified: SHA-256 of the id the agent sent. */
+  claimedTaskIdSha256?: string;
   outcome:
     'SUCCESS' | 'DENIED' | 'UNAVAILABLE' | 'UPSTREAM_ERROR' | 'INCOMPLETE';
   reason?: string;
@@ -191,8 +194,9 @@ export class LlmProxyService {
   }
 
   /**
-   * The gates before any model call, in order: task access, the tenant's catalog (`fixed`: an
-   * upstream outside the catalog, judged by its own placement), the task's token budget, DLP on
+   * The gates before any model call, in order: task access, then `afterAccess` (the caller's
+   * own checks, which may name a fixed upstream outside the catalog, judged by its own placement
+   * and the tenant's pinned model), the tenant's catalog, the task's token budget, DLP on
    * `prompt` (everything the model will read). Throws the refusal; `record` carries what was found.
    */
   async admit<T>(
@@ -200,12 +204,14 @@ export class LlmProxyService {
     taskId: string,
     record: CallRecord,
     prompt: T,
-    fixed?: { external: boolean; uaeResident: boolean },
+    afterAccess?: () =>
+      { external: boolean; uaeResident: boolean; model: string } | undefined,
   ): Promise<AdmittedCall<T>> {
     const { tenantClient, task } = await this.access.assertTaskAccess(
       agent,
       taskId,
     );
+    const fixed = afterAccess?.();
 
     // Staff's catalog: proxy on, model allowed for this tenant, monthly quota left.
     const { route } = await catalogGate(() =>

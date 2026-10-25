@@ -71,10 +71,22 @@ export const LlmProxyConfigSchema = z.object({
   AZURE_FOUNDRY_API_KEY: optionalSecret,
   /**
    * Comma-separated model ids (Foundry: deployment names) this install serves in Anthropic
-   * format; the first is the default. A request naming another model is sent to the default.
-   * Empty: the client's model is passed through. Listed by `GET /agent/v1/llm/models`.
+   * format. A request naming another model is refused (400 `llm_model_not_served`). Empty: the
+   * Anthropic-format endpoint is off (404 `anthropic_disabled`). Listed by `GET /agent/v1/llm/models`.
    */
   LLM_ANTHROPIC_MODELS: z.string().default(''),
+  /**
+   * `anthropic-beta` values forwarded upstream (comma-separated); others are dropped. Default:
+   * the values Claude Code sends that pair with features this proxy passes on (interleaved
+   * thinking, context management, effort, 1M context, fine-grained tool streaming).
+   */
+  LLM_ANTHROPIC_BETAS: z
+    .string()
+    .default(
+      'interleaved-thinking-2025-05-14,context-management-2025-06-27,effort-2025-11-24,context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14',
+    ),
+  /** A streamed Anthropic-format response is cut after this long, idle or not. */
+  LLM_STREAM_MAX_MS: z.coerce.number().int().positive().default(900_000),
   /** Whether the `anthropic`/`azure_foundry` upstream processes prompts in the UAE (tenant residency rule). */
   LLM_ANTHROPIC_UAE_RESIDENT: z.enum(['true', 'false']).default('false'),
   /** Per-task budget of upstream-reported total tokens (prompt + completion). */

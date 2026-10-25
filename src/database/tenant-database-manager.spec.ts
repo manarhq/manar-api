@@ -147,6 +147,8 @@ function fakeConfigService(
     LLM_ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
     LLM_ANTHROPIC_MODELS: '',
     LLM_ANTHROPIC_UAE_RESIDENT: 'false',
+    LLM_ANTHROPIC_BETAS: '',
+    LLM_STREAM_MAX_MS: 900_000,
     ...overrides,
   };
   return {

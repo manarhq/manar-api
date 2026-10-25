@@ -216,9 +216,11 @@ config:
   AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'
   TENANT_DB_CLIENT_CACHE_MAX: '50'
   TENANT_DB_CLIENT_IDLE_TTL_MS: '600000'
-  # Anthropic Messages format for Claude Code (ADR-0002 A2). Off until a key is set below
-  # (404 anthropic_disabled): anthropic | azure_foundry | openai_translate | none.
+  # Anthropic Messages format for Claude Code (ADR-0002 A2). Off (404 anthropic_disabled) until
+  # a key is set below and LLM_ANTHROPIC_MODELS lists the served model ids:
+  # anthropic | azure_foundry | openai_translate | none.
   LLM_ANTHROPIC_PROVIDER: anthropic
+  LLM_ANTHROPIC_MODELS: ''
   # Whether that upstream processes prompts in the UAE (a UAE tenant is refused otherwise).
   LLM_ANTHROPIC_UAE_RESIDENT: 'false'
 
