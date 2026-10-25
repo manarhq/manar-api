@@ -481,6 +481,31 @@ describe('Manar edge (e2e)', () => {
         .expect(400);
     });
 
+    it('a bad token gets the same 401 and the same audit event with or without edge', async () => {
+      const db = await tenants.getClient(t1.id);
+      const failures = () =>
+        db.auditEvent.findMany({
+          where: { eventType: AUDIT_EVENT_TYPES.AGENT_ENROLLMENT_FAILED },
+          orderBy: { sequence: 'asc' },
+        });
+      const before = (await failures()).length;
+      const token = `${t1.slug}:${short('ghost')}:${'B'.repeat(43)}`;
+      const plain = await http()
+        .post('/agents/enroll')
+        .send({ token, csr: 'x' })
+        .expect(401);
+      const withEdge = await http()
+        .post('/agents/enroll')
+        .send({ token, csr: 'x', edge: { wgPublicKey: wgKey() } })
+        .expect(401);
+      expect(withEdge.body).toEqual(plain.body);
+      const added = (await failures()).slice(before);
+      expect(added).toHaveLength(2);
+      expect(added[1]!.actor).toEqual(added[0]!.actor);
+      expect(added[1]!.data).toEqual(added[0]!.data);
+      expect(added[0]!.data).toEqual({ reason: 'not_found' });
+    });
+
     it('allocates distinct addresses to concurrent enrollments across tenants and API instances', async () => {
       const agents = await Promise.all([
         ...Array.from({ length: 6 }, () =>

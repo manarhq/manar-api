@@ -314,11 +314,13 @@ export class AgentsService {
 
   /**
    * Read-only token check (docs/edge.md): the same conditions `enroll` applies (known hash, not
-   * used, not expired, agent not terminal, the agent the token names), nothing consumed and nothing
-   * audited. Null on any failure; the caller then lets `enroll` refuse and audit it.
+   * used, not expired, agent not terminal, the agent the token names), nothing consumed. A failure
+   * is audited exactly as `enroll` audits it (`agent.enrollment_failed`, same reason and actor), so
+   * adding `edge` to a guessed token does not avoid the trail. Null on any failure.
    */
   async verifyEnrollmentToken(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
     rawToken: string,
     agentSlug: string,
   ): Promise<{ agentId: string } | null> {
@@ -326,15 +328,26 @@ export class AgentsService {
       where: { tokenHash: hashEnrollmentToken(rawToken) },
       include: { agent: { select: { slug: true, status: true } } },
     });
-    if (
-      !row ||
-      row.usedAt ||
-      row.expiresAt.getTime() < Date.now() ||
-      isTerminal(row.agent.status) ||
-      row.agent.slug !== agentSlug
-    )
+    const reason: EnrollmentFailureReason | null =
+      !row || row.agent.slug !== agentSlug
+        ? 'not_found'
+        : row.usedAt
+          ? 'used'
+          : row.expiresAt.getTime() < Date.now()
+            ? 'expired'
+            : isTerminal(row.agent.status)
+              ? 'agent_terminated'
+              : null;
+    if (reason) {
+      await this.recordEnrollmentFailure(
+        tenantClient,
+        tenantId,
+        reason,
+        reason === 'not_found' ? undefined : row?.agentId,
+      );
       return null;
-    return { agentId: row.agentId };
+    }
+    return { agentId: row!.agentId };
   }
 
   /**

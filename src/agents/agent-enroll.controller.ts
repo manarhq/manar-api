@@ -89,6 +89,7 @@ export class AgentEnrollController {
     if (input.edge) {
       const verified = await this.agentsService.verifyEnrollmentToken(
         tenantClient,
+        tenant.id,
         input.token,
         tokenParts.agentSlug,
       );
