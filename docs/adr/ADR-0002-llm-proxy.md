@@ -295,6 +295,90 @@ Errors:
 UAE PII in the prompt is not an error: it is replaced before sending, and the model sees
 the placeholder.
 
+### A2. LLM proxy, Anthropic format (added 2026-10-25, manar-edge design section 6)
+
+```http
+POST /agent/v1/llm/anthropic/v1/messages
+X-Manar-Task-Id: 5d0c...-task-uuid
+anthropic-version: 2023-06-01
+anthropic-beta: <optional, forwarded as is>
+```
+
+The Anthropic Messages API for Claude Code and other Anthropic clients (behind manar-edge's
+local gateway, `POST /v1/messages`). Same mTLS guard, task header and gates as section A, in the
+same code (`LlmProxyService.admit`, `charge`, `recordSuccess`, `recordRefusal`):
+
+- **Request.** `model`, `max_tokens` and `messages` are required; every other field passes
+  through unchanged (Claude Code pairs body fields with `anthropic-beta` values). Body limit
+  10 MiB on this route only. Of the client's headers only `anthropic-version` (default
+  `2023-06-01`) and `anthropic-beta` reach the upstream; its `Authorization`/`x-api-key` never
+  do. `LLM_ANTHROPIC_MODELS` (comma-separated, first is the default): a request naming another
+  model is sent to the default; empty passes the client's model through.
+- **Refused by shape**, before any gate: server tools (`web_search_*`, `web_fetch_*`,
+  `code_execution_*`, anything but custom tools, `bash_*`/`text_editor_*`/`computer_*`/`memory_*`
+  client tools and tool search) and `mcp_servers`/`container`, because the provider would reach
+  the network outside the agent's egress policy: `400` with `Input tag '<type>'` in the message
+  (Claude Code then retries without that tool), reason `llm_server_tool_not_allowed`. Content
+  DLP cannot read (base64, URL or file images and documents, file uploads):
+  `403 dlp_unscannable_content`.
+- **Catalog.** `anthropic`/`azure_foundry` are judged as external upstreams with residency
+  `LLM_ANTHROPIC_UAE_RESIDENT`: a tenant without external AI gets `403 llm_external_not_allowed`,
+  a UAE tenant with a non-resident upstream `403 llm_residency_mismatch`. `openai_translate`
+  is judged as the OpenAI-format upstream it uses (section A).
+- **DLP before** on `system`, `messages` (text, tool use and tool result content, thinking
+  text) and `tools`, as in section A. Thinking signatures and redacted thinking are opaque and
+  reach the upstream unchanged.
+- **DLP after** (deterministic floor; manar-ai is not called per token): a credential shape in
+  the output refuses the call (`403 dlp_policy_violation`, tokens still charged); UAE PII is
+  redacted in text, thinking and tool input. Streaming: text is released up to the last
+  character that cannot be part of a PII match, a tool call's input is released whole at its
+  block end, and a credential ends the stream with an Anthropic `error` event
+  (`permission_error`, reason `dlp_policy_violation`), recorded `DENIED`. A credential split
+  over several text deltas is found once complete, so its first characters may already be out.
+- **Budget** from `usage`: input, output, cache creation and cache read tokens (`message_delta`
+  usage is cumulative); a length/4 estimate when none is reported.
+- **Audit** `llm.request` as in section A plus `format: "anthropic"`, `stream`,
+  `cacheCreationTokens`, `cacheReadTokens` and `responseDlp` (types only). A stream's final
+  `message_delta`/`message_stop` go out only after the audit row is written; a client that
+  leaves mid-stream is recorded `INCOMPLETE` (`client_closed`) and charged.
+- **Upstreams** (`LLM_ANTHROPIC_PROVIDER`): `anthropic` (default; `LLM_ANTHROPIC_BASE_URL`,
+  key `ANTHROPIC_API_KEY` from OpenBao `kv/prod/llm-anthropic` `api_key`), `azure_foundry`
+  (`LLM_AZURE_FOUNDRY_ENDPOINT` = `https://<resource>.services.ai.azure.com/anthropic`,
+  `AZURE_FOUNDRY_API_KEY`; both send the key as `x-api-key` to `<base>/v1/messages`),
+  `openai_translate` (Anthropic messages, custom tools, tool calls and results to the
+  section A upstream and back; `stream: true` is answered as one synthesized event sequence
+  after the upstream answers, with `ping` events every 10 s while it works), `none`.
+  `anthropic`/`azure_foundry` without key (or endpoint) behave as `none`.
+
+Errors use the Anthropic shape with Manar's fields alongside, and every 4xx carries
+`x-should-retry: false`:
+
+```json
+{
+  "type": "error",
+  "error": { "type": "rate_limit_error", "message": "llm_budget_exhausted" },
+  "decision": "DENY",
+  "reason": "llm_budget_exhausted"
+}
+```
+
+| Status             | `reason`                                                                              | When                                                         |
+| ------------------ | ------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| 400                | (message) / `llm_server_tool_not_allowed`                                             | schema, missing task header, server tool                     |
+| 400, 404, 413, 422 | `llm_upstream_rejected`                                                               | the upstream's own error, `error.type`/`message` kept        |
+| 403                | task-gate reasons, `dlp_policy_violation`, `dlp_unscannable_content`, catalog reasons | as in section A                                              |
+| 404                | `anthropic_disabled`                                                                  | `none`, or no key                                            |
+| 429                | `llm_budget_exhausted`                                                                | as in section A                                              |
+| 502                | `llm_upstream_unavailable`                                                            | upstream down, timed out (idle timeout while streaming), 5xx |
+| 503                | `enforcement_dependency_unavailable`                                                  | as in section A                                              |
+
+`GET /agent/v1/llm/models` (mTLS, no task header): the OpenAI-format model (the tenant's
+catalog model or the deployment default) and `LLM_ANTHROPIC_MODELS` (when the Anthropic
+upstream is on), each entry carrying both shapes:
+`{"id":"...","object":"model","type":"model","created":0,"created_at":"1970-01-01T00:00:00Z","display_name":"...","owned_by":"manar"}`,
+in `{"object":"list","data":[...],"has_more":false,"first_id":"...","last_id":"..."}`.
+Claude Code's discovery keeps ids containing `claude` or `anthropic`.
+
 ### B. Tool manifest
 
 ```http
@@ -478,13 +562,19 @@ kill switches and task state are re-checked at redemption. The same endpoint wit
 
 ### Configuration (manar-api side)
 
-| Variable                                                    | Default                     |                                          |
-| ----------------------------------------------------------- | --------------------------- | ---------------------------------------- |
-| `LLM_PROVIDER`                                              | `ollama`                    | or `azure_openai`                        |
-| `LLM_OLLAMA_BASE_URL`                                       | `http://localhost:11434/v1` |                                          |
-| `LLM_MODEL`                                                 | `qwen3.5:9b`                | Ollama model                             |
-| `LLM_AZURE_OPENAI_ENDPOINT` / `LLM_AZURE_OPENAI_DEPLOYMENT` | —                           | required for `azure_openai`              |
-| `LLM_AZURE_OPENAI_API_VERSION`                              | `2024-10-21`                |                                          |
-| `AZURE_OPENAI_API_KEY`                                      | —                           | environment only, never on disk          |
-| `LLM_TASK_TOKEN_BUDGET`                                     | `200000`                    | per task, upstream-reported total tokens |
-| `LLM_UPSTREAM_TIMEOUT_MS`                                   | `180000`                    |                                          |
+| Variable                                                    | Default                     |                                                     |
+| ----------------------------------------------------------- | --------------------------- | --------------------------------------------------- |
+| `LLM_PROVIDER`                                              | `ollama`                    | or `azure_openai`                                   |
+| `LLM_OLLAMA_BASE_URL`                                       | `http://localhost:11434/v1` |                                                     |
+| `LLM_MODEL`                                                 | `qwen3.5:9b`                | Ollama model                                        |
+| `LLM_AZURE_OPENAI_ENDPOINT` / `LLM_AZURE_OPENAI_DEPLOYMENT` | —                           | required for `azure_openai`                         |
+| `LLM_AZURE_OPENAI_API_VERSION`                              | `2024-10-21`                |                                                     |
+| `AZURE_OPENAI_API_KEY`                                      | —                           | environment only, never on disk                     |
+| `LLM_TASK_TOKEN_BUDGET`                                     | `200000`                    | per task, upstream-reported total tokens            |
+| `LLM_UPSTREAM_TIMEOUT_MS`                                   | `180000`                    |                                                     |
+| `LLM_ANTHROPIC_PROVIDER`                                    | `anthropic`                 | or `azure_foundry`, `openai_translate`, `none` (A2) |
+| `LLM_ANTHROPIC_BASE_URL`                                    | `https://api.anthropic.com` | https (http on loopback only)                       |
+| `ANTHROPIC_API_KEY` / `AZURE_FOUNDRY_API_KEY`               | (unset)                     | environment only; unset = 404 `anthropic_disabled`  |
+| `LLM_AZURE_FOUNDRY_ENDPOINT`                                | (unset)                     | required for `azure_foundry`                        |
+| `LLM_ANTHROPIC_MODELS`                                      | (empty)                     | served models, first is the default                 |
+| `LLM_ANTHROPIC_UAE_RESIDENT`                                | `false`                     | tenant residency rule for A2                        |

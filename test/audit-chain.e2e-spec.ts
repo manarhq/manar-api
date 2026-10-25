@@ -128,6 +128,10 @@ function fakeConfigService(
     LLM_AZURE_OPENAI_API_VERSION: '2024-10-21',
     LLM_TASK_TOKEN_BUDGET: 200_000,
     LLM_UPSTREAM_TIMEOUT_MS: 180_000,
+    LLM_ANTHROPIC_PROVIDER: 'none',
+    LLM_ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+    LLM_ANTHROPIC_MODELS: '',
+    LLM_ANTHROPIC_UAE_RESIDENT: 'false',
     ...overrides,
   };
   return {

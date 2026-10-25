@@ -9,7 +9,13 @@ const LLM_ENV = vi.hoisted(() => {
   process.env.LLM_OLLAMA_BASE_URL = `http://127.0.0.1:${port}/v1`;
   process.env.LLM_MODEL = 'fixture-model';
   process.env.LLM_TASK_TOKEN_BUDGET = '150';
-  return { port, budget: 150 };
+  // The Anthropic-format proxy, against a fake Anthropic upstream (no real call, no real key).
+  const anthropicPort = port + 1;
+  process.env.LLM_ANTHROPIC_PROVIDER = 'anthropic';
+  process.env.LLM_ANTHROPIC_BASE_URL = `http://127.0.0.1:${anthropicPort}`;
+  process.env.ANTHROPIC_API_KEY = 'fake-upstream-key-e2e';
+  process.env.LLM_ANTHROPIC_MODELS = 'claude-e2e-main';
+  return { port, anthropicPort, budget: 150 };
 });
 import * as https from 'node:https';
 import { randomUUID } from 'node:crypto';
@@ -59,6 +65,8 @@ import {
 } from './support/keycloak-test-helpers';
 import { FakeAnalysisServiceServer } from './support/fake-analysis-service-server';
 import { FakeOpenAiUpstream } from './support/fake-openai-upstream';
+import { FakeAnthropicUpstream } from './support/fake-anthropic-upstream';
+import { allowLargeLlmBodies } from '../src/agent-runtime/llm-proxy.controller';
 
 /**
  * ADR-0002: the agent runtime surface on the mTLS listener, end to end
@@ -82,6 +90,7 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
   let fixture: FastifyInstance;
   let fixtureBase: string;
   let upstream: FakeOpenAiUpstream;
+  let anthropicUpstream: FakeAnthropicUpstream;
 
   let control: ControlPrismaService;
   let tenantDatabaseManager: TenantDatabaseManager;
@@ -188,7 +197,14 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
             resolve({
               status: res.statusCode ?? 0,
               headers: res.headers,
-              body: data ? (JSON.parse(data) as unknown) : undefined,
+              // Server-sent events stay text; everything else here is JSON.
+              body: !data
+                ? undefined
+                : String(res.headers['content-type']).startsWith(
+                      'text/event-stream',
+                    )
+                  ? data
+                  : (JSON.parse(data) as unknown),
             }),
           );
         },
@@ -221,6 +237,8 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
   beforeAll(async () => {
     upstream = new FakeOpenAiUpstream();
     await upstream.start(LLM_ENV.port);
+    anthropicUpstream = new FakeAnthropicUpstream();
+    await anthropicUpstream.start(LLM_ENV.anthropicPort);
     fakeAnalysisServer = new FakeAnalysisServiceServer();
     const analysisTarget = await fakeAnalysisServer.start();
 
@@ -268,6 +286,7 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
           },
         }),
       );
+    allowLargeLlmBodies(agentMtlsApp.getHttpAdapter().getInstance());
     await agentMtlsApp.init();
     await agentMtlsApp.getHttpAdapter().getInstance().ready();
     await agentMtlsApp.listen(0, '127.0.0.1');
@@ -334,6 +353,7 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
     await fixture?.close();
     await fakeAnalysisServer?.stop();
     await upstream?.stop();
+    await anthropicUpstream?.stop();
     if (tenant) await cleanupTenant(tenant);
     await control?.$disconnect();
   }, 60_000);
@@ -1237,5 +1257,169 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
       }
       expect(upstream.calls.length).toBe(before);
     }, 30_000);
+  });
+
+  describe('LLM proxy, Anthropic format', () => {
+    let claudeTask: { id: string };
+    beforeAll(async () => {
+      claudeTask = await createTask({
+        allowedToolActions: [],
+        allowedResourceSelectors: [],
+      });
+    });
+    afterAll(() =>
+      control.tenant.update({
+        where: { id: tenant.id },
+        data: { residency: 'UAE', allowExternalAi: false },
+      }),
+    );
+
+    const messages = (
+      taskId: string | undefined,
+      body: Record<string, unknown>,
+      path = '/agent/v1/llm/anthropic/v1/messages',
+    ) =>
+      mtlsRequest(
+        agentA,
+        'POST',
+        path,
+        {
+          model: 'claude-e2e-main',
+          max_tokens: 512,
+          messages: [{ role: 'user', content: 'How many files?' }],
+          ...body,
+        },
+        {
+          ...(taskId ? { 'X-Manar-Task-Id': taskId } : {}),
+          // What Claude Code sends: its credentials must never reach the upstream.
+          Authorization: 'Bearer client-gateway-token',
+          'x-api-key': 'manar',
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'interleaved-thinking-2025-05-14',
+          'x-claude-code-session-id': 'session-1',
+        },
+      );
+
+    it('refuses while the tenant keeps prompts in the UAE: the Anthropic upstream is external', async () => {
+      const before = anthropicUpstream.calls.length;
+      const res = await messages(claudeTask.id, {});
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ reason: 'llm_external_not_allowed' });
+      expect(anthropicUpstream.calls.length).toBe(before);
+      await control.tenant.update({
+        where: { id: tenant.id },
+        data: { residency: 'CUSTOM_REGION', allowExternalAi: true },
+      });
+    });
+
+    it('answers in Anthropic format with the server key and only the allow-listed headers', async () => {
+      const res = await messages(claudeTask.id, {});
+      expect(res.status).toBe(200);
+      expect(res.headers['x-manar-task-id']).toBe(claudeTask.id);
+      expect(res.body).toMatchObject({
+        type: 'message',
+        content: [{ type: 'text', text: anthropicUpstream.text }],
+      });
+      const sent = anthropicUpstream.calls.at(-1)!;
+      expect(sent.path).toBe('/v1/messages');
+      expect(sent.headers['x-api-key']).toBe('fake-upstream-key-e2e');
+      expect(sent.headers['anthropic-version']).toBe('2023-06-01');
+      expect(sent.headers['anthropic-beta']).toBe(
+        'interleaved-thinking-2025-05-14',
+      );
+      expect(sent.headers.authorization).toBeUndefined();
+      expect(sent.headers['x-claude-code-session-id']).toBeUndefined();
+      expect(JSON.stringify(sent.headers)).not.toContain(
+        'client-gateway-token',
+      );
+
+      const events = await tenantClientRef.auditEvent.findMany({
+        where: { eventType: AUDIT_EVENT_TYPES.LLM_REQUEST },
+      });
+      const ok = events.find(
+        (e) =>
+          (e.data as { taskId?: string; outcome?: string }).taskId ===
+            claudeTask.id &&
+          (e.data as { outcome?: string }).outcome === 'SUCCESS',
+      );
+      expect(ok?.data).toMatchObject({
+        format: 'anthropic',
+        provider: 'anthropic',
+        model: 'claude-e2e-main',
+        totalTokens: 35,
+      });
+      expect(JSON.stringify(events)).not.toContain('How many files');
+    });
+
+    it('streams server-sent events (Claude Code posts to ?beta=true)', async () => {
+      const res = await messages(
+        claudeTask.id,
+        { stream: true },
+        '/agent/v1/llm/anthropic/v1/messages?beta=true',
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toMatch(/^text\/event-stream/);
+      const types = [...String(res.body).matchAll(/^event: (\w+)$/gm)].map(
+        (m) => m[1],
+      );
+      expect(types).toEqual([
+        'message_start',
+        'content_block_start',
+        'content_block_delta',
+        'content_block_stop',
+        'message_delta',
+        'message_stop',
+      ]);
+      expect(String(res.body)).toContain(anthropicUpstream.text);
+    });
+
+    it('takes a request body over 1 MiB (a long coding session)', async () => {
+      const res = await messages(claudeTask.id, {
+        system: 'x '.repeat(1024 * 1024),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('refuses in the Anthropic error shape with the Manar reason, and says not to retry', async () => {
+      const before = anthropicUpstream.calls.length;
+      const noTask = await messages(undefined, {});
+      expect(noTask.status).toBe(400);
+      expect(noTask.body).toMatchObject({
+        type: 'error',
+        error: { type: 'invalid_request_error' },
+      });
+      expect(noTask.headers['x-should-retry']).toBe('false');
+      const other = await mtlsRequest(
+        agentB,
+        'POST',
+        '/agent/v1/llm/anthropic/v1/messages',
+        {
+          model: 'm',
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'x' }],
+        },
+        { 'X-Manar-Task-Id': claudeTask.id },
+      );
+      expect(other.status).toBe(403);
+      expect(other.body).toMatchObject({
+        type: 'error',
+        error: { type: 'permission_error', message: 'not_assigned_agent' },
+        decision: 'DENY',
+        reason: 'not_assigned_agent',
+      });
+      expect(anthropicUpstream.calls.length).toBe(before);
+    });
+
+    it('lists the models this install serves', async () => {
+      const res = await mtlsRequest(agentA, 'GET', '/agent/v1/llm/models');
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        object: 'list',
+        data: [
+          { id: 'fixture-model', object: 'model', type: 'model' },
+          { id: 'claude-e2e-main', object: 'model', type: 'model' },
+        ],
+      });
+    });
   });
 });
