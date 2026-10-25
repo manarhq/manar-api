@@ -9,6 +9,9 @@ import type { KnownIssuerRegistry } from '../auth/known-issuer-registry.service'
 import type { AppConfig } from '../config/env.validation';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { registry } from '../metrics/metrics';
+import type { CloudAgentsService } from './cloud-agents.service';
+import { cloudMcpBodyLimit } from './cloud-mcp-body-limit.middleware';
 import {
   CloudMcpAuthGuard,
   type CloudMcpRequest,
@@ -26,24 +29,33 @@ const OTHER_ISSUER = 'https://id.manar.test/realms/globex';
 const MCP_URL = `https://${HOST}/mcp/acme/copilot-1`;
 const METADATA_URL = `https://${HOST}/.well-known/oauth-protected-resource/mcp/acme/copilot-1`;
 const SCOPE = 'manar-mcp-copilot-1';
+const ROLE = 'manar-agent-copilot-1';
 
 let signingKey: CryptoKey;
+let strangerKey: CryptoKey;
 let jwks: JWTVerifyGetKey;
 
 beforeAll(async () => {
   const { privateKey, publicKey } = await generateKeyPair('RS256');
   signingKey = privateKey;
+  strangerKey = (await generateKeyPair('RS256')).privateKey;
   jwks = () => Promise.resolve(publicKey);
 });
 
 async function token(
   overrides: Record<string, unknown> = {},
-  options: { issuer?: string; expiresIn?: string; aud?: string } = {},
+  options: {
+    issuer?: string;
+    expiresIn?: string;
+    aud?: string | string[];
+    key?: CryptoKey;
+  } = {},
 ) {
   return new SignJWT({
     typ: 'Bearer',
     azp: 'manar-cloud-copilot-1',
     scope: `openid profile ${SCOPE}`,
+    manar_roles: [ROLE],
     sub: 'user-1',
     ...overrides,
   })
@@ -52,7 +64,7 @@ async function token(
     .setAudience(options.aud ?? MCP_URL)
     .setIssuedAt()
     .setExpirationTime(options.expiresIn ?? '5m')
-    .sign(signingKey);
+    .sign(options.key ?? signingKey);
 }
 
 interface Agent {
@@ -62,6 +74,7 @@ interface Agent {
   kind: string;
   status: string;
   cloudBinding: {
+    platform: string;
     oauthClientId: string | null;
     oauthScope: string;
     taskId: string;
@@ -76,6 +89,7 @@ function cloudAgent(overrides: Partial<Agent> = {}): Agent {
     kind: 'CLOUD',
     status: 'ACTIVE',
     cloudBinding: {
+      platform: 'COPILOT_STUDIO',
       oauthClientId: 'manar-cloud-copilot-1',
       oauthScope: SCOPE,
       taskId: 'task-1',
@@ -84,11 +98,22 @@ function cloudAgent(overrides: Partial<Agent> = {}): Agent {
   };
 }
 
+const chatGptAgent = (oauthClientId: string | null) =>
+  cloudAgent({
+    cloudBinding: {
+      platform: 'CHATGPT',
+      oauthClientId,
+      oauthScope: SCOPE,
+      taskId: 'task-1',
+    },
+  });
+
 function setup(
   options: {
     agent?: Agent | null;
     env?: Record<string, unknown>;
-    blocked?: boolean;
+    blocked?: (key: string) => boolean;
+    bindResult?: boolean;
   } = {},
 ) {
   const env: Record<string, unknown> = {
@@ -111,11 +136,6 @@ function setup(
       ),
   } as unknown as KnownIssuerRegistry;
   const jwksCache = { getJwks: () => jwks } as unknown as JwksCacheService;
-  const control = {
-    tenant: {
-      findUnique: () => Promise.resolve({ id: 't-acme', status: 'ACTIVE' }),
-    },
-  } as unknown as ControlPrismaService;
   const tenantClient = {
     agent: {
       findUnique: () =>
@@ -124,28 +144,32 @@ function setup(
         ),
     },
   };
-  const tenants = {
-    getClient: () => Promise.resolve(tenantClient),
-  } as unknown as TenantDatabaseManager;
+  const getClient = vi.fn().mockResolvedValue(tenantClient);
+  const tenants = { getClient } as unknown as TenantDatabaseManager;
   const recordSafely = vi.fn().mockResolvedValue(undefined);
   const audit = { recordSafely } as unknown as AuditService;
-  const increment = vi.fn().mockResolvedValue({
-    totalHits: 1,
-    timeToExpire: 60,
-    isBlocked: options.blocked ?? false,
-    timeToBlockExpire: options.blocked ? 30 : 0,
+  const bindDcrClient = vi.fn().mockResolvedValue(options.bindResult ?? true);
+  const cloudAgents = { bindDcrClient } as unknown as CloudAgentsService;
+  const increment = vi.fn((key: string) => {
+    const blocked = options.blocked?.(key) ?? false;
+    return Promise.resolve({
+      totalHits: 1,
+      timeToExpire: 60,
+      isBlocked: blocked,
+      timeToBlockExpire: blocked ? 30 : 0,
+    });
   });
   const limits = { increment } as unknown as ThrottlerStorage;
   const guard = new CloudMcpAuthGuard(
     config,
     knownIssuers,
     jwksCache,
-    control,
     tenants,
     audit,
+    cloudAgents,
     limits,
   );
-  return { guard, config, control, recordSafely, increment };
+  return { guard, config, recordSafely, increment, getClient, bindDcrClient };
 }
 
 function context(
@@ -154,11 +178,11 @@ function context(
     tenantSlug: 'acme',
     agentSlug: 'copilot-1',
   },
-  headers: Record<string, string> = {},
 ) {
   const request = {
     params,
-    headers: { ...headers, ...(authorization ? { authorization } : {}) },
+    ip: '203.0.113.7',
+    headers: authorization ? { authorization } : {},
   } as unknown as CloudMcpRequest;
   const replyHeaders: Record<string, string> = {};
   const reply = {
@@ -189,6 +213,13 @@ async function refusal(promise: Promise<unknown>) {
     status: http.getStatus(),
     body: http.getResponse() as Record<string, unknown>,
   };
+}
+
+async function rejections(reason: string): Promise<number> {
+  const metric = await registry
+    .getSingleMetric('manar_cloud_mcp_token_rejections_total')
+    ?.get();
+  return metric?.values.find((v) => v.labels.reason === reason)?.value ?? 0;
 }
 
 describe('CloudMcpAuthGuard', () => {
@@ -238,32 +269,53 @@ describe('CloudMcpAuthGuard', () => {
       'unknown_issuer',
     ],
     [
-      'another tenant’s issuer on this tenant’s path',
+      'another tenant issuer on this tenant path',
       () => token({}, { issuer: OTHER_ISSUER }),
       'issuer_tenant_mismatch',
     ],
+    [
+      'a key the realm never used',
+      () => token({}, { key: strangerKey }),
+      'invalid_token',
+    ],
+    ['garbage', () => Promise.resolve('not-a-jwt'), 'unknown_issuer'],
+  ])(
+    '401 for %s before the signature verified: a metric, no tenant database, no audit',
+    async (_label, make, reason) => {
+      const before = await rejections(reason);
+      const { ctx, replyHeaders } = context(`Bearer ${await make()}`);
+      const { status, body } = await refusal(s.guard.canActivate(ctx));
+      expect([status, body.reason]).toEqual([401, reason]);
+      expect(replyHeaders['WWW-Authenticate']).toContain(
+        'error="invalid_token"',
+      );
+      expect(s.recordSafely).not.toHaveBeenCalled();
+      expect(s.getClient).not.toHaveBeenCalled();
+      expect(await rejections(reason)).toBe(before + 1);
+    },
+  );
+
+  it.each([
     [
       'wrong audience',
       () => token({}, { aud: 'https://mcp.manar.test/mcp/acme/other' }),
       'wrong_audience',
     ],
+    [
+      'an audience naming another agent too',
+      () =>
+        token({}, { aud: [MCP_URL, 'https://mcp.manar.test/mcp/acme/other'] }),
+      'foreign_audience',
+    ],
     ['expired', () => token({}, { expiresIn: '-1s' }), 'token_expired'],
     ['an ID token', () => token({ typ: 'ID' }), 'not_an_access_token'],
-    ['garbage', () => Promise.resolve('not-a-jwt'), 'unknown_issuer'],
   ])(
-    '401 invalid_token for %s, audited without the token',
+    '401 for %s after the signature verified: audited in the issuer tenant without the token',
     async (_label, make, reason) => {
       const raw = await make();
-      const { ctx, replyHeaders } = context(`Bearer ${raw}`);
+      const { ctx } = context(`Bearer ${raw}`);
       const { status, body } = await refusal(s.guard.canActivate(ctx));
-      expect(status).toBe(401);
-      expect(body.reason).toBe(reason);
-      expect(replyHeaders['WWW-Authenticate']).toContain(
-        'error="invalid_token"',
-      );
-      expect(replyHeaders['WWW-Authenticate']).toContain(
-        `resource_metadata="${METADATA_URL}"`,
-      );
+      expect([status, body.reason]).toEqual([401, reason]);
       expect(s.recordSafely).toHaveBeenCalledTimes(1);
       const [, tenantId, event] = s.recordSafely.mock.calls[0] as [
         unknown,
@@ -278,16 +330,22 @@ describe('CloudMcpAuthGuard', () => {
   );
 
   it.each([
-    ['another client', { azp: 'some-other-client' }],
-    ['the scope missing', { scope: 'openid profile' }],
-  ])('403 unknown_client for %s', async (_label, claims) => {
+    ['another client', { azp: 'some-other-client' }, 'unknown_client'],
+    ['the scope missing', { scope: 'openid profile' }, 'unknown_client'],
+    [
+      'a person without the agent role',
+      { manar_roles: ['TENANT_OWNER'] },
+      'user_not_allowed',
+    ],
+    ['no role claim at all', { manar_roles: undefined }, 'user_not_allowed'],
+  ])('403 for %s', async (_label, claims, reason) => {
     const { ctx, replyHeaders } = context(`Bearer ${await token(claims)}`);
     const { status, body } = await refusal(s.guard.canActivate(ctx));
-    expect(status).toBe(403);
-    expect(body.reason).toBe('unknown_client');
+    expect([status, body.reason]).toEqual([403, reason]);
     expect(replyHeaders['WWW-Authenticate']).toContain(
       'error="insufficient_scope"',
     );
+    expect(s.recordSafely).toHaveBeenCalledTimes(1);
   });
 
   it('403 for an agent that is not a cloud agent, does not exist, or is not active', async () => {
@@ -304,49 +362,96 @@ describe('CloudMcpAuthGuard', () => {
     }
   });
 
-  it('a DCR (ChatGPT) agent accepts a self-registered client, not the console client or another agent client', async () => {
-    const dcr = cloudAgent({
-      cloudBinding: {
-        oauthClientId: null,
-        oauthScope: SCOPE,
-        taskId: 'task-1',
-      },
+  describe('ChatGPT (self-registered client)', () => {
+    it('records the first client that gets this far, then accepts only it', async () => {
+      const first = setup({ agent: chatGptAgent(null) });
+      const ok = context(`Bearer ${await token({ azp: 'dcr-client-1' })}`);
+      await expect(first.guard.canActivate(ok.ctx)).resolves.toBe(true);
+      expect(first.bindDcrClient).toHaveBeenCalledWith(
+        't-acme',
+        'agent-1',
+        'dcr-client-1',
+      );
+
+      const recorded = setup({ agent: chatGptAgent('dcr-client-1') });
+      const other = context(`Bearer ${await token({ azp: 'dcr-client-2' })}`);
+      expect(
+        (await refusal(recorded.guard.canActivate(other.ctx))).body.reason,
+      ).toBe('unknown_client');
+      expect(recorded.bindDcrClient).not.toHaveBeenCalled();
     });
-    const { guard } = setup({ agent: dcr });
-    const ok = context(
-      `Bearer ${await token({ azp: 'a1b2-registered-by-chatgpt' })}`,
-    );
-    await expect(guard.canActivate(ok.ctx)).resolves.toBe(true);
-    const consoleToken = context(`Bearer ${await token({ azp: 'manar-api' })}`);
-    expect((await refusal(guard.canActivate(consoleToken.ctx))).status).toBe(
-      403,
-    );
-    const otherAgents = context(
-      `Bearer ${await token({ azp: 'manar-cloud-another-agent' })}`,
-    );
-    expect((await refusal(guard.canActivate(otherAgents.ctx))).status).toBe(
-      403,
-    );
+
+    it('refuses when Keycloak does not show a client registered under the DCR policy', async () => {
+      const g = setup({ agent: chatGptAgent(null), bindResult: false });
+      const { ctx } = context(`Bearer ${await token({ azp: 'admin-cli' })}`);
+      expect((await refusal(g.guard.canActivate(ctx))).status).toBe(403);
+    });
+
+    it('never records another agent pre-registered client, and never for a person without the role', async () => {
+      const g = setup({ agent: chatGptAgent(null) });
+      const precreated = context(
+        `Bearer ${await token({ azp: 'manar-cloud-another-agent' })}`,
+      );
+      expect((await refusal(g.guard.canActivate(precreated.ctx))).status).toBe(
+        403,
+      );
+      const noRole = context(
+        `Bearer ${await token({ azp: 'dcr-client-1', manar_roles: [] })}`,
+      );
+      expect((await refusal(g.guard.canActivate(noRole.ctx))).status).toBe(403);
+      expect(g.bindDcrClient).not.toHaveBeenCalled();
+    });
   });
 
-  it('429 with Retry-After over the per-agent limit', async () => {
-    const { ctx, replyHeaders } = context(`Bearer ${await token()}`);
-    const { status } = await refusal(
-      setup({ blocked: true }).guard.canActivate(ctx),
-    );
-    expect(status).toBe(429);
-    expect(replyHeaders['Retry-After']).toBe('30');
+  it('429 with Retry-After over the per-agent limit, and per address before any token work', async () => {
+    const agentLimited = setup({ blocked: (k) => k.startsWith('cloud-mcp:') });
+    const one = context(`Bearer ${await token()}`);
+    expect(
+      (await refusal(agentLimited.guard.canActivate(one.ctx))).status,
+    ).toBe(429);
+    expect(one.replyHeaders['Retry-After']).toBe('30');
+
+    const addressLimited = setup({
+      blocked: (k) => k === 'cloud-mcp-addr:acme:203.0.113.7',
+    });
+    const two = context('Bearer not-a-jwt');
+    expect(
+      (await refusal(addressLimited.guard.canActivate(two.ctx))).status,
+    ).toBe(429);
   });
 
-  it('413 over the body cap, 404 when the endpoint is off or the path is not a slug pair', async () => {
-    const big = context(undefined, undefined, { 'content-length': '300000' });
-    expect((await refusal(s.guard.canActivate(big.ctx))).status).toBe(413);
+  it('404 when the endpoint is off or the path is not a slug pair', async () => {
     const off = setup({ env: { MANAR_MCP_ENABLED: 'false' } });
     expect((await refusal(off.guard.canActivate(context().ctx))).status).toBe(
       404,
     );
     const bad = context(undefined, { tenantSlug: 'ACME', agentSlug: 'x' });
     expect((await refusal(s.guard.canActivate(bad.ctx))).status).toBe(404);
+  });
+});
+
+describe('cloudMcpBodyLimit', () => {
+  function run(method: string, headers: Record<string, string>) {
+    const res = { statusCode: 200, setHeader: vi.fn(), end: vi.fn() };
+    const next = vi.fn();
+    cloudMcpBodyLimit(1000)({ method, headers } as never, res as never, next);
+    return { status: res.statusCode, passed: next.mock.calls.length === 1 };
+  }
+
+  it('lets a declared body within the cap through, refuses a bigger or undeclared one', () => {
+    expect(run('POST', { 'content-length': '1000' })).toEqual({
+      status: 200,
+      passed: true,
+    });
+    expect(run('POST', { 'content-length': '1001' })).toEqual({
+      status: 413,
+      passed: false,
+    });
+    expect(run('POST', { 'transfer-encoding': 'chunked' })).toEqual({
+      status: 411,
+      passed: false,
+    });
+    expect(run('GET', {})).toEqual({ status: 200, passed: true });
   });
 });
 

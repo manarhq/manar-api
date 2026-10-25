@@ -1,9 +1,32 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../config/env.validation';
+import { AGENT_ROLE_CLAIM } from '../cloud-mcp/cloud-mcp.config';
 
 /** Alias of the Entra ID identity provider in a tenant realm (docs/cloud-agents.md). */
 export const ENTRA_IDP_ALIAS = 'entra';
+/** First broker login flow Manar creates: new users only, never linking by email. */
+export const CREATE_ONLY_BROKER_FLOW = 'manar first broker login';
+
+export interface KeycloakClientRepresentation {
+  id: string;
+  clientId: string;
+  enabled?: boolean;
+  publicClient?: boolean;
+  redirectUris?: string[];
+  directAccessGrantsEnabled?: boolean;
+  implicitFlowEnabled?: boolean;
+  serviceAccountsEnabled?: boolean;
+  defaultClientScopes?: string[];
+  optionalClientScopes?: string[];
+  [key: string]: unknown;
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error && error.message.includes('failed with HTTP 404')
+  );
+}
 
 /**
  * Minimal wrapper around Keycloak's Admin REST API
@@ -231,18 +254,61 @@ export class KeycloakAdminClient {
     return secret;
   }
 
+  // ---- Cloud agents (docs/cloud-agents.md) ----
+
+  /** A client by clientId, or undefined. */
+  async findClient(
+    realmName: string,
+    clientId: string,
+  ): Promise<KeycloakClientRepresentation | undefined> {
+    const found = (
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${encodeURIComponent(realmName)}/clients?clientId=${encodeURIComponent(clientId)}`,
+      )
+    ).body as KeycloakClientRepresentation[] | undefined;
+    return found?.find((c) => c.clientId === clientId);
+  }
+
+  /** A client scope id by name, or undefined. */
+  async findClientScopeId(
+    realmName: string,
+    name: string,
+  ): Promise<string | undefined> {
+    const scopes = (
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${encodeURIComponent(realmName)}/client-scopes`,
+      )
+    ).body as Array<{ id: string; name: string }> | undefined;
+    return scopes?.find((s) => s.name === name)?.id;
+  }
+
+  async realmRoleExists(realmName: string, roleName: string): Promise<boolean> {
+    try {
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${encodeURIComponent(realmName)}/roles/${encodeURIComponent(roleName)}`,
+      );
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
+  }
+
   /**
-   * Cloud agents (docs/cloud-agents.md): a client scope whose audience mapper adds `audience`
-   * (the agent's MCP URL) to access tokens. With `forDcr` it is also made a realm default
-   * optional scope, the only way a client that registers itself (DCR) can be given it and the
-   * only kind of scope the realm's anonymous "Allowed Client Scopes" policy lets it ask for.
-   * Returns the scope id.
+   * One cloud agent's client scope: an audience mapper adds the agent's MCP URL to the access
+   * token, and a realm role mapper writes the agent role into `AGENT_ROLE_CLAIM` when the person
+   * holds it (the role is the scope's only scope mapping, so a client without full scope gets
+   * just that role). Not a realm default or optional scope: only the clients Manar assigns it to
+   * (the agent's own client, or a self-registered client the DCR policy lets ask for it) get it.
    */
-  async createAudienceClientScope(
+  async createAgentClientScope(
     realmName: string,
     name: string,
     audience: string,
-    forDcr: boolean,
+    roleName: string,
   ): Promise<string> {
     const realm = encodeURIComponent(realmName);
     const created = await this.adminRequest(
@@ -267,6 +333,20 @@ export class KeycloakAdminClient {
               'introspection.token.claim': 'true',
             },
           },
+          {
+            name: 'agent-role',
+            protocol: 'openid-connect',
+            protocolMapper: 'oidc-usermodel-realm-role-mapper',
+            config: {
+              'claim.name': AGENT_ROLE_CLAIM,
+              multivalued: 'true',
+              'jsonType.label': 'String',
+              'access.token.claim': 'true',
+              'id.token.claim': 'false',
+              'userinfo.token.claim': 'false',
+              'introspection.token.claim': 'true',
+            },
+          },
         ],
       },
       { returnLocation: true },
@@ -277,19 +357,24 @@ export class KeycloakAdminClient {
         `Keycloak did not return an id for client scope "${name}"`,
       );
     }
-    if (forDcr) {
+    const role = (
       await this.adminRequest(
-        'PUT',
-        `/admin/realms/${realm}/default-optional-client-scopes/${scopeId}`,
-      );
-    }
+        'GET',
+        `/admin/realms/${realm}/roles/${encodeURIComponent(roleName)}`,
+      )
+    ).body as { id: string; name: string };
+    await this.adminRequest(
+      'POST',
+      `/admin/realms/${realm}/client-scopes/${scopeId}/scope-mappings/realm`,
+      [{ id: role.id, name: role.name }],
+    );
     return scopeId;
   }
 
   /**
    * A confidential authorization-code client (PKCE S256) for one cloud agent, with the agent's
-   * audience scope as a default scope so every token it gets carries the MCP URL. No password
-   * grant, no service account. Returns the secret, shown to the admin once and not stored.
+   * scope as a default scope. No password grant, no implicit flow, no service account, no full
+   * scope (its tokens carry only the agent role). Returns the secret, shown to the admin once.
    */
   async createMcpClient(
     realmName: string,
@@ -309,6 +394,7 @@ export class KeycloakAdminClient {
         directAccessGrantsEnabled: false,
         implicitFlowEnabled: false,
         serviceAccountsEnabled: false,
+        fullScopeAllowed: false,
         enabled: true,
         redirectUris,
         webOrigins: [],
@@ -338,40 +424,63 @@ export class KeycloakAdminClient {
     return secret.value;
   }
 
-  /** Replaces a client's redirect URIs (the callback Copilot Studio shows after the connector is created). */
-  async setClientRedirectUris(
+  /** Merges `patch` into a client's representation (redirect URIs, hardening a DCR client). */
+  async updateClient(
     realmName: string,
     clientId: string,
-    redirectUris: string[],
+    patch: Partial<KeycloakClientRepresentation>,
   ): Promise<void> {
-    const realm = encodeURIComponent(realmName);
-    const found = (
-      await this.adminRequest(
-        'GET',
-        `/admin/realms/${realm}/clients?clientId=${encodeURIComponent(clientId)}`,
-      )
-    ).body as Array<Record<string, unknown> & { id: string }> | undefined;
-    const client = found?.[0];
+    const client = await this.findClient(realmName, clientId);
     if (!client) throw new Error(`Keycloak client "${clientId}" not found`);
     await this.adminRequest(
       'PUT',
-      `/admin/realms/${realm}/clients/${client.id}`,
-      {
-        ...client,
-        redirectUris,
-      },
+      `/admin/realms/${encodeURIComponent(realmName)}/clients/${client.id}`,
+      { ...client, ...patch },
     );
   }
 
+  /** Best effort clean-up: each call ignores a missing object. */
+  async deleteClient(realmName: string, clientId: string): Promise<void> {
+    const client = await this.findClient(realmName, clientId);
+    if (client) {
+      await this.adminRequest(
+        'DELETE',
+        `/admin/realms/${encodeURIComponent(realmName)}/clients/${client.id}`,
+      );
+    }
+  }
+
+  async deleteClientScope(realmName: string, name: string): Promise<void> {
+    const id = await this.findClientScopeId(realmName, name);
+    if (id) {
+      await this.adminRequest(
+        'DELETE',
+        `/admin/realms/${encodeURIComponent(realmName)}/client-scopes/${id}`,
+      );
+    }
+  }
+
+  async deleteRealmRole(realmName: string, roleName: string): Promise<void> {
+    if (await this.realmRoleExists(realmName, roleName)) {
+      await this.adminRequest(
+        'DELETE',
+        `/admin/realms/${encodeURIComponent(realmName)}/roles/${encodeURIComponent(roleName)}`,
+      );
+    }
+  }
+
   /**
-   * Opens anonymous dynamic client registration to `hosts` only: the realm's anonymous Trusted
-   * Hosts policy accepts a registration from any address but requires every redirect URI to be
-   * on one of `hosts` (Keycloak's default policy accepts none, which keeps DCR closed).
+   * The realm's anonymous DCR policies, as Manar uses them for ChatGPT agents: "Allowed Client
+   * Scopes" lists exactly the agent scopes a self-registered client may ask for, and "Trusted
+   * Hosts" accepts a registration from any address but requires every redirect URI on one of
+   * `hosts`. `update` gets the current agent scopes and returns the new list; when it is empty the
+   * trusted hosts are removed and the policy is back to Keycloak's default (DCR closed).
    */
-  async allowDcrRedirectHosts(
+  async updateDcrPolicy(
     realmName: string,
     hosts: string[],
-  ): Promise<void> {
+    update: (agentScopes: string[]) => string[],
+  ): Promise<string[]> {
     const realm = encodeURIComponent(realmName);
     const policies = (
       await this.adminRequest(
@@ -386,15 +495,39 @@ export class KeycloakAdminClient {
       subType?: string;
       config?: Record<string, string[]>;
     }>;
-    const trusted = policies.find(
-      (p) => p.providerId === 'trusted-hosts' && p.subType === 'anonymous',
-    );
-    if (!trusted) {
-      throw new Error(
-        `Realm "${realmName}" has no anonymous Trusted Hosts policy`,
+    const find = (providerId: string) => {
+      const policy = policies.find(
+        (p) => p.providerId === providerId && p.subType === 'anonymous',
       );
-    }
-    const current = trusted.config?.['trusted-hosts'] ?? [];
+      if (!policy) {
+        throw new Error(
+          `Realm "${realmName}" has no anonymous ${providerId} policy`,
+        );
+      }
+      return policy;
+    };
+    const scopesPolicy = find('allowed-client-templates');
+    const trusted = find('trusted-hosts');
+    const current = scopesPolicy.config?.['allowed-client-scopes'] ?? [];
+    const agentScopes = update(
+      current.filter((s) => s.startsWith('manar-mcp-')),
+    );
+    const others = current.filter((s) => !s.startsWith('manar-mcp-'));
+    await this.adminRequest(
+      'PUT',
+      `/admin/realms/${realm}/components/${scopesPolicy.id}`,
+      {
+        ...scopesPolicy,
+        config: {
+          ...scopesPolicy.config,
+          'allowed-client-scopes': [...others, ...agentScopes],
+        },
+      },
+    );
+    const otherHosts = (trusted.config?.['trusted-hosts'] ?? []).filter(
+      (h) => !hosts.includes(h),
+    );
+    const open = agentScopes.length > 0;
     await this.adminRequest(
       'PUT',
       `/admin/realms/${realm}/components/${trusted.id}`,
@@ -402,41 +535,106 @@ export class KeycloakAdminClient {
         ...trusted,
         config: {
           ...trusted.config,
-          'trusted-hosts': [...new Set([...current, ...hosts])],
-          'host-sending-registration-request-must-match': ['false'],
+          'trusted-hosts': open ? [...otherHosts, ...hosts] : otherHosts,
+          // Open: ChatGPT registers from addresses no one can list. Closed: Keycloak's default.
+          'host-sending-registration-request-must-match': [
+            open ? 'false' : 'true',
+          ],
           'client-uris-must-match': ['true'],
         },
       },
     );
+    return agentScopes;
   }
 
   /**
-   * Creates or updates the realm's `entra` OIDC identity provider for one Entra ID directory
-   * (single tenant). The client secret goes to Keycloak only; Manar does not keep it.
+   * The first broker login flow Manar gives an identity provider: "Create User If Unique" only.
+   * A brokered identity whose email or username matches an existing account is refused, never
+   * linked to it (no linking by email, no "confirm link" step). Idempotent.
    */
-  async upsertEntraIdentityProvider(
+  async ensureCreateOnlyFirstBrokerFlow(realmName: string): Promise<string> {
+    const realm = encodeURIComponent(realmName);
+    const flows = (
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${realm}/authentication/flows`,
+      )
+    ).body as Array<{ alias: string }>;
+    if (!flows.some((f) => f.alias === CREATE_ONLY_BROKER_FLOW)) {
+      await this.adminRequest(
+        'POST',
+        `/admin/realms/${realm}/authentication/flows`,
+        {
+          alias: CREATE_ONLY_BROKER_FLOW,
+          description:
+            'Manar: create a new user for a brokered identity, never link by email',
+          providerId: 'basic-flow',
+          topLevel: true,
+          builtIn: false,
+        },
+      );
+      await this.adminRequest(
+        'POST',
+        `/admin/realms/${realm}/authentication/flows/${encodeURIComponent(CREATE_ONLY_BROKER_FLOW)}/executions/execution`,
+        { provider: 'idp-create-user-if-unique' },
+      );
+    }
+    const executions = (
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${realm}/authentication/flows/${encodeURIComponent(CREATE_ONLY_BROKER_FLOW)}/executions`,
+      )
+    ).body as Array<{ id: string; providerId?: string; requirement: string }>;
+    for (const execution of executions) {
+      if (execution.requirement !== 'REQUIRED') {
+        await this.adminRequest(
+          'PUT',
+          `/admin/realms/${realm}/authentication/flows/${encodeURIComponent(CREATE_ONLY_BROKER_FLOW)}/executions`,
+          { ...execution, requirement: 'REQUIRED' },
+        );
+      }
+    }
+    return CREATE_ONLY_BROKER_FLOW;
+  }
+
+  /**
+   * Creates or updates an OIDC identity provider. Emails from it are not trusted, and its first
+   * login uses `ensureCreateOnlyFirstBrokerFlow`, so it can never take over an existing account.
+   * Brokered users are keyed on the provider's `sub`. The client secret goes to Keycloak only.
+   */
+  async upsertOidcIdentityProvider(
     realmName: string,
-    input: { directoryId: string; clientId: string; clientSecret: string },
+    alias: string,
+    input: {
+      displayName: string;
+      issuer: string;
+      authorizationUrl: string;
+      tokenUrl: string;
+      jwksUrl: string;
+      logoutUrl?: string;
+      clientId: string;
+      clientSecret: string;
+    },
   ): Promise<void> {
     const realm = encodeURIComponent(realmName);
-    const alias = ENTRA_IDP_ALIAS;
-    const authority = `https://login.microsoftonline.com/${input.directoryId}`;
+    const flow = await this.ensureCreateOnlyFirstBrokerFlow(realmName);
     const representation = {
       alias,
-      displayName: 'Microsoft Entra ID',
+      displayName: input.displayName,
       providerId: 'oidc',
       enabled: true,
-      trustEmail: true,
-      firstBrokerLoginFlowAlias: 'first broker login',
+      trustEmail: false,
+      linkOnly: false,
+      firstBrokerLoginFlowAlias: flow,
       config: {
         clientId: input.clientId,
         clientSecret: input.clientSecret,
         clientAuthMethod: 'client_secret_post',
-        authorizationUrl: `${authority}/oauth2/v2.0/authorize`,
-        tokenUrl: `${authority}/oauth2/v2.0/token`,
-        logoutUrl: `${authority}/oauth2/v2.0/logout`,
-        issuer: `${authority}/v2.0`,
-        jwksUrl: `${authority}/discovery/v2.0/keys`,
+        authorizationUrl: input.authorizationUrl,
+        tokenUrl: input.tokenUrl,
+        ...(input.logoutUrl ? { logoutUrl: input.logoutUrl } : {}),
+        issuer: input.issuer,
+        jwksUrl: input.jwksUrl,
         useJwksUrl: 'true',
         validateSignature: 'true',
         pkceEnabled: 'true',
@@ -456,9 +654,68 @@ export class KeycloakAdminClient {
         throw error;
       await this.adminRequest(
         'PUT',
-        `/admin/realms/${realm}/identity-provider/instances/${alias}`,
+        `/admin/realms/${realm}/identity-provider/instances/${encodeURIComponent(alias)}`,
         representation,
       );
+    }
+  }
+
+  async identityProviderExists(
+    realmName: string,
+    alias: string,
+  ): Promise<boolean> {
+    try {
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${encodeURIComponent(realmName)}/identity-provider/instances/${encodeURIComponent(alias)}`,
+      );
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Gives `roleName` to brokered users whose `groups` claim contains `groupId` (Entra groups). */
+  async addGroupRoleMapper(
+    realmName: string,
+    alias: string,
+    name: string,
+    groupId: string,
+    roleName: string,
+  ): Promise<void> {
+    await this.adminRequest(
+      'POST',
+      `/admin/realms/${encodeURIComponent(realmName)}/identity-provider/instances/${encodeURIComponent(alias)}/mappers`,
+      {
+        name,
+        identityProviderAlias: alias,
+        identityProviderMapper: 'oidc-role-idp-mapper',
+        config: {
+          syncMode: 'FORCE',
+          claim: 'groups',
+          'claim.value': groupId,
+          role: roleName,
+        },
+      },
+    );
+  }
+
+  async deleteIdpMapper(
+    realmName: string,
+    alias: string,
+    name: string,
+  ): Promise<void> {
+    const base = `/admin/realms/${encodeURIComponent(realmName)}/identity-provider/instances/${encodeURIComponent(alias)}/mappers`;
+    let mappers: Array<{ id: string; name: string }>;
+    try {
+      mappers = (await this.adminRequest('GET', base)).body as typeof mappers;
+    } catch (error) {
+      if (isNotFound(error)) return;
+      throw error;
+    }
+    for (const mapper of mappers.filter((m) => m.name === name)) {
+      await this.adminRequest('DELETE', `${base}/${mapper.id}`);
     }
   }
 

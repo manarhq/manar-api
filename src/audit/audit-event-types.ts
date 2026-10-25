@@ -103,7 +103,9 @@ export const AUDIT_EVENT_TYPES = {
   /** A tenant admin connected a cloud agent (Copilot Studio or ChatGPT) or changed its binding. */
   CLOUD_AGENT_CONNECTED: 'cloud_agent.connected',
   CLOUD_AGENT_UPDATED: 'cloud_agent.updated',
-  /** A token presented to the public MCP endpoint was refused (reason and a hash prefix, never the token). */
+  /** A tenant admin revoked a cloud agent and removed its realm objects. */
+  CLOUD_AGENT_DISCONNECTED: 'cloud_agent.disconnected',
+  /** A token with a valid realm signature was refused by the public MCP endpoint (reason and a hash prefix, never the token). */
   CLOUD_MCP_TOKEN_REJECTED: 'cloud_mcp.token_rejected',
   /** A tenant admin configured the realm's Entra ID identity provider. */
   IDENTITY_PROVIDER_CONFIGURED: 'tenant.identity_provider_configured',

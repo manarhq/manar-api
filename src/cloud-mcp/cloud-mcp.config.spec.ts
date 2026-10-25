@@ -23,4 +23,16 @@ describe('CloudMcpConfigSchema', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('takes plain host names only for DCR trusted hosts', () => {
+    const ok = (v: string) =>
+      CloudMcpConfigSchema.safeParse({ MANAR_MCP_DCR_TRUSTED_HOSTS: v })
+        .success;
+    expect(ok('chatgpt.com')).toBe(true);
+    expect(ok('chatgpt.com, openai.com')).toBe(true);
+    expect(ok('*.chatgpt.com')).toBe(false);
+    expect(ok('https://chatgpt.com')).toBe(false);
+    expect(ok('chatgpt.com:443')).toBe(false);
+    expect(ok('localhost')).toBe(false);
+  });
 });

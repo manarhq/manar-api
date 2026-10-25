@@ -1,4 +1,12 @@
-import { Body, Controller, Param, Post, Put, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Param,
+  Post,
+  Put,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -16,6 +24,7 @@ import {
   BindTaskSchema,
   CloudAgentsService,
   ConnectCloudAgentSchema,
+  DisconnectSchema,
   EntraIdpSchema,
   RedirectUrisSchema,
 } from './cloud-agents.service';
@@ -33,7 +42,7 @@ export class CloudAgentsController {
   @ApiOperation({
     summary: 'Connect a cloud agent (Copilot Studio or ChatGPT)',
     description:
-      'Creates an ACTIVE agent of kind CLOUD with its standing task (`task`, same fields as `POST /tasks`) and the OAuth set-up in the tenant realm. Returns what to paste into the vendor: MCP URL, authorization and token URLs, scope and, for Copilot Studio, a client id and a client secret shown only in this response. 400 `cloud_mcp_not_enabled` when the install has no public MCP endpoint.',
+      'Creates an ACTIVE agent of kind CLOUD with its standing task (`task`, same fields as `POST /tasks`) and the OAuth set-up in the tenant realm, including the realm role `manar-agent-<slug>` people need (assign it, or name an Entra group in `entraGroupId`). A connection that failed part way is resumed by calling again with the same slug. Returns what to paste into the vendor: MCP URL, authorization and token URLs, scope and, for Copilot Studio, a client id and a client secret shown only in this response. 400 `cloud_mcp_not_enabled` when the install has no public MCP endpoint.',
   })
   @ApiResponse({ status: 201 })
   @ApiResponse({ status: 400 })
@@ -94,6 +103,39 @@ export class CloudAgentsController {
     return this.cloudAgents.configureEntra(
       auth,
       parseBodyOrThrow(EntraIdpSchema, body),
+    );
+  }
+
+  @Delete(':id/oauth-client')
+  @ApiOperation({
+    summary: 'Forget the client a ChatGPT agent registered',
+    description:
+      'Deletes the recorded self-registered client in Keycloak; the next client that authenticates for this agent is recorded instead (the connector was recreated in ChatGPT).',
+  })
+  @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
+  resetDcrClient(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') agentId: string,
+  ) {
+    return this.cloudAgents.resetDcrClient(auth, agentId);
+  }
+
+  @Delete(':id')
+  @ApiOperation({
+    summary: 'Disconnect (revoke) a cloud agent',
+    description:
+      'Revokes the agent and its standing task, then removes its Keycloak client, scope, role, Entra mapper and DCR policy entry (DCR closes when no ChatGPT agent is left). Body `{ reason }`. Repeatable if Keycloak fails part way. Cloud agents are not revoked with `POST /agents/:id/revoke`.',
+  })
+  @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
+  disconnect(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') agentId: string,
+    @Body() body: unknown,
+  ) {
+    return this.cloudAgents.disconnect(
+      auth,
+      agentId,
+      parseBodyOrThrow(DisconnectSchema, body).reason,
     );
   }
 }

@@ -1,4 +1,8 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { AppConfig } from '../config/env.validation';
+import { cloudMcpBodyLimit } from './cloud-mcp-body-limit.middleware';
+import { cloudMcpSettings } from './cloud-mcp.config';
 import { AgentRuntimeController } from '../agent-runtime/agent-runtime.controller';
 import { AgentTaskAccessService } from '../agent-runtime/agent-task-access.service';
 import { ToolManifestService } from '../agent-runtime/tool-manifest.service';
@@ -49,4 +53,12 @@ import { CloudMcpController } from './cloud-mcp.controller';
     AgentRuntimeController,
   ],
 })
-export class CloudMcpModule {}
+export class CloudMcpModule implements NestModule {
+  constructor(private readonly config: ConfigService<AppConfig, true>) {}
+
+  configure(consumer: MiddlewareConsumer): void {
+    consumer
+      .apply(cloudMcpBodyLimit(cloudMcpSettings(this.config).maxBodyBytes))
+      .forRoutes(CloudMcpController);
+  }
+}

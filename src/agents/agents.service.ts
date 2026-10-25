@@ -12,6 +12,7 @@ import { buildAgentIdentifier } from './agent-identifier';
 import {
   AgentNotFoundError,
   AgentTerminatedError,
+  CloudAgentOperationError,
   EnrollmentFailureReason,
   EnrollmentTokenInvalidError,
 } from './agents.errors';
@@ -132,6 +133,9 @@ export class AgentsService {
       where: { id: agentId },
     });
     if (!agent) throw new AgentNotFoundError(agentId);
+    if (agent.kind === 'CLOUD') {
+      throw new CloudAgentOperationError(agentId, 'an enrollment token');
+    }
     if (isTerminal(agent.status)) {
       throw new AgentTerminatedError(agentId, agent.status);
     }
@@ -276,6 +280,9 @@ export class AgentsService {
       where: { id: agentId },
     });
     if (!agent) throw new AgentNotFoundError(agentId);
+    if (agent.kind === 'CLOUD') {
+      throw new CloudAgentOperationError(agentId, 'revoke');
+    }
 
     const { caRevocationPending } = await this.certificateAuthority.revoke(
       tenantClient,

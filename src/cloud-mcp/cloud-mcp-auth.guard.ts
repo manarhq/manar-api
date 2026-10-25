@@ -6,8 +6,8 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   NotFoundException,
-  PayloadTooLargeException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -24,51 +24,69 @@ import { ACCEPTED_SIGNING_ALGORITHMS } from '../auth/jwt-auth.guard';
 import { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
 import { failClosed, throwFailClosed } from '../common/fail-closed/fail-closed';
 import type { AppConfig } from '../config/env.validation';
-import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { recordCloudMcpRejection } from '../metrics/metrics';
+import { CloudAgentsService } from './cloud-agents.service';
 import {
+  AGENT_ROLE_CLAIM,
+  PRE_REGISTERED_CLIENT_PREFIX,
   cloudMcpMetadataUrl,
   cloudMcpResourceUrl,
+  cloudMcpRole,
   cloudMcpScope,
   cloudMcpSettings,
 } from './cloud-mcp.config';
 
 const SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const RATE_WINDOW_MS = 60_000;
-/** Client ids Manar gives pre-registered (Copilot Studio) clients. */
-export const PRE_REGISTERED_CLIENT_PREFIX = 'manar-cloud-';
+/** Requests per minute from one address to one tenant's endpoints, before any token check. */
+const PER_ADDRESS_LIMIT = 600;
+const LOG_SAMPLE_MS = 60_000;
 
 export type CloudMcpRequest = FastifyRequest & {
   cloudAgent?: { context: AgentContext; taskId: string };
 };
 
-type Rejection = { status: 401 | 403; reason: string };
+type Rejection = {
+  status: 401 | 403;
+  reason: string;
+  /** Set once the realm signature verified: the refusal goes to that tenant's audit chain. */
+  tenantId?: string;
+};
 
 /**
  * The OAuth gate of the public MCP endpoint `/mcp/<tenantSlug>/<agentSlug>`
- * (docs/cloud-agents.md, MCP authorization spec). The tenant comes from the
- * verified token's issuer, matched against the control DB's provisioned
- * realms; the path slug only has to agree with it (else 401). Then:
- * signature against the realm JWKS (pinned RSA algorithms, no clock skew),
- * audience = this agent's exact MCP URL, `typ: Bearer`, then the agent must
- * be an ACTIVE `CLOUD` agent whose binding names the token's client (`azp`)
- * and scope (else 403). Per-agent rate limit last.
+ * (docs/cloud-agents.md, MCP authorization spec).
  *
- * Every refusal of a presented token is audited in the tenant the path names
- * (reason, unverified client id, a SHA-256 prefix of the token; never the
- * token). A request with no token is the normal first step of discovery and
- * is not audited. Kill switches, quarantine and task liveness are checked by
- * the governed MCP server itself on every call (`AgentTaskAccessService`).
+ * Before any token work: a per address and tenant limit. Then the tenant
+ * comes from the token issuer, matched against provisioned realms; the path
+ * slug only has to agree (else 401). Signature against the realm JWKS (pinned
+ * RSA, no clock skew), audience = this agent's exact MCP URL and no other
+ * agent's, `typ: Bearer`. Then the agent: ACTIVE, kind CLOUD; the person:
+ * holds the agent role (`manar-agent-<slug>`); the client: the agent's own
+ * (pre-registered, or the self-registered client recorded on first use) with
+ * the agent scope. Per-agent rate limit last.
+ *
+ * Refusals before the signature verified (no issuer, unknown realm, other
+ * tenant, bad signature) never touch a tenant database: a metric and a log
+ * line sampled per address and tenant. Refusals after it are audited in the
+ * issuer's tenant (reason, unverified client id, a SHA-256 prefix; never the
+ * token). Kill switches, quarantine and task liveness are checked by the
+ * governed MCP server on every call (`AgentTaskAccessService`).
  */
 @Injectable()
 export class CloudMcpAuthGuard implements CanActivate {
+  private readonly logger = new Logger(CloudMcpAuthGuard.name);
+  // ponytail: per-process sampling map, cleared when large; good enough for log volume control.
+  private readonly lastLogged = new Map<string, number>();
+
   constructor(
     private readonly config: ConfigService<AppConfig, true>,
     private readonly knownIssuers: KnownIssuerRegistry,
     private readonly jwksCache: JwksCacheService,
-    private readonly control: ControlPrismaService,
     private readonly tenants: TenantDatabaseManager,
     private readonly audit: AuditService,
+    private readonly cloudAgents: CloudAgentsService,
     @InjectThrottlerStorage() private readonly limits: ThrottlerStorage,
   ) {}
 
@@ -83,11 +101,12 @@ export class CloudMcpAuthGuard implements CanActivate {
     if (!host || !SLUG.test(tenantSlug) || !SLUG.test(agentSlug)) {
       throw new NotFoundException();
     }
-    if (
-      Number(request.headers['content-length'] ?? 0) > settings.maxBodyBytes
-    ) {
-      throw new PayloadTooLargeException();
-    }
+
+    await this.limit(
+      reply,
+      `cloud-mcp-addr:${tenantSlug}:${request.ip}`,
+      PER_ADDRESS_LIMIT,
+    );
 
     const resource = cloudMcpResourceUrl(host, tenantSlug, agentSlug);
     const scope = cloudMcpScope(agentSlug);
@@ -117,17 +136,23 @@ export class CloudMcpAuthGuard implements CanActivate {
       unverified,
       tenantSlug,
       agentSlug,
+      `https://${host}/mcp/`,
       resource,
       scope,
     );
     if ('status' in outcome) {
-      await this.recordRejection(
-        tenantSlug,
-        agentSlug,
-        token,
-        unverified,
-        outcome.reason,
-      );
+      recordCloudMcpRejection(outcome.reason);
+      if (outcome.tenantId) {
+        await this.recordRejection(
+          outcome.tenantId,
+          agentSlug,
+          token,
+          unverified,
+          outcome.reason,
+        );
+      } else {
+        this.sampledLog(tenantSlug, request.ip, outcome.reason);
+      }
       reply.header(
         'WWW-Authenticate',
         challenge(
@@ -140,16 +165,27 @@ export class CloudMcpAuthGuard implements CanActivate {
     }
 
     const { context: agentContext } = outcome;
+    await this.limit(
+      reply,
+      `cloud-mcp:${agentContext.tenant.id}:${agentContext.agent.id}`,
+      settings.ratePerMinute,
+    );
+    request.cloudAgent = outcome;
+    return true;
+  }
+
+  private async limit(reply: FastifyReply, key: string, limit: number) {
     const usage = await failClosed('rate-limit-store', () =>
       this.limits.increment(
-        `cloud-mcp:${agentContext.tenant.id}:${agentContext.agent.id}`,
+        key,
         RATE_WINDOW_MS,
-        settings.ratePerMinute,
+        limit,
         RATE_WINDOW_MS,
         'cloud-mcp',
       ),
     );
     if (usage.isBlocked) {
+      recordCloudMcpRejection('rate_limited');
       reply.header(
         'Retry-After',
         String(Math.max(1, Math.ceil(usage.timeToBlockExpire))),
@@ -159,9 +195,6 @@ export class CloudMcpAuthGuard implements CanActivate {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
-
-    request.cloudAgent = outcome;
-    return true;
   }
 
   private async check(
@@ -169,6 +202,7 @@ export class CloudMcpAuthGuard implements CanActivate {
     unverified: JWTPayload,
     tenantSlug: string,
     agentSlug: string,
+    mcpPrefix: string,
     resource: string,
     scope: string,
   ): Promise<Rejection | { context: AgentContext; taskId: string }> {
@@ -185,6 +219,8 @@ export class CloudMcpAuthGuard implements CanActivate {
     }
 
     let payload: JWTPayload;
+    // jose checks the signature before any claim, so claim failures below are post-signature.
+    const verified = { status: 401 as const, tenantId: known.tenantId };
     try {
       ({ payload } = await jwtVerify(
         token,
@@ -197,11 +233,11 @@ export class CloudMcpAuthGuard implements CanActivate {
       ));
     } catch (error) {
       if (error instanceof joseErrors.JWTExpired) {
-        return { status: 401, reason: 'token_expired' };
+        return { ...verified, reason: 'token_expired' };
       }
       if (error instanceof joseErrors.JWTClaimValidationFailed) {
         return {
-          status: 401,
+          ...verified,
           reason:
             error.claim === 'aud' ? 'wrong_audience' : `invalid_${error.claim}`,
         };
@@ -215,9 +251,20 @@ export class CloudMcpAuthGuard implements CanActivate {
       // The realm's JWKS could not be fetched: fail closed (503), not "bad token".
       throwFailClosed('keycloak-jwks', error);
     }
-    if (payload.typ !== 'Bearer')
-      return { status: 401, reason: 'not_an_access_token' };
+    if (payload.typ !== 'Bearer') {
+      return { ...verified, reason: 'not_an_access_token' };
+    }
+    // A token for several agents is a token for none of them.
+    const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (audiences.some((a) => a?.startsWith(mcpPrefix) && a !== resource)) {
+      return { ...verified, reason: 'foreign_audience' };
+    }
 
+    const forbidden = (reason: string): Rejection => ({
+      status: 403,
+      reason,
+      tenantId: known.tenantId,
+    });
     const tenantClient = await failClosed('tenant-db', () =>
       this.tenants.getClient(known.tenantId),
     );
@@ -229,23 +276,32 @@ export class CloudMcpAuthGuard implements CanActivate {
     );
     const binding = agent?.cloudBinding;
     if (!agent || agent.kind !== 'CLOUD' || !binding) {
-      return { status: 403, reason: 'unknown_agent' };
+      return forbidden('unknown_agent');
     }
-    if (agent.status !== 'ACTIVE')
-      return { status: 403, reason: 'agent_not_active' };
+    if (agent.status !== 'ACTIVE') return forbidden('agent_not_active');
 
-    const clientId = typeof payload.azp === 'string' ? payload.azp : '';
-    const clientAllowed = binding.oauthClientId
-      ? clientId === binding.oauthClientId
-      : // Registered by the vendor itself (DCR): any realm client except the console's and the
-        // pre-registered clients of other cloud agents (which also see realm optional scopes).
-        clientId !== '' &&
-        clientId !== this.config.get('KEYCLOAK_CLIENT_ID', { infer: true }) &&
-        !clientId.startsWith(PRE_REGISTERED_CLIENT_PREFIX);
+    const roles = payload[AGENT_ROLE_CLAIM];
+    if (!Array.isArray(roles) || !roles.includes(cloudMcpRole(agentSlug))) {
+      return forbidden('user_not_allowed');
+    }
     const scopes =
       typeof payload.scope === 'string' ? payload.scope.split(' ') : [];
-    if (!clientAllowed || !scopes.includes(scope)) {
-      return { status: 403, reason: 'unknown_client' };
+    const clientId = typeof payload.azp === 'string' ? payload.azp : '';
+    if (!clientId || !scopes.includes(scope)) {
+      return forbidden('unknown_client');
+    }
+    if (binding.oauthClientId) {
+      if (clientId !== binding.oauthClientId)
+        return forbidden('unknown_client');
+    } else {
+      // ChatGPT: the first self-registered client to get this far is recorded; others refused.
+      const recorded =
+        binding.platform === 'CHATGPT' &&
+        !clientId.startsWith(PRE_REGISTERED_CLIENT_PREFIX) &&
+        (await failClosed('keycloak-admin', () =>
+          this.cloudAgents.bindDcrClient(known.tenantId, agent.id, clientId),
+        ));
+      if (!recorded) return forbidden('unknown_client');
     }
 
     return {
@@ -257,21 +313,17 @@ export class CloudMcpAuthGuard implements CanActivate {
     };
   }
 
-  /** Best effort: an audit failure never changes the refusal. */
+  /** Only for tokens whose realm signature verified; best effort, never changes the refusal. */
   private async recordRejection(
-    tenantSlug: string,
+    tenantId: string,
     agentSlug: string,
     token: string,
     unverified: JWTPayload,
     reason: string,
   ): Promise<void> {
     try {
-      const tenant = await this.control.tenant.findUnique({
-        where: { slug: tenantSlug },
-      });
-      if (!tenant || tenant.status !== 'ACTIVE') return;
-      const tenantClient = await this.tenants.getClient(tenant.id);
-      await this.audit.recordSafely(tenantClient, tenant.id, {
+      const tenantClient = await this.tenants.getClient(tenantId);
+      await this.audit.recordSafely(tenantClient, tenantId, {
         eventType: AUDIT_EVENT_TYPES.CLOUD_MCP_TOKEN_REJECTED,
         actor: { type: 'system', id: 'system:cloud-mcp' },
         data: {
@@ -290,5 +342,16 @@ export class CloudMcpAuthGuard implements CanActivate {
     } catch {
       // Audit is best effort here; the request is refused either way.
     }
+  }
+
+  private sampledLog(tenantSlug: string, ip: string, reason: string): void {
+    const key = `${tenantSlug}|${ip}`;
+    const now = Date.now();
+    if (now - (this.lastLogged.get(key) ?? 0) < LOG_SAMPLE_MS) return;
+    if (this.lastLogged.size > 10_000) this.lastLogged.clear();
+    this.lastLogged.set(key, now);
+    this.logger.warn(
+      `Refused an unverified token for tenant "${tenantSlug}" from ${ip}: ${reason} (sampled, one line per minute per address and tenant)`,
+    );
   }
 }

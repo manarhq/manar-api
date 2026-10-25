@@ -2,6 +2,14 @@ import type { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
 import type { AppConfig } from '../config/env.validation';
 
+const DNS_NAME =
+  /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+/** Client ids Manar gives pre-registered (Copilot Studio) clients. */
+export const PRE_REGISTERED_CLIENT_PREFIX = 'manar-cloud-';
+/** Token claim the agent scope's role mapper writes the user's agent role into. */
+export const AGENT_ROLE_CLAIM = 'manar_roles';
+
 /**
  * Public MCP endpoint for cloud agents (docs/cloud-agents.md). Off by default: with
  * `MANAR_MCP_ENABLED` unset or false the `/mcp/*` and protected resource metadata routes answer
@@ -24,7 +32,17 @@ export const CloudMcpConfigSchema = z.object({
    * anonymous Trusted Hosts policy when a ChatGPT agent is connected. Comma-separated, default
    * `chatgpt.com`.
    */
-  MANAR_MCP_DCR_TRUSTED_HOSTS: z.string().optional(),
+  MANAR_MCP_DCR_TRUSTED_HOSTS: z
+    .string()
+    .refine(
+      (value) =>
+        value
+          .split(',')
+          .map((host) => host.trim())
+          .every((host) => host === '' || DNS_NAME.test(host)),
+      'comma-separated plain host names (no scheme, port, path or wildcard)',
+    )
+    .optional(),
   /** Requests per cloud agent per minute, all MCP methods (default 60). */
   MANAR_MCP_RATE_LIMIT_PER_MINUTE: z.coerce
     .number()
@@ -96,4 +114,17 @@ export function cloudMcpMetadataUrl(
 /** The Keycloak client scope that puts one agent's MCP URL in the token audience. */
 export function cloudMcpScope(agentSlug: string): string {
   return `manar-mcp-${agentSlug}`;
+}
+
+/** Realm role a person needs to use one cloud agent (assigned by the tenant admin). */
+export function cloudMcpRole(agentSlug: string): string {
+  return `manar-agent-${agentSlug}`;
+}
+
+/** Routes of the public endpoint (they are not part of the human API's rate limit). */
+export function isCloudMcpPath(url: string): boolean {
+  return (
+    url.startsWith('/mcp/') ||
+    url.startsWith('/.well-known/oauth-protected-resource/mcp/')
+  );
 }
