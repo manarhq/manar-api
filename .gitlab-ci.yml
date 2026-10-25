@@ -208,7 +208,15 @@ test:e2e:
       alias: opensearch
       # discovery.type has a dot, which a CI variable name cannot carry;
       # the image's entrypoint passes -E flags through to OpenSearch.
-      command: ['opensearch', '-Ediscovery.type=single-node']
+      # path.data: the runner mounts a root-owned tmpfs on the default data
+      # directory, which the opensearch user cannot write, so the node never
+      # came up (test:e2e timed out, exit 124). /tmp is writable.
+      command:
+        [
+          'opensearch',
+          '-Ediscovery.type=single-node',
+          '-Epath.data=/tmp/opensearch-data',
+        ]
       variables:
         DISABLE_SECURITY_PLUGIN: 'true'
         OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
@@ -634,8 +642,8 @@ release-image:
   dependencies: []
   parallel:
     matrix:
-      - {IMAGE: manar-api, TARGET: 'runtime'}
-      - {IMAGE: manar-api-worker, TARGET: 'worker'}
+      - { IMAGE: manar-api, TARGET: 'runtime' }
+      - { IMAGE: manar-api-worker, TARGET: 'worker' }
   script:
     - |
       set -eu
