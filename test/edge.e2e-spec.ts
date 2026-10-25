@@ -752,7 +752,7 @@ describe('Manar edge (e2e)', () => {
           },
         });
       const batch = {
-        batchId: `b-${randomUUID()}`,
+        batchId: randomUUID(),
         events: [
           event(agent.edge.peerId, 'once.example.com'),
           event(other.edge.peerId, 'once.example.com'),
@@ -772,6 +772,12 @@ describe('Manar edge (e2e)', () => {
       expect(retry.body).toEqual({ accepted: 0, skipped: 0, duplicates: 2 });
       expect(await count(t1.id, 'once.example.com')).toBe(1);
       expect(await count(t2.id, 'once.example.com')).toBe(1);
+      // The gateway sends a UUID per batch; anything else is refused.
+      await http()
+        .post('/internal/v1/edge/events')
+        .set(gateway)
+        .send({ ...batch, batchId: 'b-1' })
+        .expect(400);
 
       // Tenant two suspended (its database refused): tenant one's events still land.
       await http(appA)
@@ -1026,7 +1032,13 @@ describe('Manar edge (e2e)', () => {
         await locker.query('ROLLBACK');
         await locker.end();
       }
-      await appA.get(EdgePeerService).allChanged();
+      // No other change: the recompute scheduled by the failed read restores it within seconds.
+      const deadline = Date.now() + 15_000;
+      while (
+        (await row(hung.edge.peerId)).state !== 'active' &&
+        Date.now() < deadline
+      )
+        await new Promise((r) => setTimeout(r, 500));
       await expectState(hung.edge.peerId, 'active');
       await http()
         .post(`/agents/${otherTenant.agentId}/kill-switch/deactivate`)

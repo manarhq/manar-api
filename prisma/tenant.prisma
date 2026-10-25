@@ -1991,3 +1991,14 @@ model AgentEgressRule {
   @@unique([agentId, host])
   @@map("agent_egress_rules")
 }
+
+/// docs/edge.md: gateway event batches (UUID per batch) already recorded in this tenant. Written in
+/// the same transaction as the batch's audit events, so a retried batch is recorded once and a crash
+/// loses nothing. Rows older than a day are deleted by the next batch.
+model EdgeEventBatch {
+  batchId   String   @id
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("edge_event_batches")
+}

@@ -83,17 +83,17 @@ export class AgentEnrollController {
       tenant.id,
     );
 
-    // The edge preflight runs only for a token that verifies (read-only, not consumed), scoped to
-    // the agent it names: an unauthenticated caller learns nothing about keys or the address pool.
-    // A token that does not verify goes on to `enroll`, which refuses it (uniform 401) and audits.
-    const verified = input.edge
-      ? await this.agentsService.verifyEnrollmentToken(
-          tenantClient,
-          input.token,
-          tokenParts.agentSlug,
-        )
-      : null;
-    if (input.edge && verified) {
+    // An edge request runs only for a token that verifies (read-only, not consumed; the agent it
+    // names): anything else gets the uniform 401 here, before a token is spent or a certificate
+    // signed, and an unauthenticated caller learns nothing about keys or the address pool.
+    if (input.edge) {
+      const verified = await this.agentsService.verifyEnrollmentToken(
+        tenantClient,
+        input.token,
+        tokenParts.agentSlug,
+      );
+      if (!verified)
+        throw new UnauthorizedException('Invalid enrollment token');
       try {
         await this.edgePeers.preflight({
           tenantId: tenant.id,

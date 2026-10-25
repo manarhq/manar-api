@@ -217,7 +217,17 @@ describe('EdgeGatewayGuard', () => {
     });
   });
 
-  it.each(['x-forwarded-for', 'forwarded', 'x-real-ip'])(
+  it.each([
+    'x-forwarded-for',
+    'x-forwarded-host',
+    'x-forwarded-proto',
+    'x-forwarded-port',
+    'forwarded',
+    'x-real-ip',
+    'via',
+    'cf-connecting-ip',
+    'true-client-ip',
+  ])(
     'answers 404 to a request that came through a proxy (%s), even with the right token',
     (name) => {
       expect(() =>
@@ -318,7 +328,7 @@ describe('POST /agents/enroll with edge', () => {
     expect(touched).toEqual(['tenant', 'verify']);
   });
 
-  it('runs no edge check for a token that does not verify: the same 401 as any bad token', async () => {
+  it('refuses an edge request whose token does not verify with the uniform 401: no token spent, nothing signed, no edge check', async () => {
     const preflight = vi.fn();
     const { c, touched } = controller(true, { preflight }, t, false);
     await expect(
@@ -328,7 +338,7 @@ describe('POST /agents/enroll with edge', () => {
       response: { message: 'Invalid enrollment token' },
     });
     expect(preflight).not.toHaveBeenCalled();
-    expect(touched).toEqual(['tenant', 'verify', 'enroll']);
+    expect(touched).toEqual(['tenant', 'verify']);
   });
 
   it('revokes the just-signed certificate when the edge step fails after signing', async () => {
@@ -390,6 +400,106 @@ describe('EdgePeerService hooks', () => {
       expect(reconcile).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(reconcile).toHaveBeenCalledWith(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('EdgePeerService reads and timers', () => {
+  it('a peer whose read hangs or fails is cut alone, the others are read, and a recompute is scheduled', async () => {
+    const svc = new EdgePeerService(
+      {} as ControlPrismaService,
+      {
+        getClient: () =>
+          Promise.resolve({
+            agentEgressRule: { findMany: () => Promise.resolve([]) },
+            agentCertificate: {
+              findFirst: () =>
+                Promise.resolve({ notAfter: new Date(Date.now() + 3_600_000) }),
+            },
+          }),
+      } as unknown as TenantDatabaseManager,
+      config({ MANAR_EDGE_ENABLED: 'false' }),
+      {
+        get: () => ({
+          checkAgent: (_db: unknown, _t: string, agentId: string) =>
+            agentId === 'hangs'
+              ? new Promise(() => undefined)
+              : agentId === 'fails'
+                ? Promise.reject(new Error('boom'))
+                : Promise.resolve({ killed: false }),
+        }),
+      } as unknown as ModuleRef,
+      {} as AuditService,
+    );
+    const markDirty = vi
+      .spyOn(svc as unknown as { markDirty: () => void }, 'markDirty')
+      .mockImplementation(() => undefined);
+    const result = new Map<
+      string,
+      { state: string; cutReason: string | null }
+    >();
+    const ticket = (id: string) => ({
+      id,
+      tenantId: 't',
+      agentId: id,
+      refreshSeq: 1,
+    });
+    await (
+      svc as unknown as {
+        computeTenant: (
+          t: string,
+          l: unknown[],
+          r: Map<string, unknown>,
+        ) => Promise<void>;
+      }
+    ).computeTenant(
+      't',
+      ['hangs', 'ok-1', 'fails', 'ok-2'].map(ticket),
+      result,
+    );
+    expect(result.get('hangs')).toMatchObject({
+      state: 'cut',
+      cutReason: 'enforcement_dependency_unavailable',
+    });
+    expect(result.get('fails')).toMatchObject({
+      state: 'cut',
+      cutReason: 'enforcement_dependency_unavailable',
+    });
+    expect(result.get('ok-1')).toMatchObject({ state: 'active' });
+    expect(result.get('ok-2')).toMatchObject({ state: 'active' });
+    expect(markDirty).toHaveBeenCalled();
+  }, 10_000);
+
+  it('arms the expiry timer at boot and re-arms it after it fires', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'setImmediate'] });
+    try {
+      const svc = new EdgePeerService(
+        {
+          edgePeer: {
+            findFirst: () =>
+              Promise.resolve({ certNotAfter: new Date(Date.now() + 1_000) }),
+            findMany: () => Promise.resolve([]),
+          },
+        } as unknown as ControlPrismaService,
+        {} as TenantDatabaseManager,
+        config({ MANAR_EDGE_ENABLED: 'true' }),
+        {} as ModuleRef,
+        {} as AuditService,
+      );
+      vi.spyOn(svc, 'reconcile').mockResolvedValue(undefined);
+      const schedule = vi.spyOn(
+        svc as unknown as { scheduleExpiry: () => Promise<void> },
+        'scheduleExpiry',
+      );
+      svc.onModuleInit();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(schedule).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_500);
+      // Fired: the expiry refresh re-arms it, and the finally re-arms it again.
+      expect(schedule.mock.calls.length).toBeGreaterThanOrEqual(2);
+      await svc.onModuleDestroy();
     } finally {
       vi.useRealTimers();
     }

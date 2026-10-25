@@ -26,8 +26,21 @@ export const EDGE_LONG_POLL_MS = 25_000;
 
 const digest = (value: string) => createHash('sha256').update(value).digest();
 
-/** Headers an ingress or proxy adds; the gateway calls the pod directly and sends none. */
-const PROXY_HEADERS = ['x-forwarded-for', 'forwarded', 'x-real-ip'];
+/**
+ * Headers an ingress, proxy or CDN adds; the gateway calls the pod directly and sends none. A
+ * defence in depth only: the controls are the token and the NetworkPolicy.
+ */
+const PROXY_HEADERS = [
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-forwarded-port',
+  'forwarded',
+  'x-real-ip',
+  'via',
+  'cf-connecting-ip',
+  'true-client-ip',
+];
 
 /**
  * 404, as if the routes did not exist, while the edge is off or when the request carries a
@@ -81,11 +94,8 @@ const EgressEventSchema = z.object({
 });
 
 const EgressBatchSchema = z.object({
-  /** Optional: the gateway's id for this batch; a retried batch with the same id is not recorded twice. */
-  batchId: z
-    .string()
-    .regex(/^[A-Za-z0-9._:-]{1,128}$/)
-    .optional(),
+  /** Optional UUID (the gateway sends a v4 per batch); a retried batch with the same id is recorded once. */
+  batchId: z.uuid().optional(),
   events: z.array(z.unknown()).max(500),
 });
 

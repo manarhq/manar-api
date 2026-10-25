@@ -341,7 +341,8 @@ networkPolicy:
     # and polls the sync API (/internal/v1/edge/*) on the HTTP port. Off by default; turn on with
     # MANAR_EDGE_ENABLED. The API serves /internal/* on the HTTP port only, never on agent-mtls.
     # Public ingress must never route /internal/* (manar-infra adds an explicit deny); the API also
-    # answers 404 there to any request carrying X-Forwarded-For, Forwarded or X-Real-IP.
+    # answers 404 to requests carrying proxy headers (X-Forwarded-*, Forwarded, Via, ...). The
+    # controls are the gateway token and this NetworkPolicy; the header check is defence in depth.
     edge-gateway:
       enabled: false
       ports:

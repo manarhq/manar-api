@@ -26,8 +26,9 @@ const FALLBACK_POLL_MS = 5_000;
 const RECONCILE_MS = 60_000;
 /** A tenant whose state cannot be read within this cuts its peers (fail closed) instead of delaying anyone else. */
 export const TENANT_READ_TIMEOUT_MS = 2_500;
-/** Tenants read in parallel during a refresh. */
+/** Tenants read in parallel during a refresh, and peers read in parallel within one tenant. */
 const TENANT_CONCURRENCY = 8;
+const PEER_CONCURRENCY = 4;
 /** Peers per reconcile batch; one short write transaction per batch. */
 const BATCH_SIZE = 200;
 /** A failed hook is retried after 100 ms and 300 ms, then marks the registry dirty. */
@@ -121,6 +122,21 @@ function view(row: EdgePeer): EdgePeerView {
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** Runs `fn` over `items`, at most `limit` at a time. */
+async function mapLimit<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  const queue = [...items];
+  await Promise.all(
+    Array.from({ length: Math.min(limit, queue.length) }, async () => {
+      for (let item = queue.shift(); item !== undefined; item = queue.shift())
+        await fn(item);
+    }),
+  );
+}
+
 /** Rejects after `ms`; the underlying work keeps running but nobody waits for it. */
 function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -187,6 +203,9 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
     this.reconcileTimer.unref();
     // Once at boot: a change that landed while no replica ran is not left waiting a minute.
     setImmediate(() => void this.reconcile());
+    setImmediate(
+      () => void this.scheduleExpiry().catch(() => this.markDirty()),
+    );
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -476,10 +495,10 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
     });
     const status = new Map(tenantRows.map((t) => [t.id, t.status]));
 
-    const groups = [...byTenant];
-    const worker = async () => {
-      for (let group = groups.shift(); group; group = groups.shift()) {
-        const [tenantId, list] = group;
+    await mapLimit(
+      [...byTenant],
+      TENANT_CONCURRENCY,
+      async ([tenantId, list]) => {
         const cutAll = (cutReason: string) =>
           list.forEach((t) =>
             result.set(t.id, { state: 'cut', cutReason, allowHosts: null }),
@@ -488,18 +507,16 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
         else if (status.get(tenantId) !== 'ACTIVE')
           cutAll(`tenant_${(status.get(tenantId) ?? 'missing').toLowerCase()}`);
         else await this.computeTenant(tenantId, list, result);
-      }
-    };
-    await Promise.all(
-      Array.from(
-        { length: Math.min(TENANT_CONCURRENCY, groups.length) },
-        worker,
-      ),
+      },
     );
     return result;
   }
 
-  /** One tenant: the first read that fails or times out cuts it and every peer not yet read. */
+  /**
+   * One tenant, its peers read 4 at a time, each read under its own `TENANT_READ_TIMEOUT_MS`. A
+   * read that fails or times out cuts that peer only (fail closed) and schedules a full recompute,
+   * so the peer comes back within seconds once the read works again.
+   */
   private async computeTenant(
     tenantId: string,
     list: Ticket[],
@@ -508,34 +525,44 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
     const killSwitches = this.moduleRef.get(KillSwitchService, {
       strict: false,
     });
-    let db: TenantPrismaClient | undefined;
-    for (const [i, target] of list.entries()) {
+    const failed = (ids: string[], error: unknown) => {
+      this.logger.warn(
+        `edge peer(s) ${ids.join(', ')} of tenant ${tenantId} cut: state lookup failed (${(error as Error).message})`,
+      );
+      for (const id of ids)
+        result.set(id, {
+          state: 'cut',
+          cutReason: 'enforcement_dependency_unavailable',
+          allowHosts: null,
+        });
+      this.markDirty();
+    };
+    let db: TenantPrismaClient;
+    try {
+      db = await withTimeout(
+        this.tenants.getClient(tenantId),
+        TENANT_READ_TIMEOUT_MS,
+      );
+    } catch (error) {
+      failed(
+        list.map((t) => t.id),
+        error,
+      );
+      return;
+    }
+    await mapLimit(list, PEER_CONCURRENCY, async (target) => {
       try {
-        db ??= await withTimeout(
-          this.tenants.getClient(tenantId),
-          TENANT_READ_TIMEOUT_MS,
-        );
-        const tenantDb = db;
         result.set(
           target.id,
           await withTimeout(
-            this.computeAgent(tenantDb, killSwitches, tenantId, target.agentId),
+            this.computeAgent(db, killSwitches, tenantId, target.agentId),
             TENANT_READ_TIMEOUT_MS,
           ),
         );
       } catch (error) {
-        this.logger.warn(
-          `edge peers of tenant ${tenantId} cut: state lookup failed (${(error as Error).message})`,
-        );
-        for (const rest of list.slice(i))
-          result.set(rest.id, {
-            state: 'cut',
-            cutReason: 'enforcement_dependency_unavailable',
-            allowHosts: null,
-          });
-        return;
+        failed([target.id], error);
       }
-    }
+    });
   }
 
   private async computeAgent(
@@ -597,6 +624,9 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
             state: 'active',
             certNotAfter: { lte: new Date() },
           }),
+        ).finally(
+          // Re-armed whatever happened (`refresh` arms it too when it gets that far).
+          () => void this.scheduleExpiry().catch(() => this.markDirty()),
         ),
       delay,
     );
@@ -751,9 +781,10 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
   /**
    * Gateway egress records as audit events in each peer's tenant, one transaction per tenant.
    * Records for an unknown peer are skipped; a tenant whose write fails (database gone,
-   * suspended, unavailable) is skipped and counted, never failing the others. With a `batchId`,
-   * each tenant's part is claimed once (`edge_event_batches`, kept a day), so a retried batch
-   * writes nothing twice.
+   * suspended, unavailable) is skipped and counted, never failing the others. With a `batchId`
+   * (a UUID), the batch is claimed in each tenant's `edge_event_batches` inside the same
+   * transaction as its audit events, so a retried batch is recorded once and a crash loses
+   * nothing (rows older than a day are purged by the next batch).
    */
   async recordEgress(
     events: EgressEvent[],
@@ -779,48 +810,44 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
       list.push({ event, agentId: peer.agentId });
       byTenant.set(peer.tenantId, list);
     }
-    if (batchId)
-      await this.control.edgeEventBatch.deleteMany({
-        where: { createdAt: { lt: new Date(Date.now() - EVENT_BATCH_TTL_MS) } },
-      });
     let accepted = 0;
     let duplicates = 0;
     for (const [tenantId, list] of byTenant) {
-      if (batchId) {
-        const claimed = await this.control.edgeEventBatch.createMany({
-          data: [{ batchId, tenantId }],
-          skipDuplicates: true,
-        });
-        if (claimed.count === 0) {
-          duplicates += list.length;
-          continue;
-        }
-      }
       try {
-        await this.writeEgress(tenantId, list);
-        accepted += list.length;
+        if (await this.writeEgress(tenantId, list, batchId))
+          accepted += list.length;
+        else duplicates += list.length;
       } catch (error) {
         this.logger.warn(
           `egress events for tenant ${tenantId} not written (${list.length}): ${(error as Error).message}`,
         );
         skipped += list.length;
-        // Unclaim, so the gateway's retry of this batch writes them.
-        if (batchId)
-          await this.control.edgeEventBatch
-            .deleteMany({ where: { batchId, tenantId } })
-            .catch(() => undefined);
       }
     }
     return { accepted, skipped, duplicates };
   }
 
+  /** False when this tenant already recorded `batchId`. */
   private async writeEgress(
     tenantId: string,
     list: { event: EgressEvent; agentId: string }[],
-  ): Promise<void> {
+    batchId: string | undefined,
+  ): Promise<boolean> {
     const db = await this.tenants.getClient(tenantId);
     const publishers = await db.$transaction(
       async (tx) => {
+        if (batchId) {
+          await tx.edgeEventBatch.deleteMany({
+            where: {
+              createdAt: { lt: new Date(Date.now() - EVENT_BATCH_TTL_MS) },
+            },
+          });
+          const claimed = await tx.edgeEventBatch.createMany({
+            data: [{ batchId }],
+            skipDuplicates: true,
+          });
+          if (claimed.count === 0) return null;
+        }
         const out: (() => void)[] = [];
         for (const { event, agentId } of list) {
           out.push(
@@ -842,6 +869,7 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
                 durationMs: event.durationMs,
                 ech: event.ech ?? null,
                 source: 'manar-edge-gateway',
+                ...(batchId ? { batchId } : {}),
               },
             }),
           );
@@ -850,6 +878,8 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
       },
       { timeout: 60_000 },
     );
+    if (!publishers) return false;
     publishers.forEach((publish) => publish());
+    return true;
   }
 }

@@ -32,10 +32,12 @@ enrollment token is spent:
 
 - edge off: 400 `{ code: "edge_not_enabled" }`;
 - not canonical base64 of 32 bytes: 400;
-- the key belongs to another agent, or the agent has no peer and no address is free: 409. This
-  read-only check runs only after the token verifies (known, unused, unexpired, for this agent;
-  not consumed), scoped to that agent; any token that does not verify gets the uniform 401, so an
-  unauthenticated caller learns nothing about keys or the address pool.
+- a token that does not verify (unknown, used, expired, terminal agent, or not the agent it
+  names; checked read-only, not consumed): the uniform 401, before any token is spent or
+  certificate signed;
+- the key belongs to another agent, or the agent has no peer and no address is free: 409, checked
+  only after the token verifies and scoped to that agent, so an unauthenticated caller learns
+  nothing about keys or the address pool.
 
 If the edge step still fails after the certificate is signed (a race the read-only check could not
 see), that certificate is revoked before the answer (audited as `agent.enrollment_failed`,
@@ -60,9 +62,10 @@ tenant database stays the source of truth. `EdgePeerService` recomputes a peer f
 `state`, `cutReason` and `allowHosts`.
 
 How a refresh runs: it takes a ticket per peer (`refreshSeq + 1`), then reads the control and
-tenant databases outside any lock. Tenants are read in parallel (8 at a time), each read under a
-2.5 s timeout; a tenant that does not answer in time, or a read that fails, cuts that tenant's peers
-(`enforcement_dependency_unavailable`) and delays nobody else. Only the write takes the
+tenant databases outside any lock. Tenants are read in parallel (8 at a time) and peers within a
+tenant 4 at a time, each peer's read under its own 2.5 s timeout. A read that times out or fails
+cuts that peer only (`enforcement_dependency_unavailable`), delays nobody else, and schedules a full
+recompute 5 s later, so the peer returns within seconds once the read works again. Only the write takes the
 `edge_state` row lock, and a peer is written only if no fresher ticket was applied (`appliedSeq`),
 so a slow, stale read never overwrites a newer one. Large refreshes run in batches of 200 peers,
 one short write transaction each. A peer is `cut` while any of
@@ -103,8 +106,8 @@ and before it answers:
 The hooks never fail the action they follow. A failed refresh is retried twice (100 ms, 300 ms); if
 it still fails, a full recompute runs 5 s later on that replica. The reconcile recomputes every peer
 at boot and then every 60 s on the replica holding the lease, which also covers changes made to a
-tenant database outside these paths. A timer fires at the earliest certificate expiry among active
-peers, so an expired certificate cuts its peer at expiry without any other change. Back to `active` happens only when a recompute finds nothing that stops the
+tenant database outside these paths. A timer, armed at boot and re-armed after every refresh and
+every time it fires, runs at the earliest certificate expiry among active peers, so an expired certificate cuts its peer at expiry without any other change. Back to `active` happens only when a recompute finds nothing that stops the
 agent, and every way back (release, deactivation, resume, AI system back to ACTIVE) is a human API
 call.
 
@@ -120,10 +123,12 @@ On the HTTP port only. `EdgeHttpModule` is imported by `AppModule` and never by
 `Authorization: Bearer <MANAR_EDGE_GATEWAY_TOKEN>`, compared in constant time; anything else is a
 bare 401. They are left out of the OpenAPI document.
 
-Public ingress must never route `/internal/*` (manar-infra adds an explicit deny). As a second
-line, the routes answer 404 to any request carrying `X-Forwarded-For`, `Forwarded` or `X-Real-IP`,
-which an ingress or proxy adds and the gateway, calling the pod directly, never sends: a misrouted
-public path cannot reach them even with a leaked token.
+The controls are the token and the NetworkPolicy (only the gateway pods reach the HTTP port from
+outside manar-prod). Public ingress must never route `/internal/*` (manar-infra adds an explicit
+deny). As defence in depth only, the routes answer 404 to any request carrying a header an ingress,
+proxy or CDN adds and the gateway, calling the pod directly, never sends: `X-Forwarded-For`,
+`X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, `Forwarded`, `X-Real-IP`, `Via`,
+`CF-Connecting-IP`, `True-Client-IP`.
 
 - `GET /internal/v1/edge/peers?after=<version>`: `after=0`, a missing value or a version the server
   does not have (higher than its own) returns `full: true` with every peer, cut ones included.
@@ -143,10 +148,11 @@ public path cannot reach them even with a leaked token.
   `ech_not_allowed`, `private_address`, `peer_cut`, `dns_failed`, `dial_failed`, ...). Records
   with an unknown peer or an invalid shape are skipped; so are a tenant's records when writing them
   fails (database gone, suspended, unavailable), without failing the other tenants. The answer is
-  `{ accepted, skipped, duplicates }`, one transaction per tenant. Optional `batchId`
-  (`^[A-Za-z0-9._:-]{1,128}$`): each tenant's part of a batch is claimed once in
-  `edge_event_batches` (kept a day), so a retried batch is not recorded twice (`duplicates`); a
-  part that failed is unclaimed, so the retry writes it.
+  `{ accepted, skipped, duplicates }`, one transaction per tenant. Optional `batchId`, a
+  UUID (400 otherwise; the gateway sends a v4 per batch, a contract addition): each tenant claims
+  it in its own `edge_event_batches` table inside the same transaction as the audit events (rows
+  kept a day), so a retried batch is recorded once (`duplicates`) and a crash between claim and
+  write cannot happen.
 
 ## Egress allow-list
 

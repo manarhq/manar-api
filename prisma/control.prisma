@@ -273,15 +273,3 @@ model EdgeState {
 
   @@map("edge_state")
 }
-
-/// Gateway event batches already written, per tenant, so a retried batch (same `batchId`) is not
-/// recorded twice. Rows older than a day are deleted on the next batch.
-model EdgeEventBatch {
-  batchId   String
-  tenantId  String
-  createdAt DateTime @default(now())
-
-  @@id([batchId, tenantId])
-  @@index([createdAt])
-  @@map("edge_event_batches")
-}

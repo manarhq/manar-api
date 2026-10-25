@@ -5,8 +5,7 @@
 --
 -- Rollback (after rolling back the code that reads them; the gateway then has no peers, so every
 -- edge agent loses its tunnel until it re-enrolls on a build with the feature):
---   DROP TABLE "edge_peers"; DROP TABLE "edge_state"; DROP TABLE "edge_event_batches";
---   DROP TYPE "EdgePeerState";
+--   DROP TABLE "edge_peers"; DROP TABLE "edge_state"; DROP TYPE "EdgePeerState";
 
 -- CreateEnum
 CREATE TYPE "EdgePeerState" AS ENUM ('active', 'cut');
@@ -41,18 +40,6 @@ CREATE TABLE "edge_state" (
 
     CONSTRAINT "edge_state_pkey" PRIMARY KEY ("id")
 );
-
--- CreateTable
-CREATE TABLE "edge_event_batches" (
-    "batchId" TEXT NOT NULL,
-    "tenantId" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "edge_event_batches_pkey" PRIMARY KEY ("batchId","tenantId")
-);
-
--- CreateIndex
-CREATE INDEX "edge_event_batches_createdAt_idx" ON "edge_event_batches"("createdAt");
 
 -- The singleton every peer change locks and bumps.
 INSERT INTO "edge_state" ("id", "version") VALUES ('singleton', 0);
