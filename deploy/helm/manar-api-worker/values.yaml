@@ -82,8 +82,8 @@ resources:
     memory: 768Mi
 
 # No HTTP server in this process (see chart doc comment above) — liveness
-# is a process-existence check via busybox `ps` (already on PATH in the
-# node:24-alpine runtime image; no extra tooling installed), mirroring the
+# is a process-existence check on PID 1's command line with `sh` and `grep`
+# (the Debian runtime image has no `ps`; no extra tooling installed), mirroring the
 # Dockerfile worker stage's own doc comment ("a liveness probe on the
 # process itself"). No readinessProbe: this Deployment has no Service to
 # gate traffic on, and Temporal's own worker-heartbeat visibility (also
@@ -94,7 +94,7 @@ livenessProbe:
     command:
       - sh
       - -c
-      - "ps aux | grep '[w]orker.main.js'"
+      - 'grep -q worker.main.js /proc/1/cmdline'
   initialDelaySeconds: 10
   periodSeconds: 15
   timeoutSeconds: 5
