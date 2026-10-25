@@ -73,9 +73,8 @@ spec:
           across the window in which this pod has been marked Terminating
           but kube-proxy/the ingress have not finished removing it from
           their endpoint tables — the race that makes rollouts drop
-          in-flight requests. `sleep` is busybox's, already on PATH in the
-          node:24-alpine runtime image (same assumption the worker chart's
-          exec liveness probe makes). No shell needed, so this works with
+          in-flight requests. `sleep` is coreutils', already on PATH in the
+          Debian runtime image. No shell needed, so this works with
           readOnlyRootFilesystem and every capability dropped.
           */}}
           lifecycle:
