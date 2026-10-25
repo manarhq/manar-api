@@ -21,7 +21,13 @@ const AUTH = {
   user: { id: 'user-1' },
 } as unknown as AuthContext;
 
-function setup(options: { failClientOnce?: boolean; taken?: boolean } = {}) {
+function setup(
+  options: {
+    failClientOnce?: boolean;
+    taken?: boolean;
+    roleConflict?: boolean;
+  } = {},
+) {
   let agent: Record<string, unknown> | null = null;
   let binding: Record<string, unknown> | null = null;
   const tenantClient = {
@@ -53,18 +59,22 @@ function setup(options: { failClientOnce?: boolean; taken?: boolean } = {}) {
     findClientScopeId: vi.fn().mockResolvedValue(undefined),
     realmRoleExists: vi.fn().mockResolvedValue(false),
     identityProviderExists: vi.fn().mockResolvedValue(true),
-    createRealmRole: vi.fn().mockResolvedValue(undefined),
+    createRealmRole: vi.fn(() =>
+      options.roleConflict
+        ? Promise.reject(
+            new Error('Keycloak Admin API POST failed with HTTP 409'),
+          )
+        : Promise.resolve(),
+    ),
+    realmRoleId: vi.fn().mockResolvedValue('role-id'),
     createAgentClientScope: vi.fn().mockResolvedValue('scope-id'),
     createMcpClient: vi.fn(() =>
       clientFailures-- > 0
         ? Promise.reject(new Error('Keycloak down'))
-        : Promise.resolve('secret'),
+        : Promise.resolve({ uuid: 'client-uuid', secret: 'secret' }),
     ),
     updateDcrPolicy: vi.fn().mockResolvedValue([]),
-    deleteClient: vi.fn().mockResolvedValue(undefined),
-    deleteClientScope: vi.fn().mockResolvedValue(undefined),
-    deleteRealmRole: vi.fn().mockResolvedValue(undefined),
-    deleteIdpMapper: vi.fn().mockResolvedValue(undefined),
+    deleteById: vi.fn().mockResolvedValue(undefined),
   };
   const tasks = {
     createTask: vi.fn().mockResolvedValue({ id: 'task-1' }),
@@ -112,18 +122,11 @@ describe('CloudAgentsService.connect', () => {
   it('undoes what it made in Keycloak when a step fails, and resumes under the same slug', async () => {
     const { service, kc, state } = setup({ failClientOnce: true });
     await expect(service.connect(AUTH, input)).rejects.toThrow('Keycloak down');
-    expect(kc.deleteClient).toHaveBeenCalledWith(
-      'acme',
-      'manar-cloud-copilot-1',
-    );
-    expect(kc.deleteClientScope).toHaveBeenCalledWith(
-      'acme',
-      'manar-mcp-copilot-1',
-    );
-    expect(kc.deleteRealmRole).toHaveBeenCalledWith(
-      'acme',
-      'manar-agent-copilot-1',
-    );
+    // The client was never created: nothing of it is deleted. What was created goes, by id.
+    expect(kc.deleteById.mock.calls).toEqual([
+      ['acme', 'client-scopes/scope-id'],
+      ['acme', 'roles-by-id/role-id'],
+    ]);
     expect(state().agent?.status).toBe('PENDING_ENROLLMENT');
     expect(state().binding).toBeNull();
 
@@ -136,7 +139,18 @@ describe('CloudAgentsService.connect', () => {
     expect(state().agent?.status).toBe('ACTIVE');
     expect(state().binding).toMatchObject({
       oauthScope: 'manar-mcp-copilot-1',
+      keycloakIds: {
+        roleId: 'role-id',
+        scopeId: 'scope-id',
+        clientUuid: 'client-uuid',
+      },
     });
+  });
+
+  it("a conflict on create is never cleaned up: the object is someone else's", async () => {
+    const { service, kc } = setup({ roleConflict: true });
+    await expect(service.connect(AUTH, input)).rejects.toThrow('HTTP 409');
+    expect(kc.deleteById).not.toHaveBeenCalled();
   });
 
   it('refuses before creating anything when the realm already has the client name', async () => {

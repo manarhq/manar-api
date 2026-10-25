@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  Get,
   Param,
   Post,
   Put,
@@ -23,6 +24,7 @@ import { parseBodyOrThrow } from '../agents/parse-body.util';
 import {
   BindTaskSchema,
   CloudAgentsService,
+  ConfirmClientSchema,
   ConnectCloudAgentSchema,
   DisconnectSchema,
   EntraIdpSchema,
@@ -106,11 +108,41 @@ export class CloudAgentsController {
     );
   }
 
+  @Get(':id')
+  @ApiOperation({
+    summary: 'A cloud agent binding',
+    description:
+      'Platform, standing task, confirmed client and, for ChatGPT, the self-registered client waiting for confirmation (registration time, redirect URIs, grants).',
+  })
+  @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
+  describe(@CurrentAuth() auth: AuthContext, @Param('id') agentId: string) {
+    return this.cloudAgents.describe(auth, agentId);
+  }
+
+  @Post(':id/oauth-client/confirm')
+  @ApiOperation({
+    summary: 'Confirm the client a ChatGPT agent registered',
+    description:
+      'Body `{ clientId }`, which must be the waiting client. Until confirmed, its calls get 403 `cloud_client_pending_approval`. Keycloak then requires PKCE S256 from it.',
+  })
+  @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
+  confirmClient(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') agentId: string,
+    @Body() body: unknown,
+  ) {
+    return this.cloudAgents.confirmDcrClient(
+      auth,
+      agentId,
+      parseBodyOrThrow(ConfirmClientSchema, body).clientId,
+    );
+  }
+
   @Delete(':id/oauth-client')
   @ApiOperation({
-    summary: 'Forget the client a ChatGPT agent registered',
+    summary: 'Reject or forget the client a ChatGPT agent registered',
     description:
-      'Deletes the recorded self-registered client in Keycloak; the next client that authenticates for this agent is recorded instead (the connector was recreated in ChatGPT).',
+      'Rejects the waiting client or forgets the confirmed one, and deletes every self-registered client carrying this agent scope; the connector must register again and wait for confirmation.',
   })
   @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
   resetDcrClient(

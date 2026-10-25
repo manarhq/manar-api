@@ -28,6 +28,7 @@ import { PlatformConfigSchema } from '../platform/platform.config';
 import { FleetHeartbeatConfigSchema } from '../fleet-heartbeat/fleet-heartbeat.config';
 import { MetricsConfigSchema } from '../metrics/metrics';
 import { LicensingConfigSchema } from '../licensing/licensing.config';
+import { TrustedProxyConfigSchema } from './trusted-proxy';
 import {
   CloudMcpConfigSchema,
   cloudMcpConfigIssues,
@@ -80,6 +81,7 @@ export const AppConfigSchema = z
   .extend(MetricsConfigSchema.shape)
   .extend(LicensingConfigSchema.shape)
   .extend(CloudMcpConfigSchema.shape)
+  .extend(TrustedProxyConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {

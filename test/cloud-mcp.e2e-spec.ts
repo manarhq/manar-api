@@ -19,6 +19,7 @@ import type { FastifyInstance } from 'fastify';
 import request from 'supertest';
 import { decodeJwt } from 'jose';
 import { AppModule } from '../src/app.module';
+import { httpAdapterOptions } from '../src/config/trusted-proxy';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
@@ -89,6 +90,7 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
   let ownerToken: string;
   let owner: { id: string; username: string; email: string };
   const extraRealms: string[] = [];
+  let base: string;
 
   const http = () => request(app.getHttpServer());
   const admin = () => `Bearer ${ownerToken}`;
@@ -220,10 +222,19 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
       })
       .compile();
     app = moduleFixture.createNestApplication<NestFastifyApplication>(
-      new FastifyAdapter(),
+      // As main.ts builds it; here the test client is the trusted proxy, so X-Forwarded-For
+      // stands in for the caller cloudflared and Traefik would report.
+      new FastifyAdapter(
+        httpAdapterOptions({
+          MANAR_TRUSTED_PROXY_CIDRS:
+            '127.0.0.1/32,::1/128,::ffff:127.0.0.1/128',
+        }),
+      ),
     );
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
+    await app.listen(0, '127.0.0.1');
+    base = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
     control = app.get(ControlPrismaService);
     tenants = app.get(TenantDatabaseManager);
 
@@ -522,13 +533,56 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
       expect(await tenantClient.auditEvent.count()).toBe(before);
     });
 
-    it('a body over the cap is refused before it is read', async () => {
-      const res = await http()
+    it('the body cap holds for declared and chunked bodies; a small chunked body is served', async () => {
+      const declared = await http()
         .post(path)
         .set('Authorization', `Bearer ${token}`)
         .set('Content-Type', 'application/json')
         .send(JSON.stringify({ padding: 'x'.repeat(300_000) }));
-      expect(res.status).toBe(413);
+      expect(declared.status).toBe(413);
+
+      const chunked = (text: string) =>
+        fetch(`${base}${path}`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+          },
+          // A stream body has no Content-Length: it goes out chunked.
+          body: new ReadableStream({
+            start(controller) {
+              const bytes = new TextEncoder().encode(text);
+              for (let i = 0; i < bytes.length; i += 16_384) {
+                controller.enqueue(bytes.slice(i, i + 16_384));
+              }
+              controller.close();
+            },
+          }),
+          duplex: 'half',
+        } as RequestInit);
+      const big = await chunked(
+        JSON.stringify({ padding: 'x'.repeat(300_000) }),
+      );
+      expect(big.status).toBe(413);
+      const small = await chunked(
+        JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      );
+      expect(small.status).toBe(200);
+    });
+
+    it('refused calls spend a per-caller budget (real address via trusted proxies), never the agent budget', async () => {
+      const from = (ip: string, bearer?: string) =>
+        mcp(path, bearer, 'tools/list').set('X-Forwarded-For', ip);
+      let last = 0;
+      for (let i = 0; i < 61; i += 1) {
+        last = (await from('198.51.100.10', 'not-a-jwt')).status;
+      }
+      expect(last).toBe(429);
+      // Another caller behind the same proxies has its own budget...
+      expect((await from('198.51.100.11', 'not-a-jwt')).status).toBe(401);
+      // ...and a valid token from the throttled address still works: separate budgets.
+      expect((await from('198.51.100.10', token)).status).toBe(200);
     });
 
     it('the callback URL and the standing task can be replaced; the client keeps its audience scope', async () => {
@@ -638,38 +692,40 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
   });
 
   describe('ChatGPT (dynamic client registration)', () => {
-    it('records the first registered client, refuses others, and disconnecting closes DCR', async () => {
+    it('the first eligible client waits for an admin, is confirmed, others stay refused; disconnecting deletes them and closes DCR', async () => {
       const agent = await connect('CHATGPT');
       expect(agent.clientId).toBeUndefined();
       const path = new URL(agent.mcpUrl).pathname;
-      const register = async (redirect: string) =>
+      type Registered = { client_id: string; client_secret: string };
+      const register = async (redirect: string, grants: string[]) =>
         fetch(agent.registrationUrl!, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             client_name: 'ChatGPT',
             redirect_uris: [redirect],
-            // A registrant may ask for the password grant; Manar turns it off when it records the client.
-            grant_types: ['authorization_code', 'refresh_token', 'password'],
+            grant_types: grants,
             response_types: ['code'],
             token_endpoint_auth_method: 'client_secret_basic',
             scope: agent.scopes[0],
           }),
         });
-      expect((await register('https://evil.example/callback')).status).toBe(
-        403,
-      );
-      const first = (await (await register(CHATGPT_CALLBACK)).json()) as {
-        client_id: string;
-        client_secret: string;
-      };
-      const second = (await (await register(CHATGPT_CALLBACK)).json()) as {
-        client_id: string;
-        client_secret: string;
-      };
+      const codeOnly = ['authorization_code', 'refresh_token'];
+      expect(
+        (await register('https://evil.example/callback', codeOnly)).status,
+      ).toBe(403);
+      const withPassword = (await (
+        await register(CHATGPT_CALLBACK, [...codeOnly, 'password'])
+      ).json()) as Registered;
+      const first = (await (
+        await register(CHATGPT_CALLBACK, codeOnly)
+      ).json()) as Registered;
+      const second = (await (
+        await register(CHATGPT_CALLBACK, codeOnly)
+      ).json()) as Registered;
 
       const user = await person(agent.role);
-      const tokenFor = (c: { client_id: string; client_secret: string }) =>
+      const tokenFor = (c: Registered) =>
         vendorToken(
           {
             clientId: c.client_id,
@@ -679,26 +735,72 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
           user,
           `openid ${agent.scopes[0]}`,
         );
+      const reason = async (token: string) => {
+        const res = await mcp(path, token, 'tools/list');
+        return res.status === 200
+          ? 'ok'
+          : (res.body as { reason: string }).reason;
+      };
+
+      // A client that asked for the password grant is never eligible.
+      expect(await reason(await tokenFor(withPassword))).toBe('unknown_client');
       const firstToken = await tokenFor(first);
       expect(decodeJwt(firstToken).aud).toContain(agent.mcpUrl);
-      expect((await mcp(path, firstToken, 'tools/list')).status).toBe(200);
+      expect(await reason(firstToken)).toBe('cloud_client_pending_approval');
+      expect(await reason(firstToken)).toBe('cloud_client_pending_approval');
+      const secondToken = await tokenFor(second);
+      expect(await reason(secondToken)).toBe('unknown_client');
 
       const tenantClient = await tenants.getClient(tenantA.id);
-      const binding = await tenantClient.cloudAgentBinding.findUniqueOrThrow({
-        where: { agentId: agent.agent.id },
+      const pendingEvents = await tenantClient.auditEvent.findMany({
+        where: { eventType: 'cloud_agent.client_pending' },
       });
-      expect(binding.oauthClientId).toBe(first.client_id);
-      const [recorded] = await kcJson<{ directAccessGrantsEnabled: boolean }[]>(
-        `/admin/realms/${realm}/clients?clientId=${first.client_id}`,
-      );
-      expect(recorded!.directAccessGrantsEnabled).toBe(false);
+      expect(
+        pendingEvents.filter(
+          (e) => (e.data as { agentId: string }).agentId === agent.agent.id,
+        ),
+      ).toHaveLength(1);
+      const shown = await http()
+        .get(`/cloud-agents/${agent.agent.id}`)
+        .set('Authorization', admin())
+        .expect(200);
+      expect(shown.body).toMatchObject({
+        oauthClientId: null,
+        pendingClient: {
+          clientId: first.client_id,
+          redirectUris: [CHATGPT_CALLBACK],
+          grants: {
+            authorizationCode: true,
+            password: false,
+            serviceAccount: false,
+          },
+        },
+      });
 
-      const secondToken = await tokenFor(second);
-      const refused = await mcp(path, secondToken, 'tools/list');
-      expect([refused.status, refused.body]).toEqual([
-        403,
-        expect.objectContaining({ reason: 'unknown_client' }),
-      ]);
+      await http()
+        .post(`/cloud-agents/${agent.agent.id}/oauth-client/confirm`)
+        .set('Authorization', admin())
+        .send({ clientId: second.client_id })
+        .expect(409);
+      await http()
+        .post(`/cloud-agents/${agent.agent.id}/oauth-client/confirm`)
+        .set('Authorization', admin())
+        .send({ clientId: first.client_id })
+        .expect(201);
+      expect(await reason(firstToken)).toBe('ok');
+      expect(await reason(secondToken)).toBe('unknown_client');
+      const [confirmed] = await kcJson<
+        {
+          fullScopeAllowed: boolean;
+          directAccessGrantsEnabled: boolean;
+          attributes: Record<string, string>;
+        }[]
+      >(`/admin/realms/${realm}/clients?clientId=${first.client_id}`);
+      expect(confirmed).toMatchObject({
+        fullScopeAllowed: false,
+        directAccessGrantsEnabled: false,
+      });
+      expect(confirmed!.attributes['pkce.code.challenge.method']).toBe('S256');
 
       await http()
         .delete(`/cloud-agents/${agent.agent.id}`)
@@ -710,18 +812,20 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
         403,
         expect.objectContaining({ reason: 'agent_not_active' }),
       ]);
-      expect(
-        await kcJson<unknown[]>(
-          `/admin/realms/${realm}/clients?clientId=${first.client_id}`,
-        ),
-      ).toEqual([]);
+      for (const c of [first, second, withPassword]) {
+        expect(
+          await kcJson<unknown[]>(
+            `/admin/realms/${realm}/clients?clientId=${c.client_id}`,
+          ),
+        ).toEqual([]);
+      }
       const scopes = await kcJson<{ name: string }[]>(
         `/admin/realms/${realm}/client-scopes`,
       );
-      expect(scopes.map((s) => s.name)).not.toContain(agent.scopes[0]);
+      expect(scopes.map((sc) => sc.name)).not.toContain(agent.scopes[0]);
       // The last ChatGPT agent is gone: anonymous registration is closed again.
-      expect((await register(CHATGPT_CALLBACK)).status).toBe(403);
-    }, 60_000);
+      expect((await register(CHATGPT_CALLBACK, codeOnly)).status).toBe(403);
+    }, 90_000);
   });
 
   describe('connecting', () => {
@@ -885,6 +989,10 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
       expect(executions.map((e) => [e.providerId, e.requirement])).toEqual([
         ['idp-create-user-if-unique', 'REQUIRED'],
       ]);
+      const realmSettings = await kcJson<{ duplicateEmailsAllowed: boolean }>(
+        `/admin/realms/${realm}`,
+      );
+      expect(realmSettings.duplicateEmailsAllowed).toBe(false);
     });
 
     it('an upstream identity with an existing user email does not get that user', async () => {
@@ -959,5 +1067,24 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
         (await mcp(new URL(agent.mcpUrl).pathname, token, 'tools/list')).status,
       ).toBe(200);
     }, 60_000);
+
+    it('refuses to configure the provider when the first login flow was changed', async () => {
+      await adminFetch(
+        `/admin/realms/${realm}/authentication/flows/${encodeURIComponent('manar first broker login')}/executions/execution`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ provider: 'idp-review-profile' }),
+        },
+      );
+      const res = await http()
+        .put('/cloud-agents/entra-identity-provider')
+        .set('Authorization', admin())
+        .send({
+          directoryId: randomUUID(),
+          clientId: randomUUID(),
+          clientSecret: 'e2e-not-a-real-secret',
+        });
+      expect(res.status).toBe(409);
+    });
   });
 });

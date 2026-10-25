@@ -243,6 +243,16 @@ model CloudAgentBinding {
   oauthScope    String  @unique
   /// The standing task every tools/call of this agent runs under.
   taskId        String
+  /// Keycloak object ids Manar created at connect ({ clientUuid?, scopeId, roleId, mapperId? });
+  /// disconnect deletes these, never objects found by name.
+  keycloakIds   Json    @default("{}")
+
+  /// ChatGPT: the first eligible self-registered client waits here until a tenant admin confirms
+  /// it (POST /cloud-agents/:id/oauth-client/confirm); `pendingClient` holds what was checked
+  /// (registration time, redirect URIs, grants).
+  pendingClientId String?
+  pendingClient   Json?
+  pendingSince    DateTime?
 
   createdBy String
   createdAt DateTime @default(now())

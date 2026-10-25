@@ -11,7 +11,6 @@ import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { registry } from '../metrics/metrics';
 import type { CloudAgentsService } from './cloud-agents.service';
-import { cloudMcpBodyLimit } from './cloud-mcp-body-limit.middleware';
 import {
   CloudMcpAuthGuard,
   type CloudMcpRequest,
@@ -113,7 +112,8 @@ function setup(
     agent?: Agent | null;
     env?: Record<string, unknown>;
     blocked?: (key: string) => boolean;
-    bindResult?: boolean;
+    proposal?: 'pending' | 'refused';
+    auditHits?: number;
   } = {},
 ) {
   const env: Record<string, unknown> = {
@@ -148,12 +148,16 @@ function setup(
   const tenants = { getClient } as unknown as TenantDatabaseManager;
   const recordSafely = vi.fn().mockResolvedValue(undefined);
   const audit = { recordSafely } as unknown as AuditService;
-  const bindDcrClient = vi.fn().mockResolvedValue(options.bindResult ?? true);
-  const cloudAgents = { bindDcrClient } as unknown as CloudAgentsService;
+  const proposeDcrClient = vi
+    .fn()
+    .mockResolvedValue(options.proposal ?? 'pending');
+  const cloudAgents = { proposeDcrClient } as unknown as CloudAgentsService;
   const increment = vi.fn((key: string) => {
     const blocked = options.blocked?.(key) ?? false;
     return Promise.resolve({
-      totalHits: 1,
+      totalHits: key.startsWith('cloud-mcp-audit:')
+        ? (options.auditHits ?? 1)
+        : 1,
       timeToExpire: 60,
       isBlocked: blocked,
       timeToBlockExpire: blocked ? 30 : 0,
@@ -169,7 +173,14 @@ function setup(
     cloudAgents,
     limits,
   );
-  return { guard, config, recordSafely, increment, getClient, bindDcrClient };
+  return {
+    guard,
+    config,
+    recordSafely,
+    increment,
+    getClient,
+    proposeDcrClient,
+  };
 }
 
 function context(
@@ -363,31 +374,41 @@ describe('CloudMcpAuthGuard', () => {
   });
 
   describe('ChatGPT (self-registered client)', () => {
-    it('records the first client that gets this far, then accepts only it', async () => {
-      const first = setup({ agent: chatGptAgent(null) });
-      const ok = context(`Bearer ${await token({ azp: 'dcr-client-1' })}`);
-      await expect(first.guard.canActivate(ok.ctx)).resolves.toBe(true);
-      expect(first.bindDcrClient).toHaveBeenCalledWith(
+    it('the first eligible client waits for an admin: 403 cloud_client_pending_approval, nothing bound', async () => {
+      const g = setup({ agent: chatGptAgent(null) });
+      const call = context(`Bearer ${await token({ azp: 'dcr-client-1' })}`);
+      const { status, body } = await refusal(g.guard.canActivate(call.ctx));
+      expect([status, body.reason]).toEqual([
+        403,
+        'cloud_client_pending_approval',
+      ]);
+      expect(g.proposeDcrClient).toHaveBeenCalledWith(
         't-acme',
         'agent-1',
         'dcr-client-1',
       );
+    });
 
-      const recorded = setup({ agent: chatGptAgent('dcr-client-1') });
+    it('a confirmed client is accepted and no other is', async () => {
+      const g = setup({ agent: chatGptAgent('dcr-client-1') });
+      const ok = context(`Bearer ${await token({ azp: 'dcr-client-1' })}`);
+      await expect(g.guard.canActivate(ok.ctx)).resolves.toBe(true);
       const other = context(`Bearer ${await token({ azp: 'dcr-client-2' })}`);
-      expect(
-        (await refusal(recorded.guard.canActivate(other.ctx))).body.reason,
-      ).toBe('unknown_client');
-      expect(recorded.bindDcrClient).not.toHaveBeenCalled();
+      expect((await refusal(g.guard.canActivate(other.ctx))).body.reason).toBe(
+        'unknown_client',
+      );
+      expect(g.proposeDcrClient).not.toHaveBeenCalled();
     });
 
-    it('refuses when Keycloak does not show a client registered under the DCR policy', async () => {
-      const g = setup({ agent: chatGptAgent(null), bindResult: false });
+    it('an ineligible client is refused', async () => {
+      const g = setup({ agent: chatGptAgent(null), proposal: 'refused' });
       const { ctx } = context(`Bearer ${await token({ azp: 'admin-cli' })}`);
-      expect((await refusal(g.guard.canActivate(ctx))).status).toBe(403);
+      expect((await refusal(g.guard.canActivate(ctx))).body.reason).toBe(
+        'unknown_client',
+      );
     });
 
-    it('never records another agent pre-registered client, and never for a person without the role', async () => {
+    it('never proposes another agent pre-registered client, or for a person without the role', async () => {
       const g = setup({ agent: chatGptAgent(null) });
       const precreated = context(
         `Bearer ${await token({ azp: 'manar-cloud-another-agent' })}`,
@@ -399,25 +420,62 @@ describe('CloudMcpAuthGuard', () => {
         `Bearer ${await token({ azp: 'dcr-client-1', manar_roles: [] })}`,
       );
       expect((await refusal(g.guard.canActivate(noRole.ctx))).status).toBe(403);
-      expect(g.bindDcrClient).not.toHaveBeenCalled();
+      expect(g.proposeDcrClient).not.toHaveBeenCalled();
     });
   });
 
-  it('429 with Retry-After over the per-agent limit, and per address before any token work', async () => {
-    const agentLimited = setup({ blocked: (k) => k.startsWith('cloud-mcp:') });
-    const one = context(`Bearer ${await token()}`);
-    expect(
-      (await refusal(agentLimited.guard.canActivate(one.ctx))).status,
-    ).toBe(429);
-    expect(one.replyHeaders['Retry-After']).toBe('30');
+  describe('budgets', () => {
+    const keys = (g: ReturnType<typeof setup>) =>
+      g.increment.mock.calls.map((c) => c[0]);
 
-    const addressLimited = setup({
-      blocked: (k) => k === 'cloud-mcp-addr:acme:203.0.113.7',
+    it('an accepted call uses only the per-agent budget', async () => {
+      const g = setup();
+      await g.guard.canActivate(context(`Bearer ${await token()}`).ctx);
+      expect(keys(g)).toEqual(['cloud-mcp:t-acme:agent-1']);
     });
-    const two = context('Bearer not-a-jwt');
-    expect(
-      (await refusal(addressLimited.guard.canActivate(two.ctx))).status,
-    ).toBe(429);
+
+    it('a refused call uses only the failure budgets, never the agent budget', async () => {
+      const g = setup();
+      await refusal(g.guard.canActivate(context('Bearer not-a-jwt').ctx));
+      await refusal(g.guard.canActivate(context().ctx));
+      expect(keys(g)).toEqual([
+        'cloud-mcp-fail:acme:203.0.113.7',
+        'cloud-mcp-fail-tenant:acme',
+        'cloud-mcp-fail:acme:203.0.113.7',
+        'cloud-mcp-fail-tenant:acme',
+      ]);
+    });
+
+    it('429 with Retry-After over the per-agent limit', async () => {
+      const g = setup({ blocked: (k) => k.startsWith('cloud-mcp:') });
+      const call = context(`Bearer ${await token()}`);
+      expect((await refusal(g.guard.canActivate(call.ctx))).status).toBe(429);
+      expect(call.replyHeaders['Retry-After']).toBe('30');
+    });
+
+    it('over a failure budget: 429 and nothing audited, while valid tokens still pass', async () => {
+      const g = setup({ blocked: (k) => k.startsWith('cloud-mcp-fail') });
+      const bad = context(
+        `Bearer ${await token({}, { aud: 'https://mcp.manar.test/mcp/acme/other' })}`,
+      );
+      expect((await refusal(g.guard.canActivate(bad.ctx))).status).toBe(429);
+      expect(g.recordSafely).not.toHaveBeenCalled();
+      await expect(
+        g.guard.canActivate(context(`Bearer ${await token()}`).ctx),
+      ).resolves.toBe(true);
+    });
+
+    it('a validly signed refused token is audited once a minute per tenant, client and reason', async () => {
+      const g = setup({ auditHits: 2 });
+      const bad = context(
+        `Bearer ${await token({}, { aud: 'https://mcp.manar.test/mcp/acme/other' })}`,
+      );
+      expect((await refusal(g.guard.canActivate(bad.ctx))).status).toBe(401);
+      expect(g.recordSafely).not.toHaveBeenCalled();
+      expect(keys(g)).toContain(
+        'cloud-mcp-audit:t-acme:manar-cloud-copilot-1:wrong_audience',
+      );
+    });
   });
 
   it('404 when the endpoint is off or the path is not a slug pair', async () => {
@@ -430,55 +488,72 @@ describe('CloudMcpAuthGuard', () => {
   });
 });
 
-describe('cloudMcpBodyLimit', () => {
-  function run(method: string, headers: Record<string, string>) {
-    const res = { statusCode: 200, setHeader: vi.fn(), end: vi.fn() };
-    const next = vi.fn();
-    cloudMcpBodyLimit(1000)({ method, headers } as never, res as never, next);
-    return { status: res.statusCode, passed: next.mock.calls.length === 1 };
-  }
-
-  it('lets a declared body within the cap through, refuses a bigger or undeclared one', () => {
-    expect(run('POST', { 'content-length': '1000' })).toEqual({
-      status: 200,
-      passed: true,
-    });
-    expect(run('POST', { 'content-length': '1001' })).toEqual({
-      status: 413,
-      passed: false,
-    });
-    expect(run('POST', { 'transfer-encoding': 'chunked' })).toEqual({
-      status: 411,
-      passed: false,
-    });
-    expect(run('GET', {})).toEqual({ status: 200, passed: true });
-  });
-});
-
 describe('CloudMcpController protected resource metadata', () => {
-  it('names the tenant realm as the authorization server and the agent scope', async () => {
+  const request = { ip: '203.0.113.7' } as never;
+  const limits = (blocked = false) =>
+    ({
+      increment: () =>
+        Promise.resolve({
+          totalHits: 1,
+          timeToExpire: 60,
+          isBlocked: blocked,
+          timeToBlockExpire: 0,
+        }),
+    }) as unknown as ThrottlerStorage;
+
+  it('names the tenant realm as the authorization server and the agent scope; caches the tenant', async () => {
     const { config } = setup();
+    const findUnique = vi
+      .fn()
+      .mockResolvedValue({ status: 'ACTIVE', keycloakIssuerUrl: ISSUER });
     const control = {
-      tenant: {
-        findUnique: () =>
-          Promise.resolve({ status: 'ACTIVE', keycloakIssuerUrl: ISSUER }),
-      },
+      tenant: { findUnique },
     } as unknown as ControlPrismaService;
-    const controller = new CloudMcpController(config, control, {} as never);
-    await expect(
-      controller.protectedResourceMetadata('acme', 'copilot-1'),
-    ).resolves.toEqual({
+    const controller = new CloudMcpController(
+      config,
+      control,
+      {} as never,
+      limits(),
+    );
+    const expected = {
       resource: MCP_URL,
       authorization_servers: [ISSUER],
       scopes_supported: [SCOPE],
       bearer_methods_supported: ['header'],
       resource_name: 'Manar governed tools',
-    });
+    };
+    await expect(
+      controller.protectedResourceMetadata('acme', 'copilot-1', request),
+    ).resolves.toEqual(expected);
+    await expect(
+      controller.protectedResourceMetadata('acme', 'copilot-1', request),
+    ).resolves.toEqual(expected);
+    expect(findUnique).toHaveBeenCalledTimes(1);
+
     const gone = new CloudMcpController(
       config,
       { tenant: { findUnique: () => Promise.resolve(null) } } as never,
       {} as never,
+      limits(),
     );
-    await expect(gone.protectedResourceMetadata('nope', 'x')).rejects.toThrow();
+    await expect(
+      gone.protectedResourceMetadata('nope', 'x', request),
+    ).rejects.toThrow();
+  });
+
+  it('429 over the per-address limit, before any database read', async () => {
+    const { config } = setup();
+    const findUnique = vi.fn();
+    const controller = new CloudMcpController(
+      config,
+      { tenant: { findUnique } } as never,
+      {} as never,
+      limits(true),
+    );
+    const error = await controller
+      .protectedResourceMetadata('acme', 'copilot-1', request)
+      .catch((e: unknown) => e);
+    expect((error as HttpException).getStatus()).toBe(429);
+    expect(findUnique).not.toHaveBeenCalled();
   });
 });

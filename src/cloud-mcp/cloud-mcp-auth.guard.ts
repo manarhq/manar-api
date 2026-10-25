@@ -39,8 +39,15 @@ import {
 
 const SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const RATE_WINDOW_MS = 60_000;
-/** Requests per minute from one address to one tenant's endpoints, before any token check. */
-const PER_ADDRESS_LIMIT = 600;
+/**
+ * Refused requests (no token, or a token refused) per minute: per caller address and tenant, and
+ * per tenant across all addresses. A separate budget: it never touches the per-agent budget of
+ * accepted calls, so failures cannot use up an agent's limit.
+ */
+const FAILURES_PER_ADDRESS = 60;
+const FAILURES_PER_TENANT = 600;
+/** A refused, validly signed token is audited once a minute per tenant, client and reason. */
+const AUDIT_DEDUP_MS = 60_000;
 const LOG_SAMPLE_MS = 60_000;
 
 export type CloudMcpRequest = FastifyRequest & {
@@ -58,21 +65,26 @@ type Rejection = {
  * The OAuth gate of the public MCP endpoint `/mcp/<tenantSlug>/<agentSlug>`
  * (docs/cloud-agents.md, MCP authorization spec).
  *
- * Before any token work: a per address and tenant limit. Then the tenant
- * comes from the token issuer, matched against provisioned realms; the path
- * slug only has to agree (else 401). Signature against the realm JWKS (pinned
- * RSA, no clock skew), audience = this agent's exact MCP URL and no other
- * agent's, `typ: Bearer`. Then the agent: ACTIVE, kind CLOUD; the person:
- * holds the agent role (`manar-agent-<slug>`); the client: the agent's own
- * (pre-registered, or the self-registered client recorded on first use) with
- * the agent scope. Per-agent rate limit last.
+ * The tenant comes from the token issuer, matched against provisioned
+ * realms; the path slug only has to agree (else 401). Signature against the
+ * realm JWKS (pinned RSA, no clock skew), audience = this agent's exact MCP
+ * URL and no other agent's, `typ: Bearer`. Then the agent: ACTIVE, kind
+ * CLOUD; the person: holds the agent role (`manar-agent-<slug>`); the client:
+ * the agent's own with the agent scope (pre-registered, or the self-registered
+ * client a tenant admin confirmed; the first eligible one waits for that and
+ * gets 403 `cloud_client_pending_approval`).
  *
- * Refusals before the signature verified (no issuer, unknown realm, other
- * tenant, bad signature) never touch a tenant database: a metric and a log
- * line sampled per address and tenant. Refusals after it are audited in the
- * issuer's tenant (reason, unverified client id, a SHA-256 prefix; never the
- * token). Kill switches, quarantine and task liveness are checked by the
- * governed MCP server on every call (`AgentTaskAccessService`).
+ * Budgets: an accepted call spends only its agent's budget. A refused call
+ * spends only the failure budgets (per caller address and tenant, per tenant);
+ * past them it is 429 and nothing is audited. `request.ip` is the real caller
+ * when `MANAR_TRUSTED_PROXY_CIDRS` lists the proxies (src/config/trusted-proxy.ts).
+ *
+ * Refusals before the signature verified never touch a tenant database: a
+ * metric and a log line sampled per address and tenant. Refusals after it are
+ * audited in the issuer's tenant at most once a minute per client and reason
+ * (reason, client id, a SHA-256 prefix; never the token). Kill switches,
+ * quarantine and task liveness are checked by the governed MCP server on
+ * every call (`AgentTaskAccessService`).
  */
 @Injectable()
 export class CloudMcpAuthGuard implements CanActivate {
@@ -102,12 +114,6 @@ export class CloudMcpAuthGuard implements CanActivate {
       throw new NotFoundException();
     }
 
-    await this.limit(
-      reply,
-      `cloud-mcp-addr:${tenantSlug}:${request.ip}`,
-      PER_ADDRESS_LIMIT,
-    );
-
     const resource = cloudMcpResourceUrl(host, tenantSlug, agentSlug);
     const scope = cloudMcpScope(agentSlug);
     const challenge = (error?: string) =>
@@ -121,6 +127,7 @@ export class CloudMcpAuthGuard implements CanActivate {
       request.headers.authorization ?? '',
     )?.[1];
     if (!token) {
+      await this.countFailure(reply, tenantSlug, request.ip, 'missing_token');
       reply.header('WWW-Authenticate', challenge());
       throw new UnauthorizedException('Bearer token required');
     }
@@ -141,7 +148,7 @@ export class CloudMcpAuthGuard implements CanActivate {
       scope,
     );
     if ('status' in outcome) {
-      recordCloudMcpRejection(outcome.reason);
+      await this.countFailure(reply, tenantSlug, request.ip, outcome.reason);
       if (outcome.tenantId) {
         await this.recordRejection(
           outcome.tenantId,
@@ -172,6 +179,29 @@ export class CloudMcpAuthGuard implements CanActivate {
     );
     request.cloudAgent = outcome;
     return true;
+  }
+
+  /**
+   * Counts a refusal in the failure budgets (metric always); over either budget the caller gets
+   * 429 and nothing is audited or logged for it.
+   */
+  private async countFailure(
+    reply: FastifyReply,
+    tenantSlug: string,
+    ip: string,
+    reason: string,
+  ): Promise<void> {
+    recordCloudMcpRejection(reason);
+    await this.limit(
+      reply,
+      `cloud-mcp-fail:${tenantSlug}:${ip}`,
+      FAILURES_PER_ADDRESS,
+    );
+    await this.limit(
+      reply,
+      `cloud-mcp-fail-tenant:${tenantSlug}`,
+      FAILURES_PER_TENANT,
+    );
   }
 
   private async limit(reply: FastifyReply, key: string, limit: number) {
@@ -294,14 +324,23 @@ export class CloudMcpAuthGuard implements CanActivate {
       if (clientId !== binding.oauthClientId)
         return forbidden('unknown_client');
     } else {
-      // ChatGPT: the first self-registered client to get this far is recorded; others refused.
-      const recorded =
+      // ChatGPT: the first eligible self-registered client waits for a tenant admin.
+      const proposal =
         binding.platform === 'CHATGPT' &&
-        !clientId.startsWith(PRE_REGISTERED_CLIENT_PREFIX) &&
-        (await failClosed('keycloak-admin', () =>
-          this.cloudAgents.bindDcrClient(known.tenantId, agent.id, clientId),
-        ));
-      if (!recorded) return forbidden('unknown_client');
+        !clientId.startsWith(PRE_REGISTERED_CLIENT_PREFIX)
+          ? await failClosed('keycloak-admin', () =>
+              this.cloudAgents.proposeDcrClient(
+                known.tenantId,
+                agent.id,
+                clientId,
+              ),
+            )
+          : 'refused';
+      return forbidden(
+        proposal === 'pending'
+          ? 'cloud_client_pending_approval'
+          : 'unknown_client',
+      );
     }
 
     return {
@@ -322,6 +361,18 @@ export class CloudMcpAuthGuard implements CanActivate {
     reason: string,
   ): Promise<void> {
     try {
+      const clientId =
+        typeof unverified.azp === 'string' ? unverified.azp.slice(0, 128) : '';
+      // Once a minute per (tenant, client, reason): any validly signed realm token could
+      // otherwise write a hash-chain row per request. The rest are the metric only.
+      const seen = await this.limits.increment(
+        `cloud-mcp-audit:${tenantId}:${clientId}:${reason}`,
+        AUDIT_DEDUP_MS,
+        Number.MAX_SAFE_INTEGER,
+        AUDIT_DEDUP_MS,
+        'cloud-mcp',
+      );
+      if (seen.totalHits > 1) return;
       const tenantClient = await this.tenants.getClient(tenantId);
       await this.audit.recordSafely(tenantClient, tenantId, {
         eventType: AUDIT_EVENT_TYPES.CLOUD_MCP_TOKEN_REJECTED,

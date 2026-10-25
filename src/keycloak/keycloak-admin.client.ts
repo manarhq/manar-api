@@ -13,6 +13,9 @@ export interface KeycloakClientRepresentation {
   clientId: string;
   enabled?: boolean;
   publicClient?: boolean;
+  standardFlowEnabled?: boolean;
+  fullScopeAllowed?: boolean;
+  attributes?: Record<string, string>;
   redirectUris?: string[];
   directAccessGrantsEnabled?: boolean;
   implicitFlowEnabled?: boolean;
@@ -20,6 +23,16 @@ export interface KeycloakClientRepresentation {
   defaultClientScopes?: string[];
   optionalClientScopes?: string[];
   [key: string]: unknown;
+}
+
+/** The Manar first broker login flow no longer has exactly its one step. */
+export class KeycloakFlowTamperedError extends Error {
+  constructor(realmName: string) {
+    super(
+      `Realm "${realmName}": the flow "${CREATE_ONLY_BROKER_FLOW}" must contain only "Create User If Unique"; it was changed. Fix or delete it in Keycloak, then retry.`,
+    );
+    this.name = 'KeycloakFlowTamperedError';
+  }
 }
 
 function isNotFound(error: unknown): boolean {
@@ -357,17 +370,25 @@ export class KeycloakAdminClient {
         `Keycloak did not return an id for client scope "${name}"`,
       );
     }
-    const role = (
+    try {
+      const role = (
+        await this.adminRequest(
+          'GET',
+          `/admin/realms/${realm}/roles/${encodeURIComponent(roleName)}`,
+        )
+      ).body as { id: string; name: string };
       await this.adminRequest(
-        'GET',
-        `/admin/realms/${realm}/roles/${encodeURIComponent(roleName)}`,
-      )
-    ).body as { id: string; name: string };
-    await this.adminRequest(
-      'POST',
-      `/admin/realms/${realm}/client-scopes/${scopeId}/scope-mappings/realm`,
-      [{ id: role.id, name: role.name }],
-    );
+        'POST',
+        `/admin/realms/${realm}/client-scopes/${scopeId}/scope-mappings/realm`,
+        [{ id: role.id, name: role.name }],
+      );
+    } catch (error) {
+      // Created by this call: removed before the error goes up.
+      await this.deleteById(realmName, `client-scopes/${scopeId}`).catch(
+        () => undefined,
+      );
+      throw error;
+    }
     return scopeId;
   }
 
@@ -381,7 +402,7 @@ export class KeycloakAdminClient {
     clientId: string,
     scopeId: string,
     redirectUris: string[],
-  ): Promise<string> {
+  ): Promise<{ uuid: string; secret: string }> {
     const realm = encodeURIComponent(realmName);
     const created = await this.adminRequest(
       'POST',
@@ -406,22 +427,30 @@ export class KeycloakAdminClient {
     if (!clientUuid) {
       throw new Error(`Keycloak did not return an id for client "${clientId}"`);
     }
-    await this.adminRequest(
-      'PUT',
-      `/admin/realms/${realm}/clients/${clientUuid}/default-client-scopes/${scopeId}`,
-    );
-    const secret = (
+    try {
       await this.adminRequest(
-        'GET',
-        `/admin/realms/${realm}/clients/${clientUuid}/client-secret`,
-      )
-    ).body as { value?: string } | undefined;
-    if (!secret?.value) {
-      throw new Error(
-        `Keycloak did not return a secret for client "${clientId}"`,
+        'PUT',
+        `/admin/realms/${realm}/clients/${clientUuid}/default-client-scopes/${scopeId}`,
       );
+      const secret = (
+        await this.adminRequest(
+          'GET',
+          `/admin/realms/${realm}/clients/${clientUuid}/client-secret`,
+        )
+      ).body as { value?: string } | undefined;
+      if (!secret?.value) {
+        throw new Error(
+          `Keycloak did not return a secret for client "${clientId}"`,
+        );
+      }
+      return { uuid: clientUuid, secret: secret.value };
+    } catch (error) {
+      // Created by this call: removed before the error goes up.
+      await this.deleteById(realmName, `clients/${clientUuid}`).catch(
+        () => undefined,
+      );
+      throw error;
     }
-    return secret.value;
   }
 
   /** Merges `patch` into a client's representation (redirect URIs, hardening a DCR client). */
@@ -435,38 +464,68 @@ export class KeycloakAdminClient {
     await this.adminRequest(
       'PUT',
       `/admin/realms/${encodeURIComponent(realmName)}/clients/${client.id}`,
-      { ...client, ...patch },
+      {
+        ...client,
+        ...patch,
+        attributes: {
+          ...client.attributes,
+          ...patch.attributes,
+        },
+      },
     );
   }
 
-  /** Best effort clean-up: each call ignores a missing object. */
+  /** Deletes a client by clientId; a missing one is ignored. */
   async deleteClient(realmName: string, clientId: string): Promise<void> {
     const client = await this.findClient(realmName, clientId);
-    if (client) {
+    if (client) await this.deleteById(realmName, `clients/${client.id}`);
+  }
+
+  /**
+   * Deletes an object Manar created, by the id Keycloak gave it (`clients/<uuid>`,
+   * `client-scopes/<id>`, `roles-by-id/<id>`, `identity-provider/instances/<alias>/mappers/<id>`);
+   * a missing one is ignored. Never by name: a name may since belong to someone else.
+   */
+  async deleteById(realmName: string, path: string): Promise<void> {
+    try {
       await this.adminRequest(
         'DELETE',
-        `/admin/realms/${encodeURIComponent(realmName)}/clients/${client.id}`,
+        `/admin/realms/${encodeURIComponent(realmName)}/${path}`,
       );
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
     }
   }
 
-  async deleteClientScope(realmName: string, name: string): Promise<void> {
-    const id = await this.findClientScopeId(realmName, name);
-    if (id) {
+  async realmRoleId(realmName: string, roleName: string): Promise<string> {
+    const role = (
       await this.adminRequest(
-        'DELETE',
-        `/admin/realms/${encodeURIComponent(realmName)}/client-scopes/${id}`,
-      );
-    }
-  }
-
-  async deleteRealmRole(realmName: string, roleName: string): Promise<void> {
-    if (await this.realmRoleExists(realmName, roleName)) {
-      await this.adminRequest(
-        'DELETE',
+        'GET',
         `/admin/realms/${encodeURIComponent(realmName)}/roles/${encodeURIComponent(roleName)}`,
-      );
-    }
+      )
+    ).body as { id: string };
+    return role.id;
+  }
+
+  /** Every client of the realm (for finding self-registered clients that carry an agent scope). */
+  async listClients(
+    realmName: string,
+  ): Promise<KeycloakClientRepresentation[]> {
+    return (
+      await this.adminRequest(
+        'GET',
+        `/admin/realms/${encodeURIComponent(realmName)}/clients?first=0&max=5000`,
+      )
+    ).body as KeycloakClientRepresentation[];
+  }
+
+  /** Keycloak only allows one email per account in the realm (the default; enforced here). */
+  async disallowDuplicateEmails(realmName: string): Promise<void> {
+    await this.adminRequest(
+      'PUT',
+      `/admin/realms/${encodeURIComponent(realmName)}`,
+      { duplicateEmailsAllowed: false },
+    );
   }
 
   /**
@@ -554,6 +613,7 @@ export class KeycloakAdminClient {
    */
   async ensureCreateOnlyFirstBrokerFlow(realmName: string): Promise<string> {
     const realm = encodeURIComponent(realmName);
+    const flowPath = `/admin/realms/${realm}/authentication/flows/${encodeURIComponent(CREATE_ONLY_BROKER_FLOW)}`;
     const flows = (
       await this.adminRequest(
         'GET',
@@ -573,26 +633,26 @@ export class KeycloakAdminClient {
           builtIn: false,
         },
       );
-      await this.adminRequest(
-        'POST',
-        `/admin/realms/${realm}/authentication/flows/${encodeURIComponent(CREATE_ONLY_BROKER_FLOW)}/executions/execution`,
-        { provider: 'idp-create-user-if-unique' },
-      );
+      await this.adminRequest('POST', `${flowPath}/executions/execution`, {
+        provider: 'idp-create-user-if-unique',
+      });
     }
     const executions = (
-      await this.adminRequest(
-        'GET',
-        `/admin/realms/${realm}/authentication/flows/${encodeURIComponent(CREATE_ONLY_BROKER_FLOW)}/executions`,
-      )
+      await this.adminRequest('GET', `${flowPath}/executions`)
     ).body as Array<{ id: string; providerId?: string; requirement: string }>;
-    for (const execution of executions) {
-      if (execution.requirement !== 'REQUIRED') {
-        await this.adminRequest(
-          'PUT',
-          `/admin/realms/${realm}/authentication/flows/${encodeURIComponent(CREATE_ONLY_BROKER_FLOW)}/executions`,
-          { ...execution, requirement: 'REQUIRED' },
-        );
-      }
+    const only = executions[0];
+    if (
+      executions.length !== 1 ||
+      only?.providerId !== 'idp-create-user-if-unique'
+    ) {
+      // Someone changed the flow: refuse rather than guess which steps are safe.
+      throw new KeycloakFlowTamperedError(realmName);
+    }
+    if (only.requirement !== 'REQUIRED') {
+      await this.adminRequest('PUT', `${flowPath}/executions`, {
+        ...only,
+        requirement: 'REQUIRED',
+      });
     }
     return CREATE_ONLY_BROKER_FLOW;
   }
@@ -618,6 +678,7 @@ export class KeycloakAdminClient {
   ): Promise<void> {
     const realm = encodeURIComponent(realmName);
     const flow = await this.ensureCreateOnlyFirstBrokerFlow(realmName);
+    await this.disallowDuplicateEmails(realmName);
     const representation = {
       alias,
       displayName: input.displayName,
@@ -683,8 +744,8 @@ export class KeycloakAdminClient {
     name: string,
     groupId: string,
     roleName: string,
-  ): Promise<void> {
-    await this.adminRequest(
+  ): Promise<string> {
+    const created = await this.adminRequest(
       'POST',
       `/admin/realms/${encodeURIComponent(realmName)}/identity-provider/instances/${encodeURIComponent(alias)}/mappers`,
       {
@@ -698,25 +759,12 @@ export class KeycloakAdminClient {
           role: roleName,
         },
       },
+      { returnLocation: true },
     );
-  }
-
-  async deleteIdpMapper(
-    realmName: string,
-    alias: string,
-    name: string,
-  ): Promise<void> {
-    const base = `/admin/realms/${encodeURIComponent(realmName)}/identity-provider/instances/${encodeURIComponent(alias)}/mappers`;
-    let mappers: Array<{ id: string; name: string }>;
-    try {
-      mappers = (await this.adminRequest('GET', base)).body as typeof mappers;
-    } catch (error) {
-      if (isNotFound(error)) return;
-      throw error;
-    }
-    for (const mapper of mappers.filter((m) => m.name === name)) {
-      await this.adminRequest('DELETE', `${base}/${mapper.id}`);
-    }
+    const id = created.location?.split('/').pop();
+    if (!id)
+      throw new Error(`Keycloak did not return an id for mapper "${name}"`);
+    return id;
   }
 
   /**

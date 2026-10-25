@@ -1,7 +1,8 @@
-import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { Module, NestModule } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { HttpAdapterHost } from '@nestjs/core';
+import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '../config/env.validation';
-import { cloudMcpBodyLimit } from './cloud-mcp-body-limit.middleware';
 import { cloudMcpSettings } from './cloud-mcp.config';
 import { AgentRuntimeController } from '../agent-runtime/agent-runtime.controller';
 import { AgentTaskAccessService } from '../agent-runtime/agent-task-access.service';
@@ -54,11 +55,24 @@ import { CloudMcpController } from './cloud-mcp.controller';
   ],
 })
 export class CloudMcpModule implements NestModule {
-  constructor(private readonly config: ConfigService<AppConfig, true>) {}
+  constructor(
+    private readonly config: ConfigService<AppConfig, true>,
+    private readonly adapterHost: HttpAdapterHost,
+  ) {}
 
-  configure(consumer: MiddlewareConsumer): void {
-    consumer
-      .apply(cloudMcpBodyLimit(cloudMcpSettings(this.config).maxBodyBytes))
-      .forRoutes(CloudMcpController);
+  /**
+   * Called before Nest adds its routes: a Fastify `bodyLimit` on the public MCP routes, so
+   * Fastify counts the body as it streams in (chunked too) and answers 413 past the cap, before
+   * anything parses it. The rest of the API keeps the default limit.
+   */
+  configure(): void {
+    // Unset only in a test module compiled without an HTTP app.
+    const fastify = this.adapterHost.httpAdapter
+      ? this.adapterHost.httpAdapter.getInstance<FastifyInstance>()
+      : undefined;
+    const bodyLimit = cloudMcpSettings(this.config).maxBodyBytes;
+    fastify?.addHook('onRoute', (route) => {
+      if (route.url.startsWith('/mcp/')) route.bodyLimit = bodyLimit;
+    });
   }
 }

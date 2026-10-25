@@ -1,6 +1,8 @@
 import {
   Body,
   Controller,
+  HttpException,
+  HttpStatus,
   Delete,
   Get,
   Header,
@@ -13,7 +15,9 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiExcludeController } from '@nestjs/swagger';
-import type { FastifyReply } from 'fastify';
+import { InjectThrottlerStorage } from '@nestjs/throttler';
+import type { ThrottlerStorage } from '@nestjs/throttler';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import {
   AgentRuntimeController,
   methodNotAllowed,
@@ -30,6 +34,9 @@ import {
 } from './cloud-mcp.config';
 
 const SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+/** Metadata requests per caller address per minute. */
+const METADATA_PER_ADDRESS = 120;
+const ISSUER_CACHE_MS = 60_000;
 
 /**
  * The public MCP endpoint for cloud agents (docs/cloud-agents.md), on the
@@ -46,7 +53,31 @@ export class CloudMcpController {
     private readonly config: ConfigService<AppConfig, true>,
     private readonly control: ControlPrismaService,
     private readonly runtime: AgentRuntimeController,
+    @InjectThrottlerStorage() private readonly limits: ThrottlerStorage,
   ) {}
+
+  // ponytail: per-process cache of active tenants' issuers, one minute; a suspended tenant's
+  // metadata can outlive the suspension by that long (tokens are still refused by the guard).
+  private readonly issuers = new Map<
+    string,
+    { issuer: string | null; until: number }
+  >();
+
+  private async issuerOf(tenantSlug: string): Promise<string | null> {
+    const cached = this.issuers.get(tenantSlug);
+    if (cached && cached.until > Date.now()) return cached.issuer;
+    const tenant = await failClosed('control-db', () =>
+      this.control.tenant.findUnique({ where: { slug: tenantSlug } }),
+    );
+    const issuer =
+      tenant?.status === 'ACTIVE' ? (tenant.keycloakIssuerUrl ?? null) : null;
+    if (this.issuers.size > 10_000) this.issuers.clear();
+    this.issuers.set(tenantSlug, {
+      issuer,
+      until: Date.now() + ISSUER_CACHE_MS,
+    });
+    return issuer;
+  }
 
   /**
    * Names the tenant's realm as the authorization server. Answers the same for
@@ -57,20 +88,32 @@ export class CloudMcpController {
   async protectedResourceMetadata(
     @Param('tenantSlug') tenantSlug: string,
     @Param('agentSlug') agentSlug: string,
+    @Req() request: FastifyRequest,
   ) {
     const host = cloudMcpSettings(this.config).host;
     if (!host || !SLUG.test(tenantSlug) || !SLUG.test(agentSlug)) {
       throw new NotFoundException();
     }
-    const tenant = await failClosed('control-db', () =>
-      this.control.tenant.findUnique({ where: { slug: tenantSlug } }),
+    const usage = await failClosed('rate-limit-store', () =>
+      this.limits.increment(
+        `cloud-mcp-meta:${request.ip}`,
+        60_000,
+        METADATA_PER_ADDRESS,
+        60_000,
+        'cloud-mcp',
+      ),
     );
-    if (!tenant || tenant.status !== 'ACTIVE' || !tenant.keycloakIssuerUrl) {
-      throw new NotFoundException();
+    if (usage.isBlocked) {
+      throw new HttpException(
+        { statusCode: 429, reason: 'rate_limited' },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
+    const issuer = await this.issuerOf(tenantSlug);
+    if (!issuer) throw new NotFoundException();
     return {
       resource: cloudMcpResourceUrl(host, tenantSlug, agentSlug),
-      authorization_servers: [tenant.keycloakIssuerUrl],
+      authorization_servers: [issuer],
       scopes_supported: [cloudMcpScope(agentSlug)],
       bearer_methods_supported: ['header'],
       resource_name: 'Manar governed tools',
