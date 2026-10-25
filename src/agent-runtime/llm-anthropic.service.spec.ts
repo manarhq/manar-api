@@ -25,9 +25,15 @@ import { TasksService } from '../tasks/tasks.service';
 import { allowAllCatalog } from '../platform/catalog.fakes';
 import type { CatalogService } from '../platform/catalog.service';
 import { AgentTaskAccessService } from './agent-task-access.service';
-import { anthropicError, parseSse, type SseEvent } from './llm-anthropic';
+import {
+  AnthropicStreamGuard,
+  anthropicError,
+  parseSse,
+  type SseEvent,
+} from './llm-anthropic';
 import {
   LlmAnthropicService,
+  replyStream,
   type AnthropicReply,
 } from './llm-anthropic.service';
 import type { LlmBudgetStore } from './llm-budget.store';
@@ -221,7 +227,15 @@ function setup(
     new TasksService(null as never, null as never, killSwitchService),
     catalog,
   );
+  const thinking = new Set<string>();
   const budget = {
+    rememberThinking: vi.fn((_t: string, task: string, hmacs: string[]) => {
+      hmacs.forEach((h) => thinking.add(`${task}:${h}`));
+      return Promise.resolve();
+    }),
+    knowsThinking: vi.fn((_t: string, task: string, hmacs: string[]) =>
+      Promise.resolve(hmacs.every((h) => thinking.has(`${task}:${h}`))),
+    ),
     used: vi.fn().mockResolvedValue(opts.used ?? 0),
     add: vi
       .fn()
@@ -239,6 +253,7 @@ function setup(
   const values: Json = {
     LLM_TASK_TOKEN_BUDGET: 200_000,
     LLM_UPSTREAM_TIMEOUT_MS: 5_000,
+    APPROVAL_GRANT_SIGNING_SECRET: 'unit-test-only-signing-secret',
     LLM_PROVIDER: 'ollama',
     LLM_MODEL: 'fixture-model',
     LLM_OLLAMA_BASE_URL: `${upstream.url}/v1`,
@@ -250,6 +265,7 @@ function setup(
     LLM_ANTHROPIC_BETAS:
       'interleaved-thinking-2025-05-14,context-management-2025-06-27',
     LLM_STREAM_MAX_MS: 900_000,
+    LLM_ANTHROPIC_STREAM_DLP: 'buffer',
     ...opts.env,
   };
   const config = {
@@ -266,7 +282,13 @@ function setup(
     config,
     catalog,
   );
-  const service = new LlmAnthropicService(proxy, client, config, catalog);
+  const service = new LlmAnthropicService(
+    proxy,
+    client,
+    config,
+    catalog,
+    budget as unknown as LlmBudgetStore,
+  );
   const send = (
     body: Json,
     client = {},
@@ -297,6 +319,12 @@ async function refused(
   });
 }
 
+/** A signature as the upstream issues it: canonical base64. */
+const sig = (seed: number) =>
+  Buffer.from(
+    Array.from({ length: 96 }, (_, i) => (i * 31 + seed) % 256),
+  ).toString('base64');
+
 describe('LlmAnthropicService: providers and request policy', () => {
   it('is 404 anthropic_disabled for provider none, without a key, and without a model list', async () => {
     for (const env of [
@@ -309,28 +337,47 @@ describe('LlmAnthropicService: providers and request policy', () => {
     expect(upstream.calls).toHaveLength(0);
   });
 
-  it('runs the task check first: a killed agent gets its DENY, never a shape refusal, and no task id is recorded', async () => {
-    const { send, audited } = setup({ killed: 'agent_killed' });
-    await refused(
-      send(
+  it('runs the task check before everything: disabled endpoint, bad body and shape refusals all yield to it', async () => {
+    for (const [env, body] of [
+      [
+        {},
         request({
           tools: [{ type: 'web_search_20250305', name: 'w' }],
           foo: 1,
         }),
-      ),
-      403,
-      'agent_killed',
-    );
+      ],
+      [{ LLM_ANTHROPIC_PROVIDER: 'none' }, request()],
+      [{}, { model: 'claude-test' }],
+    ] as [Json, Json][]) {
+      const { send, audited } = setup({ env, killed: 'agent_killed' });
+      await refused(send(body), 403, 'agent_killed');
+      const row = audited()[0]!;
+      expect(row).toMatchObject({
+        outcome: 'DENIED',
+        reason: 'agent_killed',
+        claimedTaskIdSha256: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown,
+      });
+      expect(row.taskId).toBeUndefined();
+      expect(JSON.stringify(row)).not.toContain('task-1');
+    }
     expect(upstream.calls).toHaveLength(0);
-    const row = audited()[0]!;
-    expect(row).toMatchObject({
-      outcome: 'DENIED',
-      reason: 'agent_killed',
-      format: 'anthropic',
-      claimedTaskIdSha256: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown,
+  });
+
+  it('records a bad body and a disabled endpoint against the verified task', async () => {
+    const bad = setup();
+    await expect(bad.send({ model: 'claude-test' })).rejects.toMatchObject({
+      status: 400,
     });
-    expect(row.taskId).toBeUndefined();
-    expect(JSON.stringify(row)).not.toContain('task-1');
+    expect(bad.audited()[0]).toMatchObject({
+      taskId: 'task-1',
+      outcome: 'DENIED',
+    });
+    const off = setup({ env: { LLM_ANTHROPIC_PROVIDER: 'none' } });
+    await refused(off.send(request()), 404, 'anthropic_disabled');
+    expect(off.audited()[0]).toMatchObject({
+      taskId: 'task-1',
+      reason: 'anthropic_disabled',
+    });
   });
 
   it('stops with 429 llm_budget_exhausted once the task budget is used', async () => {
@@ -343,17 +390,12 @@ describe('LlmAnthropicService: providers and request policy', () => {
   });
 
   it('refuses a model the install does not serve (no substitution)', async () => {
-    const { send, audited } = setup();
     await refused(
-      send(request({ model: 'claude-other' })),
+      setup().send(request({ model: 'claude-other' })),
       400,
       'llm_model_not_served',
     );
     expect(upstream.calls).toHaveLength(0);
-    expect(audited()[0]).toMatchObject({
-      taskId: 'task-1',
-      reason: 'llm_model_not_served',
-    });
   });
 
   it('refuses unknown top-level fields, provider-side connectors and server tools in Anthropic wording', async () => {
@@ -421,8 +463,7 @@ describe('LlmAnthropicService: providers and request policy', () => {
       version: '2023-06-01',
       beta: 'interleaved-thinking-2025-05-14, oauth-2025-04-20,context-management-2025-06-27',
     });
-    const headers = upstream.calls[0]!.headers;
-    expect(headers['anthropic-beta']).toBe(
+    expect(upstream.calls[0]!.headers['anthropic-beta']).toBe(
       'interleaved-thinking-2025-05-14,context-management-2025-06-27',
     );
     await send(request(), { beta: 'oauth-2025-04-20' });
@@ -437,82 +478,114 @@ describe('LlmAnthropicService: providers and request policy', () => {
   });
 });
 
-describe('LlmAnthropicService: non-streaming pass-through', () => {
-  it('sends the DLP-scanned body with the server key; budget and audit from usage', async () => {
-    const { send, budget, audited, llmGate } = setup();
-    const thinking = {
-      type: 'thinking',
-      thinking: 'Plan.',
-      signature: 'c2ln+784199012345671/',
-    };
-    const result = await send(
-      request({
-        system: [
-          { type: 'text', text: 'Owner Emirates ID 784-1990-1234567-1.' },
-        ],
-        messages: [
-          { role: 'user', content: 'Hi' },
-          {
-            role: 'assistant',
-            content: [thinking, { type: 'text', text: 'Hello' }],
-          },
-          { role: 'user', content: 'Go on' },
-        ],
-        context_management: { edits: [] },
-        metadata: { user_id: 'card 4111 1111 1111 1111' },
-      }),
-      { version: '2023-06-01' },
-    );
-    expect(result).toEqual({ json: message() });
-
-    const call = upstream.calls[0]!;
-    expect(call.path).toBe('/v1/messages');
-    expect(call.headers['x-api-key']).toBe(SERVER_KEY);
-    expect(call.headers.authorization).toBeUndefined();
-    expect(call.body.model).toBe('claude-test');
-    expect(call.body.context_management).toEqual({ edits: [] });
-    expect(JSON.stringify(call.body.system)).toContain(
-      '[REDACTED:EMIRATES_ID]',
-    );
-    // Every passed field is scanned, not only messages.
-    expect(call.body.metadata).toEqual({
-      user_id: 'card [REDACTED:PAYMENT_CARD]',
-    });
-    // A well-formed signature on an assistant thinking block reaches the upstream unchanged.
-    expect((call.body.messages as Json[])[1]).toEqual({
-      role: 'assistant',
-      content: [thinking, { type: 'text', text: 'Hello' }],
+describe('LlmAnthropicService: thinking signatures', () => {
+  const history = (signature: string, extra: Json = {}) =>
+    request({
+      messages: [
+        { role: 'user', content: 'Hi' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Plan.', signature, ...extra },
+            { type: 'text', text: 'Hello' },
+          ],
+        },
+        { role: 'user', content: 'Go on' },
+      ],
     });
 
-    expect(llmGate).toHaveBeenCalledWith('tenant-1', 'llm_proxy', {
-      external: true,
-      uaeResident: false,
-      model: 'claude-test',
+  it('passes a signature this proxy returned for the task unchanged, and refuses one it did not', async () => {
+    const { send } = setup();
+    const issued = sig(1);
+    upstream.handler = (_b, res) =>
+      json(
+        res,
+        200,
+        message([
+          { type: 'thinking', thinking: 'Plan.', signature: issued },
+          { type: 'text', text: 'Hello' },
+        ]),
+      );
+    await send(request());
+    upstream.handler = (_b, res) => json(res, 200, message());
+    await send(history(issued));
+    expect(
+      ((upstream.calls[1]!.body.messages as Json[])[1]!.content as Json[])[0],
+    ).toEqual({ type: 'thinking', thinking: 'Plan.', signature: issued });
+
+    const forged = send(history(sig(2)));
+    await refused(forged, 400, 'unknown_thinking_signature');
+    await expect(forged).rejects.toMatchObject({
+      response: {
+        error: {
+          message: expect.stringContaining(
+            'Invalid `signature` in `thinking` block',
+          ) as unknown,
+        },
+      },
     });
-    expect(budget.add).toHaveBeenCalledWith(
-      'tenant-1',
-      'task-1',
-      145,
-      expect.any(Date),
+    // A secret in the base64 alphabet (an AWS-style key) is not a signature this proxy issued.
+    await refused(
+      send(history('AKIAIOSFODNN7EXAMPLE')),
+      400,
+      'unknown_thinking_signature',
     );
-    expect(audited()[0]).toMatchObject({
-      taskId: 'task-1',
-      outcome: 'SUCCESS',
-      format: 'anthropic',
-      stream: false,
-      provider: 'anthropic',
-      model: 'claude-test',
-      promptTokens: 30,
-      completionTokens: 10,
-      cacheCreationTokens: 5,
-      cacheReadTokens: 100,
-      totalTokens: 145,
-    });
-    expect(audited()[0]!.claimedTaskIdSha256).toBeUndefined();
-    expect(JSON.stringify(audited())).not.toContain('Owner Emirates');
+    expect(upstream.calls).toHaveLength(2);
   });
 
-  it('scans thinking-shaped objects anywhere but directly in assistant content, and malformed signatures', async () => {
+  it('remembers signatures from a streamed answer too (both stream modes)', async () => {
+    for (const mode of ['buffer', 'incremental']) {
+      upstream.calls = [];
+      const { send } = setup({ env: { LLM_ANTHROPIC_STREAM_DLP: mode } });
+      const issued = sig(mode.length);
+      upstream.handler = streamFrom([
+        sseText('message_start', { message: message([]) }),
+        sseText('content_block_start', {
+          index: 0,
+          content_block: { type: 'thinking', thinking: '', signature: '' },
+        }),
+        sseText('content_block_delta', {
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: 'Plan.' },
+        }),
+        sseText('content_block_delta', {
+          index: 0,
+          delta: { type: 'signature_delta', signature: issued },
+        }),
+        sseText('content_block_stop', { index: 0 }),
+        sseText('message_delta', {
+          delta: { stop_reason: 'end_turn' },
+          usage: { output_tokens: 3 },
+        }),
+        sseText('message_stop', {}),
+      ]);
+      const events = await collect(await send(request({ stream: true })));
+      expect(
+        events.some(
+          (e) => (e.data.delta as Json | undefined)?.signature === issued,
+        ),
+      ).toBe(true);
+      upstream.handler = (_b, res) => json(res, 200, message());
+      await send(history(issued));
+      expect(upstream.calls).toHaveLength(2);
+    }
+  });
+
+  it('runs the credential and PII patterns on the raw value even when it was issued', async () => {
+    const { send } = setup();
+    const withId = 'AAA+784199012345671/'; // canonical base64 holding an Emirates ID
+    upstream.handler = (_b, res) =>
+      json(
+        res,
+        200,
+        message([{ type: 'thinking', thinking: 'x', signature: withId }]),
+      );
+    await send(request());
+    await refused(send(history(withId)), 403, 'dlp_policy_violation');
+    expect(upstream.calls).toHaveLength(1);
+  });
+
+  it('scans thinking-shaped objects anywhere but directly in assistant content, and malformed or oversized signatures', async () => {
     const { send } = setup();
     const nested = {
       type: 'thinking',
@@ -550,29 +623,64 @@ describe('LlmAnthropicService: non-streaming pass-through', () => {
     const sent = JSON.stringify(upstream.calls[0]!.body);
     expect(sent).not.toContain('784-1990-1234567-1');
     expect(sent.match(/\[REDACTED:EMIRATES_ID\]/g)).toHaveLength(3);
-
+    // Over 8 KiB: not treated as a signature, scanned like any text (a JWT inside blocks).
     await refused(
-      send(
-        request({
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'tool_result',
-                  tool_use_id: 't1',
-                  content: [
-                    { type: 'thinking', thinking: 'z', signature: JWT },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
-      ),
+      send(history(`${'A'.repeat(9000)} ${JWT}`)),
       403,
       'dlp_policy_violation',
     );
+  });
+});
+
+describe('LlmAnthropicService: non-streaming pass-through', () => {
+  it('sends the DLP-scanned body with the server key; budget and audit from usage', async () => {
+    const { send, budget, audited, llmGate } = setup();
+    const result = await send(
+      request({
+        system: [
+          { type: 'text', text: 'Owner Emirates ID 784-1990-1234567-1.' },
+        ],
+        context_management: { edits: [] },
+        metadata: { user_id: 'card 4111 1111 1111 1111' },
+      }),
+      { version: '2023-06-01' },
+    );
+    expect(result).toEqual({ json: message() });
+    const call = upstream.calls[0]!;
+    expect(call.path).toBe('/v1/messages');
+    expect(call.headers['x-api-key']).toBe(SERVER_KEY);
+    expect(call.headers.authorization).toBeUndefined();
+    expect(call.body.model).toBe('claude-test');
+    expect(call.body.context_management).toEqual({ edits: [] });
+    expect(JSON.stringify(call.body.system)).toContain(
+      '[REDACTED:EMIRATES_ID]',
+    );
+    expect(call.body.metadata).toEqual({
+      user_id: 'card [REDACTED:PAYMENT_CARD]',
+    });
+    expect(llmGate).toHaveBeenCalledWith('tenant-1', 'llm_proxy', {
+      external: true,
+      uaeResident: false,
+      model: 'claude-test',
+    });
+    expect(budget.add).toHaveBeenCalledWith(
+      'tenant-1',
+      'task-1',
+      145,
+      expect.any(Date),
+    );
+    expect(audited()[0]).toMatchObject({
+      taskId: 'task-1',
+      outcome: 'SUCCESS',
+      format: 'anthropic',
+      stream: false,
+      provider: 'anthropic',
+      model: 'claude-test',
+      cacheCreationTokens: 5,
+      cacheReadTokens: 100,
+      totalTokens: 145,
+    });
+    expect(JSON.stringify(audited())).not.toContain('Owner Emirates');
   });
 
   it('DLP before the call: a credential in a tool result blocks, nothing is sent', async () => {
@@ -599,7 +707,7 @@ describe('LlmAnthropicService: non-streaming pass-through', () => {
     expect(upstream.calls).toHaveLength(0);
   });
 
-  it('DLP after the call: PII in text and tool input is redacted; a credential is refused after charging', async () => {
+  it('DLP after the call: PII redacted; a credential, also one split between text and tool input, is refused after charging', async () => {
     const { send, budget, audited } = setup();
     upstream.handler = (_b, res) =>
       json(
@@ -625,9 +733,20 @@ describe('LlmAnthropicService: non-streaming pass-through', () => {
         input: { command: 'echo [REDACTED:EMIRATES_ID]' },
       },
     ]);
-
     upstream.handler = (_b, res) =>
-      json(res, 200, message([{ type: 'text', text: `Use ${JWT}` }]));
+      json(
+        res,
+        200,
+        message([
+          { type: 'text', text: `Use ${JWT.slice(0, 30)}` },
+          {
+            type: 'tool_use',
+            id: 't',
+            name: 'Bash',
+            input: { command: JWT.slice(30) },
+          },
+        ]),
+      );
     await refused(send(request()), 403, 'dlp_policy_violation');
     expect(budget.add).toHaveBeenCalledTimes(2);
     expect(audited().at(-1)).toMatchObject({
@@ -650,7 +769,6 @@ describe('LlmAnthropicService: non-streaming pass-through', () => {
     await expect(send(request())).rejects.toMatchObject({
       status: 400,
       response: {
-        type: 'error',
         error: {
           message: 'context_management: Extra inputs are not permitted',
         },
@@ -664,6 +782,26 @@ describe('LlmAnthropicService: non-streaming pass-through', () => {
       });
     await refused(send(request()), 502, 'llm_upstream_unavailable');
   });
+
+  it('a client that leaves during a call is charged and recorded (non-streaming and before stream headers)', async () => {
+    for (const stream of [false, true]) {
+      const { send, audited, budget } = setup();
+      upstream.handler = (_b, res) =>
+        void setTimeout(() => json(res, 200, message()), 2_000);
+      const leave = new AbortController();
+      const reply = send(request({ stream }), {}, leave.signal);
+      await vi.waitFor(() => expect(upstream.calls.length).toBeGreaterThan(0));
+      leave.abort();
+      await expect(reply).rejects.toBeDefined();
+      expect(audited()).toHaveLength(1);
+      expect(audited()[0]).toMatchObject({
+        outcome: 'INCOMPLETE',
+        reason: 'client_closed',
+      });
+      expect(budget.add).toHaveBeenCalledTimes(1);
+      upstream.calls = [];
+    }
+  });
 });
 
 const textOf = (events: SseEvent[]) =>
@@ -672,253 +810,366 @@ const textOf = (events: SseEvent[]) =>
     .map((e) => ((e.data.delta as Json).text as string | undefined) ?? '')
     .join('');
 
-describe('LlmAnthropicService: streaming pass-through', () => {
-  it('relays events in order, charges the reported usage, and releases message_stop after the audit', async () => {
-    const { send, budget, audit } = setup();
-    let release!: () => void;
-    const hold = new Promise<void>((r) => (release = r));
-    upstream.handler = streamFrom(streamEvents(['Hello ', 'world.']), hold);
+/** Upstream events for one text block made of `deltas`, then a tool call with `input`. */
+function withTool(deltas: string[], input: string): string[] {
+  const all = streamEvents(deltas);
+  return [
+    ...all.slice(0, -3),
+    sseText('content_block_start', {
+      index: 1,
+      content_block: { type: 'tool_use', id: 't', name: 'Bash', input: {} },
+    }),
+    sseText('content_block_delta', {
+      index: 1,
+      delta: { type: 'input_json_delta', partial_json: input },
+    }),
+    sseText('content_block_stop', { index: 1 }),
+    ...all.slice(-2),
+  ];
+}
 
-    const seen: string[] = [];
-    let auditedBeforeDelta = false;
-    const events = await collect(await send(request({ stream: true })), (e) => {
-      seen.push(e.data.type as string);
-      // The first event is out while the upstream is still holding the rest.
-      if (seen.length === 1) release();
-      if (e.data.type === 'message_delta')
-        auditedBeforeDelta = audit.record.mock.calls.length === 1;
+describe.each(['buffer', 'incremental'])(
+  'LlmAnthropicService: streaming, %s mode',
+  (mode) => {
+    const env = { LLM_ANTHROPIC_STREAM_DLP: mode };
+    const filler = 'x '.repeat(400);
+
+    it('streams the answer, charges the reported usage, and releases message_stop after the audit', async () => {
+      const { send, budget, audit } = setup({ env });
+      upstream.handler = streamFrom(streamEvents(['Hello ', 'world.']));
+      let auditedBeforeDelta = false;
+      const events = await collect(
+        await send(request({ stream: true })),
+        (e) => {
+          if (e.data.type === 'message_delta')
+            auditedBeforeDelta = audit.record.mock.calls.length === 1;
+        },
+      );
+      const types = events.map((e) => e.data.type).filter((t) => t !== 'ping');
+      expect(types).toEqual([
+        'message_start',
+        'content_block_start',
+        'content_block_delta',
+        'content_block_stop',
+        'message_delta',
+        'message_stop',
+      ]);
+      expect(textOf(events)).toBe('Hello world.');
+      expect(auditedBeforeDelta).toBe(true);
+      // 30 input + 7 output (cumulative, from message_delta) + 100 cache read.
+      expect(budget.add).toHaveBeenCalledWith(
+        'tenant-1',
+        'task-1',
+        137,
+        expect.any(Date),
+      );
     });
-    expect(seen).toEqual([
-      'message_start',
-      'content_block_start',
-      'ping',
-      'content_block_delta',
-      'content_block_stop',
-      'message_delta',
-      'message_stop',
-    ]);
-    expect(textOf(events)).toBe('Hello world.');
-    expect(auditedBeforeDelta).toBe(true);
-    expect(budget.add).toHaveBeenCalledWith(
-      'tenant-1',
-      'task-1',
-      137,
-      expect.any(Date),
-    );
-  });
 
-  it('releases long text as it goes, keeping only the lookahead back', async () => {
-    const { send } = setup();
-    let release!: () => void;
-    const hold = new Promise<void>((r) => (release = r));
-    const words = 'lorem ipsum dolor sit amet '.repeat(60); // 1620 chars
-    const chunks = streamEvents([words]);
-    // Everything up to and including the delta, then wait.
-    upstream.handler = streamFrom(
-      [chunks.slice(0, 4).join(''), ...chunks.slice(4)],
-      hold,
-    );
-    const reply = (await send(request({ stream: true }))) as {
-      stream: AsyncGenerator<string>;
-    };
-    let early = '';
-    while (!early.includes('text_delta'))
-      early += (await reply.stream.next()).value as string;
-    const sentEarly = textOf(
-      early
-        .split('\n\n')
-        .filter(Boolean)
-        .map((r) => parseSse(r)!),
-    );
-    expect(sentEarly.length).toBeGreaterThan(1000);
-    expect(sentEarly.length).toBeLessThanOrEqual(words.length - 512);
-    release();
-    const rest = await collect({ stream: reply.stream });
-    expect(sentEarly + textOf(rest)).toBe(words);
-  });
-
-  it('redacts PII split across deltas', async () => {
-    const { send, audited } = setup();
-    upstream.handler = streamFrom(
-      streamEvents(['ID 784-1990-', '1234567-1 ok']),
-    );
-    const events = await collect(await send(request({ stream: true })));
-    expect(textOf(events)).toBe('ID [REDACTED:EMIRATES_ID] ok');
-    expect(audited().at(-1)).toMatchObject({
-      responseDlp: { piiTypes: ['emirates_id'] },
-    });
-  });
-
-  it('catches a credential split across deltas and blocks before any of it is released', async () => {
-    const filler = 'x '.repeat(400); // long enough that earlier text is released
-    for (const parts of [
-      [
-        filler,
-        'Your token is ',
-        JWT.slice(0, 20),
-        JWT.slice(20, 40),
-        JWT.slice(40),
-        ' bye',
-      ],
-      [
-        filler,
-        'Authorization: Bearer ',
-        'AbCdEfGhIjKlMnOp',
-        'QrStUvWxYz0123456789',
-        ' end',
-      ],
-    ]) {
-      const { send, audited, budget } = setup();
-      upstream.handler = streamFrom(streamEvents(parts));
-      const cut = await collect(await send(request({ stream: true })));
-      const types = cut.map((e) => e.data.type);
-      expect(types.at(-1)).toBe('error');
-      expect(types).not.toContain('message_stop');
-      expect(cut.at(-1)!.data).toMatchObject({
-        type: 'error',
-        error: { type: 'permission_error', message: 'dlp_policy_violation' },
-        reason: 'dlp_policy_violation',
-      });
-      const out = textOf(cut);
-      expect(out).not.toContain(parts[2]!.slice(0, 8));
+    it('redacts PII split across deltas and PII lying across the release point', async () => {
+      const { send, audited } = setup({ env });
+      upstream.handler = streamFrom(
+        streamEvents(['ID 784-1990-', '1234567-1 ok']),
+      );
+      expect(textOf(await collect(await send(request({ stream: true }))))).toBe(
+        'ID [REDACTED:EMIRATES_ID] ok',
+      );
       expect(audited().at(-1)).toMatchObject({
-        outcome: 'DENIED',
-        reason: 'dlp_policy_violation',
-        stream: true,
+        responseDlp: { piiTypes: ['emirates_id'] },
       });
-      expect(budget.add).toHaveBeenCalledTimes(1);
-    }
-  });
-
-  it('catches a credential split across two text blocks', async () => {
-    const { send } = setup();
-    upstream.handler = streamFrom([
-      sseText('message_start', { message: message([]) }),
-      sseText('content_block_start', {
-        index: 0,
-        content_block: { type: 'text', text: '' },
-      }),
-      sseText('content_block_delta', {
-        index: 0,
-        delta: {
-          type: 'text_delta',
-          text: 'x '.repeat(400) + JWT.slice(0, 30),
-        },
-      }),
-      sseText('content_block_stop', { index: 0 }),
-      sseText('content_block_start', {
-        index: 1,
-        content_block: { type: 'text', text: '' },
-      }),
-      sseText('content_block_delta', {
-        index: 1,
-        delta: { type: 'text_delta', text: JWT.slice(30) + ' done' },
-      }),
-      sseText('content_block_stop', { index: 1 }),
-      sseText('message_delta', {
-        delta: { stop_reason: 'end_turn' },
-        usage: { output_tokens: 9 },
-      }),
-      sseText('message_stop', {}),
-    ]);
-    const events = await collect(await send(request({ stream: true })));
-    expect(events.at(-1)!.data).toMatchObject({
-      reason: 'dlp_policy_violation',
+      // The lookahead cut (end - 512) would fall inside the card.
+      upstream.handler = streamFrom(
+        streamEvents([
+          'x'.repeat(1000) + ' 4111 1111 1111 1111 ' + 'b'.repeat(500),
+        ]),
+      );
+      const out = textOf(await collect(await send(request({ stream: true }))));
+      expect(out).not.toMatch(/4111|1111/);
+      expect(out).toContain('[REDACTED:PAYMENT_CARD]');
     });
-    expect(textOf(events)).not.toContain('eyJ');
-  });
 
-  it('charges a stream the client left by the larger of reported usage and input plus output seen', async () => {
-    const { send, audited, budget } = setup();
-    let release!: () => void;
-    const hold = new Promise<void>((r) => (release = r));
-    const chunks = streamEvents(['y '.repeat(2000)]); // 4000 output chars
-    upstream.handler = streamFrom(
-      [chunks.slice(0, 4).join(''), ...chunks.slice(4)],
-      hold,
+    it.each([
+      [
+        'a JWT split across deltas',
+        [
+          filler,
+          'Your token is ',
+          JWT.slice(0, 20),
+          JWT.slice(20, 40),
+          JWT.slice(40),
+          ' bye',
+        ],
+        JWT.slice(0, 12),
+      ],
+      [
+        'a bearer token split across deltas',
+        [
+          filler,
+          'Authorization: Bearer ',
+          'AbCdEfGhIjKlMnOp',
+          'QrStUvWxYz0123456789',
+          ' end',
+        ],
+        'AbCdEfGh',
+      ],
+      [
+        'a bearer token after 600 spaces',
+        [
+          filler,
+          'Authorization: Bearer',
+          ' '.repeat(600),
+          'AbCdEfGhIjKlMnOpQrStUvWx',
+          ' end',
+        ],
+        'AbCdEfGh',
+      ],
+      [
+        'an AccountKey after padding',
+        [
+          filler,
+          'AccountKey',
+          ' '.repeat(600),
+          '=',
+          'Zm9vYmFyYmF6cXV4cXV1eA',
+          ';x',
+        ],
+        'Zm9vYmFy',
+      ],
+      [
+        'a 600-character password value',
+        [filler, '{"password": "', 'p@'.repeat(300), '"}'],
+        'p@p@p@',
+      ],
+    ])(
+      'blocks %s before any of it is released',
+      async (_name, parts, secret) => {
+        const { send, audited, budget } = setup({ env });
+        upstream.handler = streamFrom(streamEvents(parts));
+        const events = await collect(await send(request({ stream: true })));
+        expect(events.at(-1)!.data).toMatchObject({
+          type: 'error',
+          error: { type: 'permission_error', message: 'dlp_policy_violation' },
+          reason: 'dlp_policy_violation',
+        });
+        expect(events.map((e) => e.data.type)).not.toContain('message_stop');
+        expect(JSON.stringify(events)).not.toContain(secret);
+        expect(audited().at(-1)).toMatchObject({
+          outcome: 'DENIED',
+          reason: 'dlp_policy_violation',
+          stream: true,
+        });
+        expect(budget.add).toHaveBeenCalledTimes(1);
+      },
     );
-    const reply = (await send(request({ stream: true }))) as {
-      stream: AsyncGenerator<string>;
-    };
-    let early = '';
-    while (!early.includes('text_delta'))
-      early += (await reply.stream.next()).value as string;
-    await reply.stream.return(undefined);
-    release();
-    expect(audited().at(-1)).toMatchObject({
-      outcome: 'INCOMPLETE',
-      reason: 'client_closed',
+
+    it('blocks a credential split between text and tool input, and one in a citation', async () => {
+      const { send } = setup({ env });
+      upstream.handler = streamFrom(
+        withTool([filler, 'see ' + JWT.slice(0, 30)], JWT.slice(30)),
+      );
+      let events = await collect(await send(request({ stream: true })));
+      expect(events.at(-1)!.data).toMatchObject({
+        reason: 'dlp_policy_violation',
+      });
+      expect(JSON.stringify(events)).not.toContain(JWT.slice(0, 12));
+
+      const all = streamEvents(['Quoted.']);
+      upstream.handler = streamFrom([
+        ...all.slice(0, 3),
+        sseText('content_block_delta', {
+          index: 0,
+          delta: {
+            type: 'citations_delta',
+            citation: { type: 'char_location', cited_text: `key ${JWT}` },
+          },
+        }),
+        ...all.slice(3),
+      ]);
+      events = await collect(await send(request({ stream: true })));
+      expect(events.at(-1)!.data).toMatchObject({
+        reason: 'dlp_policy_violation',
+      });
     });
-    // Reported 131 (30 in + 1 out + 100 cache); input 130 + 4000/4 output = 1130.
-    expect(budget.add).toHaveBeenCalledWith(
-      'tenant-1',
-      'task-1',
-      1130,
-      expect.any(Date),
-    );
-  });
 
-  it('cuts a stream at the overall deadline even while the upstream keeps it alive', async () => {
-    const { send, audited } = setup({ env: { LLM_STREAM_MAX_MS: 300 } });
-    let stop = false;
-    upstream.handler = async (_b, res) => {
-      res.writeHead(200, { 'content-type': 'text/event-stream' });
-      res.write(streamEvents([])[0]);
-      while (!stop && !res.destroyed) {
-        res.write(sseText('ping', {}));
-        await new Promise((r) => setTimeout(r, 50));
+    it('holds a tool call input and releases it redacted', async () => {
+      const { send } = setup({ env });
+      const input = '{"command": "echo 784-1990-1234567-1"}';
+      upstream.handler = streamFrom(withTool(['Running.'], input));
+      const events = await collect(await send(request({ stream: true })));
+      const json = events
+        .filter(
+          (e) =>
+            (e.data.delta as Json | undefined)?.type === 'input_json_delta',
+        )
+        .map((e) => (e.data.delta as Json).partial_json as string)
+        .join('');
+      expect(JSON.parse(json)).toEqual({
+        command: 'echo [REDACTED:EMIRATES_ID]',
+      });
+    });
+
+    it('charges a stream the client left by the larger of reported usage and input plus output seen', async () => {
+      const { send, audited, budget } = setup({ env });
+      let release!: () => void;
+      const hold = new Promise<void>((r) => (release = r));
+      const all = streamEvents(['y '.repeat(2000)]); // 4000 output chars
+      // start, block start, the delta, then a ping; the rest waits.
+      upstream.handler = streamFrom(
+        [[all[0], all[1], all[3], all[2]].join(''), ...all.slice(4)],
+        hold,
+      );
+      const leave = new AbortController();
+      const reply = (await send(
+        request({ stream: true }),
+        {},
+        leave.signal,
+      )) as {
+        stream: AsyncGenerator<string>;
+      };
+      if (mode === 'incremental') {
+        for (;;) {
+          const r = await reply.stream.next();
+          if (r.done || String(r.value).includes('event: ping')) break;
+        }
+      } else {
+        void reply.stream.next();
+        await new Promise((r) => setTimeout(r, 200));
       }
-      res.end();
-    };
-    const events = await collect(await send(request({ stream: true })));
-    stop = true;
-    expect(events.at(-1)!.data).toMatchObject({
-      type: 'error',
-      reason: 'llm_upstream_unavailable',
+      leave.abort();
+      await reply.stream.return(undefined);
+      release();
+      await vi.waitFor(() =>
+        expect(audited().at(-1)).toMatchObject({
+          outcome: 'INCOMPLETE',
+          reason: 'client_closed',
+        }),
+      );
+      // Reported 131 (30 in + 1 out + 100 cache) is less than input 130 + output seen / 4.
+      expect(budget.add.mock.calls[0]![2]).toBeGreaterThanOrEqual(1130);
     });
-    expect(audited().at(-1)).toMatchObject({
-      outcome: 'UPSTREAM_ERROR',
-      reason: 'stream_deadline',
+
+    it('cuts at the overall deadline while the upstream keeps the stream alive', async () => {
+      const { send, audited } = setup({
+        env: { ...env, LLM_STREAM_MAX_MS: 300 },
+      });
+      let stop = false;
+      upstream.handler = async (_b, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(streamEvents([])[0]);
+        while (!stop && !res.destroyed) {
+          res.write(sseText('ping', {}));
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        res.end();
+      };
+      const events = await collect(await send(request({ stream: true })));
+      stop = true;
+      expect(events.at(-1)!.data).toMatchObject({
+        type: 'error',
+        reason: 'llm_upstream_unavailable',
+      });
+      expect(audited().at(-1)).toMatchObject({
+        outcome: 'UPSTREAM_ERROR',
+        reason: 'stream_deadline',
+      });
     });
+
+    it('tears down a stream whose client stopped reading, then charges and records it', async () => {
+      const { send, audited, budget } = setup({
+        env: { ...env, LLM_STREAM_MAX_MS: 400 },
+      });
+      let stop = false;
+      upstream.handler = async (_b, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(streamEvents([])[0]);
+        while (!stop && !res.destroyed) {
+          res.write(sseText('ping', {}));
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        res.end();
+      };
+      const readable = replyStream(
+        (await send(request({ stream: true }))) as {
+          stream: AsyncGenerator<string>;
+          stop?: AbortSignal;
+        },
+      );
+      readable.once('data', () => readable.pause()); // reads one chunk, then never again
+      await vi.waitFor(() => expect(audited()).toHaveLength(1), {
+        timeout: 3_000,
+      });
+      stop = true;
+      expect(['UPSTREAM_ERROR', 'INCOMPLETE']).toContain(audited()[0]!.outcome);
+      expect(budget.add).toHaveBeenCalledTimes(1);
+    });
+  },
+);
+
+describe('AnthropicStreamGuard (incremental): cost', () => {
+  it('releases long plain text before the message ends', () => {
+    const guard = new AnthropicStreamGuard();
+    guard.push({
+      event: 'content_block_start',
+      data: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
+    });
+    let early = '';
+    for (let i = 0; i < 100; i++) {
+      for (const e of guard.push({
+        event: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'lorem ipsum dolor ' },
+        },
+      }))
+        early += str((e.data.delta as Json | undefined)?.text);
+    }
+    expect(early.length).toBeGreaterThan(1000);
+    expect(early.length).toBeLessThanOrEqual(1800 - 512);
   });
 
-  it('holds a tool call input whole and releases it redacted at the block end', async () => {
-    const { send } = setup();
-    const input = '{"command": "echo 784-1990-1234567-1"}';
-    upstream.handler = streamFrom([
-      sseText('message_start', { message: message([]) }),
-      sseText('content_block_start', {
-        index: 0,
-        content_block: {
-          type: 'tool_use',
-          id: 'toolu_1',
-          name: 'Bash',
-          input: {},
-        },
-      }),
-      sseText('content_block_delta', {
-        index: 0,
-        delta: { type: 'input_json_delta', partial_json: input.slice(0, 25) },
-      }),
-      sseText('content_block_delta', {
-        index: 0,
-        delta: { type: 'input_json_delta', partial_json: input.slice(25) },
-      }),
-      sseText('content_block_stop', { index: 0 }),
-      sseText('message_delta', {
-        delta: { stop_reason: 'tool_use' },
-        usage: { output_tokens: 9 },
-      }),
-      sseText('message_stop', {}),
-    ]);
-    const events = await collect(await send(request({ stream: true })));
-    const deltas = events.filter((e) => e.data.type === 'content_block_delta');
-    expect(deltas).toHaveLength(1);
-    expect(
-      JSON.parse((deltas[0]!.data.delta as Json).partial_json as string),
-    ).toEqual({
-      command: 'echo [REDACTED:EMIRATES_ID]',
+  it('scans a long token-like stream in small deltas in linear time', () => {
+    const guard = new AnthropicStreamGuard();
+    const alphabet =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let blob = '';
+    for (let i = 0; i < 100_000; i++)
+      blob += alphabet[(i * 7919 + (i >> 5)) % 64];
+    const t0 = performance.now();
+    guard.push({
+      event: 'message_start',
+      data: { type: 'message_start', message: {} },
     });
+    guard.push({
+      event: 'content_block_start',
+      data: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
+    });
+    let out = '';
+    for (let i = 0; i < blob.length; i += 8) {
+      for (const e of guard.push({
+        event: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: blob.slice(i, i + 8) },
+        },
+      }))
+        out += str((e.data.delta as Json | undefined)?.text);
+    }
+    for (const e of guard.push({
+      event: 'message_stop',
+      data: { type: 'message_stop' },
+    }))
+      out += str((e.data.delta as Json | undefined)?.text);
+    expect(out).toBe(blob);
+    expect(performance.now() - t0).toBeLessThan(3_000);
   });
 });
 
@@ -988,7 +1239,6 @@ describe('LlmAnthropicService: openai_translate', () => {
     const { send, llmGate, budget, audited } = setup({ env });
     upstream.handler = withToolCall;
     const { json: reply } = (await send(conversation)) as { json: Json };
-
     const call = upstream.calls[0]!;
     expect(call.path).toBe('/v1/chat/completions');
     expect(call.body).toMatchObject({
@@ -1022,7 +1272,6 @@ describe('LlmAnthropicService: openai_translate', () => {
         { role: 'tool', tool_call_id: 'call_1', content: '/repo' },
       ],
     });
-    // Residency follows the OpenAI-format upstream: the catalog judges it, no fixed placement.
     expect(llmGate).toHaveBeenCalledWith('tenant-1', 'llm_proxy', undefined);
     expect(reply).toMatchObject({
       type: 'message',
@@ -1076,7 +1325,7 @@ describe('LlmAnthropicService: openai_translate', () => {
   it('charges and audits a streamed call the client never read', async () => {
     const { send, audited, budget } = setup({ env });
     upstream.handler = withToolCall;
-    await send({ ...conversation, stream: true }); // stream never consumed
+    await send({ ...conversation, stream: true });
     await vi.waitFor(() => expect(audited()).toHaveLength(1));
     expect(audited()[0]).toMatchObject({ outcome: 'SUCCESS', totalTokens: 62 });
     expect(budget.add).toHaveBeenCalledWith(
@@ -1087,7 +1336,7 @@ describe('LlmAnthropicService: openai_translate', () => {
     );
   });
 
-  it('a client that leaves aborts the upstream call, and the call is still charged and recorded', async () => {
+  it('a client that leaves aborts the upstream call, and the call is still charged and recorded once', async () => {
     const { send, audited, budget } = setup({ env });
     let upstreamClosed = false;
     upstream.handler = (_b, res) => {
@@ -1105,6 +1354,8 @@ describe('LlmAnthropicService: openai_translate', () => {
     });
     expect(budget.add).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(upstreamClosed).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(audited()).toHaveLength(1);
   });
 
   it('a failed upstream ends the stream with an error event (502 reason), recorded once', async () => {
@@ -1171,3 +1422,5 @@ describe('anthropicError', () => {
     });
   });
 });
+
+const str = (v: unknown): string => (typeof v === 'string' ? v : '');

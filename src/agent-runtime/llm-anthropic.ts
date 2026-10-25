@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { BadRequestException, HttpException } from '@nestjs/common';
 import { z } from 'zod';
-import { applyDlpFloor } from '../common/dlp/dlp-classification';
+import {
+  applyDlpFloor,
+  credentialTypes,
+  dlpScanText,
+  stringLeaves,
+} from '../common/dlp/dlp-classification';
 import { denied } from './agent-task-access.service';
 import type {
   UpstreamChatRequest,
@@ -186,13 +191,17 @@ function unscannable(blocks: unknown): boolean {
 /** A path to a value inside a JSON document. */
 type Slot = (string | number)[];
 
-/** What a thinking signature or redacted-thinking payload looks like: base64, bounded. */
-function opaqueValue(v: unknown): v is string {
+/**
+ * What a thinking signature or redacted-thinking payload looks like: canonical base64, at most
+ * 8 KiB. Anything else in those fields is scanned like any other text.
+ */
+export function opaqueValue(v: unknown): v is string {
   return (
     typeof v === 'string' &&
     v.length > 0 &&
-    v.length <= 65_536 &&
-    /^[A-Za-z0-9+/=_-]+$/.test(v)
+    v.length <= 8_192 &&
+    /^[A-Za-z0-9+/]+={0,2}$/.test(v) &&
+    Buffer.from(v, 'base64').toString('base64') === v
   );
 }
 
@@ -254,13 +263,14 @@ const at = (root: unknown, path: Slot): Json =>
 export function holdOpaque<T>(
   value: T,
   slots: (v: T) => Slot[],
-): { held: T; restore: (scanned: T) => T } {
+): { held: T; restore: (scanned: T) => T; values: string[] } {
   const held = structuredClone(value);
   const paths = slots(held);
-  const saved = paths.map((p) => at(held, p)[p.at(-1)!]);
+  const saved = paths.map((p) => at(held, p)[p.at(-1)!] as string);
   paths.forEach((p) => (at(held, p)[p.at(-1)!] = ''));
   return {
     held,
+    values: saved,
     restore: (scanned) => {
       paths.forEach((p, i) => (at(scanned, p)[p.at(-1)!] = saved[i]));
       return scanned;
@@ -270,17 +280,25 @@ export function holdOpaque<T>(
 
 export interface ScannedMessage {
   message: Json;
+  /** Thinking signatures and redacted-thinking data in the message, unchanged. */
+  opaque: string[];
   credentialTypes: string[];
   piiTypes: string[];
 }
 
-/** Response DLP on a whole message: the deterministic floor (credentials block, UAE PII redacted). */
+/**
+ * Response DLP on a whole message: the deterministic floor (credentials block, UAE PII
+ * redacted), plus credential shapes over all its strings joined, so a secret split between
+ * blocks (text, thinking, tool input, citations) is found too.
+ */
 export function scanMessage(message: Json): ScannedMessage {
-  const { held, restore } = holdOpaque(message.content, contentSlots);
+  const { held, restore, values } = holdOpaque(message.content, contentSlots);
   const floor = applyDlpFloor(held);
+  const joined = credentialTypes(stringLeaves(held).join(''));
   return {
     message: { ...message, content: restore(floor.value) },
-    credentialTypes: floor.credentialTypes,
+    opaque: values,
+    credentialTypes: [...new Set([...floor.credentialTypes, ...joined])].sort(),
     piiTypes: floor.piiTypes,
   };
 }
@@ -366,54 +384,78 @@ export const errorEvent = (error: HttpException): SseEvent => ({
   data: anthropicError(error).body,
 });
 
-/**
- * Streamed text is always this far behind what the upstream sent: room for the plain-text part
- * of a credential pattern (a PEM header, `"client_secret": "`, `AccountKey=`, `Bearer `) to
- * complete before any of the secret after it is released.
- */
+/** Streamed text stays at least this far behind the upstream, and this much sent text is rescanned. */
 const CREDENTIAL_LOOKAHEAD = 512;
+/** Each delta is scanned together with this much text before it. */
+const RECENT = 256;
 /** Characters of token-like secrets (JWT, bearer and SAS values, Entra client secrets). */
 const TOKEN_CHAR = /[A-Za-z0-9_~.+/=%-]/;
 /** A token-like run is held whole until it ends; one longer than this is treated as data. */
 const TOKEN_RUN_MAX = 65_536;
 /** Characters a UAE PII match can contain (digits, separators, the `AE` of an IBAN). */
 const PII_CHAR = /[0-9AaEe +-]/;
-/** A run of PII characters longer than this is not a single PII value; it is released. */
+/** A trailing run of PII characters is held up to this length. */
 const PII_RUN_MAX = 512;
+/**
+ * The plain-text part of a credential pattern: once one appears, everything from it is held
+ * until its value has ended (`HOLD_SEPARATOR` then a value, then `HOLD_VALUE_END`), whatever the
+ * padding; a hold longer than `HOLD_MAX` blocks the stream.
+ */
+const KEYWORD =
+  /bearer|accountkey|sharedaccesskey|sharedaccesssignature|sig=|-----begin|"(?:client_?secret|clientsecret|password|passwd|secret)"/gi;
+const HOLD_SEPARATOR = /[\s:="']/;
+const HOLD_VALUE_END = /[\s"']/;
+const HOLD_MAX = 65_536;
 
-/** How much of `pending` can go out: nothing a credential or PII match could still grow into. */
-function safeCut(pending: string): number {
-  const end = pending.length;
-  let pii = end;
-  while (pii > 0 && PII_CHAR.test(pending[pii - 1]!)) pii--;
-  if (end - pii > PII_RUN_MAX) pii = end;
-  let token = end;
-  while (token > 0 && TOKEN_CHAR.test(pending[token - 1]!)) token--;
-  if (end - token > TOKEN_RUN_MAX) token = end;
-  return Math.max(0, Math.min(pii, token, end - CREDENTIAL_LOOKAHEAD));
-}
+type TextDelta = 'text_delta' | 'thinking_delta' | 'input_json_delta';
+const TEXT_FIELD: Record<TextDelta, string> = {
+  text_delta: 'text',
+  thinking_delta: 'thinking',
+  input_json_delta: 'partial_json',
+};
 
 type Queued =
   | { kind: 'event'; event: SseEvent }
-  | { kind: 'text'; index: number; field: 'text' | 'thinking'; text: string };
+  /** `scan`: strings of a structured delta, scanned with the text but emitted as their event. */
+  | { kind: 'text'; index: number; type: TextDelta | 'scan'; len: number };
 
 /**
- * Response DLP over a streamed message. Events leave in order through one message-level queue:
- * text and thinking deltas are held as long as a credential or PII match could still be growing
- * (`safeCut`), and every check reads the queued text of all blocks plus the tail already sent,
- * so a secret split across deltas or blocks is caught before any of it goes out. A tool call's
- * input is held whole until its block ends. A credential throws `DlpBlocked`. `message_delta` and
- * `message_stop` are kept in `held` for the caller to release after the call is charged and
- * audited.
+ * Incremental response DLP over a streamed message (`LLM_ANTHROPIC_STREAM_DLP=incremental`;
+ * weaker than `buffer`, see ADR-0002 A2). Every string-bearing delta (text, thinking, tool input,
+ * citations and any other) goes through one message-level queue, released in order:
+ *
+ * - each delta is scanned for credential shapes with the `RECENT` characters before it, and a
+ *   held run is scanned whole once when it closes (linear in the stream, not quadratic);
+ * - text is held at least `CREDENTIAL_LOOKAHEAD` back, while a token-like or PII-like run is open,
+ *   and from a credential keyword until its value has ended;
+ * - a release never ends where a PII match could straddle it (no digit within 32 characters of
+ *   the cut), so redaction sees whole values.
+ *
+ * A credential throws `DlpBlocked`. `message_delta` and `message_stop` are kept in `held` for the
+ * caller to release after the call is charged and audited.
  */
 export class AnthropicStreamGuard {
   readonly usage: AnthropicUsage = {};
   readonly piiTypes = new Set<string>();
   readonly held: SseEvent[] = [];
+  /** Thinking signatures and redacted-thinking data the upstream sent, whole. */
+  readonly opaque: string[] = [];
   outputChars = 0;
-  private readonly toolInput = new Map<number, string>();
+  private readonly signatures = new Map<number, string>();
   private readonly queue: Queued[] = [];
+  private pending = '';
   private sentTail = '';
+  private recent = '';
+  private seen = 0;
+  private released = 0;
+  private tokenRun = 0;
+  private piiRun = 0;
+  private lastDigit = -Infinity;
+  /** Absolute cut positions with no digit within 32 characters on either side. */
+  private readonly safe: [number, number][] = [];
+  private hold: { start: number; valueFrom: number; inValue: boolean } | null =
+    null;
+  private keywordsTo = 0;
 
   push(e: SseEvent): SseEvent[] {
     const d = e.data;
@@ -431,77 +473,155 @@ export class AnthropicStreamGuard {
         this.held.push(e);
         return this.release(true);
       case 'content_block_start': {
-        const type = (d.content_block as Json | undefined)?.type;
-        if (type === 'tool_use' || type === 'server_tool_use')
-          this.toolInput.set(d.index as number, '');
+        const block = (d.content_block ?? {}) as Json;
+        const key = blockSlot(block);
+        if (key) this.opaque.push(block[key] as string);
         break;
       }
       case 'content_block_delta': {
         const index = d.index as number;
         const delta = (d.delta ?? {}) as Json;
-        if (delta.type === 'text_delta' || delta.type === 'thinking_delta') {
-          const field = delta.type === 'text_delta' ? 'text' : 'thinking';
-          this.queueText(index, field, str(delta[field]));
-          this.check();
+        const type = delta.type as string;
+        if (type in TEXT_FIELD) {
+          this.append(
+            index,
+            type as TextDelta,
+            str(delta[TEXT_FIELD[type as TextDelta]]),
+          );
           return this.release(false);
         }
-        const input = this.toolInput.get(index);
-        if (input !== undefined && delta.type === 'input_json_delta') {
-          const part = str(delta.partial_json);
-          this.toolInput.set(index, input + part);
-          this.outputChars += part.length;
-          return [];
+        if (type === 'signature_delta') {
+          this.signatures.set(
+            index,
+            (this.signatures.get(index) ?? '') + str(delta.signature),
+          );
+          break;
         }
+        // Citations, compaction and any other delta: its strings join the scanned text.
+        this.append(
+          index,
+          'scan',
+          `\n${dlpScanText(holdOpaque(delta, () => []).held)}\n`,
+        );
         break;
       }
       case 'content_block_stop': {
         const index = d.index as number;
-        const input = this.toolInput.get(index);
-        this.toolInput.delete(index);
-        if (input) {
-          // The input JSON as one string: a redaction placeholder is JSON-safe inside a string.
-          this.queue.push({
-            kind: 'event',
-            event: delta(index, {
-              type: 'input_json_delta',
-              partial_json: this.redact(input),
-            }),
-          });
-        }
-        this.queue.push({ kind: 'event', event: e });
-        return this.release(false);
+        const signature = this.signatures.get(index);
+        this.signatures.delete(index);
+        if (opaqueValue(signature)) this.opaque.push(signature);
+        break;
       }
     }
     this.queue.push({ kind: 'event', event: this.scan(e) });
     return this.release(false);
   }
 
-  private queueText(index: number, field: 'text' | 'thinking', text: string) {
-    if (!text) return;
-    this.outputChars += text.length;
+  private append(index: number, type: TextDelta | 'scan', chunk: string): void {
+    if (!chunk) return;
+    if (type !== 'scan') this.outputChars += chunk.length;
+    const start = this.seen;
     const last = this.queue.at(-1);
-    if (last?.kind === 'text' && last.index === index && last.field === field)
-      last.text += text;
-    else this.queue.push({ kind: 'text', index, field, text });
+    if (last?.kind === 'text' && last.index === index && last.type === type)
+      last.len += chunk.length;
+    else this.queue.push({ kind: 'text', index, type, len: chunk.length });
+    this.pending += chunk;
+    this.seen += chunk.length;
+
+    const window = this.recent + chunk;
+    this.recent = window.slice(-RECENT);
+    this.block(credentialTypes(window));
+
+    const windowStart = this.seen - window.length;
+    const keywordEnds: { start: number; end: number }[] = [];
+    for (const m of window.matchAll(KEYWORD)) {
+      const s = windowStart + m.index;
+      const end = s + m[0].length;
+      if (end > this.keywordsTo && end > start)
+        keywordEnds.push({ start: s, end });
+    }
+    this.keywordsTo = this.seen;
+
+    let closedFrom = Infinity;
+    let k = 0;
+    for (let i = 0; i < chunk.length; i++) {
+      const pos = start + i;
+      const ch = chunk[i]!;
+      if (TOKEN_CHAR.test(ch)) {
+        if (++this.tokenRun === TOKEN_RUN_MAX + 1)
+          closedFrom = Math.min(closedFrom, pos - TOKEN_RUN_MAX);
+      } else {
+        if (this.tokenRun > RECENT / 2)
+          closedFrom = Math.min(closedFrom, pos - this.tokenRun);
+        this.tokenRun = 0;
+      }
+      this.piiRun = PII_CHAR.test(ch) ? this.piiRun + 1 : 0;
+      if (/\d/.test(ch)) this.lastDigit = pos;
+      else if (pos - this.lastDigit >= 64 && pos >= 31) this.markSafe(pos - 31);
+      const hold = this.hold;
+      if (hold && pos >= hold.valueFrom) {
+        if (!hold.inValue) hold.inValue = !HOLD_SEPARATOR.test(ch);
+        else if (HOLD_VALUE_END.test(ch)) {
+          closedFrom = Math.min(closedFrom, hold.start);
+          this.hold = null;
+        }
+      }
+      while (k < keywordEnds.length && keywordEnds[k]!.end === pos + 1) {
+        this.hold ??= {
+          start: keywordEnds[k]!.start,
+          valueFrom: pos + 1,
+          inValue: false,
+        };
+        k++;
+      }
+    }
+    if (this.hold && this.seen - this.hold.start > HOLD_MAX)
+      throw new DlpBlocked(['credential_hold_exceeded']);
+    // A held run or hold just closed: scan it whole, once.
+    if (closedFrom !== Infinity)
+      this.block(credentialTypes(this.textFrom(closedFrom)));
   }
 
-  private pendingText(): string {
-    return this.queue.map((q) => (q.kind === 'text' ? q.text : '')).join('');
+  private markSafe(at: number): void {
+    const last = this.safe.at(-1);
+    if (last && last[1] === at - 1) last[1] = at;
+    else this.safe.push([at, at]);
   }
 
-  /** Credential shapes in what was last sent plus everything held, across blocks. */
-  private check(): void {
-    const found = applyDlpFloor(
-      this.sentTail + this.pendingText(),
-    ).credentialTypes;
-    if (found.length) throw new DlpBlocked(found);
+  /** Text from absolute position `from` (minus the lookahead) to the end, sent tail included. */
+  private textFrom(from: number): string {
+    const start = from - CREDENTIAL_LOOKAHEAD;
+    return (
+      (start < this.released ? this.sentTail : '') +
+      this.pending.slice(Math.max(0, start - this.released))
+    );
+  }
+
+  private block(types: string[]): void {
+    if (types.length) throw new DlpBlocked(types);
+  }
+
+  /** How much of `pending` can go out now. */
+  private safeCut(): number {
+    let keep = CREDENTIAL_LOOKAHEAD;
+    if (this.tokenRun <= TOKEN_RUN_MAX) keep = Math.max(keep, this.tokenRun);
+    if (this.piiRun <= PII_RUN_MAX) keep = Math.max(keep, this.piiRun);
+    let target = this.seen - keep;
+    if (this.hold) target = Math.min(target, this.hold.start);
+    while (this.safe.length && this.safe[0]![1] < this.released)
+      this.safe.shift();
+    for (let i = this.safe.length - 1; i >= 0; i--) {
+      const [a, b] = this.safe[i]!;
+      if (a <= target) return Math.max(0, Math.min(b, target) - this.released);
+    }
+    return 0;
   }
 
   private release(final: boolean): SseEvent[] {
-    if (final) this.check();
-    const pending = this.pendingText();
-    let cut = final ? pending.length : safeCut(pending);
+    if (final) this.block(credentialTypes(this.sentTail + this.pending));
+    let cut = final ? this.pending.length : this.safeCut();
     const out: SseEvent[] = [];
+    let taken = 0;
     while (this.queue.length) {
       const q = this.queue[0]!;
       if (q.kind === 'event') {
@@ -510,26 +630,35 @@ export class AnthropicStreamGuard {
         continue;
       }
       if (cut <= 0) break;
-      const part = q.text.slice(0, cut);
-      cut -= part.length;
-      q.text = q.text.slice(part.length);
-      if (!q.text) this.queue.shift();
-      this.sentTail = (this.sentTail + part).slice(-CREDENTIAL_LOOKAHEAD);
-      out.push(
-        delta(q.index, {
-          type: `${q.field}_delta`,
-          [q.field]: this.redact(part),
-        }),
+      const n = Math.min(q.len, cut);
+      const part = this.pending.slice(taken, taken + n);
+      taken += n;
+      cut -= n;
+      q.len -= n;
+      if (q.len === 0) this.queue.shift();
+      if (q.type !== 'scan') {
+        out.push(
+          delta(q.index, {
+            type: q.type,
+            [TEXT_FIELD[q.type]]: this.redact(part),
+          }),
+        );
+      }
+      if (q.len > 0) break;
+    }
+    if (taken) {
+      this.sentTail = (this.sentTail + this.pending.slice(0, taken)).slice(
+        -CREDENTIAL_LOOKAHEAD,
       );
-      if (q.text) break;
+      this.pending = this.pending.slice(taken);
+      this.released += taken;
     }
     return out;
   }
 
   private redact(text: string): string {
     const floor = applyDlpFloor(text);
-    if (floor.credentialTypes.length)
-      throw new DlpBlocked(floor.credentialTypes);
+    this.block(floor.credentialTypes);
     floor.piiTypes.forEach((t) => this.piiTypes.add(t));
     return floor.value;
   }
@@ -537,8 +666,7 @@ export class AnthropicStreamGuard {
   private scan(e: SseEvent): SseEvent {
     const { held, restore } = holdOpaque(e.data, eventSlots);
     const floor = applyDlpFloor(held);
-    if (floor.credentialTypes.length)
-      throw new DlpBlocked(floor.credentialTypes);
+    this.block(floor.credentialTypes);
     floor.piiTypes.forEach((t) => this.piiTypes.add(t));
     return { event: e.event, data: restore(floor.value) };
   }
@@ -552,13 +680,89 @@ export class AnthropicStreamGuard {
   }
 }
 
+/**
+ * The whole message a stream describes (`LLM_ANTHROPIC_STREAM_DLP=buffer`): deltas applied to
+ * their blocks, tool input parsed at block end (kept as a string when it is not JSON), the last
+ * `message_delta` merged. Response DLP then runs once on the complete message.
+ */
+export class MessageAccumulator {
+  private message: Json = {};
+  private readonly blocks: Json[] = [];
+  private readonly toolInput = new Map<number, string>();
+  private readonly usage: Json = {};
+  finalDelta: Json | undefined;
+
+  push(e: SseEvent): void {
+    const d = e.data;
+    const index = d.index as number;
+    switch (d.type) {
+      case 'message_start':
+        this.message = { ...((d.message ?? {}) as Json) };
+        Object.assign(this.usage, (this.message.usage ?? {}) as Json);
+        return;
+      case 'content_block_start':
+        this.blocks[index] = structuredClone((d.content_block ?? {}) as Json);
+        return;
+      case 'content_block_delta': {
+        const block = (this.blocks[index] ??= { type: 'text', text: '' });
+        const delta = (d.delta ?? {}) as Json;
+        if (delta.type === 'input_json_delta') {
+          this.toolInput.set(
+            index,
+            (this.toolInput.get(index) ?? '') + str(delta.partial_json),
+          );
+        } else if (delta.type === 'citations_delta') {
+          block.citations = [
+            ...((block.citations as unknown[] | undefined) ?? []),
+            delta.citation,
+          ];
+        } else {
+          // text, thinking, signature, and any other delta: strings append, others replace.
+          for (const [k, v] of Object.entries(delta)) {
+            if (k === 'type') continue;
+            block[k] = typeof v === 'string' ? str(block[k]) + v : v;
+          }
+        }
+        return;
+      }
+      case 'content_block_stop': {
+        const input = this.toolInput.get(index);
+        if (input !== undefined) {
+          try {
+            this.blocks[index]!.input = JSON.parse(input || '{}');
+          } catch {
+            this.blocks[index]!.input = input;
+          }
+        }
+        return;
+      }
+      case 'message_delta':
+        Object.assign(this.message, (d.delta ?? {}) as Json);
+        Object.assign(this.usage, (d.usage ?? {}) as Json);
+        this.finalDelta = d;
+        return;
+    }
+  }
+
+  result(): Json {
+    return {
+      ...this.message,
+      content: this.blocks.filter(Boolean),
+      usage: this.usage,
+    };
+  }
+}
+
 const delta = (index: number, d: Json): SseEvent => ({
   event: 'content_block_delta',
   data: { type: 'content_block_delta', index, delta: d },
 });
 
-/** A whole message as the event sequence a streaming upstream would have sent. */
-export function messageEvents(message: Json): SseEvent[] {
+/**
+ * A whole message as the event sequence a streaming upstream would have sent; `finalDelta` (the
+ * upstream's own last `message_delta`) replaces the generated one when given.
+ */
+export function messageEvents(message: Json, finalDelta?: Json): SseEvent[] {
   const usage = (message.usage ?? {}) as AnthropicUsage;
   const events: SseEvent[] = [
     {
@@ -581,14 +785,31 @@ export function messageEvents(message: Json): SseEvent[] {
       data: { type: 'content_block_start', index, content_block },
     });
     if (block.type === 'text') {
-      events.push(start({ type: 'text', text: '' }));
-      events.push(delta(index, { type: 'text_delta', text: block.text }));
-    } else if (block.type === 'tool_use') {
+      const { text, citations, ...rest } = block;
+      events.push(
+        start({ ...rest, text: '', ...(citations ? { citations: [] } : {}) }),
+      );
+      for (const citation of (citations as unknown[] | undefined) ?? [])
+        events.push(delta(index, { type: 'citations_delta', citation }));
+      events.push(delta(index, { type: 'text_delta', text: str(text) }));
+    } else if (block.type === 'thinking') {
+      events.push(start({ type: 'thinking', thinking: '', signature: '' }));
+      events.push(
+        delta(index, { type: 'thinking_delta', thinking: str(block.thinking) }),
+      );
+      if (block.signature)
+        events.push(
+          delta(index, { type: 'signature_delta', signature: block.signature }),
+        );
+    } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
       events.push(start({ ...block, input: {} }));
       events.push(
         delta(index, {
           type: 'input_json_delta',
-          partial_json: JSON.stringify(block.input ?? {}),
+          partial_json:
+            typeof block.input === 'string'
+              ? block.input
+              : JSON.stringify(block.input ?? {}),
         }),
       );
     } else {
@@ -602,7 +823,7 @@ export function messageEvents(message: Json): SseEvent[] {
   events.push(
     {
       event: 'message_delta',
-      data: {
+      data: finalDelta ?? {
         type: 'message_delta',
         delta: {
           stop_reason: message.stop_reason,

@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { Readable } from 'node:stream';
 import {
   BadRequestException,
   Body,
@@ -17,7 +16,7 @@ import type { AgentContext } from '../agent-mtls/agent-context';
 import { AgentMtlsGuard } from '../agent-mtls/agent-mtls.guard';
 import { getCorrelationId } from '../logging/correlation-id.store';
 import { anthropicError } from './llm-anthropic';
-import { LlmAnthropicService } from './llm-anthropic.service';
+import { LlmAnthropicService, replyStream } from './llm-anthropic.service';
 import { LlmProxyService } from './llm-proxy.service';
 
 export const ANTHROPIC_MESSAGES_PATH = '/agent/v1/llm/anthropic/v1/messages';
@@ -101,7 +100,7 @@ export class LlmProxyController {
         .header('content-type', 'text/event-stream; charset=utf-8')
         .header('cache-control', 'no-cache')
         .header('x-accel-buffering', 'no')
-        .send(Readable.from(result.stream));
+        .send(replyStream(result));
     } catch (error) {
       // The client is gone: nothing to answer (the call is already recorded).
       if (closed.signal.aborted) return;

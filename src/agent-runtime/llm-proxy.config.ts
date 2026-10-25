@@ -85,6 +85,13 @@ export const LlmProxyConfigSchema = z.object({
     .default(
       'interleaved-thinking-2025-05-14,context-management-2025-06-27,effort-2025-11-24,context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14',
     ),
+  /**
+   * Response DLP on a streamed Anthropic-format answer. `buffer` (default): the whole answer is
+   * read, checked once, then replayed as events. `incremental`: events are checked and released
+   * as they arrive, held back only as far as a credential or PII match could still be growing;
+   * the first tokens arrive sooner, but the check is weaker (ADR-0002 A2).
+   */
+  LLM_ANTHROPIC_STREAM_DLP: z.enum(['buffer', 'incremental']).default('buffer'),
   /** A streamed Anthropic-format response is cut after this long, idle or not. */
   LLM_STREAM_MAX_MS: z.coerce.number().int().positive().default(900_000),
   /** Whether the `anthropic`/`azure_foundry` upstream processes prompts in the UAE (tenant residency rule). */

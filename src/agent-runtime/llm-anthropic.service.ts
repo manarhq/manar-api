@@ -1,3 +1,5 @@
+import { createHmac, hkdfSync } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   BadGatewayException,
@@ -11,11 +13,14 @@ import type { AppConfig } from '../config/env.validation';
 import type { AgentContext } from '../agent-mtls/agent-context';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { failClosed } from '../common/fail-closed/fail-closed';
+import { applyDlpFloor } from '../common/dlp/dlp-classification';
 import { CatalogService } from '../platform/catalog.service';
 import { denied } from './agent-task-access.service';
 import {
   AnthropicMessagesRequestSchema,
   AnthropicStreamGuard,
+  MessageAccumulator,
+  type AnthropicMessagesRequest,
   clientHeaders,
   DlpBlocked,
   errorEvent,
@@ -32,6 +37,7 @@ import {
   usageTokens,
   type AnthropicUsage,
 } from './llm-anthropic';
+import { LlmBudgetStore } from './llm-budget.store';
 import {
   LlmProxyService,
   sha256,
@@ -43,13 +49,14 @@ import {
   LlmUpstreamClient,
   LlmUpstreamError,
   LlmUpstreamRejected,
+  type AnthropicProvider,
 } from './llm-upstream.client';
 
 type Json = Record<string, unknown>;
 type Call = AdmittedCall<unknown>;
 
 export type AnthropicReply =
-  { json: Json } | { stream: AsyncGenerator<string> };
+  { json: Json } | { stream: AsyncGenerator<string>; stop?: AbortSignal };
 
 /** While a synthesized stream waits for its upstream, a ping this often keeps the client from timing out. */
 const PING_MS = 10_000;
@@ -73,12 +80,84 @@ class ClientClosed extends Error {}
  */
 @Injectable()
 export class LlmAnthropicService {
+  /** Keys the HMACs of thinking signatures this proxy returned; derived, never the secret itself. */
+  private readonly thinkingKey: Buffer;
+
   constructor(
     private readonly proxy: LlmProxyService,
     private readonly upstream: LlmUpstreamClient,
     private readonly config: ConfigService<AppConfig, true>,
     private readonly catalog: CatalogService,
-  ) {}
+    private readonly store: LlmBudgetStore,
+  ) {
+    this.thinkingKey = Buffer.from(
+      hkdfSync(
+        'sha256',
+        this.config.get('APPROVAL_GRANT_SIGNING_SECRET', { infer: true }),
+        '',
+        'manar llm thinking signature v1',
+        32,
+      ),
+    );
+  }
+
+  private thinkingHmac(value: string): string {
+    return createHmac('sha256', this.thinkingKey).update(value).digest('hex');
+  }
+
+  /** Remembers the thinking signatures of a delivered answer for this task (fail closed). */
+  private rememberThinking(
+    agent: AgentContext,
+    call: Call,
+    opaque: string[],
+  ): Promise<void> {
+    return failClosed('limits-store', () =>
+      this.store.rememberThinking(
+        agent.tenant.id,
+        call.task.id,
+        opaque.map((v) => this.thinkingHmac(v)),
+        call.task.expiresAt,
+      ),
+    );
+  }
+
+  /**
+   * Thinking signatures and redacted-thinking data in the request skip DLP only if this proxy
+   * returned them for this task. A value matching a credential or PII pattern is refused anyway.
+   */
+  private async checkThinking(
+    agent: AgentContext,
+    taskId: string,
+    opaque: string[],
+  ): Promise<void> {
+    if (
+      opaque.some((v) => {
+        const floor = applyDlpFloor(v);
+        return floor.credentialTypes.length > 0 || floor.piiTypes.length > 0;
+      })
+    ) {
+      throw denied('dlp_policy_violation');
+    }
+    const known = await failClosed('limits-store', () =>
+      this.store.knowsThinking(
+        agent.tenant.id,
+        taskId,
+        opaque.map((v) => this.thinkingHmac(v)),
+      ),
+    );
+    if (!known) {
+      // Anthropic's wording: Claude Code drops earlier thinking blocks and retries.
+      throw new BadRequestException({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message:
+            'Invalid `signature` in `thinking` block: not issued by this proxy for this task',
+        },
+        reason: 'unknown_thinking_signature',
+      });
+    }
+  }
 
   async messages(
     agent: AgentContext,
@@ -87,65 +166,85 @@ export class LlmAnthropicService {
     rawHeaders: { version?: string; beta?: string },
     signal: AbortSignal,
   ): Promise<AnthropicReply> {
-    const provider = this.upstream.anthropicProvider();
-    if (provider === 'none') {
-      throw new NotFoundException({ reason: 'anthropic_disabled' });
-    }
-    const request = parseBodyOrThrow(AnthropicMessagesRequestSchema, rawBody);
     const started = Date.now();
-    const stream = request.stream === true;
     const record: CallRecord = {
       claimedTaskIdSha256: sha256(taskId),
       outcome: 'DENIED',
       format: 'anthropic',
-      stream,
       latencyMs: 0,
-      messageCount: request.messages.length,
-      toolCount: request.tools?.length ?? 0,
-      promptSha256: sha256({
-        system: request.system,
-        messages: request.messages,
-      }),
+      messageCount: 0,
+      toolCount: 0,
     };
-    const translate = provider === 'openai_translate';
+    let provider = 'none' as AnthropicProvider;
+    let request!: AnthropicMessagesRequest;
     let client: { version?: string; beta?: string } = {};
-    // Every top-level field passed on is scanned; `model` is checked against the served list.
-    const { model, ...passed } = request;
+    let restore!: (scanned: Json) => Json;
     let recordedAlready = false;
 
     try {
-      const { held, restore } = holdOpaque(passed, requestSlots);
-      const call = await this.proxy.admit(agent, taskId, record, held, () => {
-        record.taskId = taskId;
-        delete record.claimedTaskIdSha256;
-        const refusal = requestRefusal(request);
-        if (refusal) throw refusal;
-        client = clientHeaders(rawHeaders, this.betas());
-        if (!this.upstream.anthropicModels().includes(model)) {
-          throw new BadRequestException({
-            type: 'error',
-            error: {
-              type: 'invalid_request_error',
-              message: `model: ${model.slice(0, 128)} is not served by this install`,
-            },
-            reason: 'llm_model_not_served',
+      // Task access first: every refusal below is recorded against a verified task.
+      const call = await this.proxy.admit<Json>(
+        agent,
+        taskId,
+        record,
+        undefined,
+        async () => {
+          record.taskId = taskId;
+          delete record.claimedTaskIdSha256;
+          provider = this.upstream.anthropicProvider();
+          if (provider === 'none') {
+            throw new NotFoundException({ reason: 'anthropic_disabled' });
+          }
+          request = parseBodyOrThrow(AnthropicMessagesRequestSchema, rawBody);
+          Object.assign(record, {
+            stream: request.stream === true,
+            messageCount: request.messages.length,
+            toolCount: request.tools?.length ?? 0,
+            promptSha256: sha256({
+              system: request.system,
+              messages: request.messages,
+            }),
           });
-        }
-        return translate
-          ? undefined
-          : {
-              external: true,
-              uaeResident:
-                this.config.get('LLM_ANTHROPIC_UAE_RESIDENT', {
-                  infer: true,
-                }) === 'true',
-              model,
-            };
-      });
-      const body = { ...restore(call.dlp.value), model };
+          const refusal = requestRefusal(request);
+          if (refusal) throw refusal;
+          client = clientHeaders(rawHeaders, this.betas());
+          if (!this.upstream.anthropicModels().includes(request.model)) {
+            throw new BadRequestException({
+              type: 'error',
+              error: {
+                type: 'invalid_request_error',
+                message: `model: ${request.model.slice(0, 128)} is not served by this install`,
+              },
+              reason: 'llm_model_not_served',
+            });
+          }
+          // Every top-level field passed on is scanned; `model` was checked above.
+          const passed: Json = { ...request };
+          delete passed.model;
+          const opaque = holdOpaque(passed, requestSlots);
+          restore = opaque.restore;
+          await this.checkThinking(agent, taskId, opaque.values);
+          return {
+            prompt: opaque.held,
+            fixed:
+              provider === 'openai_translate'
+                ? undefined
+                : {
+                    external: true,
+                    uaeResident:
+                      this.config.get('LLM_ANTHROPIC_UAE_RESIDENT', {
+                        infer: true,
+                      }) === 'true',
+                    model: request.model,
+                  },
+          };
+        },
+      );
+      const stream = request.stream === true;
+      const body = { ...restore(call.dlp.value), model: request.model };
 
-      if (translate) {
-        const chat = toOpenAiChat(body);
+      if (provider === 'openai_translate') {
+        const chat = toOpenAiChat(body as AnthropicMessagesRequest);
         // Charged and audited here, whether or not the client is still reading.
         const settled = this.upstream
           .chat(chat, call.route, signal)
@@ -158,18 +257,7 @@ export class LlmAnthropicService {
             },
             async (error: unknown) => {
               if (signal.aborted) {
-                await this.cut(
-                  agent,
-                  call,
-                  record,
-                  'INCOMPLETE',
-                  'client_closed',
-                  {
-                    sent: chat,
-                    outputChars: 0,
-                    started,
-                  },
-                );
+                await this.clientLeft(agent, call, record, chat, started);
                 throw new ClientClosed();
               }
               throw upstreamFailure(record, error);
@@ -186,23 +274,34 @@ export class LlmAnthropicService {
       }
 
       record.provider = provider;
-      record.model = model;
+      record.model = request.model;
       const timeoutMs = this.config.get('LLM_UPSTREAM_TIMEOUT_MS', {
         infer: true,
       });
       if (!stream) {
-        const message = await this.upstreamCall(record, async () => {
-          const { response } = await this.upstream.anthropicMessages(
-            body,
-            client,
-            AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-          );
-          const json = (await response.json().catch(() => null)) as Json | null;
-          if (json?.type !== 'message' || !Array.isArray(json.content)) {
-            throw new LlmUpstreamError('not a message');
+        let message: Json;
+        try {
+          message = await this.upstreamCall(record, async () => {
+            const { response } = await this.upstream.anthropicMessages(
+              body,
+              client,
+              AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
+            );
+            const json = (await response
+              .json()
+              .catch(() => null)) as Json | null;
+            if (json?.type !== 'message' || !Array.isArray(json.content)) {
+              throw new LlmUpstreamError('not a message');
+            }
+            return json;
+          });
+        } catch (error) {
+          if (signal.aborted) {
+            recordedAlready = true;
+            await this.clientLeft(agent, call, record, body, started);
           }
-          return json;
-        });
+          throw error;
+        }
         return {
           json: await this.deliver(agent, call, record, message, body, started),
         };
@@ -217,20 +316,30 @@ export class LlmAnthropicService {
         const { response } = await this.upstreamCall(record, () =>
           this.upstream.anthropicMessages(body, client, limits.signal),
         );
+        const run = {
+          agent,
+          call,
+          record,
+          response,
+          limits,
+          signal,
+          sent: body,
+          started,
+        };
         return {
-          stream: this.relay(
-            agent,
-            call,
-            record,
-            response,
-            limits,
-            signal,
-            body,
-            started,
-          ),
+          stream:
+            this.config.get('LLM_ANTHROPIC_STREAM_DLP', { infer: true }) ===
+            'incremental'
+              ? this.relay(run)
+              : this.buffered(run),
+          stop: limits.signal,
         };
       } catch (error) {
         limits.clear();
+        if (signal.aborted) {
+          recordedAlready = true;
+          await this.clientLeft(agent, call, record, body, started);
+        }
         throw error;
       }
     } catch (error) {
@@ -239,6 +348,21 @@ export class LlmAnthropicService {
       }
       throw error;
     }
+  }
+
+  /** The client left before any answer: charge the input estimate and record `INCOMPLETE`. */
+  private clientLeft(
+    agent: AgentContext,
+    call: Call,
+    record: CallRecord,
+    sent: unknown,
+    started: number,
+  ): Promise<void> {
+    return this.cut(agent, call, record, 'INCOMPLETE', 'client_closed', {
+      sent,
+      outputChars: 0,
+      started,
+    });
   }
 
   /** `GET /agent/v1/llm/models`: the OpenAI-format model and the Anthropic-format models this install serves. */
@@ -331,6 +455,7 @@ export class LlmAnthropicService {
         estimate(usage, sent, JSON.stringify(message.content).length),
     );
     if (scanned.credentialTypes.length) throw denied('dlp_policy_violation');
+    await this.rememberThinking(agent, call, scanned.opaque);
     await this.proxy.recordSuccess(agent, call.tenantClient, record, started);
     return scanned.message;
   }
@@ -386,19 +511,104 @@ export class LlmAnthropicService {
     }
   }
 
-  /** `anthropic`/`azure_foundry` with `stream: true`: the upstream's events, through the guard, as they arrive. */
-  private async *relay(
-    agent: AgentContext,
-    call: Call,
-    record: CallRecord,
-    response: Response,
-    limits: StreamLimits,
-    clientSignal: AbortSignal,
-    sent: unknown,
-    started: number,
-  ): AsyncGenerator<string> {
+  /**
+   * `stream: true` on `anthropic`/`azure_foundry`, `LLM_ANTHROPIC_STREAM_DLP=buffer` (default):
+   * reads the whole upstream stream (pinging the client every 10 s), runs the full response DLP
+   * once on the complete message, charges and audits as for a non-streaming call, then replays
+   * the (redacted) message as events, or one error event.
+   */
+  private async *buffered(run: StreamRun): AsyncGenerator<string> {
+    const { agent, call, record, limits, signal, sent, started } = run;
+    const message = new MessageAccumulator();
+    const reader = run.response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let ended = false;
+    const cut = (outcome: CallRecord['outcome'], reason: string) => {
+      ended = true;
+      const seen = message.result();
+      return this.cut(agent, call, record, outcome, reason, {
+        usage: seen.usage ?? {},
+        sent,
+        outputChars: JSON.stringify(seen.content).length,
+        started,
+      });
+    };
+    let read = reader.read();
+    try {
+      for (;;) {
+        const next = await Promise.race([
+          read,
+          sleep(PING_MS, null, { ref: false }),
+        ]);
+        if (next === null) {
+          yield sse(PING);
+          continue;
+        }
+        if (next.done)
+          throw new LlmUpstreamError('stream ended before message_stop');
+        limits.touch();
+        buffer += decoder.decode(next.value, { stream: true });
+        read = reader.read();
+        let complete = false;
+        for (let m = EVENT_END.exec(buffer); m; m = EVENT_END.exec(buffer)) {
+          const event = parseSse(buffer.slice(0, m.index));
+          buffer = buffer.slice(m.index + m[0].length);
+          if (!event) continue;
+          if (event.data.type === 'error') {
+            const type = (event.data.error as Json | undefined)?.type;
+            await cut('UPSTREAM_ERROR', `stream error: ${String(type)}`);
+            yield sse(
+              errorEvent(
+                new BadGatewayException({ reason: 'llm_upstream_unavailable' }),
+              ),
+            );
+            return;
+          }
+          message.push(event);
+          if (event.data.type === 'message_stop') complete = true;
+        }
+        if (!complete) continue;
+
+        ended = true;
+        let delivered: Json;
+        try {
+          delivered = await this.deliver(
+            agent,
+            call,
+            record,
+            message.result(),
+            sent,
+            started,
+          );
+        } catch (error) {
+          if (!(error instanceof HttpException)) throw error;
+          await this.proxy.recordRefusal(agent, record, error, started);
+          yield sse(errorEvent(error));
+          return;
+        }
+        for (const e of messageEvents(delivered, message.finalDelta))
+          yield sse(e);
+        return;
+      }
+    } catch (error) {
+      if (ended) throw error;
+      yield* this.streamFailure(error, signal, limits, cut);
+    } finally {
+      limits.clear();
+      void reader.cancel().catch(() => undefined);
+      if (!ended) await cut('INCOMPLETE', limits.reason());
+    }
+  }
+
+  /**
+   * `stream: true` on `anthropic`/`azure_foundry`, `LLM_ANTHROPIC_STREAM_DLP=incremental`: the
+   * upstream's events, through `AnthropicStreamGuard`, as they arrive.
+   */
+  private async *relay(run: StreamRun): AsyncGenerator<string> {
+    const { agent, call, record, limits, signal, sent, started } = run;
     const guard = new AnthropicStreamGuard();
-    const reader = response.body!.getReader();
+    const reader = run.response.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     let ended = false;
@@ -430,10 +640,11 @@ export class LlmAnthropicService {
           if (event.data.type === 'error') {
             const type = (event.data.error as Json | undefined)?.type;
             await cut('UPSTREAM_ERROR', `stream error: ${String(type)}`);
-            yield sse({
-              event: 'error',
-              data: { ...event.data, reason: 'llm_upstream_unavailable' },
-            });
+            yield sse(
+              errorEvent(
+                new BadGatewayException({ reason: 'llm_upstream_unavailable' }),
+              ),
+            );
             return;
           }
           for (const out of guard.push(event)) yield sse(out);
@@ -453,6 +664,7 @@ export class LlmAnthropicService {
               usageTokens(guard.usage) ||
                 estimate(guard.usage, sent, guard.outputChars),
             );
+            await this.rememberThinking(agent, call, guard.opaque);
             await this.proxy.recordSuccess(
               agent,
               call.tenantClient,
@@ -477,32 +689,71 @@ export class LlmAnthropicService {
         };
         await cut('DENIED', 'dlp_policy_violation');
         yield sse(errorEvent(denied('dlp_policy_violation')));
-      } else if (clientSignal.aborted) {
-        await cut('INCOMPLETE', 'client_closed');
-      } else {
-        await cut(
-          'UPSTREAM_ERROR',
-          limits.deadlineHit()
-            ? 'stream_deadline'
-            : error instanceof LlmUpstreamError
-              ? error.detail
-              : error instanceof Error
-                ? error.name
-                : 'stream failed',
-        );
-        yield sse(
-          errorEvent(
-            new BadGatewayException({ reason: 'llm_upstream_unavailable' }),
-          ),
-        );
+        return;
       }
+      yield* this.streamFailure(error, signal, limits, cut);
     } finally {
       limits.clear();
       void reader.cancel().catch(() => undefined);
-      // The client went away while we waited on the upstream.
-      if (!ended) await cut('INCOMPLETE', 'client_closed');
+      // The client went away, or the stream was torn down while parked (`stop`).
+      if (!ended) await cut('INCOMPLETE', limits.reason());
     }
   }
+
+  /** A stream that broke before its end: record why and, if the client is still there, say so. */
+  private async *streamFailure(
+    error: unknown,
+    signal: AbortSignal,
+    limits: StreamLimits,
+    cut: (outcome: CallRecord['outcome'], reason: string) => Promise<void>,
+  ): AsyncGenerator<string> {
+    if (signal.aborted) {
+      await cut('INCOMPLETE', 'client_closed');
+      return;
+    }
+    await cut(
+      'UPSTREAM_ERROR',
+      limits.deadlineHit()
+        ? 'stream_deadline'
+        : error instanceof LlmUpstreamError
+          ? error.detail
+          : error instanceof Error
+            ? error.name
+            : 'stream failed',
+    );
+    yield sse(
+      errorEvent(
+        new BadGatewayException({ reason: 'llm_upstream_unavailable' }),
+      ),
+    );
+  }
+}
+
+interface StreamRun {
+  agent: AgentContext;
+  call: Call;
+  record: CallRecord;
+  response: Response;
+  limits: StreamLimits;
+  signal: AbortSignal;
+  sent: unknown;
+  started: number;
+}
+
+/**
+ * The SSE body for a stream reply. When `stop` fires (client gone, idle or deadline) the stream
+ * is destroyed, so a generator parked on a client that stopped reading still ends, charges and
+ * records.
+ */
+export function replyStream(reply: {
+  stream: AsyncGenerator<string>;
+  stop?: AbortSignal;
+}): Readable {
+  const readable = Readable.from(reply.stream);
+  reply.stop?.addEventListener('abort', () => readable.destroy(), {
+    once: true,
+  });
+  return readable;
 }
 
 function applyUsage(record: CallRecord, usage: AnthropicUsage): void {
@@ -561,6 +812,13 @@ class StreamLimits {
 
   deadlineHit(): boolean {
     return this.deadline.aborted;
+  }
+
+  /** Why the stream stopped, for a stream torn down before its end. */
+  reason(): string {
+    if (this.deadline.aborted) return 'stream_deadline';
+    if (this.idle.signal.aborted) return 'upstream_idle';
+    return 'client_closed';
   }
 
   clear(): void {

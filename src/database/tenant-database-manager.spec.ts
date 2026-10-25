@@ -149,6 +149,7 @@ function fakeConfigService(
     LLM_ANTHROPIC_UAE_RESIDENT: 'false',
     LLM_ANTHROPIC_BETAS: '',
     LLM_STREAM_MAX_MS: 900_000,
+    LLM_ANTHROPIC_STREAM_DLP: 'buffer',
     ...overrides,
   };
   return {

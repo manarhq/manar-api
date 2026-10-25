@@ -195,23 +195,28 @@ export class LlmProxyService {
 
   /**
    * The gates before any model call, in order: task access, then `afterAccess` (the caller's
-   * own checks, which may name a fixed upstream outside the catalog, judged by its own placement
-   * and the tenant's pinned model), the tenant's catalog, the task's token budget, DLP on
-   * `prompt` (everything the model will read). Throws the refusal; `record` carries what was found.
+   * own checks; it may supply the prompt and name a fixed upstream outside the catalog, judged
+   * by its own placement and the tenant's pinned model), the tenant's catalog, the task's token
+   * budget, DLP on the prompt (everything the model will read). Throws the refusal; `record`
+   * carries what was found.
    */
   async admit<T>(
     agent: AgentContext,
     taskId: string,
     record: CallRecord,
-    prompt: T,
-    afterAccess?: () =>
-      { external: boolean; uaeResident: boolean; model: string } | undefined,
+    prompt: T | undefined,
+    afterAccess?: () => Promise<{
+      prompt?: T;
+      fixed?: { external: boolean; uaeResident: boolean; model: string };
+    }>,
   ): Promise<AdmittedCall<T>> {
     const { tenantClient, task } = await this.access.assertTaskAccess(
       agent,
       taskId,
     );
-    const fixed = afterAccess?.();
+    const after = await afterAccess?.();
+    const fixed = after?.fixed;
+    prompt = after?.prompt ?? prompt;
 
     // Staff's catalog: proxy on, model allowed for this tenant, monthly quota left.
     const { route } = await catalogGate(() =>
@@ -225,7 +230,7 @@ export class LlmProxyService {
     record.budget = { used, limit };
     if (used >= limit) throw new LlmBudgetExhaustedException();
 
-    const dlp = await classifyDlp(prompt, (content) =>
+    const dlp = await classifyDlp(prompt as T, (content) =>
       failClosed('dlp-advisory', () =>
         this.aiAdvisory.analyzeDlp({ content, tenantId: agent.tenant.id }),
       ),

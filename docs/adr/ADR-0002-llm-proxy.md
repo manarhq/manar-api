@@ -308,8 +308,10 @@ The Anthropic Messages API for Claude Code and other Anthropic clients (behind m
 local gateway, `POST /v1/messages`). Same mTLS guard, task header and gates as section A, in the
 same code (`LlmProxyService.admit`, `charge`, `recordSuccess`, `recordRefusal`). In order:
 
-- **Task access first** (section A). Until it passes, a refusal's audit row carries
-  `claimedTaskIdSha256` instead of `taskId`, so an id the agent does not own is never written.
+- **Task access first** (section A), before the body is even parsed: a disabled endpoint, a
+  bad body and every request check below are refusals of a verified task. Until access passes,
+  a refusal's audit row carries `claimedTaskIdSha256` instead of `taskId`, so an id the agent
+  does not own is never written.
 - **Request checks.** `model`, `max_tokens` and `messages` are required. Top-level fields
   passed on: `model`, `max_tokens`, `messages`, `system`, `stream`, `tools`, `tool_choice`,
   `temperature`, `top_p`, `top_k`, `stop_sequences`, `metadata`, `thinking`, `output_config`,
@@ -331,19 +333,36 @@ invalid_anthropic_version`); of `anthropic-beta` only the values in `LLM_ANTHROP
   catalog pins a different model `403 llm_model_not_allowed`. `openai_translate` is judged as
   the OpenAI-format upstream it uses (section A, including the pinned model).
 - **DLP before** on every string passed on (all the fields above except `model`), as in
-  section A. Only the `signature` of a `thinking` block and the `data` of a `redacted_thinking`
-  block placed directly in an assistant message's `content`, and only when base64-like and at
-  most 64 KiB, are held out of DLP and reach the upstream unchanged; the same shapes anywhere
-  else (tool input, tool result) are scanned.
+  section A. The only exception is the `signature` of a `thinking` block and the `data` of a
+  `redacted_thinking` block placed directly in an assistant message's `content`, canonical
+  base64 of at most 8 KiB, **and** issued by this proxy for this task: every such value the
+  response path returns is remembered as an HMAC (key derived with HKDF from
+  `APPROVAL_GRANT_SIGNING_SECRET`, label `manar llm thinking signature v1`) in Redis next to the
+  task's token budget, with the same lifetime. A well-formed value this proxy did not issue is
+  `400 unknown_thinking_signature` (worded as Anthropic's invalid-signature error, so Claude Code
+  drops earlier thinking blocks and retries); a value matching a credential or PII pattern is
+  `403 dlp_policy_violation` even when issued. The same shapes anywhere else (tool input, tool
+  result), or larger or malformed, are scanned like any text.
 - **DLP after** (deterministic floor; manar-ai is not called per token): a credential shape in
   the output refuses the call (`403 dlp_policy_violation`, tokens still charged); UAE PII is
-  redacted in text, thinking and tool input. Streaming goes through one message-level queue:
-  text and thinking are held at least 512 characters behind the upstream, and also while a
-  token-like run (JWT, bearer, SAS, Entra secret characters) or a PII-like run is still open, so
-  a credential split across deltas or blocks is detected before any of it is released. A tool
-  call's input is released whole at its block end. A credential ends the stream with an
-  Anthropic `error` event (`permission_error`, reason `dlp_policy_violation`), recorded `DENIED`.
-  Short answers therefore arrive at the end of the stream.
+  redacted in text, thinking, tool input and citations. Credential shapes are also looked for
+  across all of the answer's strings joined, so a secret split between blocks is found.
+- **Streaming DLP mode** (`LLM_ANTHROPIC_STREAM_DLP`):
+  - `buffer` (default): the whole upstream stream is read (a `ping` to the client every 10 s
+    while waiting), the response DLP above runs once on the complete message, the call is
+    charged and audited as a non-streaming one, and the redacted message is replayed as events,
+    or a single `error` event (`permission_error`, reason `dlp_policy_violation`) when blocked.
+    The client sees the answer only once it is complete.
+  - `incremental` (opt-in, **weaker**): events are checked and released as they arrive through
+    one message-level queue (text, thinking, tool input, citations and any other delta). Text
+    is held at least 512 characters back, while a token-like or PII-like run is open, and from a
+    credential keyword (`bearer`, `AccountKey`, `SharedAccessKey`, `sig=`, `-----BEGIN`, a
+    `"password"`-like JSON key) until its value has ended (a hold over 64 KiB blocks). A release
+    never ends within 32 characters of a digit, so PII is redacted whole. Each delta is scanned
+    with the 256 characters before it and a held run is scanned once when it closes, so the cost
+    stays linear. It relies on these heuristics: a credential pattern the floor gains later, or
+    a shape the holds do not anticipate, can be partly released before it is recognised. Final
+    `message_delta`/`message_stop` go out only after the audit row is written.
 - **Budget** from `usage`: input, output, cache creation and cache read tokens (`message_delta`
   usage is cumulative); a length/4 estimate when none is reported. A cut stream (client left,
   credential, upstream error, deadline) is charged the larger of the reported usage and the
@@ -353,7 +372,11 @@ invalid_anthropic_version`); of `anthropic-beta` only the values in `LLM_ANTHROP
   `message_delta`/`message_stop` go out only after the audit row is written; a client that
   leaves is recorded `INCOMPLETE` (`client_closed`) and charged.
 - **Limits.** Streams end after `LLM_UPSTREAM_TIMEOUT_MS` without a byte from the upstream, and
-  after `LLM_STREAM_MAX_MS` (default 15 min) in all (`502`, recorded `stream_deadline`).
+  after `LLM_STREAM_MAX_MS` (default 15 min) in all (`502`, recorded `stream_deadline`). When a
+  limit fires or the client goes, the response stream is destroyed, so a stream whose client
+  stopped reading still ends, is charged and recorded. A client that leaves during a
+  non-streaming call or before the stream starts is charged the input estimate and recorded
+  `INCOMPLETE` (`client_closed`).
 - **Upstreams** (`LLM_ANTHROPIC_PROVIDER`): `anthropic` (default; `LLM_ANTHROPIC_BASE_URL`,
   key `ANTHROPIC_API_KEY` from OpenBao `kv/prod/llm-anthropic` `api_key`), `azure_foundry`
   (`LLM_AZURE_FOUNDRY_ENDPOINT` = `https://<resource>.services.ai.azure.com/anthropic`,
@@ -377,15 +400,15 @@ Errors use the Anthropic shape with Manar's fields alongside, and every 4xx carr
 }
 ```
 
-| Status             | `reason`                                                                                                                       | When                                                            |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| 400                | (message), `llm_request_field_not_allowed`, `llm_server_tool_not_allowed`, `llm_model_not_served`, `invalid_anthropic_version` | schema, missing task header, request checks                     |
-| 400, 404, 413, 422 | `llm_upstream_rejected`                                                                                                        | the upstream's own error, `error.type`/`message` kept           |
-| 403                | task-gate reasons, `dlp_policy_violation`, `dlp_unscannable_content`, catalog reasons (`llm_model_not_allowed` too)            | as in section A                                                 |
-| 404                | `anthropic_disabled`                                                                                                           | `none`, no key, or no model list                                |
-| 429                | `llm_budget_exhausted`                                                                                                         | as in section A                                                 |
-| 502                | `llm_upstream_unavailable`                                                                                                     | upstream down, timed out (idle or overall stream deadline), 5xx |
-| 503                | `enforcement_dependency_unavailable`                                                                                           | as in section A                                                 |
+| Status             | `reason`                                                                                                                                                     | When                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| 400                | (message), `llm_request_field_not_allowed`, `llm_server_tool_not_allowed`, `llm_model_not_served`, `invalid_anthropic_version`, `unknown_thinking_signature` | schema, missing task header, request checks                     |
+| 400, 404, 413, 422 | `llm_upstream_rejected`                                                                                                                                      | the upstream's own error, `error.type`/`message` kept           |
+| 403                | task-gate reasons, `dlp_policy_violation`, `dlp_unscannable_content`, catalog reasons (`llm_model_not_allowed` too)                                          | as in section A                                                 |
+| 404                | `anthropic_disabled`                                                                                                                                         | `none`, no key, or no model list                                |
+| 429                | `llm_budget_exhausted`                                                                                                                                       | as in section A                                                 |
+| 502                | `llm_upstream_unavailable`                                                                                                                                   | upstream down, timed out (idle or overall stream deadline), 5xx |
+| 503                | `enforcement_dependency_unavailable`                                                                                                                         | as in section A                                                 |
 
 `GET /agent/v1/llm/models` (mTLS, no task header): the OpenAI-format model (the tenant's
 catalog model or the deployment default) and `LLM_ANTHROPIC_MODELS` (when the Anthropic
