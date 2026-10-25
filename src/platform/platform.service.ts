@@ -4,7 +4,11 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  Optional,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
+import { EdgePeerService } from '../edge/edge-peer.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import {
@@ -51,6 +55,10 @@ export class PlatformService {
     private readonly tenants: TenantDatabaseManager,
     private readonly provisioning: TenantProvisioningService,
     private readonly suspension: PlatformSuspension,
+    // forwardRef: edge-peer.service imports the kill-switch services (an import cycle).
+    @Optional()
+    @Inject(forwardRef(() => EdgePeerService))
+    private readonly edgePeers?: EdgePeerService,
   ) {}
 
   async list() {
@@ -144,6 +152,7 @@ export class PlatformService {
       throw new ConflictException(`Tenant is not ACTIVE`);
     await this.suspension.engage(await this.tenants.getClient(id), id, caller);
     await this.lifecycle(() => this.tenants.suspendTenant(id));
+    await this.edgePeers?.tenantChanged(id);
     this.logger.log(`platform: tenant ${id} suspended by ${caller}`);
     return view(await this.tenantOr404(id));
   }
@@ -157,6 +166,7 @@ export class PlatformService {
       id,
       caller,
     );
+    await this.edgePeers?.tenantChanged(id);
     this.logger.log(
       `platform: tenant ${id} resumed by ${caller} (platform kill switch ${released ? 'released' : 'was not active'})`,
     );
@@ -176,6 +186,7 @@ export class PlatformService {
         caller,
       );
     await this.tenants.deprovisionTenant(id);
+    await this.edgePeers?.tenantChanged(id);
     this.logger.log(`platform: tenant ${id} deleted by ${caller}`);
     return view(await this.tenantOr404(id));
   }

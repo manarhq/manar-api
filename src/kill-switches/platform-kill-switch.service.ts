@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional, Inject, forwardRef } from '@nestjs/common';
+import { EdgePeerService } from '../edge/edge-peer.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 
 /** Fixed, known id — a deployment only ever has exactly one platform-wide switch (the same `AuditChainState`/`"singleton"` convention `prisma/tenant.prisma` already uses). */
@@ -34,7 +35,13 @@ const INACTIVE_DEFAULT: PlatformKillSwitchState = {
  */
 @Injectable()
 export class PlatformKillSwitchService {
-  constructor(private readonly control: ControlPrismaService) {}
+  constructor(
+    private readonly control: ControlPrismaService,
+    // forwardRef: edge-peer.service imports the kill-switch services (an import cycle).
+    @Optional()
+    @Inject(forwardRef(() => EdgePeerService))
+    private readonly edgePeers?: EdgePeerService,
+  ) {}
 
   async isActive(): Promise<boolean> {
     const row = await this.control.platformKillSwitch.findUnique({
@@ -56,7 +63,7 @@ export class PlatformKillSwitchService {
     activatedBy: string,
   ): Promise<PlatformKillSwitchState> {
     const now = new Date();
-    return this.control.platformKillSwitch.upsert({
+    const state = await this.control.platformKillSwitch.upsert({
       where: { id: PLATFORM_KILL_SWITCH_SINGLETON_ID },
       create: {
         id: PLATFORM_KILL_SWITCH_SINGLETON_ID,
@@ -76,5 +83,8 @@ export class PlatformKillSwitchService {
         deactivatedAt: null,
       },
     });
+    // docs/edge.md: the platform switch cuts every edge peer.
+    await this.edgePeers?.allChanged();
+    return state;
   }
 }

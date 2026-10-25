@@ -1,4 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  Optional,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
+import { EdgePeerService } from '../edge/edge-peer.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
@@ -83,6 +90,10 @@ export class AgentsService {
   constructor(
     private readonly certificateAuthority: CertificateAuthorityService,
     private readonly auditService: AuditService,
+    // forwardRef: edge-peer.service imports the kill-switch services (an import cycle).
+    @Optional()
+    @Inject(forwardRef(() => EdgePeerService))
+    private readonly edgePeers?: EdgePeerService,
   ) {}
 
   async createAgent(tenantClient: TenantPrismaClient, input: CreateAgentInput) {
@@ -173,7 +184,7 @@ export class AgentsService {
     tenantId: string,
     rawToken: string,
     csrPem: string,
-  ): Promise<IssuedCertificate> {
+  ): Promise<IssuedCertificate & { agentId: string; agentSlug: string }> {
     const tokenHash = hashEnrollmentToken(rawToken);
     const tokenRow = await tenantClient.agentEnrollmentToken.findUnique({
       where: { tokenHash },
@@ -249,6 +260,7 @@ export class AgentsService {
     this.logger.log(
       `Agent "${tokenRow.agent.identifier}" enrolled successfully`,
     );
+    await this.edgePeers?.agentChanged(tenantId, tokenRow.agentId);
 
     await this.auditService.recordSafely(tenantClient, tenantId, {
       eventType: AUDIT_EVENT_TYPES.AGENT_ENROLLED,
@@ -262,7 +274,11 @@ export class AgentsService {
       },
     });
 
-    return issued;
+    return {
+      ...issued,
+      agentId: tokenRow.agentId,
+      agentSlug: tokenRow.agent.slug,
+    };
   }
 
   async revokeAgent(
@@ -282,6 +298,7 @@ export class AgentsService {
       agentId,
       reason,
     );
+    await this.edgePeers?.agentChanged(tenantId, agentId);
 
     await this.auditService.recordSafely(tenantClient, tenantId, {
       eventType: AUDIT_EVENT_TYPES.AGENT_REVOKED,

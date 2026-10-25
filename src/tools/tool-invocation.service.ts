@@ -217,21 +217,23 @@ export class ToolInvocationService {
           : null;
       const approvalId =
         reused ??
-        (await this.startApproval(tenantClient, agent, input, {
-          riskScore: decision.riskScore,
-          policyVersionId: decision.policyVersionId,
-          deterministicRiskScore: decision.deterministicRiskScore,
-          // ADR-004: the advisory is not a decision input, so nothing is known
-          // about it here. `ApprovalWorkflow` fetches it off the decision path
-          // for the human approver; until then the approval records that no
-          // advisory is attached rather than implying a low one.
-          aiAdvisoryScore: null,
-          advisoryUnavailable: true,
-          riskReasonCodes: decision.riskReasonCodes,
-          riskCeiling: decision.riskCeiling,
-          requiredReason: decision.reason,
-          decisionId: decision.decisionId,
-        }));
+        (
+          await this.startApproval(tenantClient, agent, input, {
+            riskScore: decision.riskScore,
+            policyVersionId: decision.policyVersionId,
+            deterministicRiskScore: decision.deterministicRiskScore,
+            // ADR-004: the advisory is not a decision input, so nothing is known
+            // about it here. `ApprovalWorkflow` fetches it off the decision path
+            // for the human approver; until then the approval records that no
+            // advisory is attached rather than implying a low one.
+            aiAdvisoryScore: null,
+            advisoryUnavailable: true,
+            riskReasonCodes: decision.riskReasonCodes,
+            riskCeiling: decision.riskCeiling,
+            requiredReason: decision.reason,
+            decisionId: decision.decisionId,
+          })
+        ).id;
       return {
         status: 'PENDING',
         reason: decision.reason,
@@ -360,9 +362,10 @@ export class ToolInvocationService {
   /**
    * Creates the `ApprovalRequest` row and starts its 1:1 `ApprovalWorkflow`.
    * Never calls `CredentialBrokerService`, so a pending action cannot
-   * execute before approval.
+   * execute before approval. Also used by `POST /agent/v1/authorize`
+   * (`AuthorizeController`) for actions the caller executes itself.
    */
-  private async startApproval(
+  async startApproval(
     tenantClient: TenantClient,
     agent: AgentContext,
     input: ToolInvokeRequest,
@@ -377,7 +380,7 @@ export class ToolInvocationService {
       requiredReason: string;
       decisionId: string;
     },
-  ): Promise<string> {
+  ): Promise<{ id: string; expiresAt: Date }> {
     const requestTtlMs = this.configService.get('APPROVAL_REQUEST_TTL_MS', {
       infer: true,
     });
@@ -452,6 +455,6 @@ export class ToolInvocationService {
       },
     });
 
-    return approvalRequest.id;
+    return { id: approvalRequest.id, expiresAt };
   }
 }

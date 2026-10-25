@@ -105,6 +105,7 @@ model Tenant {
   databaseBinding  TenantDatabaseBinding?
   secretReferences SecretReference[]
   catalog          TenantCatalog?
+  edgePeers        EdgePeer[]
 
   @@map("tenants")
 }
@@ -217,4 +218,48 @@ model TenantCatalog {
   updatedAt DateTime @updatedAt
 
   @@map("tenant_catalogs")
+}
+
+enum EdgePeerState {
+  active
+  cut
+}
+
+/// docs/edge.md: one WireGuard peer per agent enrolled on the Manar edge. Platform level because the
+/// gateway serves every tenant. A projection only: the tenant database stays the source of truth
+/// for the agent's state and allow-list, and `EdgePeerService` recomputes this row from it.
+/// Rows are never deleted while the tenant exists, so an address is never reused while a row
+/// holds it.
+model EdgePeer {
+  id         String        @id @default(uuid())
+  tenantId   String
+  tenant     Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantSlug String
+  agentId    String
+  agentSlug  String
+  /// WireGuard public key (base64, 32 bytes). The private key never leaves the host.
+  publicKey  String        @unique
+  /// Overlay address, `a.b.c.d/32`.
+  address    String        @unique
+  state      EdgePeerState
+  /// Why the peer is cut (the first stop condition found), null when active.
+  cutReason  String?
+  allowHosts String[]      @default([])
+  /// `EdgeState.version` when this row last changed.
+  version    Int
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  @@unique([tenantId, agentId])
+  @@index([version])
+  @@map("edge_peers")
+}
+
+/// Singleton (`id = "singleton"`): the global, monotonic edge peer version. Every change to any peer
+/// takes this row's lock and bumps it in the same transaction, so versions commit in order.
+model EdgeState {
+  id      String @id
+  version Int    @default(0)
+
+  @@map("edge_state")
 }

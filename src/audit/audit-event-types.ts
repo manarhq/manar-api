@@ -71,6 +71,13 @@ export const AUDIT_EVENT_TYPES = {
   AGENT_QUARANTINE_EXPLAINED: 'agent.quarantine_explained',
   AGENT_QUARANTINE_RELEASED: 'agent.quarantine_released',
 
+  // docs/edge.md. Egress records come from the edge gateway (hostnames only, never payloads or
+  // paths); rule changes are always a person's.
+  AGENT_EGRESS_ALLOWED: 'agent.egress.allowed',
+  AGENT_EGRESS_DENIED: 'agent.egress.denied',
+  AGENT_EGRESS_RULE_ADDED: 'agent.egress_rule.added',
+  AGENT_EGRESS_RULE_REMOVED: 'agent.egress_rule.removed',
+
   // Phase 14 (Users/Roles/Settings) — see src/users/, src/tenant-settings/.
   /** `POST /users/:id/role-bindings` granted a role — see `UsersService.grantRole`. */
   USER_ROLE_GRANTED: 'user.role_granted',

@@ -28,6 +28,7 @@ import { PlatformConfigSchema } from '../platform/platform.config';
 import { FleetHeartbeatConfigSchema } from '../fleet-heartbeat/fleet-heartbeat.config';
 import { MetricsConfigSchema } from '../metrics/metrics';
 import { LicensingConfigSchema } from '../licensing/licensing.config';
+import { EdgeConfigSchema, edgeConfigIssues } from '../edge/edge.config';
 
 /**
  * Application-level environment schema.
@@ -75,6 +76,7 @@ export const AppConfigSchema = z
   .extend(FleetHeartbeatConfigSchema.shape)
   .extend(MetricsConfigSchema.shape)
   .extend(LicensingConfigSchema.shape)
+  .extend(EdgeConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {
@@ -82,6 +84,7 @@ export const AppConfigSchema = z
       ...kafkaConfigIssues(c),
       ...openSearchConfigIssues(c),
       ...redisConfigIssues(c),
+      ...edgeConfigIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });
   });

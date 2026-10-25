@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional, Inject, forwardRef } from '@nestjs/common';
+import { EdgePeerService } from '../edge/edge-peer.service';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import type {
@@ -42,6 +43,10 @@ export class AgentQuarantineService {
   constructor(
     private readonly auditService: AuditService,
     private readonly config: ConfigService<AppConfig, true>,
+    // forwardRef: edge-peer.service imports the kill-switch services (an import cycle).
+    @Optional()
+    @Inject(forwardRef(() => EdgePeerService))
+    private readonly edgePeers?: EdgePeerService,
   ) {}
 
   async quarantine(
@@ -120,6 +125,8 @@ export class AgentQuarantineService {
       };
     }
     const row = step.row;
+    // docs/edge.md: cut the agent's network path right after the quarantine commits.
+    await this.edgePeers?.agentChanged(tenantId, input.agentId);
     // Tightening is never held back by an audit failure; the row is the
     // control and the decision is already recorded.
     await this.auditService.recordSafely(tenantClient, tenantId, {
@@ -239,6 +246,10 @@ export class AgentQuarantineService {
         },
       });
       throw error;
+    } finally {
+      // Restores the peer only if nothing else still stops the agent (or keeps it cut after the
+      // rollback above).
+      await this.edgePeers?.agentChanged(tenantId, input.agentId);
     }
     return row;
   }

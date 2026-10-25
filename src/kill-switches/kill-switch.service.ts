@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional, Inject, forwardRef } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
@@ -8,6 +8,7 @@ import {
   toCursorPage,
 } from '../common/pagination/cursor-pagination';
 import { PlatformKillSwitchService } from './platform-kill-switch.service';
+import { EdgePeerService } from '../edge/edge-peer.service';
 
 /** The four tenant-scoped kill-switch levels — see `KillSwitch` in `prisma/tenant.prisma`. */
 export type TenantKillSwitchScope = 'TENANT' | 'AGENT_GROUP' | 'AGENT' | 'TOOL';
@@ -72,7 +73,35 @@ export class KillSwitchService {
   constructor(
     private readonly auditService: AuditService,
     private readonly platformKillSwitchService: PlatformKillSwitchService,
+    // forwardRef: edge-peer.service imports the kill-switch services (an import cycle).
+    @Optional()
+    @Inject(forwardRef(() => EdgePeerService))
+    private readonly edgePeers?: EdgePeerService,
   ) {}
+
+  /** docs/edge.md: cut or restore the edge peers this switch covers. TOOL scope covers none. */
+  private async refreshEdge(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    scope: TenantKillSwitchScope,
+    targetId: string | null,
+  ): Promise<void> {
+    if (!this.edgePeers) return;
+    if (scope === 'TENANT') return this.edgePeers.tenantChanged(tenantId);
+    if (scope === 'AGENT' && targetId)
+      return this.edgePeers.agentChanged(tenantId, targetId);
+    if (scope === 'AGENT_GROUP' && targetId) {
+      const members = await tenantClient.agentGroupMembership
+        .findMany({ where: { groupId: targetId }, select: { agentId: true } })
+        // A failed member lookup must not fail the switch; the tenant refresh covers the group.
+        .catch(() => null);
+      if (!members) return this.edgePeers.tenantChanged(tenantId);
+      return this.edgePeers.agentsChanged(
+        tenantId,
+        members.map((m) => m.agentId),
+      );
+    }
+  }
 
   /**
    * One row per (scope, targetId) pair, toggled in place — see `KillSwitch`'s
@@ -125,6 +154,7 @@ export class KillSwitchService {
         reason: input.reason ?? null,
       },
     });
+    await this.refreshEdge(tenantClient, tenantId, input.scope, input.targetId);
 
     return row;
   }
@@ -159,6 +189,7 @@ export class KillSwitchService {
         targetId: input.targetId,
       },
     });
+    await this.refreshEdge(tenantClient, tenantId, input.scope, input.targetId);
 
     return row;
   }
