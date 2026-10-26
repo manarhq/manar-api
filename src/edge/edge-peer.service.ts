@@ -667,6 +667,36 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
     return run;
   }
 
+  /**
+   * One agent's peer as the console sees it: the row the refresh wrote (state and cut reason are
+   * never recomputed here). Scoped by tenant and agent; no key, slugs or allow-list.
+   */
+  async status(
+    tenantId: string,
+    agentId: string,
+  ): Promise<{
+    enrolled: boolean;
+    state?: 'active' | 'cut';
+    cutReasons?: string[];
+    address?: string;
+    updatedAt?: string;
+  }> {
+    const row = await this.control.edgePeer.findUnique({
+      where: { tenantId_agentId: { tenantId, agentId } },
+      select: { state: true, cutReason: true, address: true, updatedAt: true },
+    });
+    if (!row) return { enrolled: false };
+    return {
+      enrolled: true,
+      state: row.state,
+      ...(row.state === 'cut' && {
+        cutReasons: row.cutReason ? [row.cutReason] : [],
+      }),
+      address: row.address,
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
   // ---------------------------------------------------------------------
   // Gateway sync API
   // ---------------------------------------------------------------------

@@ -13,6 +13,8 @@ import { EnrollmentTokenInvalidError } from '../agents/agents.errors';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { EdgeGatewayGuard } from './edge-internal.controller';
+import { EgressRulesController } from './egress-rules.controller';
+import type { AuthContext } from '../auth/auth-context';
 import type { ModuleRef } from '@nestjs/core';
 import { vi } from 'vitest';
 import type { AuditService } from '../audit/audit.service';
@@ -503,5 +505,125 @@ describe('EdgePeerService reads and timers', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('GET /agents/:id/edge', () => {
+  // Two tenants, each with its own database; t1's agent a1 has a cut peer, t2's agent a2 an
+  // active one. Rows are keyed by tenant and agent like the unique index.
+  const agents: Record<string, string[]> = {
+    t1: ['a1', 'a3', 'same'],
+    t2: ['a2', 'same'],
+  };
+  const rows: Record<string, object> = {
+    't1/same': {
+      state: 'active',
+      cutReason: null,
+      address: '100.88.0.4/32',
+      updatedAt: new Date('2026-10-26T12:00:00Z'),
+    },
+    't1/a1': {
+      state: 'cut',
+      cutReason: 'agent_quarantined',
+      address: '100.88.0.2/32',
+      updatedAt: new Date('2026-10-26T10:00:00Z'),
+    },
+    't2/a2': {
+      state: 'active',
+      cutReason: null,
+      address: '100.88.0.3/32',
+      updatedAt: new Date('2026-10-26T11:00:00Z'),
+    },
+  };
+  const peerQueries: unknown[] = [];
+  const control = {
+    edgePeer: {
+      findUnique: (q: {
+        where: { tenantId_agentId: { tenantId: string; agentId: string } };
+      }) => {
+        peerQueries.push(q);
+        const { tenantId, agentId } = q.where.tenantId_agentId;
+        return Promise.resolve(rows[`${tenantId}/${agentId}`] ?? null);
+      },
+    },
+  } as unknown as ControlPrismaService;
+  const tenants = {
+    getClient: (tenantId: string) =>
+      Promise.resolve({
+        agent: {
+          findUnique: ({ where }: { where: { id: string } }) =>
+            Promise.resolve(
+              agents[tenantId]?.includes(where.id) ? { id: where.id } : null,
+            ),
+        },
+      }),
+  } as unknown as TenantDatabaseManager;
+  const peers = new EdgePeerService(
+    control,
+    tenants,
+    config({ MANAR_EDGE_ENABLED: 'false' }),
+    {} as ModuleRef,
+    {} as AuditService,
+  );
+  const controller = new EgressRulesController(
+    tenants,
+    {} as AuditService,
+    peers,
+  );
+  const auth = (tenantId: string) =>
+    ({ tenant: { id: tenantId }, user: { id: 'u' } }) as AuthContext;
+
+  it('returns the stored state and reason of a cut peer, no key, slugs or allow-list', async () => {
+    const res = await controller.edge(auth('t1'), 'a1');
+    expect(res).toEqual({
+      enrolled: true,
+      state: 'cut',
+      cutReasons: ['agent_quarantined'],
+      address: '100.88.0.2/32',
+      updatedAt: '2026-10-26T10:00:00.000Z',
+    });
+  });
+
+  it('an active peer has no cut reasons; an agent without a peer is not enrolled', async () => {
+    expect(await controller.edge(auth('t2'), 'a2')).toEqual({
+      enrolled: true,
+      state: 'active',
+      address: '100.88.0.3/32',
+      updatedAt: '2026-10-26T11:00:00.000Z',
+    });
+    expect(await controller.edge(auth('t1'), 'a3')).toEqual({
+      enrolled: false,
+    });
+  });
+
+  it("404 for another tenant's agent, without reading the peer registry", async () => {
+    peerQueries.length = 0;
+    await expect(controller.edge(auth('t2'), 'a1')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    await expect(controller.edge(auth('t1'), 'a2')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(peerQueries).toEqual([]);
+  });
+
+  it("an agent id that exists in two tenants never returns the other tenant's peer", async () => {
+    expect(await controller.edge(auth('t2'), 'same')).toEqual({
+      enrolled: false,
+    });
+    expect(await controller.edge(auth('t1'), 'same')).toMatchObject({
+      enrolled: true,
+      address: '100.88.0.4/32',
+    });
+  });
+
+  it('reads the peer by the caller tenant and agent only', async () => {
+    peerQueries.length = 0;
+    await controller.edge(auth('t1'), 'a1');
+    expect(peerQueries).toEqual([
+      expect.objectContaining({
+        where: { tenantId_agentId: { tenantId: 't1', agentId: 'a1' } },
+      }),
+    ]);
   });
 });

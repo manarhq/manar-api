@@ -169,6 +169,27 @@ Public Suffix List (`src/edge/public-suffix-list.ts`, MPL-2.0; no runtime depend
 regenerating it). A duplicate is 409, at most 200 rules per agent. Each change commits together with its `agent.egress_rule.added` / `.removed` audit event,
 then the peer's `allowHosts` is recomputed and the version bumped.
 
+## Edge status for the console
+
+`GET /agents/:id/edge`, same gate as the allow-list (JWT plus `SECURITY_ADMIN` or `TENANT_OWNER`,
+HTTP app only). The agent is looked up in the caller's tenant database first (404 if it is not
+there, so another tenant's agent is never found), then its `edge_peers` row by tenant and agent.
+The answer is what the last refresh wrote, never recomputed on read:
+
+```json
+{
+  "enrolled": true,
+  "state": "cut",
+  "cutReasons": ["agent_quarantined"],
+  "address": "100.88.0.17/32",
+  "updatedAt": "2026-10-26T10:00:00.000Z"
+}
+```
+
+`{ "enrolled": false }` when the agent has no peer. `cutReasons` is present only when `state` is
+`cut` and holds the row's `cutReason` (the first stop condition found, so one entry today). No
+public key, slugs or allow-list: the allow-list has its own route.
+
 ## Claude Code on a governed host
 
 The host binary's Claude Code hook asks Manar before every tool call: `POST /agent/v1/authorize`
@@ -222,5 +243,6 @@ Setting up an agent, as a tenant admin:
 ## Not done here
 
 - The gateway itself, the host binary and the console panel are other repos.
+- Last handshake time: the gateway does not report it yet, so the status has none.
 - `edge_peers` lives in the control database although it names agents: the gateway serves every
   tenant and needs one registry. It holds slugs, keys, addresses and allowed hostnames only.
