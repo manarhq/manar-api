@@ -28,6 +28,11 @@ import { PlatformConfigSchema } from '../platform/platform.config';
 import { FleetHeartbeatConfigSchema } from '../fleet-heartbeat/fleet-heartbeat.config';
 import { MetricsConfigSchema } from '../metrics/metrics';
 import { LicensingConfigSchema } from '../licensing/licensing.config';
+import { TrustedProxyConfigSchema, trustedProxyIssues } from './trusted-proxy';
+import {
+  CloudMcpConfigSchema,
+  cloudMcpConfigIssues,
+} from '../cloud-mcp/cloud-mcp.config';
 import { EdgeConfigSchema, edgeConfigIssues } from '../edge/edge.config';
 
 /**
@@ -76,6 +81,8 @@ export const AppConfigSchema = z
   .extend(FleetHeartbeatConfigSchema.shape)
   .extend(MetricsConfigSchema.shape)
   .extend(LicensingConfigSchema.shape)
+  .extend(CloudMcpConfigSchema.shape)
+  .extend(TrustedProxyConfigSchema.shape)
   .extend(EdgeConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
@@ -84,6 +91,8 @@ export const AppConfigSchema = z
       ...kafkaConfigIssues(c),
       ...openSearchConfigIssues(c),
       ...redisConfigIssues(c),
+      ...cloudMcpConfigIssues(c),
+      ...trustedProxyIssues(c),
       ...edgeConfigIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });

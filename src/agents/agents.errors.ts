@@ -17,6 +17,16 @@ export class AgentTerminatedError extends Error {
   }
 }
 
+/** A CLOUD agent has no certificate and is revoked with `DELETE /cloud-agents/:id` (docs/cloud-agents.md). */
+export class CloudAgentOperationError extends Error {
+  constructor(agentId: string, operation: string) {
+    super(
+      `Agent "${agentId}" is a cloud agent: ${operation} is not available (use /cloud-agents)`,
+    );
+    this.name = 'CloudAgentOperationError';
+  }
+}
+
 export type EnrollmentFailureReason =
   | 'not_found'
   | 'used'

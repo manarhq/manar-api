@@ -4,6 +4,7 @@ import type { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import {
   AgentTerminatedError,
+  CloudAgentOperationError,
   EnrollmentTokenInvalidError,
 } from './agents.errors';
 import { AgentsService } from './agents.service';
@@ -19,12 +20,13 @@ import { hashEnrollmentToken } from './enrollment-token.util';
 
 const RAW_TOKEN = 'raw-token';
 
-function setup(status: string) {
+function setup(status: string, kind = 'WORKLOAD') {
   const agent = {
     id: 'agent-1',
     slug: 'a1',
     identifier: 'agent://acme/a1',
     status,
+    kind,
   };
   const tokenRow = {
     id: 'token-1',
@@ -118,6 +120,24 @@ describe('AgentsService terminal states (R4)', () => {
       expect(agent.status).toBe('ACTIVE');
     });
   }
+});
+
+describe('AgentsService and cloud agents', () => {
+  it('never issues an enrollment token to a CLOUD agent', async () => {
+    const { service, client, tokensCreated } = setup('ACTIVE', 'CLOUD');
+    await expect(
+      service.createEnrollmentToken(client, 'agent-1', 'acme', 'user-1'),
+    ).rejects.toBeInstanceOf(CloudAgentOperationError);
+    expect(tokensCreated).toHaveLength(0);
+  });
+
+  it('sends the revocation of a CLOUD agent to /cloud-agents (Keycloak clean-up)', async () => {
+    const { service, client, audited } = setup('ACTIVE', 'CLOUD');
+    await expect(
+      service.revokeAgent(client, 'tenant-1', 'agent-1', 'r', 'user-1'),
+    ).rejects.toBeInstanceOf(CloudAgentOperationError);
+    expect(audited).toHaveLength(0);
+  });
 });
 
 describe('AgentsService.verifyEnrollmentToken (edge preflight gate)', () => {

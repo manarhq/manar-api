@@ -11,6 +11,7 @@ import { AppModule } from './app.module';
 import { AgentMtlsAppModule } from './agent-mtls/agent-mtls-app.module';
 import { allowLargeLlmBodies } from './agent-runtime/llm-proxy.controller';
 import { validate } from './config/env.validation';
+import { httpAdapterOptions } from './config/trusted-proxy';
 import type { AppConfig } from './config/env.validation';
 import { setupOpenApiDocs } from './openapi/setup-openapi-docs';
 import { setupCors, setupHelmet } from './security/setup-security';
@@ -27,7 +28,8 @@ async function bootstrap(): Promise<void> {
 
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter(),
+    // MANAR_TRUSTED_PROXY_CIDRS: request.ip is the real caller behind cloudflared and Traefik.
+    new FastifyAdapter(httpAdapterOptions(bootstrapConfig)),
     { bufferLogs: true },
   );
   app.useLogger(app.get(WINSTON_MODULE_NEST_PROVIDER));

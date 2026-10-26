@@ -17,6 +17,7 @@ import { JwksCacheService } from '../auth/jwks-cache.service';
 import { ACCEPTED_SIGNING_ALGORITHMS } from '../auth/jwt-auth.guard';
 import { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
 import { isHealthRoutePath } from '../health/health.routes';
+import { isCloudMcpPath } from '../cloud-mcp/cloud-mcp.config';
 
 /**
  * Phase 12a: rate-limits the human JWT surface **per tenant**, not per
@@ -91,6 +92,8 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
     const { req } = this.getRequestResponse(context);
     const url: unknown = req.url;
     if (typeof url === 'string' && isHealthRoutePath(url)) return true;
+    // Cloud agents have their own per-agent and per-IP limits (CloudMcpAuthGuard).
+    if (typeof url === 'string' && isCloudMcpPath(url)) return true;
 
     return super.shouldSkip(context);
   }

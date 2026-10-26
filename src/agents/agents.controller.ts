@@ -31,7 +31,11 @@ import {
   parseCursor,
   parseLimit,
 } from '../common/pagination/cursor-pagination';
-import { AgentNotFoundError, AgentTerminatedError } from './agents.errors';
+import {
+  AgentNotFoundError,
+  AgentTerminatedError,
+  CloudAgentOperationError,
+} from './agents.errors';
 import { AgentsService } from './agents.service';
 import {
   CreateAgentRequestSchema,
@@ -56,6 +60,9 @@ async function mapAgentNotFound<T>(operation: () => Promise<T>): Promise<T> {
       throw new NotFoundException(error.message);
     }
     if (error instanceof AgentTerminatedError) {
+      throw new ConflictException(error.message);
+    }
+    if (error instanceof CloudAgentOperationError) {
       throw new ConflictException(error.message);
     }
     throw error;

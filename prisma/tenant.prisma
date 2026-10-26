@@ -206,10 +206,61 @@ model Agent {
   /// ADR-0009: present once this agent has ever been quarantined.
   quarantine AgentQuarantine?
 
+  /// How the agent authenticates (docs/cloud-agents.md).
+  kind         AgentKind          @default(WORKLOAD)
+  cloudBinding CloudAgentBinding?
   /// docs/edge.md: hostnames this agent may reach through the Manar edge proxy.
   egressRules AgentEgressRule[]
 
   @@map("agents")
+}
+
+/// WORKLOAD: an X.509 client certificate on the mTLS listener (enrollment).
+/// CLOUD: runs in a vendor's cloud (Copilot Studio, ChatGPT) and calls the
+/// public MCP endpoint with an OAuth access token from the tenant's realm.
+enum AgentKind {
+  WORKLOAD
+  CLOUD
+}
+
+enum CloudAgentPlatform {
+  COPILOT_STUDIO
+  CHATGPT
+}
+
+/// The OAuth side of a CLOUD agent (docs/cloud-agents.md). A token reaches
+/// this agent only when its audience is the agent's MCP URL (put there by
+/// the `oauthScope` client scope's audience mapper) and, for a
+/// pre-registered client, its `azp` is `oauthClientId`.
+model CloudAgentBinding {
+  id       String             @id @default(uuid())
+  agentId  String             @unique
+  agent    Agent              @relation(fields: [agentId], references: [id])
+  platform CloudAgentPlatform
+
+  /// Keycloak clientId of the pre-registered client (Copilot Studio). Null
+  /// for ChatGPT, which registers its own client (DCR).
+  oauthClientId String? @unique
+  /// Keycloak client scope whose audience mapper adds the MCP URL.
+  oauthScope    String  @unique
+  /// The standing task every tools/call of this agent runs under.
+  taskId        String
+  /// Keycloak object ids Manar created at connect ({ clientUuid?, scopeId, roleId, mapperId? });
+  /// disconnect deletes these, never objects found by name.
+  keycloakIds   Json    @default("{}")
+
+  /// ChatGPT: the first eligible self-registered client waits here until a tenant admin confirms
+  /// it (POST /cloud-agents/:id/oauth-client/confirm); `pendingClient` holds what was checked
+  /// (registration time, redirect URIs, grants).
+  pendingClientId String?
+  pendingClient   Json?
+  pendingSince    DateTime?
+
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("cloud_agent_bindings")
 }
 
 /// Minimal this phase — membership only, no group-based policy yet (that's

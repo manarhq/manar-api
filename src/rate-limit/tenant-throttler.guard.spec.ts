@@ -121,6 +121,27 @@ describe('TenantThrottlerGuard health-route exemption', () => {
   );
 });
 
+describe('TenantThrottlerGuard cloud-agent MCP exemption', () => {
+  it.each([
+    '/mcp/acme/copilot-1',
+    '/.well-known/oauth-protected-resource/mcp/acme/copilot-1',
+  ])('leaves %s to the cloud MCP limits', async (url) => {
+    const increment = vi.fn().mockResolvedValue(ALLOWED);
+    const { guard } = await makeGuard(increment);
+    await expect(guard.canActivate(makeContext(url))).resolves.toBe(true);
+    expect(increment).not.toHaveBeenCalled();
+  });
+
+  it('still limits the human API', async () => {
+    const increment = vi.fn().mockResolvedValue(ALLOWED);
+    const { guard } = await makeGuard(increment);
+    await expect(guard.canActivate(makeContext('/mcp-admin/x'))).resolves.toBe(
+      true,
+    );
+    expect(increment).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('TenantThrottlerGuard storage failure handling', () => {
   it('fails open when the rate-limit storage is unavailable', async () => {
     const increment = vi

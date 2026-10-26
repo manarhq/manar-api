@@ -86,6 +86,27 @@ export function recordRateLimitFallback(
   if (active) fallbackRequests.inc({ surface });
 }
 
+const cloudMcpRejections = new Counter({
+  name: 'manar_cloud_mcp_token_rejections_total',
+  help: 'Requests the public cloud-agent MCP endpoint refused, by reason (docs/cloud-agents.md).',
+  labelNames: ['reason'],
+  registers: [registry],
+});
+
+export function recordCloudMcpRejection(reason: string): void {
+  cloudMcpRejections.inc({ reason });
+}
+
+const cloudMcpPendingClients = new Counter({
+  name: 'manar_cloud_mcp_pending_clients_total',
+  help: 'Self-registered clients waiting for a tenant admin to confirm them for a ChatGPT agent. Alert on any increase.',
+  registers: [registry],
+});
+
+export function recordCloudMcpPendingClient(): void {
+  cloudMcpPendingClients.inc();
+}
+
 const licenseStatus = new Gauge({
   name: 'manar_license_status',
   help: 'Licence status: 1 for the current status, 0 for the others. Soft limit, never enforced.',
