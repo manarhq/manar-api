@@ -13,7 +13,7 @@ export const CATALOG_FEATURES = [
   'watcher',
   /** Every pack-bound task (`Task.packId` set). */
   'packs',
-  /** The agent LLM proxy (`/agent/v1/llm/chat/completions`). */
+  /** The agent LLM proxy (`/agent/v1/llm/chat/completions` and `/agent/v1/llm/anthropic/v1/messages`). */
   'llm_proxy',
 ] as const;
 export type CatalogFeature = (typeof CATALOG_FEATURES)[number];

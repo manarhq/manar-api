@@ -219,6 +219,13 @@ config:
   AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'
   TENANT_DB_CLIENT_CACHE_MAX: '50'
   TENANT_DB_CLIENT_IDLE_TTL_MS: '600000'
+  # Anthropic Messages format for Claude Code (ADR-0002 A2). Off (404 anthropic_disabled) until
+  # a key is set below and LLM_ANTHROPIC_MODELS lists the served model ids:
+  # anthropic | azure_foundry | openai_translate | none.
+  LLM_ANTHROPIC_PROVIDER: anthropic
+  LLM_ANTHROPIC_MODELS: ''
+  # Whether that upstream processes prompts in the UAE (a UAE tenant is refused otherwise).
+  LLM_ANTHROPIC_UAE_RESIDENT: 'false'
 
 # Secret application configuration (credentials, connection strings that
 # embed a password, signing keys, static tokens). templates/secret.yaml
@@ -254,6 +261,12 @@ secrets:
     # manar-web's own copy exactly.
     MANAR_BFF_SERVICE_TOKEN: ''
     PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ''
+    # Optional: empty counts as unset. The Anthropic key (OpenBao kv/prod/llm-anthropic,
+    # property api_key) for LLM_ANTHROPIC_PROVIDER=anthropic, or the Foundry key for
+    # azure_foundry (with LLM_AZURE_FOUNDRY_ENDPOINT in `config`). Without it the API starts
+    # and the Anthropic-format endpoint answers 404 anthropic_disabled.
+    ANTHROPIC_API_KEY: ''
+    AZURE_FOUNDRY_API_KEY: ''
 
 # The agent mTLS listener's own TLS server identity + client-CA trust
 # anchor (src/main.ts reads these paths at bootstrap — see
