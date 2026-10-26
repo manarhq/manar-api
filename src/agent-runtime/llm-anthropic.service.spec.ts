@@ -49,6 +49,7 @@ const AGENT: AgentContext = {
 };
 const SERVER_KEY = 'server-side-test-key';
 const CLEAN: DlpAdvisory = { findings: [], overallSeverity: 'SEVERITY_NONE' };
+// nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token (synthetic DLP fixture, signature is "signature-value")
 const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJlLXZhbHVl';
 
 /** A local stand-in for both upstreams: Anthropic `/v1/messages` and OpenAI `/v1/chat/completions`. */
