@@ -68,3 +68,15 @@ Name of the credentials Secret.
 {{- define "demo-soc-tools.secretName" -}}
 {{- default (printf "%s-secrets" (include "demo-soc-tools.fullname" .)) .Values.secrets.name }}
 {{- end }}
+
+{{/*
+Container image: repository@digest when image.digest is set, else
+repository:tag (tag defaults to the chart appVersion).
+*/}}
+{{- define "demo-soc-tools.image" -}}
+{{- if .Values.image.digest }}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else }}
+{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) }}
+{{- end }}
+{{- end }}

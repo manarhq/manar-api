@@ -1,5 +1,7 @@
 # ---- Base: pnpm-enabled Node image shared by the build stages ----
-FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS base
+# Debian (glibc), like the runtime stage: @temporalio/core-bridge ships glibc
+# builds only, and native modules installed here must match the runtime libc.
+FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS base
 RUN npm install --global pnpm@11.20.0
 WORKDIR /app
 
@@ -39,21 +41,36 @@ RUN pnpm packages:build \
   && pnpm db:generate && pnpm build
 
 # ---- prod-deps: install production-only dependencies ----
+# The workspace manifests are copied too, so pnpm links the workspace packages
+# dist/ requires at runtime (@manar-ai/grpc-client, and @manar/sdk-node for the
+# CLI) and installs their own dependencies. Their dist/ comes from `build`.
+# @confluentinc/kafka-javascript's install script fetches its prebuilt native
+# binding; --ignore-scripts skipped it, so it is rebuilt with Prisma's.
 FROM base AS prod-deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/manar-ai-client/package.json packages/manar-ai-client/
+COPY packages/sdk-node/package.json packages/sdk-node/
+COPY packages/demo-soc-tools/package.json packages/demo-soc-tools/
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts \
-  && pnpm rebuild @prisma/engines prisma
+  && pnpm rebuild @prisma/engines prisma @confluentinc/kafka-javascript
 
 # ---- runtime: minimal image, no build toolchain, non-root user ----
-FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS runtime
+FROM node:24-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS runtime
 ENV NODE_ENV=production
 # Reported in the manar-fleet heartbeat (ADR-0010). CI passes the commit sha.
 ARG MANAR_GIT_SHA=unknown
 ENV MANAR_GIT_SHA=${MANAR_GIT_SHA}
 WORKDIR /app
 
-RUN addgroup --system --gid 1001 nodejs \
-  && adduser --system --uid 1001 --ingroup nodejs manar
+# ca-certificates: the system trust store for native TLS clients (librdkafka, the
+# Temporal core bridge, Prisma's schema engine); Node itself uses its bundled roots.
+# apt-get upgrade picks up Debian security fixes newer than the base image digest.
+RUN apt-get update \
+  && apt-get upgrade -y --no-install-recommends \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd --system --gid 1001 nodejs \
+  && useradd --system --uid 1001 --gid nodejs --no-create-home --shell /usr/sbin/nologin manar
 
 # The runtime only runs `node`; the base image's bundled npm, corepack and
 # yarn (and their dependencies' advisories in image scans) are build tools.
@@ -62,6 +79,15 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
   /opt/yarn-v* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 COPY --from=prod-deps --chown=manar:nodejs /app/node_modules ./node_modules
+# Workspace packages behind node_modules/@manar-ai/grpc-client and
+# node_modules/@manar/sdk-node: manifest, compiled dist/ and their production
+# node_modules only (no sources, no dev dependencies).
+COPY --from=prod-deps --chown=manar:nodejs /app/packages/manar-ai-client/node_modules ./packages/manar-ai-client/node_modules
+COPY --from=build --chown=manar:nodejs /app/packages/manar-ai-client/package.json ./packages/manar-ai-client/
+COPY --from=build --chown=manar:nodejs /app/packages/manar-ai-client/dist ./packages/manar-ai-client/dist
+COPY --from=prod-deps --chown=manar:nodejs /app/packages/sdk-node/node_modules ./packages/sdk-node/node_modules
+COPY --from=build --chown=manar:nodejs /app/packages/sdk-node/package.json ./packages/sdk-node/
+COPY --from=build --chown=manar:nodejs /app/packages/sdk-node/dist ./packages/sdk-node/dist
 COPY --from=build --chown=manar:nodejs /app/dist ./dist
 COPY --chown=manar:nodejs package.json ./
 # TenantDatabaseManager.provisionTenant spawns `prisma migrate deploy

@@ -200,23 +200,36 @@ export class CatalogService {
   async llmGate(
     tenantId: string,
     surface: 'llm_proxy' | 'assistant',
+    /**
+     * A fixed upstream outside the catalog's providers (the Anthropic-format proxy's own): judged
+     * by its own placement, and refused when the tenant's catalog pins another model.
+     */
+    fixed?: { external: boolean; uaeResident: boolean; model: string },
   ): Promise<LlmRoute> {
     const s = await this.state(tenantId);
     if (!s.features[surface]) throw new CatalogDenied(`${surface}_disabled`);
+    if (fixed && s.model && s.model.model !== fixed.model)
+      throw new CatalogDenied('llm_model_not_allowed');
     const provider: LlmProvider =
       s.model?.provider ??
       this.config.get('LLM_PROVIDER', { infer: true }) ??
       'ollama';
     // Ollama runs inside the deployment, so it is as resident as the deployment itself.
-    const uaeResident = s.model
-      ? s.model.uaeResidency
-      : provider === 'ollama' ||
-        this.config.get('LLM_DEFAULT_UAE_RESIDENT', { infer: true }) === 'true';
+    const uaeResident = fixed
+      ? fixed.uaeResident
+      : s.model
+        ? s.model.uaeResidency
+        : provider === 'ollama' ||
+          this.config.get('LLM_DEFAULT_UAE_RESIDENT', { infer: true }) ===
+            'true';
+    const external = fixed
+      ? fixed.external
+      : EXTERNAL_PROVIDERS.includes(provider);
     const tenant = await this.control.tenant.findUniqueOrThrow({
       where: { id: tenantId },
       select: { residency: true, allowExternalAi: true },
     });
-    if (EXTERNAL_PROVIDERS.includes(provider) && !tenant.allowExternalAi)
+    if (external && !tenant.allowExternalAi)
       throw new CatalogDenied('llm_external_not_allowed');
     if (tenant.residency === 'UAE' && !uaeResident)
       throw new CatalogDenied('llm_residency_mismatch');

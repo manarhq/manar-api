@@ -19,6 +19,9 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   # A real deployment pins this to a CI-built digest/tag — never `latest`.
   tag: ''
+  # sha256:... of a released image. When set the image is pulled as
+  # repository@digest and `tag` is ignored.
+  digest: ''
 
 imagePullSecrets: []
 nameOverride: ''
@@ -229,6 +232,13 @@ config:
   # (Fastify trustProxy over X-Forwarded-For), or 'none' when exposed directly. Required (startup
   # fails) when MANAR_MCP_ENABLED is 'true'.
   MANAR_TRUSTED_PROXY_CIDRS: ''
+  # Anthropic Messages format for Claude Code (ADR-0002 A2). Off (404 anthropic_disabled) until
+  # a key is set below and LLM_ANTHROPIC_MODELS lists the served model ids:
+  # anthropic | azure_foundry | openai_translate | none.
+  LLM_ANTHROPIC_PROVIDER: anthropic
+  LLM_ANTHROPIC_MODELS: ''
+  # Whether that upstream processes prompts in the UAE (a UAE tenant is refused otherwise).
+  LLM_ANTHROPIC_UAE_RESIDENT: 'false'
 
 # Secret application configuration (credentials, connection strings that
 # embed a password, signing keys, static tokens). templates/secret.yaml
@@ -264,6 +274,12 @@ secrets:
     # manar-web's own copy exactly.
     MANAR_BFF_SERVICE_TOKEN: ''
     PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ''
+    # Optional: empty counts as unset. The Anthropic key (OpenBao kv/prod/llm-anthropic,
+    # property api_key) for LLM_ANTHROPIC_PROVIDER=anthropic, or the Foundry key for
+    # azure_foundry (with LLM_AZURE_FOUNDRY_ENDPOINT in `config`). Without it the API starts
+    # and the Anthropic-format endpoint answers 404 anthropic_disabled.
+    ANTHROPIC_API_KEY: ''
+    AZURE_FOUNDRY_API_KEY: ''
 
 # The agent mTLS listener's own TLS server identity + client-CA trust
 # anchor (src/main.ts reads these paths at bootstrap — see
@@ -299,6 +315,44 @@ backingServiceTls:
   # mounted and only public CAs are trusted.
   caSecretName: ''
   caKey: ca.crt
+
+# mTLS client for manar-ai's gRPC AnalysisService (port 50051), which requires a
+# client certificate (Gate-0 finding S18; src/ai-advisory/ai-advisory.config.ts).
+# secretName: a Secret with this service's client certificate and key and the CA that
+# issued manar-ai's server certificate, such as the Secret of a cert-manager
+# Certificate. The certificate's CN or DNS SAN must be `manar-api`. When set, the
+# Secret is mounted read-only at /etc/manar/ai-advisory-tls and AI_ADVISORY_TLS_*
+# point at its keys. Empty: plaintext gRPC, which manar-ai refuses in staging and
+# production.
+aiAdvisoryTls:
+  secretName: ''
+  certKey: tls.crt
+  keyKey: tls.key
+  caKey: ca.crt
+
+# Added to the container as given: lists of EnvVar, Volume and VolumeMount, for
+# settings this chart has no value for. The migration Job gets them too.
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+# Database migrations as a Helm hook Job (templates/migration-job.yaml): after install
+# and before every upgrade it runs `prisma migrate deploy` on the control database, then
+# `tenants:migrate` on every ACTIVE tenant database. Same image, ConfigMap, Secret, CA
+# mount and extra* values as the Deployment. Its pod carries
+# `manar.vax.sh/migration: "true"` for the namespace NetworkPolicy that admits it to
+# PostgreSQL, and is not selected by this chart's NetworkPolicy. A pre-upgrade hook runs
+# before the upgrade applies, so it reads the ConfigMap and Secret of the release
+# being upgraded. Off by default: migrations are then run by hand.
+migration:
+  enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 # Voluntary disruptions (node drains, cluster upgrades) take at most this many
 # pods at once. With one replica a drain still proceeds.
