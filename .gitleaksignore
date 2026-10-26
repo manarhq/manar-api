@@ -28,3 +28,6 @@ d42a7c1803fc7ab9ab01ffa1a167bd1cbc8e09fa:src/tools/credential-broker.service.spe
 d5b5feae18d5d384152a5b18697287e084876021:src/assistant/assistant.service.spec.ts:jwt:11
 e6dbaf307aa65f7c6fbed3dc7f470e2c355d6883:test/agent-runtime.e2e-spec.ts:azure-ad-client-secret:824
 44a4ba4730097328370099d6232d30d380f973c8:README.md:generic-api-key:5
+
+# Triaged 2026-10-26: the Anthropic proxy spec's JWT fixture (signature is "signature-value").
+d82a13e24a177fcc905c38ea8b3019dc7af00b4c:src/agent-runtime/llm-anthropic.service.spec.ts:jwt:46

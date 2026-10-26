@@ -75,3 +75,31 @@ Name of the agent-mTLS cert/key/CA Secret.
 {{- define "manar-api.agentMtlsCertsSecretName" -}}
 {{- default (printf "%s-agent-mtls-certs" (include "manar-api.fullname" .)) .Values.agentMtls.certs.name }}
 {{- end }}
+
+{{/*
+Container image: repository@digest when image.digest is set, else
+repository:tag (tag defaults to the chart appVersion).
+*/}}
+{{- define "manar-api.image" -}}
+{{- if .Values.image.digest }}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else }}
+{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Labels for the migration Job and its pod. app.kubernetes.io/name differs from
+selectorLabels, so the Deployment, Service, PDB and NetworkPolicy never select it.
+*/}}
+{{- define "manar-api.migrationLabels" -}}
+helm.sh/chart: {{ include "manar-api.chart" . }}
+app.kubernetes.io/name: {{ printf "%s-migrate" (include "manar-api.name" .) | trunc 63 | trimSuffix "-" }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: migration
+app.kubernetes.io/part-of: manar
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}

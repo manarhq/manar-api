@@ -6,6 +6,7 @@ import { TasksModule } from '../tasks/tasks.module';
 import { ToolInvokeModule } from '../tools/tool-invoke.module';
 import { AgentRuntimeController } from './agent-runtime.controller';
 import { AgentTaskAccessService } from './agent-task-access.service';
+import { LlmAnthropicService } from './llm-anthropic.service';
 import { LlmBudgetStore } from './llm-budget.store';
 import { LlmProxyController } from './llm-proxy.controller';
 import { LlmProxyService } from './llm-proxy.service';
@@ -32,6 +33,7 @@ import { ToolManifestService } from './tool-manifest.service';
     LlmBudgetStore,
     LlmUpstreamClient,
     LlmProxyService,
+    LlmAnthropicService,
   ],
 })
 export class AgentRuntimeModule {}

@@ -37,6 +37,9 @@ importers:
       '@manar-ai/grpc-client':
         specifier: workspace:*
         version: link:packages/manar-ai-client
+      '@manar/sdk-node':
+        specifier: workspace:*
+        version: link:packages/sdk-node
       '@modelcontextprotocol/sdk':
         specifier: ^1.31.0
         version: 1.32.1(supports-color@8.1.1)(zod@4.6.7)
@@ -155,9 +158,6 @@ importers:
       '@eslint/js':
         specifier: ^9.18.0
         version: 9.39.5
-      '@manar/sdk-node':
-        specifier: workspace:*
-        version: link:packages/sdk-node
       '@nestjs/cli':
         specifier: ^11.0.0
         version: 11.0.24(@swc/core@1.16.0)(@types/node@24.13.3)(lightningcss@1.33.0)(postcss@8.5.26)(prettier@3.9.6)(uglify-js@3.19.3)

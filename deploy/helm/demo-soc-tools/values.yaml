@@ -6,6 +6,9 @@ image:
   repository: registry.example.com/manar/demo-soc-tools
   pullPolicy: IfNotPresent
   tag: ''
+  # sha256:... of a released image. When set the image is pulled as
+  # repository@digest and `tag` is ignored.
+  digest: ''
 
 imagePullSecrets: []
 nameOverride: ''

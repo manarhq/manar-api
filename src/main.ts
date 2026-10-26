@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { AppModule } from './app.module';
 import { AgentMtlsAppModule } from './agent-mtls/agent-mtls-app.module';
+import { allowLargeLlmBodies } from './agent-runtime/llm-proxy.controller';
 import { validate } from './config/env.validation';
 import type { AppConfig } from './config/env.validation';
 import { setupOpenApiDocs } from './openapi/setup-openapi-docs';
@@ -60,6 +61,7 @@ async function bootstrap(): Promise<void> {
     { bufferLogs: true },
   );
   agentMtlsApp.useLogger(agentMtlsApp.get(WINSTON_MODULE_NEST_PROVIDER));
+  allowLargeLlmBodies(agentMtlsApp.getHttpAdapter().getInstance());
   instrumentHttp(agentMtlsApp.getHttpAdapter().getInstance(), 'agent');
   setupHelmet(agentMtlsApp);
   enableGracefulShutdown(agentMtlsApp);

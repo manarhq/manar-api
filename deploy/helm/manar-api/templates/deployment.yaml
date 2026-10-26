@@ -43,7 +43,7 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "manar-api.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -67,15 +67,30 @@ spec:
             - name: NODE_EXTRA_CA_CERTS
               value: /etc/manar/backing-service-ca/{{ .Values.backingServiceTls.caKey }}
             {{- end }}
+            {{- with .Values.aiAdvisoryTls }}
+            {{- if .secretName }}
+            # mTLS client for manar-ai (src/ai-advisory/ai-advisory.config.ts).
+            - name: AI_ADVISORY_TLS_ENABLED
+              value: 'true'
+            - name: AI_ADVISORY_TLS_CA_FILE
+              value: /etc/manar/ai-advisory-tls/{{ .caKey }}
+            - name: AI_ADVISORY_TLS_CERT_FILE
+              value: /etc/manar/ai-advisory-tls/{{ .certKey }}
+            - name: AI_ADVISORY_TLS_KEY_FILE
+              value: /etc/manar/ai-advisory-tls/{{ .keyKey }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- if gt (int .Values.preStopSleepSeconds) 0 }}
           {{/*
           Delays SIGTERM reaching the process so Fastify keeps serving
           across the window in which this pod has been marked Terminating
           but kube-proxy/the ingress have not finished removing it from
           their endpoint tables — the race that makes rollouts drop
-          in-flight requests. `sleep` is busybox's, already on PATH in the
-          node:24-alpine runtime image (same assumption the worker chart's
-          exec liveness probe makes). No shell needed, so this works with
+          in-flight requests. `sleep` is coreutils', already on PATH in the
+          Debian runtime image. No shell needed, so this works with
           readOnlyRootFilesystem and every capability dropped.
           */}}
           lifecycle:
@@ -105,6 +120,14 @@ spec:
               mountPath: /etc/manar/backing-service-ca
               readOnly: true
             {{- end }}
+            {{- with .Values.aiAdvisoryTls.secretName }}
+            - name: ai-advisory-tls
+              mountPath: /etc/manar/ai-advisory-tls
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -115,6 +138,14 @@ spec:
         - name: backing-service-ca
           secret:
             secretName: {{ . }}
+        {{- end }}
+        {{- with .Values.aiAdvisoryTls.secretName }}
+        - name: ai-advisory-tls
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

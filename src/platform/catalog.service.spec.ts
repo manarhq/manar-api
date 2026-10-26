@@ -277,6 +277,49 @@ describe('CatalogService.llmGate (LLM proxy and assistant)', () => {
     ).resolves.toEqual({ route: null, quota: null });
   });
 
+  it('judges a fixed upstream (the Anthropic-format proxy) by its own placement, not the catalog model', async () => {
+    // Local default model, but the fixed upstream is external and outside the UAE.
+    const fixed = { external: true, uaeResident: false, model: 'claude-x' };
+    await expect(
+      make().service.llmGate('t1', 'llm_proxy', fixed),
+    ).rejects.toEqual(new CatalogDenied('llm_external_not_allowed'));
+    const tenant = { residency: 'UAE', allowExternalAi: true };
+    await expect(
+      make({ tenant }).service.llmGate('t1', 'llm_proxy', fixed),
+    ).rejects.toEqual(new CatalogDenied('llm_residency_mismatch'));
+    await expect(
+      make({ tenant }).service.llmGate('t1', 'llm_proxy', {
+        ...fixed,
+        uaeResident: true,
+      }),
+    ).resolves.toEqual({ route: null, quota: null });
+  });
+
+  it("refuses the fixed upstream when the tenant's catalog pins another model", async () => {
+    const tenant = { residency: 'CUSTOM_REGION', allowExternalAi: true };
+    const pinned = (model: string) =>
+      make({
+        tenant,
+        row: row({
+          model: {
+            provider: 'azure_openai',
+            model,
+            uaeResidency: false,
+            monthlyTokenQuota: null,
+          },
+        }),
+      }).service;
+    const fixed = { external: true, uaeResident: false, model: 'claude-x' };
+    await expect(
+      pinned('gpt-5-mini').llmGate('t1', 'llm_proxy', fixed),
+    ).rejects.toEqual(new CatalogDenied('llm_model_not_allowed'));
+    await expect(
+      pinned('claude-x').llmGate('t1', 'llm_proxy', fixed),
+    ).resolves.toMatchObject({
+      quota: null,
+    });
+  });
+
   it('refuses a surface staff switched off', async () => {
     const { service } = make({
       row: row({ features: { llm_proxy: false, assistant: false } }),
