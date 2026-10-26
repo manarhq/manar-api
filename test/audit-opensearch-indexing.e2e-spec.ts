@@ -129,6 +129,8 @@ function fakeConfigService(
     SSRF_ALLOW_LOOPBACK: true,
     LLM_PROVIDER: 'ollama',
     LLM_DEFAULT_UAE_RESIDENT: 'false',
+    MANAR_EDGE_ENABLED: 'false',
+    MANAR_EDGE_CIDR: '100.88.0.0/16',
     LLM_OLLAMA_BASE_URL: 'http://localhost:11434/v1',
     LLM_MODEL: 'qwen3.5:9b',
     LLM_AZURE_OPENAI_API_VERSION: '2024-10-21',

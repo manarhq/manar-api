@@ -40,7 +40,14 @@ export interface AuthorizeRequest {
 export type AuthorizeDecision = (
   | { decision: 'ALLOW' }
   | { decision: 'DENY'; reason: string }
-  | { decision: 'APPROVAL_REQUIRED'; reason: string; riskScore: number }
+  | {
+      decision: 'APPROVAL_REQUIRED';
+      reason: string;
+      riskScore: number;
+      /** The approval request opened for this decision; poll it with `getApproval()`. Absent if it could not be opened. */
+      approvalId?: string;
+      expiresAt?: string;
+    }
 ) & { decisionId: string };
 
 export interface DelegateTaskGrant {

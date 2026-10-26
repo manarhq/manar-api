@@ -1,4 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  Optional,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
+import { EdgePeerService } from '../edge/edge-peer.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
@@ -242,7 +249,13 @@ function toGovernedFields(row: AiSystemRow): AiSystemGovernedFields {
 export class AiSystemsService {
   private readonly logger = new Logger(AiSystemsService.name);
 
-  constructor(private readonly auditService: AuditService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    // forwardRef: edge-peer.service imports the kill-switch services (an import cycle).
+    @Optional()
+    @Inject(forwardRef(() => EdgePeerService))
+    private readonly edgePeers?: EdgePeerService,
+  ) {}
 
   /**
    * `POST /ai-systems`. Always lands in `DRAFT` — the caller cannot choose
@@ -578,6 +591,18 @@ export class AiSystemsService {
         data: { lifecycleState: toState },
       });
     });
+    // docs/edge.md: SUSPENDED/RETIRED cuts the edge peers of this system's agents; ACTIVE again
+    // restores those nothing else stops.
+    if (this.edgePeers) {
+      const links = await tenantClient.aiSystemAgentLink.findMany({
+        where: { aiSystemId: updated.id },
+        select: { agentId: true },
+      });
+      await this.edgePeers.agentsChanged(
+        input.tenantId,
+        links.map((l) => l.agentId),
+      );
+    }
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
       eventType: AUDIT_EVENT_TYPES.AI_SYSTEM_STATE_CHANGED,
@@ -672,6 +697,7 @@ export class AiSystemsService {
         linkedBy: input.actorUserId,
       },
     });
+    await this.edgePeers?.agentChanged(input.tenantId, input.agentId);
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
       eventType: AUDIT_EVENT_TYPES.AI_SYSTEM_AGENT_LINKED,
@@ -700,6 +726,7 @@ export class AiSystemsService {
     if (deleted.count === 0) {
       return { unlinked: false };
     }
+    await this.edgePeers?.agentChanged(input.tenantId, input.agentId);
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
       eventType: AUDIT_EVENT_TYPES.AI_SYSTEM_AGENT_UNLINKED,

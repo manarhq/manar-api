@@ -139,3 +139,76 @@ describe('AgentsService and cloud agents', () => {
     expect(audited).toHaveLength(0);
   });
 });
+
+describe('AgentsService.verifyEnrollmentToken (edge preflight gate)', () => {
+  it('verifies a usable token for the agent it names, without consuming or auditing it', async () => {
+    const { service, client, audited } = setup('PENDING_ENROLLMENT');
+    await expect(
+      service.verifyEnrollmentToken(client, 'tenant-1', RAW_TOKEN, 'a1'),
+    ).resolves.toEqual({ agentId: 'agent-1' });
+    expect(audited).toEqual([]);
+  });
+
+  it('audits a refused token exactly as enroll does (same event, reason and actor)', async () => {
+    for (const status of ['REVOKED', 'PENDING_ENROLLMENT']) {
+      const viaEdge = setup(status);
+      const viaEnroll = setup(status);
+      if (status === 'PENDING_ENROLLMENT')
+        for (const s of [viaEdge, viaEnroll])
+          (
+            s.client.agentEnrollmentToken as unknown as {
+              findUnique: () => Promise<null>;
+            }
+          ).findUnique = () => Promise.resolve(null);
+      await viaEdge.service.verifyEnrollmentToken(
+        viaEdge.client,
+        'tenant-1',
+        RAW_TOKEN,
+        'a1',
+      );
+      await viaEnroll.service
+        .enroll(viaEnroll.client, 'tenant-1', RAW_TOKEN, 'csr')
+        .catch(() => undefined);
+      expect(viaEdge.audited).toHaveLength(1);
+      expect(viaEdge.audited).toEqual(viaEnroll.audited);
+      expect(viaEdge.audited[0]!.eventType).toBe(
+        AUDIT_EVENT_TYPES.AGENT_ENROLLMENT_FAILED,
+      );
+    }
+  });
+
+  it('refuses a token naming another agent, a terminal agent, an unknown hash', async () => {
+    const pending = setup('PENDING_ENROLLMENT');
+    await expect(
+      pending.service.verifyEnrollmentToken(
+        pending.client,
+        'tenant-1',
+        RAW_TOKEN,
+        'other',
+      ),
+    ).resolves.toBeNull();
+    const revoked = setup('REVOKED');
+    await expect(
+      revoked.service.verifyEnrollmentToken(
+        revoked.client,
+        'tenant-1',
+        RAW_TOKEN,
+        'a1',
+      ),
+    ).resolves.toBeNull();
+    const unknown = setup('PENDING_ENROLLMENT');
+    (
+      unknown.client.agentEnrollmentToken as unknown as {
+        findUnique: () => Promise<null>;
+      }
+    ).findUnique = () => Promise.resolve(null);
+    await expect(
+      unknown.service.verifyEnrollmentToken(
+        unknown.client,
+        'tenant-1',
+        RAW_TOKEN,
+        'a1',
+      ),
+    ).resolves.toBeNull();
+  });
+});

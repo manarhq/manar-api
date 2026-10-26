@@ -18,6 +18,7 @@ import { AuditModule } from '../audit/audit.module';
 import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { AgentRateLimitModule } from '../rate-limit/agent-rate-limit.module';
 import { AgentRuntimeModule } from '../agent-runtime/agent-runtime.module';
+import { EdgeModule } from '../edge/edge.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
@@ -72,6 +73,8 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     TemporalModule,
     AgentApprovalsModule,
     AgentRuntimeModule,
+    // Refresh hooks only (quarantine runs here). Never `EdgeHttpModule`: no `/internal/*` here.
+    EdgeModule,
   ],
   controllers: [AgentWhoamiController],
   providers: [{ provide: APP_INTERCEPTOR, useClass: LoggingInterceptor }],

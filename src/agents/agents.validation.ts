@@ -30,5 +30,10 @@ export type RevokeAgentRequest = z.infer<typeof RevokeAgentRequestSchema>;
 export const EnrollAgentRequestSchema = z.object({
   token: z.string().min(1),
   csr: z.string().min(1),
+  /** docs/edge.md: the host's WireGuard public key; the private key never leaves the host. */
+  edge: z
+    .object({ wgPublicKey: z.string().max(64) })
+    .strict()
+    .optional(),
 });
 export type EnrollAgentRequest = z.infer<typeof EnrollAgentRequestSchema>;

@@ -4,6 +4,7 @@ import { AgentMtlsGuardModule } from '../agent-mtls/agent-mtls-guard.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
 import { TemporalModule } from '../temporal/temporal.module';
 import { ToolInvokeController } from './tool-invoke.controller';
+import { AuthorizeController } from '../authorization/authorize.controller';
 import { ToolInvocationService } from './tool-invocation.service';
 import { ToolsModule } from './tools.module';
 
@@ -25,7 +26,9 @@ import { ToolsModule } from './tools.module';
     ApprovalsModule,
     TemporalModule,
   ],
-  controllers: [ToolInvokeController],
+  // AuthorizeController lives here (not in AgentAuthorizeModule) because its
+  // APPROVAL_REQUIRED path opens the approval through ToolInvocationService.
+  controllers: [ToolInvokeController, AuthorizeController],
   providers: [ToolInvocationService],
   exports: [ToolInvocationService],
 })

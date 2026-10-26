@@ -209,6 +209,8 @@ model Agent {
   /// How the agent authenticates (docs/cloud-agents.md).
   kind         AgentKind          @default(WORKLOAD)
   cloudBinding CloudAgentBinding?
+  /// docs/edge.md: hostnames this agent may reach through the Manar edge proxy.
+  egressRules AgentEgressRule[]
 
   @@map("agents")
 }
@@ -2021,4 +2023,33 @@ model AiSystemStateTransition {
 
   @@index([aiSystemId, at])
   @@map("ai_system_state_transitions")
+}
+
+/// docs/edge.md: one hostname an agent may reach through the Manar edge egress proxy. Added and
+/// removed only by a person (tenant admin, JWT); projected into the platform's `EdgePeer.allowHosts`.
+model AgentEgressRule {
+  id      String @id @default(uuid())
+  agentId String
+  agent   Agent  @relation(fields: [agentId], references: [id])
+  /// A lowercase DNS name, or `*.` + a DNS name (one label or more). No IPs, ports or paths.
+  host    String
+  reason  String?
+
+  /// `UserProfile.id` of the person who added it.
+  createdBy String
+  createdAt DateTime @default(now())
+
+  @@unique([agentId, host])
+  @@map("agent_egress_rules")
+}
+
+/// docs/edge.md: gateway event batches (UUID per batch) already recorded in this tenant. Written in
+/// the same transaction as the batch's audit events, so a retried batch is recorded once and a crash
+/// loses nothing. Rows older than a day are deleted by the next batch.
+model EdgeEventBatch {
+  batchId   String   @id
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("edge_event_batches")
 }

@@ -232,6 +232,12 @@ config:
   # (Fastify trustProxy over X-Forwarded-For), or 'none' when exposed directly. Required (startup
   # fails) when MANAR_MCP_ENABLED is 'true'.
   MANAR_TRUSTED_PROXY_CIDRS: ''
+  # Manar edge (docs/edge.md): off by default. When 'true', also set MANAR_EDGE_ENDPOINT
+  # (<host>:51820), MANAR_EDGE_GATEWAY_PUBLIC_KEY, MANAR_AGENTS_HOST and the secret
+  # MANAR_EDGE_GATEWAY_TOKEN, and turn on networkPolicy.ingress.edge-gateway; the API refuses to
+  # start with the edge on and any of them missing.
+  MANAR_EDGE_ENABLED: 'false'
+  MANAR_EDGE_CIDR: 100.88.0.0/16
   # Anthropic Messages format for Claude Code (ADR-0002 A2). Off (404 anthropic_disabled) until
   # a key is set below and LLM_ANTHROPIC_MODELS lists the served model ids:
   # anthropic | azure_foundry | openai_translate | none.
@@ -274,6 +280,9 @@ secrets:
     # manar-web's own copy exactly.
     MANAR_BFF_SERVICE_TOKEN: ''
     PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ''
+    # Bearer token of the edge gateway's sync API (OpenBao kv/prod/manar-edge `gateway_token`);
+    # only read when MANAR_EDGE_ENABLED is 'true'. At least 32 characters.
+    MANAR_EDGE_GATEWAY_TOKEN: ''
     # Optional: empty counts as unset. The Anthropic key (OpenBao kv/prod/llm-anthropic,
     # property api_key) for LLM_ANTHROPIC_PROVIDER=anthropic, or the Foundry key for
     # azure_foundry (with LLM_AZURE_FOUNDRY_ENDPOINT in `config`). Without it the API starts
@@ -395,6 +404,22 @@ networkPolicy:
     # through the ingress or a TCP load balancer, so no source restriction.
     agent-mtls:
       ports: [{ port: agent-mtls, protocol: TCP }]
+    # Manar edge gateway (docs/edge.md): the WireGuard gateway relays agents to the mTLS listener
+    # and polls the sync API (/internal/v1/edge/*) on the HTTP port. Off by default; turn on with
+    # MANAR_EDGE_ENABLED. The API serves /internal/* on the HTTP port only, never on agent-mtls.
+    # Public ingress must never route /internal/* (manar-infra adds an explicit deny); the API also
+    # answers 404 to requests carrying proxy headers (X-Forwarded-*, Forwarded, Via, ...). The
+    # controls are the gateway token and this NetworkPolicy; the header check is defence in depth.
+    edge-gateway:
+      enabled: false
+      ports:
+        - { port: agent-mtls, protocol: TCP }
+        - { port: http, protocol: TCP }
+      from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: manar-gateway }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: manar-edge-gateway }
     # Prometheus scrape of the internal metrics listener, Prometheus pods only.
     metrics:
       ports: [{ port: metrics, protocol: TCP }]

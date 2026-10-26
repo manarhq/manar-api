@@ -7,7 +7,6 @@ import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { CatalogModule } from '../platform/catalog.module';
 import { AuthorizationModule } from './authorization.module';
 import { AuthorizationService } from './authorization.service';
-import { AuthorizeController } from './authorize.controller';
 
 /**
  * The agent-facing `POST /agent/v1/authorize` HTTP surface. Separate from
@@ -31,7 +30,6 @@ import { AuthorizeController } from './authorize.controller';
     CatalogModule,
   ],
   providers: [AuthorizationService],
-  controllers: [AuthorizeController],
   exports: [AuthorizationService],
 })
 export class AgentAuthorizeModule {}

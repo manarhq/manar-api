@@ -41,6 +41,8 @@ import { IncidentsModule } from './incidents/incidents.module';
 import { AiSystemsModule } from './ai-systems/ai-systems.module';
 import { AssistantModule } from './assistant/assistant.module';
 import { CloudMcpModule } from './cloud-mcp/cloud-mcp.module';
+import { EdgeModule } from './edge/edge.module';
+import { EdgeHttpModule } from './edge/edge-http.module';
 
 @Module({
   imports: [
@@ -91,6 +93,9 @@ import { CloudMcpModule } from './cloud-mcp/cloud-mcp.module';
     AssistantModule,
     // Public OAuth MCP endpoint for cloud agents (docs/cloud-agents.md); off by default.
     CloudMcpModule,
+    // docs/edge.md: edge peer registry, gateway sync API, egress allow-list.
+    EdgeModule,
+    EdgeHttpModule,
   ],
   controllers: [AppController],
   providers: [
