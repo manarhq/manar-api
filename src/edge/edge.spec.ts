@@ -511,8 +511,17 @@ describe('EdgePeerService reads and timers', () => {
 describe('GET /agents/:id/edge', () => {
   // Two tenants, each with its own database; t1's agent a1 has a cut peer, t2's agent a2 an
   // active one. Rows are keyed by tenant and agent like the unique index.
-  const agents: Record<string, string[]> = { t1: ['a1', 'a3'], t2: ['a2'] };
+  const agents: Record<string, string[]> = {
+    t1: ['a1', 'a3', 'same'],
+    t2: ['a2', 'same'],
+  };
   const rows: Record<string, object> = {
+    't1/same': {
+      state: 'active',
+      cutReason: null,
+      address: '100.88.0.4/32',
+      updatedAt: new Date('2026-10-26T12:00:00Z'),
+    },
     't1/a1': {
       state: 'cut',
       cutReason: 'agent_quarantined',
@@ -596,6 +605,16 @@ describe('GET /agents/:id/edge', () => {
       NotFoundException,
     );
     expect(peerQueries).toEqual([]);
+  });
+
+  it("an agent id that exists in two tenants never returns the other tenant's peer", async () => {
+    expect(await controller.edge(auth('t2'), 'same')).toEqual({
+      enrolled: false,
+    });
+    expect(await controller.edge(auth('t1'), 'same')).toMatchObject({
+      enrolled: true,
+      address: '100.88.0.4/32',
+    });
   });
 
   it('reads the peer by the caller tenant and agent only', async () => {

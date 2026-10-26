@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiBody,
   ApiOperation,
   ApiParam,
   ApiProperty,
@@ -56,6 +57,28 @@ const AddRuleSchema = z.object({
     }),
   reason: z.string().min(1).max(500).optional(),
 });
+
+class AddEgressRuleDto {
+  @ApiProperty({ maxLength: 253, example: 'api.example.com' })
+  host!: string;
+  @ApiPropertyOptional({ maxLength: 500 })
+  reason?: string;
+}
+
+class EgressRuleDto {
+  @ApiProperty({ format: 'uuid' }) id!: string;
+  @ApiProperty({ format: 'uuid' }) agentId!: string;
+  @ApiProperty({ description: 'Lowercase DNS name or *. + a DNS name' })
+  host!: string;
+  @ApiProperty({ type: String, nullable: true }) reason!: string | null;
+  @ApiProperty({ description: 'UserProfile id of the person who added it' })
+  createdBy!: string;
+  @ApiProperty({ format: 'date-time' }) createdAt!: string;
+}
+
+class EgressRuleListDto {
+  @ApiProperty({ type: [EgressRuleDto] }) items!: EgressRuleDto[];
+}
 
 class AgentEdgeStatusDto {
   @ApiProperty({ description: 'The agent has a peer on the Manar edge' })
@@ -126,7 +149,7 @@ export class EgressRulesController {
   @Get('egress-rules')
   @ApiOperation({ summary: "List an agent's egress allow-list" })
   @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
-  @ApiResponse({ status: 200 })
+  @ApiResponse({ status: 200, type: EgressRuleListDto })
   @ApiResponse({ status: 401, type: ErrorResponseDto })
   @ApiResponse({ status: 403, type: ErrorResponseDto })
   @ApiResponse({ status: 404, type: ErrorResponseDto })
@@ -146,12 +169,14 @@ export class EgressRulesController {
       'host: a DNS name or `*.` + a DNS name (one label or more), lowercased; no IPs, ports or paths. 409 if already allowed.',
   })
   @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
-  @ApiResponse({ status: 201 })
+  @ApiBody({ type: AddEgressRuleDto })
+  @ApiResponse({ status: 201, type: EgressRuleDto })
   @ApiResponse({ status: 400, type: ErrorResponseDto })
   @ApiResponse({ status: 401, type: ErrorResponseDto })
   @ApiResponse({ status: 403, type: ErrorResponseDto })
   @ApiResponse({ status: 404, type: ErrorResponseDto })
   @ApiResponse({ status: 409, type: ErrorResponseDto })
+  @ApiResponse({ status: 422, type: ErrorResponseDto })
   async add(
     @CurrentAuth() auth: AuthContext,
     @Param('id') agentId: string,
