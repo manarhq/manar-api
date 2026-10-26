@@ -55,6 +55,43 @@ export class LlmBudgetStore implements OnModuleDestroy {
     return total;
   }
 
+  private thinkingKey(tenantId: string, taskId: string): string {
+    return `manar:${tenantId}:llm-thinking:${taskId}`;
+  }
+
+  /**
+   * Remembers HMACs of the thinking signatures and redacted-thinking data the proxy returned for
+   * a task (Anthropic format), kept as long as the budget counter.
+   */
+  async rememberThinking(
+    tenantId: string,
+    taskId: string,
+    hmacs: string[],
+    taskExpiresAt: Date,
+  ): Promise<void> {
+    if (hmacs.length === 0) return;
+    const client = await this.getClient();
+    const key = this.thinkingKey(tenantId, taskId);
+    await client.sAdd(key, hmacs);
+    await client.pExpireAt(
+      key,
+      taskExpiresAt.getTime() + RETENTION_AFTER_EXPIRY_MS,
+    );
+  }
+
+  /** Whether every HMAC in `hmacs` was remembered for this task. */
+  async knowsThinking(
+    tenantId: string,
+    taskId: string,
+    hmacs: string[],
+  ): Promise<boolean> {
+    if (hmacs.length === 0) return true;
+    const found = await (
+      await this.getClient()
+    ).smIsMember(this.thinkingKey(tenantId, taskId), hmacs);
+    return found.every(Boolean);
+  }
+
   private async getClient(): Promise<RedisClientType> {
     if (this.client?.isOpen) return this.client;
     // Fail fast rather than queue: a down Redis must deny now, not hang.

@@ -52,6 +52,13 @@ const CREDENTIAL_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
   ],
 ];
 
+/** Credential pattern names found in `text` (the floor's blocking half, without PII redaction). */
+export function credentialTypes(text: string): string[] {
+  return CREDENTIAL_PATTERNS.filter(([, pattern]) => text.match(pattern)).map(
+    ([name]) => name,
+  );
+}
+
 /** Luhn check on the digits of `match` (separators ignored). */
 function luhnValid(match: string): boolean {
   const digits = match.replace(/\D/g, '');
@@ -324,7 +331,8 @@ export async function classifyDlp<T>(
   return result;
 }
 
-function stringLeaves(value: unknown): string[] {
+/** Every string in `value` (object keys excluded), in document order. */
+export function stringLeaves(value: unknown): string[] {
   const parts: string[] = [];
   const walk = (node: unknown): void => {
     if (typeof node === 'string') parts.push(node);
