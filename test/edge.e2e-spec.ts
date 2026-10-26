@@ -1122,6 +1122,44 @@ describe('Manar edge (e2e)', () => {
       ).toMatchObject({ allowHosts: [] });
     });
 
+    it('GET /agents/:id/edge: the peer state for a tenant admin, nothing for anyone else', async () => {
+      const edgePath = `/agents/${agent.agentId}/edge`;
+      const res = await http()
+        .get(edgePath)
+        .set('Authorization', `Bearer ${admin1}`)
+        .expect(200);
+      const peer = await row(agent.edge.peerId);
+      expect(res.body).toEqual({
+        enrolled: true,
+        state: peer.state,
+        ...(peer.state === 'cut' && {
+          cutReasons: peer.cutReason ? [peer.cutReason] : [],
+        }),
+        address: peer.address,
+        updatedAt: peer.updatedAt.toISOString(),
+      });
+      await http().get(edgePath).expect(401);
+      await http()
+        .get(edgePath)
+        .set('Authorization', `Bearer ${readOnly1}`)
+        .expect(403);
+      await http()
+        .get(edgePath)
+        .set('Authorization', `Bearer ${admin2}`)
+        .expect(404);
+      expect((await mtls(agent.cert, 'GET', edgePath)).status).toBe(404);
+
+      const plain = await newAgent(admin1);
+      expect(
+        (
+          await http()
+            .get(`/agents/${plain.id}/edge`)
+            .set('Authorization', `Bearer ${admin1}`)
+            .expect(200)
+        ).body,
+      ).toEqual({ enrolled: false });
+    });
+
     it('validates hosts', async () => {
       for (const host of [
         '10.1.2.3',

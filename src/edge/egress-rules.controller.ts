@@ -15,6 +15,8 @@ import {
   ApiBearerAuth,
   ApiOperation,
   ApiParam,
+  ApiProperty,
+  ApiPropertyOptional,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -55,15 +57,32 @@ const AddRuleSchema = z.object({
   reason: z.string().min(1).max(500).optional(),
 });
 
+class AgentEdgeStatusDto {
+  @ApiProperty({ description: 'The agent has a peer on the Manar edge' })
+  enrolled!: boolean;
+  @ApiPropertyOptional({ enum: ['active', 'cut'] })
+  state?: 'active' | 'cut';
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Why the peer is cut (stop conditions, docs/edge.md); present when cut',
+  })
+  cutReasons?: string[];
+  @ApiPropertyOptional({ description: 'Overlay address, a.b.c.d/32' })
+  address?: string;
+  @ApiPropertyOptional({ format: 'date-time' })
+  updatedAt?: string;
+}
+
 /**
- * Per-agent egress allow-list (docs/edge.md section 4). Human tenant admins only (JWT + role, the
+ * Per-agent egress allow-list and edge status (docs/edge.md section 4). Human tenant admins only (JWT + role, the
  * same gate as the rest of `/agents`); this controller exists only on the HTTP app, so an agent
  * certificate cannot reach it, and no AI tool writes it. Each change commits with its audit event
  * (no event, no change), then updates the agent's edge peer and bumps the version.
  */
 @ApiTags('agents')
 @ApiBearerAuth('jwt')
-@Controller('agents/:id/egress-rules')
+@Controller('agents/:id')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @RequireRole('SECURITY_ADMIN', 'TENANT_OWNER')
 export class EgressRulesController {
@@ -86,7 +105,25 @@ export class EgressRulesController {
     return db;
   }
 
-  @Get()
+  @Get('edge')
+  @ApiOperation({
+    summary:
+      "The agent's edge status: not enrolled, or its peer's state and overlay address",
+  })
+  @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
+  @ApiResponse({ status: 200, type: AgentEdgeStatusDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async edge(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') agentId: string,
+  ): Promise<AgentEdgeStatusDto> {
+    await this.agentDb(auth, agentId);
+    return this.peers.status(auth.tenant.id, agentId);
+  }
+
+  @Get('egress-rules')
   @ApiOperation({ summary: "List an agent's egress allow-list" })
   @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
   @ApiResponse({ status: 200 })
@@ -102,7 +139,7 @@ export class EgressRulesController {
     return { items };
   }
 
-  @Post()
+  @Post('egress-rules')
   @ApiOperation({
     summary: 'Allow the agent to reach a host through the edge proxy',
     description:
@@ -159,7 +196,7 @@ export class EgressRulesController {
     return rule;
   }
 
-  @Delete(':ruleId')
+  @Delete('egress-rules/:ruleId')
   @HttpCode(204)
   @ApiOperation({ summary: 'Remove a host from the agent egress allow-list' })
   @ApiParam({ name: 'id', description: 'Agent ID', format: 'uuid' })
