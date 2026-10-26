@@ -5,11 +5,14 @@ import {
   Get,
   HttpCode,
   Logger,
+  Optional,
   Param,
   ParseUUIDPipe,
   Post,
   Req,
   UseGuards,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -32,6 +35,7 @@ import {
   type RequestWithPlatformCaller,
 } from './platform-auth.guard';
 import { PlatformOpsService } from './platform-ops.service';
+import { EdgePeerService } from '../edge/edge-peer.service';
 
 const staff = z.string().trim().min(1).max(200);
 export const EngageSchema = z.object({
@@ -134,6 +138,10 @@ export class PlatformOpsController {
     private readonly ops: PlatformOpsService,
     private readonly killSwitch: PlatformKillSwitchService,
     private readonly control: ControlPrismaService,
+    // forwardRef: edge-peer.service imports the kill-switch services (an import cycle).
+    @Optional()
+    @Inject(forwardRef(() => EdgePeerService))
+    private readonly edgePeers?: EdgePeerService,
   ) {}
 
   @Get('kill-switch')
@@ -204,6 +212,8 @@ export class PlatformOpsController {
         message: 'engagement_changed',
       });
     }
+    // docs/edge.md: restores the edge peers nothing else stops.
+    await this.edgePeers?.allChanged();
     this.logger.warn(
       `platform kill switch RELEASED by ${caller(req)} (staff ${b.staff}, proposed by ${b.proposedBy ?? 'unknown'})`,
     );
