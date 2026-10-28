@@ -17,6 +17,13 @@ import {
 /** The machine is known and was rejected or revoked: no new certificate. */
 export class HostRefusedError extends Error {}
 
+/**
+ * A known machine showed a different key, or a key of another group. The
+ * request is recorded for an admin; nothing about the machine changes and no
+ * certificate is issued until the rekey is approved.
+ */
+export class HostRekeyPendingError extends Error {}
+
 export interface RegisterHostInput {
   installKey: string;
   csr: string;
@@ -40,11 +47,12 @@ export interface RegisterHostResult {
  * 1. the key's prefix names the tenant (a host never picks its own);
  * 2. the CSR is checked before anything is spent or created;
  * 3. one key use is taken;
- * 4. the Host is created, or merged by `machineId` across the whole tenant
- *    (VDI), and audited in the same transaction. Status comes from the
- *    approval rules for a new machine, and again whenever a known machine
- *    shows a different key (its old certificates are revoked) or a key from
- *    another group (it moves): only the same key keeps an approval;
+ * 4. the Host is created (status from the approval rules), or, for a
+ *    machine already known in the tenant with the same key and group,
+ *    merged (VDI) keeping its status; audited in the same transaction. A
+ *    different key, or a key from another group, changes nothing: it is
+ *    recorded as a pending rekey for an admin (no certificate meanwhile), so
+ *    an install key alone can neither take over nor disturb a machine;
  * 5. a host certificate is issued for `host://<tenantSlug>/<machineId>`.
  * A rejected or revoked machine stays so in every group and gets nothing.
  */
@@ -77,98 +85,118 @@ export class HostsService {
     const client = await this.tenants.getClient(tenant.id);
     const key = await this.keys.consume(client, input.installKey, input.ip);
 
-    const { host, publish } = await client.$transaction(async (tx) => {
-      const existing = await tx.host.findUnique({
-        where: { machineId: input.machineId },
-      });
-      if (
-        existing &&
-        (existing.status === 'REVOKED' || existing.status === 'REJECTED')
-      ) {
-        throw new HostRefusedError(`host ${existing.id} is ${existing.status}`);
-      }
-      const keyChanged =
-        existing !== null && existing.keyFingerprint !== keyFingerprint;
-      const moved =
-        existing !== null && existing.hostGroupId !== key.hostGroupId;
-      const decideAgain = existing === null || keyChanged || moved;
-      const rule = !decideAgain
-        ? null
-        : matchApprovalRule(
-            await tx.hostApprovalRule.findMany({
-              where: {
-                enabled: true,
-                OR: [{ hostGroupId: null }, { hostGroupId: key.hostGroupId }],
-              },
-              orderBy: { createdAt: 'asc' },
-            }),
-            {
-              hostGroupId: key.hostGroupId,
-              hostname: input.hostname,
-              ip: input.ip,
-              keyType: input.keyType,
-            },
-          );
-      const decided = rule
-        ? {
-            status: 'APPROVED' as const,
-            approvedBy: `rule:${rule.id}`,
-            approvedAt: new Date(),
-          }
-        : { status: 'PENDING' as const, approvedBy: null, approvedAt: null };
-      if (keyChanged) {
-        // One machine, one key: the previous key's certificates stop now.
-        await tx.hostCertificate.updateMany({
-          where: { hostId: existing.id, revokedAt: null },
-          data: { revokedAt: new Date() },
+    const { host, publish, rekeyPending } = await client.$transaction(
+      async (tx) => {
+        const existing = await tx.host.findUnique({
+          where: { machineId: input.machineId },
         });
-      }
-      const saved = existing
-        ? await tx.host.update({
+        if (
+          existing &&
+          (existing.status === 'REVOKED' || existing.status === 'REJECTED')
+        ) {
+          throw new HostRefusedError(
+            `host ${existing.id} is ${existing.status}`,
+          );
+        }
+        if (
+          existing &&
+          (existing.keyFingerprint !== keyFingerprint ||
+            existing.hostGroupId !== key.hostGroupId)
+        ) {
+          await tx.host.update({
             where: { id: existing.id },
             data: {
-              hostGroupId: key.hostGroupId,
-              hostname: input.hostname,
-              os: input.os,
-              keyType: input.keyType,
-              keyFingerprint,
-              registeredFromIp: input.ip,
-              lastSeenAt: new Date(),
-              ...(decideAgain ? decided : {}),
-            },
-          })
-        : await tx.host.create({
-            data: {
-              hostGroupId: key.hostGroupId,
-              machineId: input.machineId,
-              hostname: input.hostname,
-              os: input.os,
-              keyType: input.keyType,
-              keyFingerprint,
-              registeredFromIp: input.ip,
-              lastSeenAt: new Date(),
-              ...decided,
+              pendingKeyFingerprint: keyFingerprint,
+              pendingHostGroupId: key.hostGroupId,
             },
           });
-      const done = await this.audit.recordInTransaction(tx, tenant.id, {
-        eventType: AUDIT_EVENT_TYPES.HOST_REGISTERED,
-        actor: { type: 'system', id: 'system:host-registration' },
-        data: {
-          hostId: saved.id,
-          hostGroupId: saved.hostGroupId,
-          installKeyId: key.id,
-          merged: existing !== null,
-          keyChanged,
-          movedFromGroupId: moved ? existing.hostGroupId : null,
-          status: saved.status,
-          approvalRuleId: rule?.id ?? null,
-          keyType: saved.keyType,
-          ip: input.ip,
-        },
-      });
-      return { host: saved, publish: done };
-    });
+          const requested = await this.audit.recordInTransaction(
+            tx,
+            tenant.id,
+            {
+              eventType: AUDIT_EVENT_TYPES.HOST_REKEY_REQUESTED,
+              actor: { type: 'system', id: 'system:host-registration' },
+              data: {
+                hostId: existing.id,
+                installKeyId: key.id,
+                keyChanged: existing.keyFingerprint !== keyFingerprint,
+                toHostGroupId: key.hostGroupId,
+                ip: input.ip,
+              },
+            },
+          );
+          return { host: existing, publish: requested, rekeyPending: true };
+        }
+        const rule = existing
+          ? null
+          : matchApprovalRule(
+              await tx.hostApprovalRule.findMany({
+                where: {
+                  enabled: true,
+                  OR: [{ hostGroupId: null }, { hostGroupId: key.hostGroupId }],
+                },
+                orderBy: { createdAt: 'asc' },
+              }),
+              {
+                hostGroupId: key.hostGroupId,
+                hostname: input.hostname,
+                ip: input.ip,
+                keyType: input.keyType,
+              },
+            );
+        const saved = existing
+          ? await tx.host.update({
+              where: { id: existing.id },
+              data: {
+                hostname: input.hostname,
+                os: input.os,
+                keyType: input.keyType,
+                registeredFromIp: input.ip,
+                lastSeenAt: new Date(),
+              },
+            })
+          : await tx.host.create({
+              data: {
+                hostGroupId: key.hostGroupId,
+                machineId: input.machineId,
+                hostname: input.hostname,
+                os: input.os,
+                keyType: input.keyType,
+                keyFingerprint,
+                registeredFromIp: input.ip,
+                lastSeenAt: new Date(),
+                ...(rule
+                  ? {
+                      status: 'APPROVED' as const,
+                      approvedBy: `rule:${rule.id}`,
+                      approvedAt: new Date(),
+                    }
+                  : {}),
+              },
+            });
+        const done = await this.audit.recordInTransaction(tx, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.HOST_REGISTERED,
+          actor: { type: 'system', id: 'system:host-registration' },
+          data: {
+            hostId: saved.id,
+            hostGroupId: saved.hostGroupId,
+            installKeyId: key.id,
+            merged: existing !== null,
+            status: saved.status,
+            approvalRuleId: rule?.id ?? null,
+            keyType: saved.keyType,
+            ip: input.ip,
+          },
+        });
+        return { host: saved, publish: done, rekeyPending: false };
+      },
+    );
     publish();
+    if (rekeyPending) {
+      throw new HostRekeyPendingError(
+        `host ${host.id}: a different key or group waits for an admin`,
+      );
+    }
 
     const issued = await this.ca.issueHostCertificate(
       client,

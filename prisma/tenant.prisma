@@ -2206,8 +2206,12 @@ model Host {
   approvedAt       DateTime?
   lastSeenAt       DateTime?
   registeredFromIp String
-  /// SHA-256 of the SubjectPublicKeyInfo the machine last registered with.
+  /// SHA-256 of the SubjectPublicKeyInfo the machine is bound to.
   keyFingerprint   String
+  /// A registration with a different key, or a key of another group, waits
+  /// here for an admin; nothing about the bound machine changes meanwhile.
+  pendingKeyFingerprint String?
+  pendingHostGroupId    String?
   certificates     HostCertificate[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
@@ -2226,6 +2230,8 @@ model HostCertificate {
   notBefore    DateTime
   notAfter     DateTime
   revokedAt    DateTime?
+  /// When OpenBao confirmed the revocation; null with `revokedAt` set = retry.
+  caRevokedAt  DateTime?
   createdAt    DateTime  @default(now())
 
   @@index([hostId])

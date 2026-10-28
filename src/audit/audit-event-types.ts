@@ -127,6 +127,8 @@ export const AUDIT_EVENT_TYPES = {
   HOST_APPROVED: 'host.approved',
   HOST_REJECTED: 'host.rejected',
   HOST_REVOKED: 'host.revoked',
+  /** A known machine registered with a different key or another group's key; waits for an admin. */
+  HOST_REKEY_REQUESTED: 'host.rekey_requested',
   /** An install key was created (its id, group and limits; never the key). */
   INSTALL_KEY_CREATED: 'install_key.created',
   INSTALL_KEY_REVOKED: 'install_key.revoked',

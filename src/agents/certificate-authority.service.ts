@@ -157,16 +157,22 @@ export class CertificateAuthorityService {
     tenantClient: TenantPrismaClient,
     hostId: string,
   ): Promise<void> {
-    const certs = await tenantClient.hostCertificate.findMany({
-      where: { hostId, revokedAt: null },
-    });
     await tenantClient.hostCertificate.updateMany({
       where: { hostId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
-    for (const cert of certs) {
+    // Every serial revoked here but not yet confirmed by OpenBao (also those
+    // a previous call failed on).
+    const owed = await tenantClient.hostCertificate.findMany({
+      where: { hostId, revokedAt: { not: null }, caRevokedAt: null },
+    });
+    for (const cert of owed) {
       try {
-        await this.openBao.revoke(cert.serialNumber);
+        await this.openBao.revoke(toColonSeparatedHex(cert.serialNumber));
+        await tenantClient.hostCertificate.update({
+          where: { id: cert.id },
+          data: { caRevokedAt: new Date() },
+        });
       } catch (error) {
         this.logger.error(
           `OpenBao revoke of host certificate ${cert.serialNumber} failed: ${error instanceof Error ? error.message : String(error)}`,

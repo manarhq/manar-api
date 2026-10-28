@@ -69,6 +69,8 @@ CREATE TABLE "hosts" (
     "lastSeenAt" TIMESTAMP(3),
     "registeredFromIp" TEXT NOT NULL,
     "keyFingerprint" TEXT NOT NULL,
+    "pendingKeyFingerprint" TEXT,
+    "pendingHostGroupId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -83,6 +85,7 @@ CREATE TABLE "host_certificates" (
     "notBefore" TIMESTAMP(3) NOT NULL,
     "notAfter" TIMESTAMP(3) NOT NULL,
     "revokedAt" TIMESTAMP(3),
+    "caRevokedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "host_certificates_pkey" PRIMARY KEY ("id")

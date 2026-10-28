@@ -175,3 +175,48 @@ describe('CertificateAuthorityService CSR names', () => {
     }
   });
 });
+
+describe('CertificateAuthorityService.revokeHostCertificates', () => {
+  it("asks OpenBao in its colon-hex serial format and records the CA's confirmation", async () => {
+    const revoke = vi.fn(() => Promise.resolve());
+    const rows = [
+      {
+        id: 'c1',
+        serialNumber: '0a1b2c',
+        revokedAt: null as Date | null,
+        caRevokedAt: null as Date | null,
+      },
+    ];
+    const client = {
+      hostCertificate: {
+        updateMany: vi.fn(({ data }: { data: { revokedAt: Date } }) => {
+          for (const r of rows) if (!r.revokedAt) r.revokedAt = data.revokedAt;
+          return Promise.resolve();
+        }),
+        findMany: vi.fn(() =>
+          Promise.resolve(rows.filter((r) => r.revokedAt && !r.caRevokedAt)),
+        ),
+        update: vi.fn(
+          ({
+            where,
+            data,
+          }: {
+            where: { id: string };
+            data: { caRevokedAt: Date };
+          }) => {
+            rows.find((r) => r.id === where.id)!.caRevokedAt = data.caRevokedAt;
+            return Promise.resolve();
+          },
+        ),
+      },
+    } as unknown as TenantPrismaClient;
+    const ca = new CertificateAuthorityService({
+      revoke,
+    } as unknown as OpenBaoPkiClient);
+
+    await ca.revokeHostCertificates(client, 'h1');
+
+    expect(revoke).toHaveBeenCalledWith('0A:1B:2C');
+    expect(rows[0]!.caRevokedAt).not.toBeNull();
+  });
+});

@@ -15,7 +15,12 @@ import {
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { OpenBaoPkiClient } from '../src/openbao/openbao-pki.client';
 import { CertificateAuthorityService } from '../src/agents/certificate-authority.service';
-import { HostRefusedError, HostsService } from '../src/hosts/hosts.service';
+import {
+  HostRefusedError,
+  HostRekeyPendingError,
+  HostsService,
+} from '../src/hosts/hosts.service';
+import { HostsAdminService } from '../src/hosts/hosts-admin.service';
 import { generateAgentCsr } from '@manar/sdk-node';
 import { fakeConfigService } from './support/audit-test-config';
 
@@ -27,6 +32,7 @@ describe('Hosts (e2e)', () => {
   let audit: AuditService;
   let keys: InstallKeysService;
   let hosts: HostsService;
+  let admins: HostsAdminService;
   const provisioned: { tenantId: string; databaseName: string }[] = [];
   const admin = { type: 'human' as const, id: 'user-admin' };
 
@@ -45,15 +51,11 @@ describe('Hosts (e2e)', () => {
       new CheckpointSigner(new OpenBaoKvClient(fakeConfigService())),
     );
     keys = new InstallKeysService(audit);
-    hosts = new HostsService(
-      control,
-      manager,
-      keys,
-      audit,
-      new CertificateAuthorityService(
-        new OpenBaoPkiClient(fakeConfigService()),
-      ),
+    const ca = new CertificateAuthorityService(
+      new OpenBaoPkiClient(fakeConfigService()),
     );
+    hosts = new HostsService(control, manager, keys, audit, ca);
+    admins = new HostsAdminService(audit, ca);
   }, 60_000);
 
   afterAll(async () => {
@@ -267,7 +269,7 @@ describe('Hosts (e2e)', () => {
       ).toBe('VDI-POOL-17');
     }, 60_000);
 
-    it('a different key for a known machine revokes its certificates and re-runs approval', async () => {
+    it('a different key for a known machine changes nothing until an admin approves the rekey', async () => {
       const t = await tenant('rekey');
       const { raw } = await keys.create(t.client, t, admin, {
         hostGroupId: t.group.id,
@@ -280,17 +282,73 @@ describe('Hosts (e2e)', () => {
       });
 
       // register() makes a fresh key pair each call: a different key.
-      const second = await register(t, raw, 'laptop-7');
+      const { csrPem: newCsr } = await generateAgentCsr(
+        `host://${t.slug}/laptop-7`,
+      );
+      const attempt = () =>
+        hosts.register({
+          installKey: raw,
+          csr: newCsr,
+          machineId: 'laptop-7',
+          hostname: 'DEV-LAPTOP-001',
+          os: 'Windows 11 24H2',
+          keyType: 'TPM',
+          ip: '10.0.0.7',
+        });
+      await expect(attempt()).rejects.toBeInstanceOf(HostRekeyPendingError);
 
-      expect(second.hostId).toBe(first.hostId);
-      expect(second.status).toBe('PENDING');
-      const certs = await t.client.hostCertificate.findMany({
-        where: { hostId: first.hostId },
-        orderBy: { createdAt: 'asc' },
+      // Nothing changed for the machine already in place.
+      const host = await t.client.host.findUniqueOrThrow({
+        where: { id: first.hostId },
       });
-      expect(certs).toHaveLength(2);
-      expect(certs[0]!.revokedAt).not.toBeNull();
-      expect(certs[1]!.revokedAt).toBeNull();
+      expect(host.status).toBe('APPROVED');
+      expect(host.pendingKeyFingerprint).not.toBeNull();
+      expect(
+        await t.client.hostCertificate.count({
+          where: { hostId: first.hostId, revokedAt: null },
+        }),
+      ).toBe(1);
+
+      // An admin approves the rekey: old certificates go, the new key may register.
+      await admins.decide(t.client, t.id, admin, first.hostId, 'approve');
+      expect(
+        await t.client.hostCertificate.count({
+          where: { hostId: first.hostId, revokedAt: null },
+        }),
+      ).toBe(0);
+      const again = await attempt();
+      expect(again).toMatchObject({ hostId: first.hostId, status: 'APPROVED' });
+    }, 60_000);
+
+    it('a key from another group cannot move a known machine by itself', async () => {
+      const t = await tenant('move');
+      const other = await t.client.hostGroup.create({ data: { name: 'Ops' } });
+      const devKey = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+      const opsKey = await keys.create(t.client, t, admin, {
+        hostGroupId: other.id,
+        label: 'ops',
+      });
+      const first = await register(t, devKey.raw, 'box-9');
+
+      await expect(
+        hosts.register({
+          installKey: opsKey.raw,
+          csr: first.csr,
+          machineId: 'box-9',
+          hostname: 'BOX-9',
+          os: 'Linux',
+          keyType: 'TPM',
+          ip: '10.0.0.7',
+        }),
+      ).rejects.toBeInstanceOf(HostRekeyPendingError);
+      const host = await t.client.host.findUniqueOrThrow({
+        where: { id: first.hostId },
+      });
+      expect(host.hostGroupId).toBe(t.group.id);
+      expect(host.pendingHostGroupId).toBe(other.id);
     }, 60_000);
 
     it('a revoked machine stays revoked in every group of the tenant', async () => {

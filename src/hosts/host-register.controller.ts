@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   ForbiddenException,
   Post,
@@ -12,7 +13,11 @@ import type { FastifyRequest } from 'fastify';
 import { CsrValidationError } from '../agents/certificate-authority.errors';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
-import { HostRefusedError, HostsService } from './hosts.service';
+import {
+  HostRefusedError,
+  HostRekeyPendingError,
+  HostsService,
+} from './hosts.service';
 import { InstallKeyInvalidError } from './install-keys.service';
 import { RegisterHostRequestSchema } from './hosts.validation';
 
@@ -46,6 +51,13 @@ export class HostRegisterController {
     } catch (error) {
       if (error instanceof InstallKeyInvalidError) {
         throw new UnauthorizedException('Invalid install key');
+      }
+      if (error instanceof HostRekeyPendingError) {
+        throw new ConflictException({
+          code: 'host_rekey_pending',
+          message:
+            'This machine is known with another key or group; an admin must approve the change',
+        });
       }
       if (error instanceof HostRefusedError) {
         throw new ForbiddenException('This machine is not allowed to register');
