@@ -80,6 +80,8 @@ const DEMO_AGENTS = [
 
 /** The exact `WS-042`/`INC-2026-0042` demo host/incident seeded by `packages/demo-soc-tools` (Phase 7a) — never renamed casually, see that package's own seed-data.ts doc comment. */
 const DEMO_HOST_ID = 'WS-042';
+/** Second host the rehearsed script isolates: policies may auto-ALLOW isolating WS-042 for the local demo tenant, so WS-017 still needs approval. */
+const DEMO_ISOLATE_HOST_ID = 'WS-017';
 
 interface ToolActionDef {
   name: string;
@@ -906,10 +908,23 @@ export class DemoSeedCommand extends CommandRunner {
   ): Promise<{ id: string }> {
     const tenantClient = await this.tenantDatabaseManager.getClient(tenantId);
     const existing = await tenantClient.task.findFirst({
-      where: { name: DEMO_TASK_NAME },
+      where: { name: DEMO_TASK_NAME, status: 'ACTIVE' },
     });
-    if (existing) {
+    // Older seeds only scoped edr to WS-042; tasks are immutable, so replace it.
+    if (
+      existing &&
+      JSON.stringify(existing.allowedResourceSelectors).includes(
+        DEMO_ISOLATE_HOST_ID,
+      )
+    ) {
       return existing;
+    }
+    if (existing) {
+      await this.httpJson(apiEndpoint, `/tasks/${existing.id}/revoke`, {
+        method: 'POST',
+        token: ownerToken,
+        body: { reason: `Re-seeding to add ${DEMO_ISOLATE_HOST_ID} to scope` },
+      });
     }
 
     const created = await this.httpJson<{ id: string }>(apiEndpoint, '/tasks', {
@@ -931,6 +946,7 @@ export class DemoSeedCommand extends CommandRunner {
         allowedResourceSelectors: [
           { toolId: 'siem', pattern: '*' },
           { toolId: 'edr', pattern: DEMO_HOST_ID },
+          { toolId: 'edr', pattern: DEMO_ISOLATE_HOST_ID },
         ],
         forbiddenActions: [],
         expiresAt: new Date(
