@@ -11,6 +11,7 @@ import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
 import { OpenBaoModule } from './openbao/openbao.module';
 import { AgentsHttpModule } from './agents/agents-http.module';
+import { HostsHttpModule } from './hosts/hosts-http.module';
 import { AuthorizationModule } from './authorization/authorization.module';
 import { TasksModule } from './tasks/tasks.module';
 import { TasksHttpModule } from './tasks/tasks-http.module';
@@ -54,6 +55,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     OpenBaoModule,
     AuditModule,
     AgentsHttpModule,
+    HostsHttpModule,
     AuthorizationModule,
     TasksModule,
     TasksHttpModule,

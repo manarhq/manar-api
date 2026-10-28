@@ -13,6 +13,10 @@ import {
   InstallKeysService,
 } from '../src/hosts/install-keys.service';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
+import { OpenBaoPkiClient } from '../src/openbao/openbao-pki.client';
+import { CertificateAuthorityService } from '../src/agents/certificate-authority.service';
+import { HostRefusedError, HostsService } from '../src/hosts/hosts.service';
+import { generateAgentCsr } from '@manar/sdk-node';
 import { fakeConfigService } from './support/audit-test-config';
 
 /** Hosts (docs/hosts.md) against a real tenant database. */
@@ -22,6 +26,7 @@ describe('Hosts (e2e)', () => {
   let kafka: KafkaPublisherService;
   let audit: AuditService;
   let keys: InstallKeysService;
+  let hosts: HostsService;
   const provisioned: { tenantId: string; databaseName: string }[] = [];
   const admin = { type: 'human' as const, id: 'user-admin' };
 
@@ -40,6 +45,15 @@ describe('Hosts (e2e)', () => {
       new CheckpointSigner(new OpenBaoKvClient(fakeConfigService())),
     );
     keys = new InstallKeysService(audit);
+    hosts = new HostsService(
+      control,
+      manager,
+      keys,
+      audit,
+      new CertificateAuthorityService(
+        new OpenBaoPkiClient(fakeConfigService()),
+      ),
+    );
   }, 60_000);
 
   afterAll(async () => {
@@ -139,6 +153,170 @@ describe('Hosts (e2e)', () => {
         'install_key.revoked',
       ]);
       expect(JSON.stringify(events)).not.toContain(ranged.raw);
+    }, 60_000);
+  });
+
+  describe('registration', () => {
+    async function register(
+      t: { slug: string },
+      raw: string,
+      machineId: string,
+      extra: Partial<{
+        hostname: string;
+        ip: string;
+        keyType: 'TPM' | 'SOFTWARE';
+      }> = {},
+    ) {
+      const { csrPem } = await generateAgentCsr(
+        `host://${t.slug}/${machineId}`,
+      );
+      return hosts.register({
+        installKey: raw,
+        csr: csrPem,
+        machineId,
+        hostname: extra.hostname ?? 'DEV-LAPTOP-001',
+        os: 'Windows 11 24H2',
+        keyType: extra.keyType ?? 'TPM',
+        ip: extra.ip ?? '10.0.0.7',
+      });
+    }
+
+    it('registers a new machine as PENDING with a host certificate', async () => {
+      const t = await tenant('reg');
+      const { raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+
+      const result = await register(t, raw, 'machine-a');
+
+      expect(result.status).toBe('PENDING');
+      expect(result.certificatePem).toContain('BEGIN CERTIFICATE');
+      expect(
+        await t.client.hostCertificate.count({
+          where: { hostId: result.hostId },
+        }),
+      ).toBe(1);
+      const event = await t.client.auditEvent.findFirst({
+        where: { eventType: 'host.registered' },
+      });
+      expect(event?.data).toMatchObject({
+        hostId: result.hostId,
+        merged: false,
+      });
+    }, 60_000);
+
+    it('auto-approves a host a rule matches, and leaves others pending', async () => {
+      const t = await tenant('rule');
+      await t.client.hostApprovalRule.create({
+        data: {
+          hostGroupId: t.group.id,
+          hostnamePattern: 'dev-*',
+          cidrs: ['10.0.0.0/8'],
+          requireTpm: true,
+        },
+      });
+      const { raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+
+      expect((await register(t, raw, 'm1')).status).toBe('APPROVED');
+      expect(
+        (await register(t, raw, 'm2', { keyType: 'SOFTWARE' })).status,
+      ).toBe('PENDING');
+      expect((await register(t, raw, 'm3', { ip: '192.0.2.4' })).status).toBe(
+        'PENDING',
+      );
+    }, 60_000);
+
+    it('merges a re-registering machine (VDI) and keeps its approval', async () => {
+      const t = await tenant('merge');
+      const { raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'vdi',
+      });
+      const first = await register(t, raw, 'golden-1');
+      await t.client.host.update({
+        where: { id: first.hostId },
+        data: { status: 'APPROVED' },
+      });
+
+      const second = await register(t, raw, 'golden-1', {
+        hostname: 'VDI-POOL-17',
+      });
+
+      expect(second.hostId).toBe(first.hostId);
+      expect(second.status).toBe('APPROVED');
+      expect(
+        await t.client.hostCertificate.count({
+          where: { hostId: first.hostId },
+        }),
+      ).toBe(2);
+      expect(
+        (await t.client.host.findUniqueOrThrow({ where: { id: first.hostId } }))
+          .hostname,
+      ).toBe('VDI-POOL-17');
+    }, 60_000);
+
+    it('a revoked machine stays revoked and gets no certificate', async () => {
+      const t = await tenant('revoked');
+      const { raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+      const first = await register(t, raw, 'gone');
+      await t.client.host.update({
+        where: { id: first.hostId },
+        data: { status: 'REVOKED' },
+      });
+
+      await expect(register(t, raw, 'gone')).rejects.toBeInstanceOf(
+        HostRefusedError,
+      );
+      expect(
+        await t.client.hostCertificate.count({
+          where: { hostId: first.hostId },
+        }),
+      ).toBe(1);
+    }, 60_000);
+
+    it("a key can't be used under another tenant's name", async () => {
+      const a = await tenant('ta');
+      const b = await tenant('tb');
+      const { raw } = await keys.create(a.client, a, admin, {
+        hostGroupId: a.group.id,
+        label: 'a',
+      });
+      const forged = raw.replace(`mik_${a.slug}_`, `mik_${b.slug}_`);
+
+      await expect(register(b, forged, 'x')).rejects.toBeInstanceOf(
+        InstallKeyInvalidError,
+      );
+      expect(await b.client.host.count()).toBe(0);
+    }, 60_000);
+
+    it('refuses a CSR that names another machine', async () => {
+      const t = await tenant('csr');
+      const { raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+      const { csrPem } = await generateAgentCsr(
+        `host://${t.slug}/someone-else`,
+      );
+      await expect(
+        hosts.register({
+          installKey: raw,
+          csr: csrPem,
+          machineId: 'me',
+          hostname: 'h',
+          os: 'Linux',
+          keyType: 'SOFTWARE',
+          ip: '10.0.0.1',
+        }),
+      ).rejects.toThrow(/Subject Alternative Name/);
+      expect(await t.client.host.count()).toBe(0);
     }, 60_000);
   });
 });

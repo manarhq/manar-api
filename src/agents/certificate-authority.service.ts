@@ -109,6 +109,47 @@ export class CertificateAuthorityService {
   }
 
   /**
+   * Checks a CSR before anything is created for it: proof of possession and
+   * exactly one URI SAN equal to `identifier`. Throws `CsrValidationError`.
+   */
+  async assertCsrNames(csrPem: string, identifier: string): Promise<void> {
+    await this.validateCsr(csrPem, identifier);
+  }
+
+  /**
+   * Hosts (docs/hosts.md): the same issuance as agents, for a machine whose
+   * CSR names `host://<tenantSlug>/<machineId>`; stored as a `HostCertificate`.
+   */
+  async issueHostCertificate(
+    tenantClient: TenantPrismaClient,
+    host: { id: string; identifier: string },
+    csrPem: string,
+  ): Promise<IssuedCertificate> {
+    await this.validateCsr(csrPem, host.identifier);
+    const signed = await this.openBao.signVerbatim(
+      csrPem,
+      CertificateAuthorityService.AGENT_LEAF_CERTIFICATE_TTL,
+    );
+    const issuedCert = new x509.X509Certificate(signed.certificatePem);
+    const serialNumber = normalizeSerialNumber(issuedCert.serialNumber);
+    await tenantClient.hostCertificate.create({
+      data: {
+        hostId: host.id,
+        serialNumber,
+        notBefore: issuedCert.notBefore,
+        notAfter: issuedCert.notAfter,
+      },
+    });
+    return {
+      certificatePem: signed.certificatePem,
+      caChainPem: signed.caChainPem,
+      serialNumber,
+      notBefore: issuedCert.notBefore,
+      notAfter: issuedCert.notAfter,
+    };
+  }
+
+  /**
    * Revokes every certificate for `agentId`, local state first: the
    * certificates' `revokedAt` and `Agent.status = REVOKED` are committed
    * before OpenBao is called. `AgentMtlsGuard` reads both from PostgreSQL on
