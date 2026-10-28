@@ -1,3 +1,6 @@
+import { KillSwitchService } from '../kill-switches/kill-switch.service';
+import type { KillSwitchEpochService } from '../kill-switches/kill-switch-epoch.service';
+import type { PlatformKillSwitchService } from '../kill-switches/platform-kill-switch.service';
 import { randomBytes } from 'node:crypto';
 import {
   ExecutionContext,
@@ -473,6 +476,72 @@ describe('EdgePeerService reads and timers', () => {
     expect(result.get('ok-2')).toMatchObject({ state: 'active' });
     expect(markDirty).toHaveBeenCalled();
   }, 10_000);
+
+  it('a lost epoch bump plus a quarantine still cuts the peer: the refresh never reads the kill-switch cache', async () => {
+    const state = { quarantined: false };
+    const db = {
+      agent: { findUnique: () => Promise.resolve({ status: 'ACTIVE' }) },
+      killSwitch: { findFirst: () => Promise.resolve(null) },
+      agentQuarantine: {
+        findFirst: () =>
+          Promise.resolve(state.quarantined ? { id: 'q' } : null),
+      },
+      agentGroupMembership: { findMany: () => Promise.resolve([]) },
+      aiSystemAgentLink: { findMany: () => Promise.resolve([]) },
+      agentEgressRule: { findMany: () => Promise.resolve([]) },
+      agentCertificate: {
+        findFirst: () =>
+          Promise.resolve({ notAfter: new Date(Date.now() + 3_600_000) }),
+      },
+    };
+    const killSwitches = new KillSwitchService(
+      { recordSafely: vi.fn() } as unknown as AuditService,
+      {
+        isActive: () => Promise.resolve(false),
+      } as unknown as PlatformKillSwitchService,
+      undefined,
+      {
+        maxAgeMs: 2000,
+        read: () => Promise.resolve('0:0'), // the bump was lost: the epoch never moves
+      } as unknown as KillSwitchEpochService,
+    );
+    // Warm the cache the way a decision does.
+    await killSwitches.checkAll(db as never, 't', { agentId: 'a' });
+    state.quarantined = true;
+    expect(
+      (await killSwitches.checkAll(db as never, 't', { agentId: 'a' })).killed,
+    ).toBe(false);
+    const svc = new EdgePeerService(
+      {} as ControlPrismaService,
+      {
+        getClient: () => Promise.resolve(db),
+      } as unknown as TenantDatabaseManager,
+      config({ MANAR_EDGE_ENABLED: 'false' }),
+      { get: () => killSwitches } as unknown as ModuleRef,
+      {} as AuditService,
+    );
+    const result = new Map<
+      string,
+      { state: string; cutReason: string | null }
+    >();
+    await (
+      svc as unknown as {
+        computeTenant: (
+          t: string,
+          l: unknown[],
+          r: Map<string, unknown>,
+        ) => Promise<void>;
+      }
+    ).computeTenant(
+      't',
+      [{ id: 'p', tenantId: 't', agentId: 'a', refreshSeq: 1 }],
+      result,
+    );
+    expect(result.get('p')).toMatchObject({
+      state: 'cut',
+      cutReason: 'agent_quarantined',
+    });
+  });
 
   it('arms the expiry timer at boot and re-arms it after it fires', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'setImmediate'] });

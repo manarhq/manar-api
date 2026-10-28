@@ -151,4 +151,37 @@ describe('KillSwitchService cache (spec 7.2)', () => {
     });
     expect(h.bumpTenant).toHaveBeenCalledTimes(2);
   });
+
+  it('fresh bypasses the cache: a lost bump still cuts (edge refresh and reconcile)', async () => {
+    const h = harness();
+    await h.check(); // warm: not killed
+    h.state.tenantKilled = true; // switch flipped, bump lost
+    expect((await h.check()).killed).toBe(false); // the decision path may lag up to the bound
+    expect(
+      (
+        await h.service.checkAll(
+          h.tenantClient,
+          't1',
+          { agentId: 'a1' },
+          { fresh: true },
+        )
+      ).killed,
+    ).toBe(true);
+  });
+
+  it('checkAgent passes fresh through to checkAll', async () => {
+    const h = harness();
+    (h.tenantClient as unknown as { agent: unknown }).agent = {
+      findUnique: vi.fn().mockResolvedValue({ status: 'ACTIVE' }),
+    };
+    await h.check();
+    h.state.tenantKilled = true;
+    expect(
+      (await h.service.checkAgent(h.tenantClient, 't1', 'a1', { fresh: true }))
+        .killed,
+    ).toBe(true);
+    expect(
+      (await h.service.checkAgent(h.tenantClient, 't1', 'a1')).killed,
+    ).toBe(false);
+  });
 });

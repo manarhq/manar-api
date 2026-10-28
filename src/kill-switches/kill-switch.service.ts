@@ -232,9 +232,11 @@ export class KillSwitchService {
     tenantClient: TenantPrismaClient,
     tenantId: string,
     params: KillSwitchCheckParams,
+    options?: { fresh?: boolean },
   ): Promise<KillSwitchCheckResult> {
     const epochs = this.epochs;
-    if (!epochs || epochs.maxAgeMs === 0) {
+    // `fresh`: stored state (edge peers) is recomputed from PostgreSQL, never from the cache.
+    if (!epochs || epochs.maxAgeMs === 0 || options?.fresh) {
       return this.loadAll(tenantClient, params);
     }
     let epoch: string;
@@ -248,10 +250,14 @@ export class KillSwitchService {
     }
     const key = `${tenantId}|${params.agentId}|${params.toolId ?? ''}`;
     const hit = this.cache.get(key);
-    if (hit && hit.epoch === epoch && Date.now() - hit.at <= epochs.maxAgeMs) {
+    if (
+      hit &&
+      hit.epoch === epoch &&
+      performance.now() - hit.at <= epochs.maxAgeMs
+    ) {
       return hit.result;
     }
-    const at = Date.now();
+    const at = performance.now();
     const result = await this.loadAll(tenantClient, params);
     this.cache.delete(key);
     this.cache.set(key, { result, epoch, at });
@@ -407,6 +413,7 @@ export class KillSwitchService {
     tenantClient: TenantPrismaClient,
     tenantId: string,
     agentId: string,
+    options?: { fresh?: boolean },
   ): Promise<KillSwitchCheckResult> {
     const agent = await tenantClient.agent.findUnique({
       where: { id: agentId },
@@ -421,7 +428,7 @@ export class KillSwitchService {
         reason: `agent_status_${agent.status.toLowerCase()}`,
       };
     }
-    return this.checkAll(tenantClient, tenantId, { agentId });
+    return this.checkAll(tenantClient, tenantId, { agentId }, options);
   }
 
   /**

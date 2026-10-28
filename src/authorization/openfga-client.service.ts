@@ -129,6 +129,8 @@ export class OpenFgaClientService implements OnModuleInit {
         },
       },
     );
+    // Again after the commit: a check that raced the write may have cached the old answer.
+    if (input.deletes?.length) this.allowed.clear();
   }
 
   /** A single relationship check — throws on any transport/server failure, deliberately not swallowed here (see class doc comment). */
@@ -143,12 +145,13 @@ export class OpenFgaClientService implements OnModuleInit {
     const key = `${tuple.user}|${tuple.relation}|${tuple.object}`;
     if (useCache) {
       const expiresAt = this.allowed.get(key);
-      if (expiresAt !== undefined && Date.now() <= expiresAt) return true;
+      if (expiresAt !== undefined && performance.now() <= expiresAt)
+        return true;
       this.allowed.delete(key);
     }
     const allowed = await this.checkRemote(tuple);
     if (allowed && useCache) {
-      this.allowed.set(key, Date.now() + ttlMs);
+      this.allowed.set(key, performance.now() + ttlMs);
       if (this.allowed.size > OpenFgaClientService.CACHE_MAX_ENTRIES) {
         const oldest = this.allowed.keys().next().value;
         if (oldest !== undefined) this.allowed.delete(oldest);
