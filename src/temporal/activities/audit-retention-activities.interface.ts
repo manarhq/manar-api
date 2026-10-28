@@ -17,8 +17,10 @@ export interface PruneAuditEventsInput {
 export interface PruneAuditEventsResult {
   /** How many `AuditEvent` rows this run deleted — `0` if nothing was old enough (a genuine no-op: no anchor written, no `audit.retention_executed` event). */
   prunedCount: number;
-  /** The new `AuditChainAnchor.anchorHash` this run wrote — `null` when `prunedCount` is `0`. */
+  /** The last `AuditChainAnchor.anchorHash` this run wrote — `null` when `prunedCount` is `0`. */
   anchorHash: string | null;
+  /** One anchor per pruned audit partition (empty when `prunedCount` is `0`). */
+  anchors: { partition: number; anchorHash: string }[];
   /** The new `audit.retention_executed` `AuditEvent.id` this run wrote — `null` when `prunedCount` is `0`. */
   retentionEventId: string | null;
 }

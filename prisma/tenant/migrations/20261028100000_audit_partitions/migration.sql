@@ -34,6 +34,8 @@ CREATE UNIQUE INDEX "audit_events_partition_partitionSeq_key" ON "audit_events"(
 
 -- AlterTable
 ALTER TABLE "audit_chain_anchors" ADD COLUMN "partition" INTEGER NOT NULL DEFAULT 0;
+-- Existing anchors continue the old chain (partition 0); new ones must name their partition.
+ALTER TABLE "audit_chain_anchors" ALTER COLUMN "partition" DROP DEFAULT;
 
 -- CreateTable
 CREATE TABLE "audit_partition_state" (

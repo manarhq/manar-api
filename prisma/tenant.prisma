@@ -1434,8 +1434,9 @@ model AuditChainAnchor {
   eventsPrunedCount Int
 
   /// The audit partition this anchor continues (retention prunes each
-  /// partition's head separately). 0 for anchors from before partitioning.
-  partition Int @default(0)
+  /// partition's head separately). Required: an anchor must never silently
+  /// land in partition 0. Anchors from before partitioning were set to 0.
+  partition Int
 
   createdAt DateTime @default(now())
 

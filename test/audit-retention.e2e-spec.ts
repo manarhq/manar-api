@@ -12,6 +12,8 @@ import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { AuditService } from '../src/audit/audit.service';
+import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
+import { AuditRetentionService } from '../src/audit/retention/audit-retention.service';
 import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
@@ -274,7 +276,9 @@ describe('Audit retention (e2e)', () => {
       const event = await auditService.record(tenantClient, tenant.id, {
         eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
         actor: { type: 'system', id: 'retention-test-old' },
-        data: { i, age: 'old' },
+        // One agent for old and new events: they share a partition, so
+        // the new events chain off the old ones (asserted below).
+        data: { i, age: 'old', agentId: 'retention-agent' },
       });
       oldIds.push(event.id);
     }
@@ -300,7 +304,7 @@ describe('Audit retention (e2e)', () => {
       const event = await auditService.record(tenantClient, tenant.id, {
         eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
         actor: { type: 'system', id: 'retention-test-new' },
-        data: { i, age: 'new' },
+        data: { i, age: 'new', agentId: 'retention-agent' },
       });
       newIds.push(event.id);
     }
@@ -385,6 +389,90 @@ describe('Audit retention (e2e)', () => {
     expect(await tenantClient.auditEvent.count()).toBe(4); // 3 new + 1 retention_executed
   }, 60_000);
 
+  it('prunes each partition separately: one anchor per partition, the log and its SEALs still verify', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('parts'),
+      name: 'Retention Partitions Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    const agents = ['ret-a', 'ret-b', 'ret-c'];
+    const oldIds: string[] = [];
+    for (const agent of agents) {
+      for (let i = 0; i < 4; i += 1) {
+        const e = await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: agent },
+          data: { i, age: 'old' },
+        });
+        oldIds.push(e.id);
+      }
+    }
+    // Seal while everything still exists, so verification later has to skip
+    // the pruned ranges rather than flag them.
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    await new AuditCheckpointService(signer).createCheckpoint(
+      tenantClient,
+      tenant.id,
+    );
+    await tenantClient.auditEvent.updateMany({
+      where: { id: { in: oldIds } },
+      data: {
+        timestamp: new Date(
+          Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000),
+        ),
+      },
+    });
+    for (const agent of agents) {
+      await auditService.record(tenantClient, tenant.id, {
+        eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+        actor: { type: 'agent', id: agent },
+        data: { age: 'new' },
+      });
+    }
+    const lastOld = new Map<number, string>();
+    for (const e of await tenantClient.auditEvent.findMany({
+      where: { id: { in: oldIds } },
+      orderBy: { partitionSeq: 'asc' },
+    })) {
+      lastOld.set(e.partition, e.eventHash);
+    }
+
+    const result = await new AuditRetentionService(
+      auditService,
+    ).pruneTenantAuditEvents(tenantClient, {
+      tenantId: tenant.id,
+      retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+    });
+
+    expect(result.prunedCount).toBe(12);
+    expect(
+      [...result.anchors].sort((a, b) => a.partition - b.partition),
+    ).toEqual(
+      [...lastOld.entries()]
+        .map(([partition, anchorHash]) => ({ partition, anchorHash }))
+        .sort((a, b) => a.partition - b.partition),
+    );
+    const anchors = await tenantClient.auditChainAnchor.findMany();
+    expect(anchors.map((a) => [a.partition, a.anchorHash]).sort()).toEqual(
+      [...lastOld.entries()].sort(),
+    );
+    const retentionEvent = await tenantClient.auditEvent.findUniqueOrThrow({
+      where: { id: result.retentionEventId! },
+    });
+    expect(
+      (retentionEvent.data as { anchors: unknown[] }).anchors,
+    ).toHaveLength(lastOld.size);
+    expect(
+      await auditService.verifyAuditChain(tenantClient, tenant.id),
+    ).toEqual({ valid: true });
+  }, 60_000);
+
   it('a retention run that finds nothing old enough is a genuine no-op', async () => {
     const tenant = await manager.provisionTenant({
       slug: uniqueSlug('noop'),
@@ -420,6 +508,7 @@ describe('Audit retention (e2e)', () => {
     expect(result).toEqual({
       prunedCount: 0,
       anchorHash: null,
+      anchors: [],
       retentionEventId: null,
     });
     expect(await tenantClient.auditEvent.count()).toBe(1);
