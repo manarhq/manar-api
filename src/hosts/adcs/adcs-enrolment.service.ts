@@ -6,7 +6,11 @@ import { ssrfPolicyFromConfig } from '../../common/ssrf/ssrf.config';
 import { CertificateAuthorityService } from '../../agents/certificate-authority.service';
 import { ControlPrismaService } from '../../database/control-prisma.service';
 import { TenantDatabaseManager } from '../../database/tenant-database-manager.service';
-import { HostsService, type RegisterHostResult } from '../hosts.service';
+import {
+  HostRefusedError,
+  HostsService,
+  type RegisterHostResult,
+} from '../hosts.service';
 import { TpmAttestationService } from '../tpm/tpm-attestation.service';
 import { AdcsDirectoryService } from './adcs-directory.service';
 import {
@@ -134,11 +138,13 @@ export class AdcsEnrolmentService {
       throw new AdcsCertificateRejectedError('revoked');
     }
 
-    const dnsName = leaf
+    const presentedDns = leaf
       .getExtension(x509.SubjectAlternativeNameExtension)
       ?.names.items.find((n) => n.type === 'dns')?.value;
-    if (!dnsName) throw new AdcsCertificateRejectedError('no DNS name');
+    if (!presentedDns) throw new AdcsCertificateRejectedError('no DNS name');
 
+    // The anchor of the host's identity: stored lower-cased, unique per tenant.
+    const dnsName = presentedDns.toLowerCase();
     const ou = await this.directory.resolve(client, tenant.id, dnsName);
     const adDn = ou.state === 'resolved' ? ou.dn : null;
     const hostGroupId = ou.state === 'resolved' ? ou.hostGroupId : null;
@@ -170,26 +176,34 @@ export class AdcsEnrolmentService {
         `ADCS registration for tenant ${tenant.id} left PENDING: revocation=${revocation} ad=${ou.state}`,
       );
     }
-    return this.hosts.completeRegistration({
-      tenant: { id: tenant.id, slug: tenant.slug },
-      client,
-      identifier,
-      csr: input.csr,
-      keyFingerprint,
-      machineId: input.machineId,
-      hostname: dnsName,
-      os: input.os,
-      keyType: input.keyType,
-      ip: input.ip,
-      method: 'ADCS',
-      hostGroupId,
-      defaultHostGroupId: settings.defaultHostGroupId,
-      installKeyId: null,
-      // Doubt about the certificate or the OU: a person decides.
-      autoApprove: certVerified && hostGroupId !== null,
-      verified: { adcs: certVerified, adDn, tpm: redeemed !== null },
-      tpmEkFingerprint: redeemed?.ekFingerprint ?? null,
-      adcs: { dnsName, adDn, revocation, adState: ou.state },
-    });
+    return this.hosts
+      .completeRegistration({
+        tenant: { id: tenant.id, slug: tenant.slug },
+        client,
+        identifier,
+        csr: input.csr,
+        keyFingerprint,
+        machineId: input.machineId,
+        hostname: dnsName,
+        os: input.os,
+        keyType: input.keyType,
+        ip: input.ip,
+        method: 'ADCS',
+        hostGroupId,
+        defaultHostGroupId: settings.defaultHostGroupId,
+        installKeyId: null,
+        // Doubt about the certificate or the OU: a person decides.
+        autoApprove: certVerified && hostGroupId !== null,
+        verified: { adcs: certVerified, adDn, tpm: redeemed !== null },
+        tpmEkFingerprint: redeemed?.ekFingerprint ?? null,
+        adcs: { dnsName, adDn, revocation, adState: ou.state },
+      })
+      .catch((error: unknown) => {
+        // Two registrations raced for the same certificate identity.
+        if ((error as { code?: string } | null)?.code === 'P2002') {
+          throw new HostRefusedError('certificate identity already registered');
+        }
+        throw error;
+      });
   }
 }

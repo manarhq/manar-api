@@ -2228,6 +2228,8 @@ model Host {
   updatedAt        DateTime          @updatedAt
 
   @@unique([machineId])
+  /// One computer identity, one host (lower-cased certificate DNS name; nulls repeat).
+  @@unique([adcsDnsName])
   @@index([hostGroupId])
   @@index([status])
   @@map("hosts")

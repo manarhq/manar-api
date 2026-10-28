@@ -157,11 +157,26 @@ export class AdcsAdminService {
         throw new AdcsConfigError('baseDn is not a valid DN');
       }
       parsePem(input.serverCaPem);
-      const existing = await this.kv
+      const stored = await client.adcsSettings.findUnique({
+        where: { id: 'default' },
+      });
+      const secret = await this.kv
         .readSecretIfPresent(adBindSecretPath(tenantId))
         .catch(() => null);
-      if (!input.bindPassword && typeof existing?.password !== 'string') {
-        throw new AdcsConfigError('bindPassword is required with ldapsUrl');
+      // The stored password is only ever sent to the server it was set for.
+      // Any change of target needs the password again, which replaces the old one.
+      const targetChanged =
+        !stored ||
+        stored.ldapsUrl !== input.ldapsUrl ||
+        stored.bindDn !== input.bindDn ||
+        stored.serverCaPem !== input.serverCaPem;
+      if (
+        !input.bindPassword &&
+        (targetChanged || typeof secret?.password !== 'string')
+      ) {
+        throw new AdcsConfigError(
+          'bindPassword is required when ldapsUrl, bindDn or serverCaPem changes',
+        );
       }
     }
     // The password goes to KV first, so a settings row never points at nothing.

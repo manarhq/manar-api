@@ -1,7 +1,7 @@
 -- AD CS enrolment, AD OU mapping, TPM attestation and the approval-rule guard (R2 F2b,
 -- docs/hosts.md). Additive: new columns with defaults and new tables only.
 --
--- Rollback: DROP TABLE "tpm_challenges", "tpm_trust_roots", "ad_ou_rules", "adcs_settings",
+-- Rollback: DROP INDEX "hosts_adcsDnsName_key"; DROP TABLE "tpm_challenges", "tpm_trust_roots", "ad_ou_rules", "adcs_settings",
 --   "adcs_trusted_cas"; ALTER TABLE "host_approval_rules" DROP COLUMN "adOuDn", DROP COLUMN
 --   "requireAdcs"; ALTER TABLE "hosts" DROP COLUMN "adDn", DROP COLUMN "adDnCheckedAt", DROP
 --   COLUMN "adcsDnsName", DROP COLUMN "enrolmentMethod", DROP COLUMN "tpmEkFingerprint", DROP
@@ -89,6 +89,9 @@ CREATE TABLE "tpm_challenges" (
 
     CONSTRAINT "tpm_challenges_pkey" PRIMARY KEY ("id")
 );
+
+-- CreateIndex
+CREATE UNIQUE INDEX "hosts_adcsDnsName_key" ON "hosts"("adcsDnsName");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "adcs_trusted_cas_fingerprint_key" ON "adcs_trusted_cas"("fingerprint");

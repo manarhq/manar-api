@@ -331,7 +331,7 @@ export class HostsAdminService {
     return unit;
   }
 
-  createApprovalRule(
+  async createApprovalRule(
     client: TenantPrismaClient,
     tenantId: string,
     actor: AuditActor,
@@ -378,7 +378,7 @@ export class HostsAdminService {
     );
   }
 
-  updateApprovalRule(
+  async updateApprovalRule(
     client: TenantPrismaClient,
     tenantId: string,
     actor: AuditActor,

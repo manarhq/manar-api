@@ -179,6 +179,26 @@ export class HostsService {
             `host ${existing.id} is ${existing.status}`,
           );
         }
+        // One certificate identity, one host: a computer certificate cannot
+        // register a second machineId, nor take over another host's machineId.
+        if (ctx.adcs) {
+          const holder = await tx.host.findUnique({
+            where: { adcsDnsName: ctx.adcs.dnsName },
+          });
+          if (holder && holder.machineId !== input.machineId) {
+            throw new HostRefusedError(
+              `certificate identity already belongs to host ${holder.id}`,
+            );
+          }
+          if (
+            existing?.enrolmentMethod === 'ADCS' &&
+            existing.adcsDnsName !== ctx.adcs.dnsName
+          ) {
+            throw new HostRefusedError(
+              `host ${existing.id} is bound to another certificate identity`,
+            );
+          }
+        }
         // A known computer-certificate host follows its OU (when AD was read);
         // anything else must keep the group its key was issued for.
         const followsOu = adcs && existing?.enrolmentMethod === 'ADCS';
@@ -188,6 +208,9 @@ export class HostsService {
         if (
           existing &&
           (existing.keyFingerprint !== keyFingerprint ||
+            // A host enrolled another way has no certificate identity: an
+            // admin decides whether this certificate may take it over.
+            (adcs && existing.enrolmentMethod !== 'ADCS') ||
             (!followsOu && existing.hostGroupId !== targetGroupId))
         ) {
           // One pending rekey at a time: a second one never replaces it, so
