@@ -201,33 +201,57 @@ export class TpmAttestationService {
         `AK certificate refused: ${error instanceof CertChainError ? error.reason : error instanceof Error ? error.message : 'invalid'}`,
       );
     }
-    const perMachine = await client.tpmChallenge.count({
-      where: {
-        machineId: input.machineId,
-        expiresAt: { gt: new Date() },
-        consumedAt: null,
-      },
-    });
-    if (perMachine >= MAX_OPEN_PER_MACHINE) {
-      throw new TpmAttestationError('too many open challenges for machine');
-    }
-    const open = await client.tpmChallenge.count({
-      where: { expiresAt: { gt: new Date() }, consumedAt: null },
-    });
-    if (open >= MAX_OPEN_CHALLENGES) {
-      throw new TpmAttestationError('too many open challenges');
-    }
     const nonce = randomBytes(32);
-    const row = await client.tpmChallenge.create({
-      data: {
-        machineId: input.machineId,
-        keyFingerprint,
-        // the AK certificate this challenge is bound to; verified again at ak-certify
-        ekFingerprint: akFingerprint,
-        secretHash: AK_PREFIX + sha256(nonce),
-        expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
-      },
-    });
+    // Count and create in one serializable transaction so concurrent calls
+    // cannot all pass the cap. The per-machine cap is keyed on the AK too, so
+    // another Azure VM's AK cannot use up a target machine's slots.
+    const attempt = () =>
+      client.$transaction(
+        async (tx) => {
+          const open = await tx.tpmChallenge.count({
+            where: { expiresAt: { gt: new Date() }, consumedAt: null },
+          });
+          if (open >= MAX_OPEN_CHALLENGES) {
+            throw new TpmAttestationError('too many open challenges');
+          }
+          const perMachine = await tx.tpmChallenge.count({
+            where: {
+              machineId: input.machineId,
+              ekFingerprint: akFingerprint,
+              expiresAt: { gt: new Date() },
+              consumedAt: null,
+            },
+          });
+          if (perMachine >= MAX_OPEN_PER_MACHINE) {
+            throw new TpmAttestationError(
+              'too many open challenges for machine',
+            );
+          }
+          return tx.tpmChallenge.create({
+            data: {
+              machineId: input.machineId,
+              keyFingerprint,
+              // the AK certificate this challenge is bound to; verified again at ak-certify
+              ekFingerprint: akFingerprint,
+              secretHash: AK_PREFIX + sha256(nonce),
+              expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+            },
+          });
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    let row;
+    try {
+      row = await attempt();
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'P2034') throw error;
+      try {
+        row = await attempt(); // one retry after a serialization failure
+      } catch (again) {
+        if ((again as { code?: string }).code !== 'P2034') throw again;
+        throw new TpmAttestationError('busy, retry');
+      }
+    }
     this.logger.log(
       `TPM AK challenge ${row.id} issued for tenant ${tenant.id}`,
     );

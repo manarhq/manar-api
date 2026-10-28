@@ -157,7 +157,7 @@ proves its key with `TPM2_Certify` by that AK:
 intermediates), hostKeyPublic (base64 TPMT_PUBLIC, same rules as above) }`. The AK chain is
    validated here, before any row is created; a bad chain gets a 400 and costs nothing. Reply
    `{ challengeId, nonce (base64, 32 bytes), expiresAt }`. The challenge is bound to that AK
-   certificate; at most 3 open challenges per machine, in addition to the global cap.
+   certificate; at most 3 open challenges per machine and AK certificate (counted and created in one serializable transaction), in addition to the global cap.
 2. The host runs Certify with the AK as signing key, the host key as the object, and the nonce bytes
    as qualifying data, then `POST /hosts/tpm/ak-certify` `{ tenantSlug, challengeId, akCertificates
 (the same chain), hostKeyPublic, certifyInfo (base64 TPMS_ATTEST), signature (base64

@@ -1248,6 +1248,42 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
         await challenge(t, 'az-cap-other', s); // another machine is not affected
       }, 90_000);
 
+      it('another AK filling the slots for a machineId does not block the real AK', async () => {
+        const t = await fresh(noAd);
+        const s = await setupAk(t);
+        const otherKeys = await newKeys();
+        const otherCert = await makeLeaf(s.inter, {
+          keys: otherKeys,
+          dns: null,
+          eku: [AIK_EKU],
+        });
+        const attacker = [otherCert.pem, s.inter.pem];
+        for (let i = 0; i < 3; i += 1) {
+          await challenge(t, 'az-victim', s, attacker);
+        }
+        await expect(
+          challenge(t, 'az-victim', s, attacker),
+        ).rejects.toBeInstanceOf(TpmAttestationError);
+        const c = await challenge(t, 'az-victim', s); // the real AK still gets in
+        expect(await certify(t, c, s)).toBe(true);
+      }, 90_000);
+
+      it('concurrent requests cannot exceed the per-machine cap', async () => {
+        const t = await fresh(noAd);
+        const s = await setupAk(t);
+        const results = await Promise.allSettled(
+          Array.from({ length: 8 }, () => challenge(t, 'az-race', s)),
+        );
+        const ok = results.filter((r) => r.status === 'fulfilled').length;
+        expect(ok).toBeGreaterThanOrEqual(1);
+        expect(ok).toBeLessThanOrEqual(3);
+        expect(
+          await t.client.tpmChallenge.count({
+            where: { machineId: 'az-race' },
+          }),
+        ).toBe(ok);
+      }, 90_000);
+
       it('refuses a different AK at certify than the one bound at step 1', async () => {
         const t = await fresh(noAd);
         const s = await setupAk(t);
