@@ -15,6 +15,7 @@ import { AuditService } from '../src/audit/audit.service';
 import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
 import { AuditRetentionService } from '../src/audit/retention/audit-retention.service';
 import { ControlSealMarkStore } from '../src/audit/checkpoint/seal-mark.store';
+import { anchorDigestOf } from '../src/audit/checkpoint/checkpoint-format';
 import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
@@ -628,6 +629,69 @@ describe('Audit retention (e2e)', () => {
       }),
     ).rejects.toThrow(/does not verify/);
     expect(await tenantClient.auditEvent.count()).toBe(9);
+  }, 60_000);
+
+  it('a forged index row over a partly pruned range cannot vouch for the rest', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('forgedrange'),
+      name: 'Retention Forged Range Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    const checkpoints = new AuditCheckpointService(signer);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+    );
+    const events = [];
+    for (let round = 0; round < 3; round += 1) {
+      for (let i = 0; i < 3; i += 1) {
+        events.push(
+          await auditService.record(tenantClient, tenant.id, {
+            eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+            actor: { type: 'agent', id: 'ret-forged' },
+            data: { round, i },
+          }),
+        );
+      }
+      await checkpoints.createCheckpoint(tenantClient, tenant.id);
+    }
+    vi.useRealTimers();
+    // Prune the first event as retention would (signed anchor), so SEAL 1's
+    // range now starts before the oldest remaining event.
+    const anchor = {
+      tenantId: tenant.id,
+      partition: events[0]!.partition,
+      anchorHash: events[0]!.eventHash,
+      eventsPrunedCount: 1,
+    };
+    await tenantClient.auditChainAnchor.create({
+      data: {
+        ...anchor,
+        signature: await signer.sign(tenant.id, anchorDigestOf(anchor)),
+      },
+    });
+    await tenantClient.auditEvent.delete({ where: { id: events[0]!.id } });
+    // Forge SEAL 1's index row to claim the whole span, and drop the others.
+    await tenantClient.$executeRaw`UPDATE "audit_checkpoint_ranges" SET "toSeq" = 9 WHERE "checkpointSeq" = 1`;
+    await tenantClient.$executeRaw`DELETE FROM "audit_checkpoint_ranges" WHERE "checkpointSeq" > 1`;
+
+    await expect(
+      new AuditRetentionService(
+        auditService,
+        signer,
+        checkpoints,
+      ).pruneTenantAuditEvents(tenantClient, {
+        tenantId: tenant.id,
+        retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+      }),
+    ).rejects.toThrow(/does not verify/);
   }, 60_000);
 
   it('refuses to prune (and sign anchors) when the log does not verify', async () => {

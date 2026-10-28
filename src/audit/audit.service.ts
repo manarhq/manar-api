@@ -746,7 +746,8 @@ export class AuditService implements OnModuleDestroy {
         return { valid: false, brokenAt: `audit_partition_state:${partition}` };
       }
 
-      // The walked span links to what remains.
+      // The walked span links to what remains: the next event, or else the
+      // partition's recorded tail must be exactly where the walk ended.
       const next = await tenantClient.auditEvent.findUnique({
         where: {
           partition_partitionSeq: { partition, partitionSeq: lastSeq + 1 },
@@ -762,8 +763,8 @@ export class AuditService implements OnModuleDestroy {
           where: { partition },
         });
         if (
-          tail &&
-          tail.latestSeq === lastSeq &&
+          !tail ||
+          tail.latestSeq !== lastSeq ||
           tail.latestEventHash !== expected
         ) {
           return {
@@ -773,56 +774,86 @@ export class AuditService implements OnModuleDestroy {
         }
       }
 
-      // The index must tile [firstSeq, upTo] with no holes; each range in
-      // it must match its SEAL's signed root.
+      // The index must tile [firstSeq, upTo] contiguously, and each row only
+      // counts once its SEAL is authenticated (hash and signature) and lists
+      // exactly that range in its signed roots. A forged or stretched row
+      // therefore can't vouch for anything.
       let cursor = firstSeq;
       for (const range of sealed) {
-        if (range.toSeq < cursor) continue; // pruned before: nothing remains
-        if (range.fromSeq > cursor) {
+        if (range.toSeq < cursor) continue; // wholly pruned before
+        const contiguous =
+          range.fromSeq === cursor ||
+          (cursor === firstSeq && range.fromSeq < firstSeq);
+        if (!contiguous) {
           return { valid: false, brokenAt: `checkpoint_index:${partition}` };
-        }
-        cursor = range.toSeq + 1;
-        if (range.fromSeq < firstSeq) continue; // start already pruned
-        const leaves: string[] = [];
-        for (let seq = range.fromSeq; seq <= range.toSeq; seq += 1) {
-          const h = hashes.get(seq);
-          if (h === undefined) break;
-          leaves.push(h);
         }
         const cp = await tenantClient.auditCheckpoint.findUnique({
           where: { seq: range.checkpointSeq },
         });
-        const signedRoot = (
-          (cp?.roots ?? []) as unknown as PartitionRoot[]
-        ).find(
+        const cpHeads = (cp?.partitionHeads ??
+          []) as unknown as PartitionHead[];
+        const cpRoots = (cp?.roots ?? []) as unknown as PartitionRoot[];
+        const signed = cpRoots.find(
           (r) =>
             r.partition === partition &&
             Number(r.fromSeq) === range.fromSeq &&
             Number(r.toSeq) === range.toSeq,
-        )?.root;
+        );
         if (
-          leaves.length !== range.toSeq - range.fromSeq + 1 ||
           !cp ||
           !key ||
+          !signed ||
+          signed.root !== range.root ||
           checkpointHashOf({
             seq: cp.seq,
             createdAt: cp.createdAt,
-            partitionHeads: cp.partitionHeads as unknown as PartitionHead[],
-            roots: cp.roots as unknown as PartitionRoot[],
+            partitionHeads: cpHeads,
+            roots: cpRoots,
             previousCheckpointHash: cp.previousCheckpointHash,
           }) !== cp.checkpointHash ||
           !verifyCheckpointSignature(
             cp.checkpointHash,
             cp.signature,
             key.publicKeyPem,
-          ) ||
-          signedRoot !== merkleRoot(leaves)
+          )
         ) {
           return {
             valid: false,
             brokenAt: `checkpoint:${range.checkpointSeq}`,
           };
         }
+        if (range.fromSeq >= firstSeq) {
+          const leaves: string[] = [];
+          for (let seq = range.fromSeq; seq <= range.toSeq; seq += 1) {
+            const h = hashes.get(seq);
+            if (h === undefined) break;
+            leaves.push(h);
+          }
+          if (
+            leaves.length !== range.toSeq - range.fromSeq + 1 ||
+            merkleRoot(leaves) !== signed.root
+          ) {
+            return {
+              valid: false,
+              brokenAt: `checkpoint:${range.checkpointSeq}`,
+            };
+          }
+        } else {
+          // Start already pruned: the root can't be recomputed, but the end
+          // of the range must still match the head this SEAL signed.
+          const head = cpHeads.find((h) => h.partition === partition);
+          if (
+            !head ||
+            Number(head.seq) !== range.toSeq ||
+            hashes.get(range.toSeq) !== head.eventHash
+          ) {
+            return {
+              valid: false,
+              brokenAt: `checkpoint:${range.checkpointSeq}`,
+            };
+          }
+        }
+        cursor = range.toSeq + 1;
       }
       if (cursor <= upTo) {
         return { valid: false, brokenAt: `checkpoint_index:${partition}` };
