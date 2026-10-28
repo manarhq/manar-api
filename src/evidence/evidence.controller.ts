@@ -75,11 +75,12 @@ export class EvidenceController {
   @ApiOperation({
     summary: 'Verify an exported evidence bundle',
     description:
-      'Checks the signature and the bundle hash of a bundle returned by POST /evidence/export. Returns { valid } and, when invalid, a reason.',
+      "Checks the signature and the bundle hash of a bundle returned by POST /evidence/export, then every event's inclusion proof against a checkpoint signed by the tenant's key. Returns { valid, proofsVerified, proofsMissing } or, when invalid, { valid: false, reason }.",
   })
   @ApiResponse({
     status: 200,
-    description: '{ valid: boolean, reason?: string }',
+    description:
+      '{ valid: true, proofsVerified: number, proofsMissing: number } | { valid: false, reason: string }',
   })
   @ApiResponse({ status: 400, type: ErrorResponseDto })
   async verify(@Body() body: unknown) {

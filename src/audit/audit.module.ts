@@ -37,6 +37,7 @@ import { KafkaPublisherService } from './kafka-publisher.service';
     CheckpointSigner,
     AuditCheckpointService,
     AuditProofService,
+    CHECKPOINT_PUBLIC_KEYS,
   ],
 })
 export class AuditModule {}

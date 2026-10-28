@@ -1,17 +1,29 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type {
   Prisma,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
 import type { AppConfig } from '../config/env.validation';
+import {
+  AuditEventNotCheckpointedError,
+  type AuditEventProof,
+  AuditProofService,
+} from '../audit/checkpoint/audit-proof.service';
+import {
+  CHECKPOINT_PUBLIC_KEYS,
+  type CheckpointKeyLookup,
+  type CheckpointPublicKey,
+  checkpointHashOf,
+  verifyCheckpointSignature,
+} from '../audit/checkpoint/checkpoint-format';
+import { verifyInclusion } from '../audit/merkle';
 import type { EvidenceExportRequest } from './evidence-export.validation';
 import {
   EvidenceBundleSignature,
   signEvidenceBundle,
   verifyEvidenceBundle,
-  type VerifyEvidenceBundleResult,
 } from './evidence-signing.util';
 
 export interface EvidenceExportResult {
@@ -33,21 +45,16 @@ export interface EvidenceBundleContent {
     correlationId: string | null;
   };
   /**
-   * The matched `AuditEvent`s, in chain order, with their full
-   * hash-linkage fields intact — this IS "enough of the audit chain
-   * segment to let a recipient verify those specific events weren't
-   * tampered with independent of trusting this export process" (Section
-   * 49): a recipient recomputes each event's `eventHash` via the same
-   * public formula `computeEventHash` uses (`sha256(canonicalize({ id,
-   * eventType, correlationId, actor, timestamp, data, previousHash }))`,
-   * `src/audit/audit-hash.ts`) and confirms `events[i].previousHash ===
-   * events[i-1].eventHash` for every consecutive pair. Full verification
-   * back to genesis additionally requires either the very first exported
-   * event's `previousHash` being `null`, or trusting a `GET /audit/verify`
-   * response from this tenant separately — this bundle alone proves
-   * *internal* consistency of the exported segment, not "this segment is
-   * the true, complete history," which is why `GET /audit/verify` (Phase
-   * 9a) remains the authoritative full-chain check.
+   * The matched `AuditEvent`s, in recorded order, each with its hash
+   * fields, its audit partition and position, and — once a SEAL covers it —
+   * an inclusion proof (Section 49: "let a recipient verify those specific
+   * events weren't tampered with independent of trusting this export").
+   * A recipient recomputes each `eventHash` (`computeEventHash`,
+   * `src/audit/audit-hash.ts`), hashes it up `proof.proof` to `proof.root`,
+   * finds that root in `proof.checkpoint.roots`, and verifies the
+   * checkpoint's Ed25519 signature with `checkpointPublicKey`. Events
+   * directly after one another in a partition also link by `previousHash`.
+   * `GET /audit/verify` remains the full-log check.
    */
   events: {
     id: string;
@@ -59,7 +66,14 @@ export interface EvidenceBundleContent {
     data: unknown;
     previousHash: string | null;
     eventHash: string;
+    partition: number;
+    /** Decimal string (a bigint). */
+    partitionSeq: string;
+    /** `null` while no SEAL covers the event yet (they are written every second). */
+    proof: AuditEventProof | null;
   }[];
+  /** The tenant's SEAL signing key, for offline checks of every `proof`. */
+  checkpointPublicKey: CheckpointPublicKey;
   /**
    * Directly-relevant context pulled from the *real* tables the retrofitted
    * decision points already write to (Section 49: "don't duplicate data
@@ -177,7 +191,12 @@ export interface EvidenceBundleContent {
  */
 @Injectable()
 export class EvidenceExportService {
-  constructor(private readonly configService: ConfigService<AppConfig, true>) {}
+  constructor(
+    private readonly configService: ConfigService<AppConfig, true>,
+    private readonly proofs: AuditProofService,
+    @Inject(CHECKPOINT_PUBLIC_KEYS)
+    private readonly checkpointKeys: CheckpointKeyLookup,
+  ) {}
 
   async export(
     tenantClient: TenantPrismaClient,
@@ -288,17 +307,28 @@ export class EvidenceExportService {
         taskId: filter.taskId ?? null,
         correlationId: filter.correlationId ?? null,
       },
-      events: events.map((event) => ({
-        id: event.id,
-        sequence: event.sequence,
-        eventType: event.eventType,
-        correlationId: event.correlationId,
-        actor: event.actor,
-        timestamp: event.timestamp.toISOString(),
-        data: event.data,
-        previousHash: event.previousHash,
-        eventHash: event.eventHash,
-      })),
+      events: await Promise.all(
+        events.map(async (event) => ({
+          id: event.id,
+          sequence: event.sequence,
+          eventType: event.eventType,
+          correlationId: event.correlationId,
+          actor: event.actor,
+          timestamp: event.timestamp.toISOString(),
+          data: event.data,
+          previousHash: event.previousHash,
+          eventHash: event.eventHash,
+          partition: event.partition,
+          partitionSeq: event.partitionSeq.toString(),
+          proof: await this.proofs
+            .proveEvent(tenantClient, event.id)
+            .catch((error: unknown) => {
+              if (error instanceof AuditEventNotCheckpointedError) return null;
+              throw error;
+            }),
+        })),
+      ),
+      checkpointPublicKey: await this.checkpointKeys.publicKey(tenantId),
       context: {
         agents: agents.map((agent) => ({
           id: agent.id,
@@ -402,15 +432,91 @@ export class EvidenceExportService {
    * from the API's `.env`). Offline verification with a public key is
    * finding F10's fix.
    */
-  verify(
+  async verify(
     bundle: unknown,
     signature: string,
-  ): Promise<VerifyEvidenceBundleResult> {
-    return verifyEvidenceBundle(
+  ): Promise<EvidenceVerifyResult> {
+    const signed = await verifyEvidenceBundle(
       bundle,
       signature,
       this.configService.get('APPROVAL_GRANT_SIGNING_SECRET', { infer: true }),
     );
+    if (!signed.valid) return signed;
+    return this.verifyProofs(bundle as Partial<EvidenceBundleContent>);
+  }
+
+  /**
+   * Checks every event's inclusion proof against a SEAL signed by the
+   * tenant's real key (looked up here, not trusted from the bundle), so a
+   * bundle stays checkable even if the HMAC export secret leaked.
+   */
+  private async verifyProofs(
+    bundle: Partial<EvidenceBundleContent>,
+  ): Promise<EvidenceVerifyResult> {
+    const events = Array.isArray(bundle.events) ? bundle.events : [];
+    const withProof = events.filter((e) => e.proof);
+    if (withProof.length === 0) {
+      return { valid: true, proofsVerified: 0, proofsMissing: events.length };
+    }
+    if (typeof bundle.tenantId !== 'string') {
+      return { valid: false, reason: 'proof_invalid' };
+    }
+    const key = await this.checkpointKeys.publicKey(bundle.tenantId);
+    if (bundle.checkpointPublicKey?.publicKeyPem !== key.publicKeyPem) {
+      return { valid: false, reason: 'proof_invalid' };
+    }
+    for (const event of withProof) {
+      if (!proofHolds(event, key)) {
+        return { valid: false, reason: 'proof_invalid' };
+      }
+    }
+    return {
+      valid: true,
+      proofsVerified: withProof.length,
+      proofsMissing: events.length - withProof.length,
+    };
+  }
+}
+
+export type EvidenceVerifyResult =
+  | { valid: true; proofsVerified: number; proofsMissing: number }
+  | { valid: false; reason: string };
+
+function proofHolds(
+  event: EvidenceBundleContent['events'][number],
+  key: CheckpointPublicKey,
+): boolean {
+  const p = event.proof!;
+  const cp = p.checkpoint;
+  try {
+    const range = cp.roots.find(
+      (r) =>
+        r.partition === event.partition &&
+        BigInt(r.fromSeq) <= BigInt(event.partitionSeq) &&
+        BigInt(r.toSeq) >= BigInt(event.partitionSeq),
+    );
+    return (
+      p.eventId === event.id &&
+      p.leaf === event.eventHash &&
+      range !== undefined &&
+      range.root === p.root &&
+      verifyInclusion(p.leaf, p.proof, p.root) &&
+      checkpointHashOf({
+        seq: BigInt(cp.seq),
+        createdAt: new Date(cp.createdAt),
+        partitionHeads: cp.partitionHeads,
+        roots: cp.roots,
+        previousCheckpointHash: cp.previousCheckpointHash,
+      }) === cp.checkpointHash &&
+      cp.keyId === key.keyId &&
+      verifyCheckpointSignature(
+        cp.checkpointHash,
+        cp.signature,
+        key.publicKeyPem,
+      )
+    );
+  } catch {
+    return false; // malformed proof fields
   }
 }
 

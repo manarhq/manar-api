@@ -13,8 +13,18 @@ import { AppModule } from '../src/app.module';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
 import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
-import { verifyEvidenceBundle } from '../src/evidence/evidence-signing.util';
-import type { EvidenceExportResult } from '../src/evidence/evidence-export.service';
+import {
+  signEvidenceBundle,
+  verifyEvidenceBundle,
+} from '../src/evidence/evidence-signing.util';
+import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
+import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
+import { verifyInclusion } from '../src/audit/merkle';
+import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
+import {
+  EvidenceExportService,
+  type EvidenceExportResult,
+} from '../src/evidence/evidence-export.service';
 import {
   assignRealmRole,
   createRealmUser,
@@ -205,13 +215,17 @@ describe('Evidence export (e2e)', () => {
     expect(taskContext?.assignedAgentId).toBe(agentId);
     expect(taskContext?.status).toBe('REVOKED');
 
-    // Chain-segment self-consistency: consecutive previousHash/eventHash
-    // linkage among the exported events (Section 49's "let a recipient
-    // verify those specific events weren't tampered with").
-    for (let i = 1; i < result.bundle.events.length; i += 1) {
-      expect(result.bundle.events[i]!.previousHash).toBe(
-        result.bundle.events[i - 1]!.eventHash,
+    // Chain-segment self-consistency within each audit partition: an
+    // exported event directly after another in the same partition links to
+    // it (Section 49's "let a recipient verify those specific events").
+    const events = result.bundle.events;
+    for (const later of events) {
+      const earlier = events.find(
+        (e) =>
+          e.partition === later.partition &&
+          BigInt(e.partitionSeq) + 1n === BigInt(later.partitionSeq),
       );
+      if (earlier) expect(later.previousHash).toBe(earlier.eventHash);
     }
 
     const verifyGood = await verifyEvidenceBundle(
@@ -251,7 +265,9 @@ describe('Evidence export (e2e)', () => {
         .send({ bundle, signature: exported.signature.signature })
         .expect(200);
 
-    expect((await verify(exported.bundle)).body).toEqual({ valid: true });
+    expect((await verify(exported.bundle)).body).toMatchObject({
+      valid: true,
+    });
     expect(
       (await verify({ ...exported.bundle, tenantId: 'someone-else' })).body,
     ).toMatchObject({ valid: false });
@@ -264,5 +280,69 @@ describe('Evidence export (e2e)', () => {
         signature: exported.signature.signature,
       })
       .expect(403);
+  });
+
+  it('carries an inclusion proof for every sealed event, and verify checks each against the tenant key', async () => {
+    const client = await app.get(TenantDatabaseManager).getClient(tenant.id);
+    await app.get(AuditCheckpointService).createCheckpoint(client, tenant.id);
+
+    const exported = (
+      await request(app.getHttpServer() as App)
+        .post('/evidence/export')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ taskId })
+        .expect(201)
+    ).body as EvidenceExportResult;
+
+    const key = await app.get(CheckpointSigner).publicKey(tenant.id);
+    expect(exported.bundle.checkpointPublicKey).toEqual(key);
+    const sealed = exported.bundle.events.filter((e) => e.proof !== null);
+    expect(sealed.length).toBe(exported.bundle.events.length);
+    for (const e of sealed) {
+      expect(verifyInclusion(e.eventHash, e.proof!.proof, e.proof!.root)).toBe(
+        true,
+      );
+    }
+
+    const verified = (
+      await request(app.getHttpServer() as App)
+        .post('/evidence/verify')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          bundle: exported.bundle,
+          signature: exported.signature.signature,
+        })
+        .expect(200)
+    ).body as { valid: boolean; proofsVerified: number; proofsMissing: number };
+    expect(verified).toEqual({
+      valid: true,
+      proofsVerified: sealed.length,
+      proofsMissing: 0,
+    });
+
+    // A bundle whose HMAC signature is genuine but whose proof does not lead
+    // to a SEAL signed by the tenant key (a leaked signing secret, say) fails.
+    const forged = {
+      ...exported.bundle,
+      events: exported.bundle.events.map((e, i) =>
+        i === 0 && e.proof
+          ? {
+              ...e,
+              proof: {
+                ...e.proof,
+                checkpoint: { ...e.proof.checkpoint, signature: 'AAAA' },
+              },
+            }
+          : e,
+      ),
+    };
+    const resigned = await signEvidenceBundle(
+      forged,
+      exported.exportId,
+      SIGNING_SECRET,
+    );
+    expect(
+      await app.get(EvidenceExportService).verify(forged, resigned.signature),
+    ).toMatchObject({ valid: false, reason: 'proof_invalid' });
   });
 });

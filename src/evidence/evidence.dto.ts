@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { AuditEventProofDto, CheckpointPublicKeyDto } from '../audit/audit.dto';
 
 /** Mirrors `EvidenceExportRequestSchema` (`evidence-export.validation.ts`). At least one filter dimension is required. */
 export class EvidenceExportRequestDto {
@@ -62,6 +63,20 @@ class EvidenceEventDto {
 
   @ApiProperty()
   eventHash!: string;
+
+  @ApiProperty({ minimum: 0, maximum: 63 })
+  partition!: number;
+
+  @ApiProperty({ description: 'Decimal string.' })
+  partitionSeq!: string;
+
+  @ApiProperty({
+    type: () => AuditEventProofDto,
+    nullable: true,
+    description:
+      'Inclusion proof against a signed checkpoint; null until one covers the event.',
+  })
+  proof!: AuditEventProofDto | null;
 }
 
 class EvidenceCertificateDto {
@@ -335,6 +350,9 @@ class EvidenceBundleDto {
 
   @ApiProperty({ type: () => EvidenceContextDto })
   context!: EvidenceContextDto;
+
+  @ApiProperty({ type: () => CheckpointPublicKeyDto })
+  checkpointPublicKey!: CheckpointPublicKeyDto;
 }
 
 class EvidenceBundleSignatureDto {
