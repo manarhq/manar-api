@@ -21,9 +21,26 @@ export function tenantSlugOf(raw: string): string | null {
   return KEY.exec(raw)?.[1] ?? null;
 }
 
+/** `network/prefix` with exactly one `/` and a decimal prefix in range; nothing looser. */
+function parseCidr(
+  cidr: string,
+): { net: string; prefix: number; family: 'ipv4' | 'ipv6' } | null {
+  const m = /^([^/\s]+)\/(\d{1,3})$/.exec(cidr);
+  if (!m) return null;
+  const family = isIP(m[1]!);
+  const prefix = Number(m[2]);
+  if (family === 0 || prefix > (family === 4 ? 32 : 128)) return null;
+  return { net: m[1]!, prefix, family: family === 4 ? 'ipv4' : 'ipv6' };
+}
+
+export function isValidCidr(cidr: string): boolean {
+  return parseCidr(cidr) !== null;
+}
+
 /**
  * Whether `ip` is inside one of `cidrs` (IPv4 or IPv6). An empty list
- * allows any address; malformed input never allows.
+ * allows any address; malformed input never allows (a malformed entry
+ * matches nothing; writers reject them up front with `isValidCidr`).
  */
 export function ipAllowed(ip: string, cidrs: string[]): boolean {
   if (cidrs.length === 0) return true;
@@ -33,18 +50,8 @@ export function ipAllowed(ip: string, cidrs: string[]): boolean {
   if (family === 0) return false;
   const list = new BlockList();
   for (const cidr of cidrs) {
-    const [net, bits] = cidr.split('/');
-    const netFamily = isIP(net ?? '');
-    const prefix = Number(bits);
-    if (
-      netFamily === 0 ||
-      !Number.isInteger(prefix) ||
-      prefix < 0 ||
-      prefix > (netFamily === 4 ? 32 : 128)
-    ) {
-      continue; // a malformed entry matches nothing
-    }
-    list.addSubnet(net!, prefix, netFamily === 4 ? 'ipv4' : 'ipv6');
+    const parsed = parseCidr(cidr);
+    if (parsed) list.addSubnet(parsed.net, parsed.prefix, parsed.family);
   }
   return list.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }

@@ -3,6 +3,7 @@ import {
   generateInstallKey,
   hashInstallKey,
   ipAllowed,
+  isValidCidr,
   tenantSlugOf,
 } from './install-key.util';
 
@@ -47,5 +48,21 @@ describe('ipAllowed', () => {
   it('rejects malformed input instead of allowing it', () => {
     expect(ipAllowed('not-an-ip', ['10.0.0.0/8'])).toBe(false);
     expect(ipAllowed('10.1.2.3', ['garbage'])).toBe(false);
+  });
+
+  it('never reads a sloppy prefix as /0 (allow-all)', () => {
+    for (const sloppy of [
+      '10.0.0.0/',
+      '10.0.0.0/ ',
+      '10.0.0.0/0x8',
+      '10.0.0.0/8/8',
+      '10.0.0.0',
+    ]) {
+      expect(ipAllowed('11.1.2.3', [sloppy])).toBe(false);
+      expect(isValidCidr(sloppy)).toBe(false);
+    }
+    expect(isValidCidr('10.0.0.0/8')).toBe(true);
+    expect(isValidCidr('2001:db8::/32')).toBe(true);
+    expect(isValidCidr('10.0.0.0/33')).toBe(false);
   });
 });

@@ -9,6 +9,7 @@ import {
   generateInstallKey,
   hashInstallKey,
   ipAllowed,
+  isValidCidr,
 } from './install-key.util';
 
 /** One error for every refusal, so a caller learns nothing about why. */
@@ -19,6 +20,9 @@ export class InstallKeyInvalidError extends Error {
 }
 
 export class HostGroupNotFoundError extends Error {}
+
+/** A range that isn't `network/prefix`: refused rather than silently ignored. */
+export class InvalidCidrError extends Error {}
 
 export interface CreateInstallKeyInput {
   hostGroupId: string;
@@ -45,6 +49,8 @@ export class InstallKeysService {
     actor: AuditActor,
     input: CreateInstallKeyInput,
   ): Promise<{ key: InstallKey; raw: string }> {
+    const bad = (input.allowedCidrs ?? []).filter((c) => !isValidCidr(c));
+    if (bad.length > 0) throw new InvalidCidrError(bad.join(', '));
     const raw = generateInstallKey(tenant.slug);
     const [key, publish] = await client.$transaction(async (tx) => {
       const group = await tx.hostGroup.findUnique({
