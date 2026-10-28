@@ -25,13 +25,13 @@
  *      iam.disable-user in response -> DENIED, by deterministic task
  *      scope, regardless of what the tool output said (Section 72) — the
  *      injected text was never trusted or executed by anything here.
- *   4. edr.isolate-host on WS-042 -> APPROVAL_REQUIRED.
+ *   4. edr.isolate-host on WS-017 -> APPROVAL_REQUIRED.
  *   5. A human (the "approver" persona) decides APPROVE via the real
  *      POST /approvals/:id/decide.
  *   6. The agent polls, retries with the issued grant -> EXECUTE — and
  *      the script independently re-verifies against demo-soc-tools
  *      directly (never trusting the gateway's own response alone) that
- *      WS-042 is now actually isolated.
+ *      WS-017 is now actually isolated.
  *   7. A kill switch is activated on the agent -> a previously-working
  *      action is denied immediately, no grace period.
  *   8. GET /audit/verify -> the tenant's whole hash chain is valid.
@@ -57,6 +57,9 @@ const CREDENTIALS_FILE_PATH =
   '.manar-demo/tenant-credentials.json';
 
 const DEMO_HOST_ID = 'WS-042';
+// Isolation uses a different host: the local demo tenant's Endpoint Isolation
+// Approval Policy v4 auto-ALLOWs isolating WS-042, so WS-017 still needs approval.
+const ISOLATE_HOST_ID = 'WS-017';
 const DEMO_INCIDENT_ID = 'INC-2026-0042';
 
 interface DemoTenantCredentials {
@@ -338,12 +341,12 @@ async function main(): Promise<void> {
     `Correctly DENIED (reason: "${iamAttempt.reason}") -- the injected instruction was never trusted or executed.`,
   );
 
-  section('4. EDR isolate-host on WS-042 -> APPROVAL_REQUIRED');
+  section('4. EDR isolate-host on WS-017 -> APPROVAL_REQUIRED');
   const isolateAttempt = await manar.invokeTool({
     taskId: credentials.taskId,
     toolId: 'edr',
     actionId: 'isolate-host',
-    resource: DEMO_HOST_ID,
+    resource: ISOLATE_HOST_ID,
     params: {},
   });
   assertPending(isolateAttempt, 'edr.isolate-host');
@@ -356,7 +359,7 @@ async function main(): Promise<void> {
     'POST',
     `/approvals/${isolateAttempt.approvalId}/decide`,
     approverToken,
-    { decision: 'APPROVE', reason: 'Confirmed malicious activity on WS-042' },
+    { decision: 'APPROVE', reason: 'Confirmed malicious activity on WS-017' },
   );
   console.log('Decision submitted.');
 
@@ -385,7 +388,7 @@ async function main(): Promise<void> {
     taskId: credentials.taskId,
     toolId: 'edr',
     actionId: 'isolate-host',
-    resource: DEMO_HOST_ID,
+    resource: ISOLATE_HOST_ID,
     params: {},
     grantToken,
   });
@@ -399,13 +402,13 @@ async function main(): Promise<void> {
   section(
     '6. Independently confirming isolation against demo-soc-tools directly',
   );
-  const realHost = await getRealDemoHost(DEMO_HOST_ID);
+  const realHost = await getRealDemoHost(ISOLATE_HOST_ID);
   assert(
     realHost.isolated,
-    `expected the real demo-soc-tools service to show ${DEMO_HOST_ID} isolated, got ${JSON.stringify(realHost)}`,
+    `expected the real demo-soc-tools service to show ${ISOLATE_HOST_ID} isolated, got ${JSON.stringify(realHost)}`,
   );
   console.log(
-    `Confirmed: ${DEMO_HOST_ID} is actually isolated (verified directly, not just via the gateway's own response).`,
+    `Confirmed: ${ISOLATE_HOST_ID} is actually isolated (verified directly, not just via the gateway's own response).`,
   );
 
   section('7. Activating a kill switch on "SOC Response Agent"');
