@@ -63,3 +63,15 @@ export function httpAdapterOptions(env: {
   const cidrs = value.trim() === 'none' ? [] : (parseCidrs(value) ?? []);
   return cidrs.length ? { trustProxy: cidrs } : {};
 }
+
+/**
+ * The caller's address for address-based controls (install-key ranges, approval-rule ranges).
+ * Only trusted when the proxies in front are named (or `none`): unset, `request.ip` may be the
+ * proxy pod, so it is reported as `unknown`, which no range matches (fail closed).
+ */
+export function callerAddress(
+  ip: string,
+  env: { MANAR_TRUSTED_PROXY_CIDRS?: string },
+): string {
+  return env.MANAR_TRUSTED_PROXY_CIDRS?.trim() ? ip : 'unknown';
+}

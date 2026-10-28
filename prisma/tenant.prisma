@@ -2192,7 +2192,7 @@ enum HostKeyType {
 /// One machine, unique per tenant by `machineId` (its certificate names
 /// `host://<tenantSlug>/<machineId>`). Re-registration merges into this row
 /// (VDI golden images register on every boot); a different key or a key
-/// from another group re-runs the approval rules (docs/hosts.md).
+/// from another group waits as a pending rekey for an admin (docs/hosts.md).
 model Host {
   id               String            @id @default(uuid())
   hostGroupId      String

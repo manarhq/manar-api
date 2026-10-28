@@ -99,22 +99,18 @@ export class HostsAdminService {
             'approving a rekey needs the host PENDING or APPROVED and the exact pending keyFingerprint',
           );
         }
-        const updated = await tx.host.update({
-          where: { id: hostId },
-          data: {
-            pendingKeyFingerprint: null,
-            pendingHostGroupId: null,
-            ...(approve
-              ? {
-                  keyFingerprint: current.pendingKeyFingerprint,
-                  hostGroupId:
-                    current.pendingHostGroupId ?? current.hostGroupId,
-                  status: 'APPROVED' as const,
-                  approvedBy: actor.id,
-                  approvedAt: new Date(),
-                }
-              : {}),
-          },
+        const updated = await this.writeIfUnchanged(tx, current, {
+          pendingKeyFingerprint: null,
+          pendingHostGroupId: null,
+          ...(approve
+            ? {
+                keyFingerprint: current.pendingKeyFingerprint,
+                hostGroupId: current.pendingHostGroupId ?? current.hostGroupId,
+                status: 'APPROVED' as const,
+                approvedBy: actor.id,
+                approvedAt: new Date(),
+              }
+            : {}),
         });
         const done = await this.audit.recordInTransaction(tx, tenantId, {
           eventType: EVENT[decision] as never,
@@ -139,18 +135,15 @@ export class HostsAdminService {
           `cannot ${decision} a host that is ${current.status}`,
         );
       }
-      const updated = await tx.host.update({
-        where: { id: hostId },
-        data: {
-          status: rule.to,
-          // Revoking or rejecting also drops any rekey waiting for approval.
-          ...(decision !== 'approve'
-            ? { pendingKeyFingerprint: null, pendingHostGroupId: null }
-            : {}),
-          ...(decision === 'approve'
-            ? { approvedBy: actor.id, approvedAt: new Date() }
-            : {}),
-        },
+      const updated = await this.writeIfUnchanged(tx, current, {
+        status: rule.to,
+        // Revoking or rejecting also drops any rekey waiting for approval.
+        ...(decision !== 'approve'
+          ? { pendingKeyFingerprint: null, pendingHostGroupId: null }
+          : {}),
+        ...(decision === 'approve'
+          ? { approvedBy: actor.id, approvedAt: new Date() }
+          : {}),
       });
       const done = await this.audit.recordInTransaction(tx, tenantId, {
         eventType: EVENT[decision] as never,
@@ -165,6 +158,32 @@ export class HostsAdminService {
       await this.ca.revokeHostCertificates(client, hostId);
     }
     return host;
+  }
+
+  /**
+   * Writes only if the host is still in the state the decision was made
+   * from: a concurrent decision that committed first (a revoke, say) is
+   * never overwritten; this one fails instead.
+   */
+  private async writeIfUnchanged(
+    tx: Prisma.TransactionClient,
+    current: Host,
+    data: Prisma.HostUpdateManyMutationInput,
+  ): Promise<Host> {
+    const { count } = await tx.host.updateMany({
+      where: {
+        id: current.id,
+        status: current.status,
+        pendingKeyFingerprint: current.pendingKeyFingerprint,
+      },
+      data,
+    });
+    if (count === 0) {
+      throw new HostTransitionError(
+        `host ${current.id} changed while this decision was made`,
+      );
+    }
+    return tx.host.findUniqueOrThrow({ where: { id: current.id } });
   }
 
   /** Runs `change` and records `eventType` with its result in one transaction. */

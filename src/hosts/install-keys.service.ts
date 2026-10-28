@@ -134,7 +134,7 @@ export class InstallKeysService {
       SET "uses" = "uses" + 1, "updatedAt" = now()
       WHERE "keyHash" = ${keyHash}
         AND "revokedAt" IS NULL
-        AND ("expiresAt" IS NULL OR "expiresAt" > now())
+        AND ("expiresAt" IS NULL OR "expiresAt" > (now() AT TIME ZONE 'UTC'))
         AND ("maxUses" IS NULL OR "uses" < "maxUses")
       RETURNING *
     `;

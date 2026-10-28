@@ -42,7 +42,16 @@ An install key alone can therefore neither take over nor disturb a machine alrea
 
 Rules (`/host-approval-rules`) auto-approve a new machine when every set condition matches:
 group (or every group), hostname glob (hostname characters plus `*`/`?`, at most three `*`,
-matched in linear time), address range, TPM-backed key. Otherwise the host waits for a person.
+matched in linear time), address range, and `keyType: TPM`. Otherwise the host waits for a person.
+
+`keyType` is what the installer reports; there is no TPM attestation yet, so `requireTpm` keeps
+honest installers on software keys out of auto-approval but does not stop a caller holding the
+install key from claiming `TPM`. Treat the install key as the control and `requireTpm` as a filter.
+
+**Caller address.** Install-key ranges and rule ranges use the caller's address only when
+`MANAR_TRUSTED_PROXY_CIDRS` names the proxies in front of the API (or is `none` for an API exposed
+directly). Unset, `request.ip` may be the proxy pod, so the address is recorded as `unknown` and no
+range matches: a key with ranges refuses every host and a rule with ranges never auto-approves.
 
 | Action                    | From                  | To         | Notes                                           |
 | ------------------------- | --------------------- | ---------- | ----------------------------------------------- |

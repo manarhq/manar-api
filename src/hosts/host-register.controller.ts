@@ -9,7 +9,9 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
 import type { FastifyRequest } from 'fastify';
+import { callerAddress } from '../config/trusted-proxy';
 import { CsrValidationError } from '../agents/certificate-authority.errors';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
@@ -29,7 +31,10 @@ import { RegisterHostRequestSchema } from './hosts.validation';
 @ApiTags('hosts')
 @Controller('hosts')
 export class HostRegisterController {
-  constructor(private readonly hosts: HostsService) {}
+  constructor(
+    private readonly hosts: HostsService,
+    private readonly config: ConfigService,
+  ) {}
 
   @Post('register')
   @ApiOperation({
@@ -47,7 +52,14 @@ export class HostRegisterController {
   async register(@Req() request: FastifyRequest, @Body() body: unknown) {
     const input = parseBodyOrThrow(RegisterHostRequestSchema, body);
     try {
-      return await this.hosts.register({ ...input, ip: request.ip });
+      return await this.hosts.register({
+        ...input,
+        ip: callerAddress(request.ip, {
+          MANAR_TRUSTED_PROXY_CIDRS: this.config.get<string>(
+            'MANAR_TRUSTED_PROXY_CIDRS',
+          ),
+        }),
+      });
     } catch (error) {
       if (error instanceof InstallKeyInvalidError) {
         throw new UnauthorizedException('Invalid install key');

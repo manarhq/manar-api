@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient as TenantPrismaClient } from '../src/generated/tenant-client/client';
 import { randomUUID } from 'node:crypto';
 import { Client as PgClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -422,6 +424,64 @@ describe('Hosts (e2e)', () => {
           where: { hostId: first.hostId, revokedAt: null },
         }),
       ).toBe(1); // only the first registration's
+    }, 60_000);
+
+    it('an approve racing a revoke never brings the host back', async () => {
+      const t = await tenant('decide-race');
+      for (let wave = 0; wave < 20; wave += 1) {
+        const host = await t.client.host.create({
+          data: {
+            hostGroupId: t.group.id,
+            machineId: `race-${wave}`,
+            hostname: `RACE-${wave}`,
+            os: 'Linux',
+            keyType: 'TPM',
+            keyFingerprint: 'f'.repeat(64),
+            registeredFromIp: '10.0.0.7',
+          },
+        });
+        const [, revoked] = await Promise.allSettled([
+          admins.decide(t.client, t.id, admin, host.id, 'approve'),
+          admins.decide(t.client, t.id, admin, host.id, 'revoke'),
+        ]);
+        const after = await t.client.host.findUniqueOrThrow({
+          where: { id: host.id },
+        });
+        if (revoked.status === 'fulfilled')
+          expect(after.status).toBe('REVOKED');
+      }
+    }, 120_000);
+
+    it('an expired key stays expired whatever the database session time zone', async () => {
+      const t = await tenant('tz');
+      const { key, raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'expired',
+        expiresAt: new Date(Date.now() - 60_000),
+      });
+      const binding = await control.tenantDatabaseBinding.findFirstOrThrow({
+        where: { tenantId: t.id },
+      });
+      const url = new URL(process.env.TENANT_DB_BASE_URL!);
+      url.pathname = `/${binding.databaseName}`;
+      url.searchParams.set('options', '-c timezone=America/Los_Angeles');
+      const behind = new TenantPrismaClient({
+        adapter: new PrismaPg({ connectionString: url.toString() }),
+      });
+      try {
+        await expect(
+          keys.consume(behind, raw, '10.0.0.7'),
+        ).rejects.toBeInstanceOf(InstallKeyInvalidError);
+        expect(
+          (
+            await t.client.installKey.findUniqueOrThrow({
+              where: { id: key.id },
+            })
+          ).uses,
+        ).toBe(0);
+      } finally {
+        await behind.$disconnect();
+      }
     }, 60_000);
 
     it('a key from another group cannot move a known machine by itself', async () => {

@@ -117,21 +117,57 @@ export class HostsController {
     });
   }
 
-  @Post(':id/:decision(approve|reject|revoke)')
+  @Post(':id/approve')
   @RequireRole(...WRITE)
   @ApiOperation({
-    summary: 'Approve, reject or revoke a host',
+    summary: 'Approve a host',
     description:
-      "Revoking also revokes its certificates. A pending rekey is approved only with body { keyFingerprint } equal to the host's pendingKeyFingerprint. Audited.",
+      "A pending rekey is approved only with body { keyFingerprint } equal to the host's pendingKeyFingerprint. Audited.",
   })
   @ApiResponse({ status: 201, description: 'The updated host.' })
   @ApiResponse({ status: 404, type: ErrorResponseDto })
   @ApiResponse({ status: 409, type: ErrorResponseDto })
-  async decide(
+  approve(
     @CurrentAuth() auth: AuthContext,
     @Param('id', new ParseUUIDPipe()) id: string,
-    @Param('decision') decision: HostDecision,
     @Body() body: unknown,
+  ) {
+    return this.decide(auth, id, 'approve', body);
+  }
+
+  @Post(':id/reject')
+  @RequireRole(...WRITE)
+  @ApiOperation({ summary: 'Reject a host, or its pending rekey (audited)' })
+  @ApiResponse({ status: 201, description: 'The updated host.' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  @ApiResponse({ status: 409, type: ErrorResponseDto })
+  reject(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    return this.decide(auth, id, 'reject', {});
+  }
+
+  @Post(':id/revoke')
+  @RequireRole(...WRITE)
+  @ApiOperation({
+    summary: 'Revoke a host and its certificates (audited)',
+  })
+  @ApiResponse({ status: 201, description: 'The updated host.' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  @ApiResponse({ status: 409, type: ErrorResponseDto })
+  revoke(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    return this.decide(auth, id, 'revoke', {});
+  }
+
+  private async decide(
+    auth: AuthContext,
+    id: string,
+    decision: HostDecision,
+    body: unknown,
   ) {
     const opts = parseBodyOrThrow(DecideHostSchema, body ?? {});
     const client = await this.tenants.getClient(auth.tenant.id);
