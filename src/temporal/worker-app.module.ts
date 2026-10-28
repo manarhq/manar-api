@@ -8,6 +8,7 @@ import { RiskModule } from '../risk/risk.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
 import { AuditModule } from '../audit/audit.module';
 import { AuditRetentionModule } from '../audit/retention/audit-retention.module';
+import { AuditCheckpointScheduler } from '../audit/checkpoint/audit-checkpoint.scheduler';
 import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { AiAdvisoryModule } from '../ai-advisory/ai-advisory.module';
@@ -54,6 +55,8 @@ import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.
     WebhooksModule,
   ],
   providers: [
+    // SEALs: signed audit checkpoints every second (docs/audit-chain.md).
+    AuditCheckpointScheduler,
     ApprovalActivitiesFactory,
     AuditRetentionActivitiesFactory,
     WebhookDeliveryActivitiesFactory,

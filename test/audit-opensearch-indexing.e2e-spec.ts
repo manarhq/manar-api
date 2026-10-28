@@ -9,6 +9,8 @@ import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { AuditService } from '../src/audit/audit.service';
+import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
+import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
 import { OpenSearchIndexService } from '../src/audit/opensearch/opensearch-client.service';
@@ -186,7 +188,10 @@ describe('OpenSearch audit-event indexing (e2e)', () => {
     );
     kafkaPublisher = new KafkaPublisherService(fakeConfigService());
     await kafkaPublisher.onModuleInit();
-    auditService = new AuditService(kafkaPublisher);
+    auditService = new AuditService(
+      kafkaPublisher,
+      new CheckpointSigner(new OpenBaoKvClient(fakeConfigService())),
+    );
     openSearchIndexService = new OpenSearchIndexService(fakeConfigService());
     await openSearchIndexService.onModuleInit();
     auditReindexService = new AuditReindexService(openSearchIndexService);

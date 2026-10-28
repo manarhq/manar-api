@@ -24,6 +24,11 @@ import { TenantDatabaseManager } from '../src/database/tenant-database-manager.s
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
 import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
+import { AuditService } from '../src/audit/audit.service';
+import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
+import type { AuditEventProof } from '../src/audit/checkpoint/audit-proof.service';
+import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
+import { verifyInclusion } from '../src/audit/merkle';
 import {
   assignRealmRole,
   createRealmUser,
@@ -941,6 +946,64 @@ describe('Audit retrofit points (e2e)', () => {
 
     await request(humanApp.getHttpServer() as App)
       .get('/audit/verify')
+      .set('Authorization', `Bearer ${noAuditRoleToken}`)
+      .expect(403);
+  }, 30_000);
+
+  it('11b. audit proofs and the SEAL public key: same roles, 404/409 before 200', async () => {
+    const server = humanApp.getHttpServer() as App;
+    const client = await humanApp
+      .get(TenantDatabaseManager)
+      .getClient(tenant.id);
+    const event = await humanApp.get(AuditService).record(client, tenant.id, {
+      eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+      actor: { type: 'system', id: 'system:proof-e2e' },
+      data: {},
+    });
+
+    await request(server)
+      .get(`/audit/events/${event.id}/proof`)
+      .set('Authorization', `Bearer ${noAuditRoleToken}`)
+      .expect(403);
+    await request(server)
+      .get(`/audit/events/${randomUUID()}/proof`)
+      .set('Authorization', `Bearer ${auditorToken}`)
+      .expect(404);
+
+    // This app runs no worker scheduler, so nothing is sealed yet.
+    const pending = await request(server)
+      .get(`/audit/events/${event.id}/proof`)
+      .set('Authorization', `Bearer ${auditorToken}`)
+      .expect(409);
+    expect(JSON.stringify(pending.body)).toContain(
+      'audit_event_not_checkpointed',
+    );
+
+    await humanApp
+      .get(AuditCheckpointService)
+      .createCheckpoint(client, tenant.id);
+
+    const proof = await request(server)
+      .get(`/audit/events/${event.id}/proof`)
+      .set('Authorization', `Bearer ${auditorToken}`)
+      .expect(200);
+    const key = await request(server)
+      .get('/audit/checkpoints/public-key')
+      .set('Authorization', `Bearer ${auditorToken}`)
+      .expect(200);
+    const body = proof.body as AuditEventProof;
+    const publicKey = key.body as { keyId: string; publicKeyPem: string };
+    expect(verifyInclusion(body.leaf, body.proof, body.root)).toBe(true);
+    expect(body.checkpoint.keyId).toBe(publicKey.keyId);
+    expect(
+      CheckpointSigner.verify(
+        body.checkpoint.checkpointHash,
+        body.checkpoint.signature,
+        publicKey.publicKeyPem,
+      ),
+    ).toBe(true);
+    await request(server)
+      .get('/audit/checkpoints/public-key')
       .set('Authorization', `Bearer ${noAuditRoleToken}`)
       .expect(403);
   }, 30_000);

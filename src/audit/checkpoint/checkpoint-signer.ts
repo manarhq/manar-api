@@ -1,0 +1,166 @@
+import {
+  createPrivateKey,
+  generateKeyPairSync,
+  type KeyObject,
+  sign,
+} from 'node:crypto';
+import { Injectable } from '@nestjs/common';
+import { OpenBaoKvClient } from '../../openbao/openbao-kv.client';
+import {
+  type CheckpointKeyLookup,
+  type CheckpointPublicKey,
+  keyIdOf,
+  NoCheckpointKeyError,
+  verifyCheckpointSignature,
+} from './checkpoint-format';
+
+export type { CheckpointPublicKey };
+export { NoCheckpointKeyError };
+
+interface TenantSigningKey extends CheckpointPublicKey {
+  privateKey: KeyObject;
+}
+
+const DIGEST = /^[0-9a-f]{64}$/;
+
+/**
+ * Signs SEALs (audit checkpoints) with **one Ed25519 key per tenant**, so each
+ * legal authority's log can be verified and handed over on its own, and a
+ * leaked key exposes only that tenant (Mohamed, 28 Oct 2026). The private key
+ * lives in OpenBao KV at `audit/checkpoint-signing-key/<tenantId>` and is
+ * created on first use with check-and-set, so two replicas racing to create
+ * it end up with the same key. Keys are cached in memory after first load.
+ */
+@Injectable()
+export class CheckpointSigner implements CheckpointKeyLookup {
+  private readonly keys = new Map<string, TenantSigningKey>();
+  private readonly creating = new Map<string, Promise<TenantSigningKey>>();
+
+  constructor(private readonly kv: OpenBaoKvClient) {}
+
+  static keyPath(tenantId: string): string {
+    return `audit/checkpoint-signing-key/${tenantId}`;
+  }
+
+  async sign(tenantId: string, checkpointHashHex: string): Promise<string> {
+    if (!DIGEST.test(checkpointHashHex)) {
+      throw new Error('checkpoint hash is not a sha256 hex digest');
+    }
+    const key = await this.keyFor(tenantId, true);
+    return sign(
+      null,
+      Buffer.from(checkpointHashHex, 'hex'),
+      key.privateKey,
+    ).toString('base64');
+  }
+
+  async hasKey(tenantId: string): Promise<boolean> {
+    if (this.keys.has(tenantId)) return true;
+    return (
+      (await this.kv.readSecretIfPresent(
+        CheckpointSigner.keyPath(tenantId),
+      )) !== null
+    );
+  }
+
+  async publicKey(tenantId: string): Promise<CheckpointPublicKey> {
+    const { keyId, algorithm, publicKeyPem } = await this.keyFor(
+      tenantId,
+      false,
+    );
+    return { keyId, algorithm, publicKeyPem };
+  }
+
+  static verify(
+    checkpointHashHex: string,
+    signatureB64: string,
+    publicKeyPem: string,
+  ): boolean {
+    return verifyCheckpointSignature(
+      checkpointHashHex,
+      signatureB64,
+      publicKeyPem,
+    );
+  }
+
+  /**
+   * Only successfully loaded keys are cached. A read-only lookup never
+   * shares its in-flight promise with a signer, so a lookup racing the
+   * first SEAL can't make that SEAL's signing fail.
+   */
+  private async keyFor(
+    tenantId: string,
+    create: boolean,
+  ): Promise<TenantSigningKey> {
+    const cached = this.keys.get(tenantId);
+    if (cached) return cached;
+    if (create) {
+      let pending = this.creating.get(tenantId);
+      if (!pending) {
+        pending = this.load(tenantId, true).finally(() =>
+          this.creating.delete(tenantId),
+        );
+        this.creating.set(tenantId, pending);
+      }
+      const key = await pending;
+      this.keys.set(tenantId, key);
+      return key;
+    }
+    const key = await this.load(tenantId, false);
+    this.keys.set(tenantId, key);
+    return key;
+  }
+
+  private async load(
+    tenantId: string,
+    create: boolean,
+  ): Promise<TenantSigningKey> {
+    const path = CheckpointSigner.keyPath(tenantId);
+    let secret = await this.kv.readSecretIfPresent(path);
+    if (secret === null && !create) {
+      throw new NoCheckpointKeyError(
+        `tenant ${tenantId} has no checkpoint key yet`,
+      );
+    }
+    if (secret === null) {
+      const pair = generateKeyPairSync('ed25519');
+      try {
+        await this.kv.writeSecretIfAbsent(path, {
+          privateKeyPem: pair.privateKey.export({
+            type: 'pkcs8',
+            format: 'pem',
+          }),
+          publicKeyPem: pair.publicKey.export({ type: 'spki', format: 'pem' }),
+        });
+      } catch {
+        // Another replica created it first (or the write failed): use what is there.
+      }
+      secret = await this.kv.readSecretIfPresent(path);
+      if (secret === null) {
+        throw new Error(
+          `checkpoint signing key for tenant ${tenantId} could not be created`,
+        );
+      }
+    }
+    if (
+      typeof secret.privateKeyPem !== 'string' ||
+      typeof secret.publicKeyPem !== 'string'
+    ) {
+      throw new Error(
+        `checkpoint signing key for tenant ${tenantId} is malformed`,
+      );
+    }
+    const privateKey = createPrivateKey(secret.privateKeyPem);
+    if (privateKey.asymmetricKeyType !== 'ed25519') {
+      throw new Error(
+        `checkpoint signing key for tenant ${tenantId} is not Ed25519`,
+      );
+    }
+    return {
+      privateKey,
+      algorithm: 'Ed25519',
+      publicKeyPem: secret.publicKeyPem,
+      keyId: keyIdOf(secret.publicKeyPem),
+    };
+  }
+}

@@ -1,18 +1,39 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  Optional,
+} from '@nestjs/common';
 import type {
   AuditEvent,
   Prisma,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
 import { getCorrelationId } from '../logging/correlation-id.store';
+import { AuditBatcher } from './audit-batcher';
 import { computeEventHash } from './audit-hash';
+import { AUDIT_PARTITIONS, partitionFor } from './audit-partition';
 import type { AuditActor, AuditEventType } from './audit-event-types';
 import {
   CURRENT_EVENT_VERSION,
   DomainEventEnvelope,
 } from './domain-event-envelope';
+import {
+  anchorDigestOf,
+  CHECKPOINT_PUBLIC_KEYS,
+  type CheckpointKeyLookup,
+  type CheckpointPublicKey,
+  checkpointHashOf,
+  NoCheckpointKeyError,
+  type PartitionHead,
+  type PartitionRoot,
+  verifyCheckpointSignature,
+} from './checkpoint/checkpoint-format';
+import { SEAL_MARKS, type SealMarkStore } from './checkpoint/seal-mark.store';
 import { KafkaPublisherService } from './kafka-publisher.service';
+import { merkleRoot } from './merkle';
 
 export interface RecordAuditEventInput {
   eventType: AuditEventType;
@@ -39,83 +60,94 @@ export interface AuditEventRecord {
   data: unknown;
   previousHash: string | null;
   eventHash: string;
+  /** Which of the tenant's 64 chains (`src/audit/audit-partition.ts`). */
+  partition: number;
+  /** 1-based position within `partition`. */
+  partitionSeq: number;
 }
 
 export type VerifyAuditChainResult =
   { valid: true } | { valid: false; brokenAt: string };
 
-interface AuditChainStateRow {
+/** An event whose id, time and correlation are fixed when `record` is called. */
+interface PendingAuditEvent {
+  client: TenantPrismaClient;
+  input: RecordAuditEventInput;
+  id: string;
+  correlationId: string;
+  timestamp: Date;
+  partition: number;
+}
+
+interface PartitionLockRow {
+  partition: number;
   latestEventHash: string | null;
+  latestSeq: number;
 }
 
 /**
- * Phase 9a (Sections 46-47, 29 — see docs/audit-chain.md). The single write
- * path for every `AuditEvent` in this codebase — no other code anywhere
- * inserts into `audit_events`/`audit_chain_state`, and there is no update/
- * delete path for either (append-only, by construction: `AuditEvent` has no
- * mutable fields any service ever writes to after creation).
+ * The single write path for every `AuditEvent` (docs/audit-chain.md). No
+ * other code inserts into `audit_events`/`audit_partition_state`, and there
+ * is no update/delete path for either outside retention.
+ *
+ * Each tenant's log is 64 hash chains (`partitionFor` keys them by agent), so
+ * one agent's events stay strictly ordered while unrelated agents append in
+ * parallel. `record` goes through a per-tenant group commit (`AuditBatcher`:
+ * ≤ 5 ms or 500 events per transaction); the caller's promise settles only
+ * when its batch commits, so "record before acting" still holds.
  */
 @Injectable()
-export class AuditService {
+export class AuditService implements OnModuleDestroy {
   private readonly logger = new Logger(AuditService.name);
-
-  /** Fixed, known singleton row id — see `AuditChainState`'s schema doc comment. */
-  static readonly SINGLETON_ID = 'singleton';
 
   /**
    * How many `AuditEvent` rows `verifyAuditChain` holds in memory at once.
-   *
-   * Release 2026-11-11 reliability fix: this method used to materialize the
-   * *entire* `audit_events` table in one `findMany` before hashing anything.
-   * `GET /audit/verify` is reachable over HTTP by any `AUDITOR`/
-   * `SECURITY_ADMIN`/`TENANT_OWNER`, and the pod's memory limit is 768Mi
-   * (deploy/helm/manar-api/values.yaml) — so a single large tenant's
-   * verification request was enough to OOM-kill the replica handling it,
-   * taking every other in-flight request on that pod down with it.
-   *
-   * Verification is a *sequential* walk: it only ever needs the previous
-   * event's `eventHash` to check the next one, so the whole table never has
-   * to be resident. Batching bounds peak memory at roughly this many rows
-   * regardless of chain length, at the cost of one extra round trip per
-   * batch. 1000 is large enough that the round trips stay negligible next
-   * to the SHA-256 work, and small enough that a batch of even unusually
-   * fat `data` payloads is a few MB rather than hundreds.
+   * `GET /audit/verify` is reachable over HTTP and the pod's memory limit is
+   * 768Mi, so the walk is keyset-paginated per partition rather than loaded
+   * whole (release 2026-11-11 fix, kept).
    */
   private static readonly VERIFY_CHAIN_BATCH_SIZE = 1000;
 
-  constructor(private readonly kafkaPublisher: KafkaPublisherService) {}
+  /**
+   * How long events may sit after the last SEAL, measured by that SEAL's
+   * signed time. The worker seals every second; two minutes absorbs a worker
+   * restart. Past it, uncovered events mean SEALs were deleted (or sealing
+   * has stopped), and verification fails closed.
+   */
+  static SEAL_GRACE_MS = 120_000;
+
+  private readonly batcher = new AuditBatcher<PendingAuditEvent, AuditEvent>(
+    (_tenantId, items) => this.flushBatch(items),
+  );
+
+  constructor(
+    private readonly kafkaPublisher: KafkaPublisherService,
+    @Inject(CHECKPOINT_PUBLIC_KEYS)
+    private readonly checkpointKeys: CheckpointKeyLookup,
+    @Optional()
+    @Inject(SEAL_MARKS)
+    private readonly sealMarks?: SealMarkStore,
+  ) {}
+
+  /** Commits whatever is still queued before the process exits. */
+  async onModuleDestroy(): Promise<void> {
+    await this.batcher.close();
+  }
 
   /**
-   * Transactional read-modify-write against `AuditChainState`: locks the
-   * singleton row with `SELECT ... FOR UPDATE` (a real Postgres row lock,
-   * held for the duration of this transaction — see that model's schema doc
-   * comment for why this, and not an in-memory mutex, is what actually
-   * prevents two concurrent callers, even across separate API replicas,
-   * from forking the chain by both computing the same `previousHash`),
-   * computes the new event's `eventHash`, inserts the `AuditEvent`, and
-   * advances `AuditChainState` — all inside one transaction, so a crash
-   * between any two of those steps leaves the chain exactly as it was
-   * before this call started (transactional atomicity), never partially
-   * advanced.
-   *
-   * Publishing to Kafka happens **after** that transaction has already
-   * committed, and is neither awaited by the caller nor allowed to affect
-   * the already-successful Postgres write in any way — `KafkaPublisherService.publish`
-   * itself never throws (internally retried/logged), and this method
-   * doesn't await it, specifically so a Kafka outage adds no latency to
-   * hot authorization-decision call sites (`AuthorizationService.authorize`
-   * is by far the most frequent caller of this method). The `AuditEvent`
-   * row is the authoritative record; Kafka is a downstream notification a
-   * future consumer (Phase 9b) reads, never a dependency this method's
-   * success depends on.
+   * Appends one event through the tenant's group commit and resolves once
+   * its batch has committed. Publishing to Kafka happens after that, is not
+   * awaited, and can never affect the Postgres write: the `AuditEvent` row is
+   * the record, Kafka a downstream notification.
    */
   async record(
     tenantClient: TenantPrismaClient,
     tenantId: string,
     input: RecordAuditEventInput,
   ): Promise<AuditEventRecord> {
-    const event = await tenantClient.$transaction((tx) =>
-      this.append(tx, input),
+    const event = await this.batcher.enqueue(
+      tenantId,
+      this.pending(tenantClient, input),
     );
     this.publishAfterCommit(event, tenantId, input);
     return event;
@@ -123,77 +155,178 @@ export class AuditService {
 
   /**
    * Appends inside the caller's transaction, so the audited change and its audit event commit
-   * or roll back together (ADR-0010: platform kill switch). Call the returned function after the
-   * transaction commits to publish to Kafka.
+   * or roll back together (ADR-0010: platform kill switch). Bypasses the batcher: it locks
+   * only this event's partition row. Call the returned function after the transaction commits
+   * to publish to Kafka.
    */
   async recordInTransaction(
     tx: Prisma.TransactionClient,
     tenantId: string,
     input: RecordAuditEventInput,
   ): Promise<() => void> {
-    const event = await this.append(tx, input);
-    return () => this.publishAfterCommit(event, tenantId, input);
+    const [event] = await this.append(tx, [this.pending(undefined, input)]);
+    return () => this.publishAfterCommit(event!, tenantId, input);
   }
 
+  /**
+   * Several events inside the caller's transaction, appended in one call so
+   * their partitions are locked once, in ascending order. A loop of
+   * `recordInTransaction` would lock them in event order and could deadlock
+   * against a concurrent batch.
+   */
+  async recordManyInTransaction(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    inputs: RecordAuditEventInput[],
+  ): Promise<() => void> {
+    if (inputs.length === 0) return () => undefined;
+    const events = await this.append(
+      tx,
+      inputs.map((input) => this.pending(undefined, input)),
+    );
+    return () =>
+      events.forEach((event, i) =>
+        this.publishAfterCommit(event, tenantId, inputs[i]!),
+      );
+  }
+
+  private pending(
+    client: TenantPrismaClient | undefined,
+    input: RecordAuditEventInput,
+  ): PendingAuditEvent {
+    return {
+      client: client as TenantPrismaClient,
+      input,
+      id: randomUUID(),
+      correlationId: input.correlationId ?? getCorrelationId() ?? randomUUID(),
+      timestamp: new Date(),
+      partition: partitionFor(input.actor, input.data),
+    };
+  }
+
+  /**
+   * One transaction per batch. Every item in a batch shares its tenant, so its
+   * client. If the batch fails, each item is retried in its own transaction,
+   * so one event Postgres refuses (say, `data` with U+0000) fails only its own
+   * caller and cannot drop its batch-mates' records.
+   */
+  private async flushBatch(
+    items: PendingAuditEvent[],
+  ): Promise<(AuditEvent | Error)[]> {
+    const client = items[0]!.client;
+    try {
+      return await client.$transaction((tx) => this.append(tx, items));
+    } catch (error) {
+      if (items.length === 1) throw error;
+      const results: (AuditEvent | Error)[] = [];
+      for (const item of items) {
+        try {
+          const [event] = await client.$transaction((tx) =>
+            this.append(tx, [item]),
+          );
+          results.push(event!);
+        } catch (itemError) {
+          results.push(
+            itemError instanceof Error
+              ? itemError
+              : new Error(String(itemError)),
+          );
+        }
+      }
+      return results;
+    }
+  }
+
+  /**
+   * Locks the touched partitions' rows **in ascending order** (two replicas
+   * flushing overlapping batches therefore never deadlock, and a real row
+   * lock means they never fork a chain), chains each item onto its
+   * partition's tail in arrival order, inserts them, and advances the rows.
+   */
   private async append(
     tx: Prisma.TransactionClient,
-    input: RecordAuditEventInput,
-  ): Promise<AuditEvent> {
-    const correlationId =
-      input.correlationId ?? getCorrelationId() ?? randomUUID();
-    const timestamp = new Date();
-    const id = randomUUID();
-    // Ensures the singleton row exists without a separate init step (the
-    // same "resolve-or-create automatically" posture
-    // `OpenFgaClientService.onModuleInit` establishes elsewhere — see
-    // docs/authorization-model.md) — a no-op `ON CONFLICT DO NOTHING`-style
-    // update for every call after the very first one for this tenant.
-    await tx.auditChainState.upsert({
-      where: { id: AuditService.SINGLETON_ID },
-      update: {},
-      create: { id: AuditService.SINGLETON_ID },
+    items: PendingAuditEvent[],
+  ): Promise<AuditEvent[]> {
+    const partitions = [...new Set(items.map((i) => i.partition))].sort(
+      (a, b) => a - b,
+    );
+    await tx.auditPartitionState.createMany({
+      data: partitions.map((partition) => ({ partition })),
+      skipDuplicates: true,
     });
-
-    const rows = await tx.$queryRaw<AuditChainStateRow[]>`
-      SELECT "latestEventHash" FROM "audit_chain_state"
-      WHERE "id" = ${AuditService.SINGLETON_ID}
+    const locked = await tx.$queryRaw<PartitionLockRow[]>`
+      SELECT "partition", "latestEventHash", "latestSeq"
+      FROM "audit_partition_state"
+      WHERE "partition" = ANY(${partitions}::int[])
+      ORDER BY "partition"
       FOR UPDATE
     `;
-    const previousHash = rows[0]?.latestEventHash ?? null;
+    const tails = new Map(
+      locked.map((row) => [
+        row.partition,
+        { hash: row.latestEventHash, seq: Number(row.latestSeq) },
+      ]),
+    );
 
-    const eventHash = computeEventHash({
-      id,
-      eventType: input.eventType,
-      correlationId,
-      actor: input.actor,
-      timestamp: timestamp.toISOString(),
-      data: input.data,
-      previousHash,
-    });
-
-    const created = await tx.auditEvent.create({
-      data: {
-        id,
-        eventType: input.eventType,
-        correlationId,
-        actor: input.actor as unknown as Prisma.InputJsonValue,
-        timestamp,
-        data: (input.data ?? null) as Prisma.InputJsonValue,
+    const rows = items.map((item) => {
+      const tail = tails.get(item.partition) ?? { hash: null, seq: 0 };
+      const previousHash = tail.hash;
+      const partitionSeq = tail.seq + 1;
+      const eventHash = computeEventHash({
+        id: item.id,
+        eventType: item.input.eventType,
+        correlationId: item.correlationId,
+        actor: item.input.actor,
+        timestamp: item.timestamp.toISOString(),
+        data: item.input.data,
+        previousHash,
+      });
+      tails.set(item.partition, { hash: eventHash, seq: partitionSeq });
+      return {
+        id: item.id,
+        eventType: item.input.eventType,
+        correlationId: item.correlationId,
+        actor: item.input.actor as unknown as Prisma.InputJsonValue,
+        timestamp: item.timestamp,
+        data: (item.input.data ?? null) as Prisma.InputJsonValue,
         previousHash,
         eventHash,
-      },
+        partition: item.partition,
+        partitionSeq,
+      };
     });
 
-    await tx.auditChainState.update({
-      where: { id: AuditService.SINGLETON_ID },
-      data: {
-        latestEventId: created.id,
-        latestEventHash: created.eventHash,
-        eventCount: { increment: 1 },
-      },
-    });
+    const created = await tx.auditEvent.createManyAndReturn({ data: rows });
+    const byId = new Map(created.map((event) => [event.id, event]));
 
-    return created;
+    const touched = partitions.map((partition) => {
+      const last = rows.filter((r) => r.partition === partition).at(-1)!;
+      return {
+        partition,
+        id: last.id,
+        hash: last.eventHash,
+        seq: last.partitionSeq,
+        count: rows.filter((r) => r.partition === partition).length,
+      };
+    });
+    await tx.$executeRaw`
+      UPDATE "audit_partition_state" AS s
+      SET "latestEventId" = v.id,
+          "latestEventHash" = v.hash,
+          "latestSeq" = v.seq,
+          "eventCount" = s."eventCount" + v.n,
+          "updatedAt" = now()
+      FROM unnest(
+        ${touched.map((t) => t.partition)}::int[],
+        ${touched.map((t) => t.id)}::text[],
+        ${touched.map((t) => t.hash)}::text[],
+        ${touched.map((t) => t.seq)}::int[],
+        ${touched.map((t) => t.count)}::int[]
+      ) AS v(p, id, hash, seq, n)
+      WHERE s."partition" = v.p
+    `;
+
+    return items.map((item) => byId.get(item.id)!);
   }
 
   private publishAfterCommit(
@@ -213,9 +346,11 @@ export class AuditService {
       previousHash: event.previousHash,
       eventHash: event.eventHash,
       sequence: event.sequence,
+      partition: event.partition,
+      partitionSeq: event.partitionSeq,
     };
 
-    // Deliberately not awaited — see method doc comment.
+    // Deliberately not awaited — see `record`.
     this.kafkaPublisher.publish(envelope).catch((error: unknown) => {
       this.logger.error(
         `Unexpected error publishing audit event "${event.id}" to Kafka: ${error instanceof Error ? error.message : String(error)}`,
@@ -255,148 +390,687 @@ export class AuditService {
   }
 
   /**
-   * Walks every `AuditEvent` in this tenant's chain in the order it was
-   * actually recorded (`sequence`), recomputing each row's hash from its
-   * own stored content and confirming both that it matches the stored
-   * `eventHash` (this row wasn't tampered with) AND that its `previousHash`
-   * matches the previous row's `eventHash` (no row was removed, reordered,
-   * or had its position in the chain altered). Reports the specific
-   * `AuditEvent.id` where verification first fails, not just "invalid" —
-   * Section 47's mandatory "modify an old event, prove verification fails
-   * *and correctly reports where*" test depends on this.
+   * Walks each of the tenant's 64 partitions in `partitionSeq` order,
+   * recomputing every event's hash from its stored content and checking that
+   * its `previousHash` is the previous event's `eventHash` in the same
+   * partition (nothing removed, reordered or moved). Reports the first event
+   * where that fails, not just "invalid" (Section 47).
    *
-   * **Anchor-aware (Phase 9b, Section 48)**: the very first event walked
-   * (the oldest one *remaining*, not necessarily this tenant's true
-   * genesis event — `AuditRetentionWorkflow` may have pruned everything
-   * before it) is valid if its `previousHash` is either `null` (true
-   * genesis — retention has never run for this tenant) OR matches a known
-   * `AuditChainAnchor.anchorHash` for this tenant (`src/audit/retention/`)
-   * — the hash `AuditRetentionWorkflow` recorded for the last event it
-   * pruned, immediately before deleting it. Every event *after* the first
-   * is checked exactly as before (against the *previous remaining* event's
-   * own `eventHash`) — retention never breaks linkage among surviving
-   * events, only the link to history that no longer exists.
+   * **Anchor-aware (Section 48)**: a partition's oldest *remaining* event may
+   * follow history retention pruned; it is valid if its `previousHash` is
+   * `null` (true genesis) or a known `AuditChainAnchor.anchorHash` for that
+   * partition. Each partition's tail must match its `AuditPartitionState`
+   * row (`brokenAt: 'audit_partition_state:<n>'`).
    *
-   * Also confirms the chain's *tail* matches `AuditChainState` — a
-   * mismatch there (the bookkeeping row disagreeing with the event table
-   * itself) is reported as `brokenAt: 'audit_chain_state'`, distinct from
-   * any single event's own id.
+   * **Bounded memory**: keyset pages of `VERIFY_CHAIN_BATCH_SIZE` per
+   * partition; the running hash carries across page boundaries exactly as
+   * across adjacent rows (`audit.service.spec.ts` pins a tamper in page two).
    *
-   * **Bounded memory (release 2026-11-11)**: the walk is fetched in
-   * `VERIFY_CHAIN_BATCH_SIZE`-row batches (keyset-paginated on `sequence`,
-   * see `fetchAuditEventBatch`) rather than as one whole-table `findMany`.
-   * The check itself is byte-for-byte the same one it always was: the walk
-   * is inherently sequential — each event is validated against nothing but
-   * the *immediately preceding* event's `eventHash` — so carrying
-   * `expectedPreviousHash` across a batch boundary is exactly equivalent to
-   * carrying it across two adjacent array elements. Nothing about batching
-   * lets a tampered event in a later batch slip through; see
-   * `audit.service.spec.ts`'s cross-batch tamper test, which pins that.
+   * **SEALs**: then walks the signed checkpoints in order — each must link
+   * to the previous one, hash to its stored `checkpointHash`, carry a valid
+   * signature by this tenant's key, and every root whose range still exists
+   * must equal the Merkle root of those events (`brokenAt: 'checkpoint:<seq>'`).
+   * Where retention pruned the start of a range, the surviving tail is still
+   * checked against the signed partition head. Every head the last SEAL
+   * signed must still exist or be explained by retention. Events after the
+   * last SEAL are accepted only while that SEAL is younger than
+   * `SEAL_GRACE_MS` by its own signed time, so deleting SEALs, or forging
+   * event timestamps, is reported (`brokenAt: 'unsealed:<partition>'`).
    */
   async verifyAuditChain(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
+    opts: { incremental?: boolean } = {},
   ): Promise<VerifyAuditChainResult> {
-    // Read before the first batch (rather than after, as this used to read
-    // it after the whole-table query): `AuditRetentionWorkflow` only ever
-    // *adds* anchors, so reading them first can only ever make the walk
-    // more permissive-by-a-hash-it-would-otherwise-not-recognize — never
-    // less. Reading them later would leave a window in which retention
-    // prunes history and writes its anchor while the walk is in progress,
-    // and the walk then rejects the new oldest-remaining event for a
-    // linkage the anchor it just missed would have explained.
-    const knownAnchorHashes = new Set(
-      (await tenantClient.auditChainAnchor.findMany()).map(
-        (anchor) => anchor.anchorHash,
-      ),
+    // The control database names the newest SEAL; the tenant database must
+    // still hold it unchanged (deleting SEALs to rewrite history fails here).
+    const mark = this.sealMarks ? await this.sealMarks.get(tenantId) : null;
+    if (mark) {
+      const atMark = await tenantClient.auditCheckpoint.findUnique({
+        where: { seq: mark.sealSeq },
+      });
+      if (!atMark || atMark.checkpointHash !== mark.sealHash) {
+        return { valid: false, brokenAt: `checkpoint:${mark.sealSeq}` };
+      }
+    }
+    // Incremental: resume from the last SEAL a previous run verified. Events
+    // it covered are not re-walked (a full run does that); everything after
+    // its heads, and every later SEAL, is checked as usual.
+    let start: {
+      seq: bigint;
+      hash: string;
+      createdAt: Date;
+      heads: PartitionHead[];
+    } | null = null;
+    if (opts.incremental && mark?.verified) {
+      const atWatermark = await tenantClient.auditCheckpoint.findUnique({
+        where: { seq: mark.verified.seq },
+      });
+      // Trust the watermark row only if its content still hashes to the
+      // hash the control database recorded, under a valid tenant signature;
+      // the heads come from the control database.
+      const watermarkKey = await this.lookupKey(tenantId);
+      if (
+        !atWatermark ||
+        !watermarkKey ||
+        checkpointHashOf({
+          seq: atWatermark.seq,
+          createdAt: atWatermark.createdAt,
+          partitionHeads:
+            atWatermark.partitionHeads as unknown as PartitionHead[],
+          roots: atWatermark.roots as unknown as PartitionRoot[],
+          previousCheckpointHash: atWatermark.previousCheckpointHash,
+        }) !== mark.verified.hash ||
+        !verifyCheckpointSignature(
+          mark.verified.hash,
+          atWatermark.signature,
+          watermarkKey.publicKeyPem,
+        )
+      ) {
+        return { valid: false, brokenAt: `checkpoint:${mark.verified.seq}` };
+      }
+      start = {
+        seq: atWatermark.seq,
+        hash: mark.verified.hash,
+        createdAt: atWatermark.createdAt,
+        heads: mark.verified.heads,
+      };
+    }
+    const startHeads = new Map(
+      (start?.heads ?? []).map((h) => [h.partition, h]),
     );
 
-    let expectedPreviousHash: string | null = null;
-    let isFirstRemainingEvent = true;
-    let lastSequence: number | null = null;
-
-    for (;;) {
-      const events = await this.fetchAuditEventBatch(
-        tenantClient,
-        lastSequence,
-      );
-      if (events.length === 0) break;
-
-      for (const event of events) {
-        const previousHashIsValid = isFirstRemainingEvent
-          ? event.previousHash === null ||
-            (event.previousHash !== null &&
-              knownAnchorHashes.has(event.previousHash))
-          : event.previousHash === expectedPreviousHash;
-        isFirstRemainingEvent = false;
-
-        if (!previousHashIsValid) {
-          return { valid: false, brokenAt: event.id };
-        }
-
-        const recomputed = computeEventHash({
-          id: event.id,
-          eventType: event.eventType,
-          correlationId: event.correlationId,
-          actor: event.actor,
-          timestamp: event.timestamp.toISOString(),
-          data: event.data,
-          previousHash: event.previousHash,
+    // Read before walking: retention only ever adds anchors, so reading them
+    // first can never make the walk reject a head an anchor written mid-walk
+    // would have explained.
+    const anchorsByPartition = await this.verifiedAnchors(
+      tenantClient,
+      tenantId,
+    );
+    for (let partition = 0; partition < AUDIT_PARTITIONS; partition += 1) {
+      const anchors = anchorsByPartition.get(partition) ?? new Set<string>();
+      // Read this partition's row right before walking it, and walk only up
+      // to the tail it names: events committed meanwhile are not "broken".
+      const state = await tenantClient.auditPartitionState.findUnique({
+        where: { partition },
+      });
+      const stateHash = state ? (state.latestEventHash ?? null) : undefined;
+      const upTo = state ? state.latestSeq : undefined;
+      let expectedPreviousHash: string | null = null;
+      let isFirstRemainingEvent = true;
+      let lastSeq: number | null = null;
+      const startHead = startHeads.get(partition);
+      if (startHead) {
+        const headRow = await tenantClient.auditEvent.findUnique({
+          where: {
+            partition_partitionSeq: {
+              partition,
+              partitionSeq: Number(startHead.seq),
+            },
+          },
+          select: { id: true, eventHash: true },
         });
-        if (recomputed !== event.eventHash) {
-          return { valid: false, brokenAt: event.id };
+        if (headRow) {
+          if (headRow.eventHash !== startHead.eventHash) {
+            return { valid: false, brokenAt: headRow.id };
+          }
+          lastSeq = Number(startHead.seq);
+          expectedPreviousHash = startHead.eventHash;
+          isFirstRemainingEvent = false;
         }
-
-        expectedPreviousHash = event.eventHash;
+        // Head pruned since: walk what remains from the start.
       }
 
-      // A short batch means the table is exhausted — stop without paying
-      // for one more round trip that can only come back empty.
-      const lastEvent = events[events.length - 1];
-      if (lastEvent === undefined) break;
-      lastSequence = lastEvent.sequence;
-      if (events.length < AuditService.VERIFY_CHAIN_BATCH_SIZE) break;
+      for (;;) {
+        const events = await this.fetchAuditEventBatch(
+          tenantClient,
+          partition,
+          lastSeq,
+          upTo,
+        );
+        if (events.length === 0) break;
+
+        for (const event of events) {
+          const previousHashIsValid = isFirstRemainingEvent
+            ? event.previousHash === null || anchors.has(event.previousHash)
+            : event.previousHash === expectedPreviousHash;
+          isFirstRemainingEvent = false;
+          if (!previousHashIsValid) return { valid: false, brokenAt: event.id };
+
+          const recomputed = computeEventHash({
+            id: event.id,
+            eventType: event.eventType,
+            correlationId: event.correlationId,
+            actor: event.actor,
+            timestamp: event.timestamp.toISOString(),
+            data: event.data,
+            previousHash: event.previousHash,
+          });
+          if (recomputed !== event.eventHash) {
+            return { valid: false, brokenAt: event.id };
+          }
+          expectedPreviousHash = event.eventHash;
+        }
+
+        lastSeq = events[events.length - 1]!.partitionSeq;
+        if (events.length < AuditService.VERIFY_CHAIN_BATCH_SIZE) break;
+      }
+
+      const tailMatches = isFirstRemainingEvent
+        ? // No events left: fine if never written, or if retention pruned
+          // the whole partition (its tail is then a known anchor).
+          stateHash === undefined ||
+          stateHash === null ||
+          anchors.has(stateHash)
+        : stateHash === expectedPreviousHash;
+      if (!tailMatches) {
+        return { valid: false, brokenAt: `audit_partition_state:${partition}` };
+      }
     }
 
-    const state = await tenantClient.auditChainState.findUnique({
-      where: { id: AuditService.SINGLETON_ID },
+    const sealed = await this.verifyCheckpoints(tenantClient, tenantId, start);
+    if (sealed.broken !== null) {
+      return { valid: false, brokenAt: `checkpoint:${sealed.broken}` };
+    }
+
+    const extents = new Map(
+      (
+        await tenantClient.$queryRaw<
+          { partition: number; oldest: number; newest: number; firstAt: Date }[]
+        >`
+          SELECT "partition", MIN("partitionSeq") AS "oldest",
+                 MAX("partitionSeq") AS "newest", MIN("timestamp") AS "firstAt"
+          FROM "audit_events" GROUP BY "partition"
+        `
+      ).map((r) => [
+        r.partition,
+        {
+          oldest: Number(r.oldest),
+          newest: Number(r.newest),
+          firstAt: new Date(r.firstAt),
+        },
+      ]),
+    );
+    // Rows past a partition's recorded tail were not written by AuditService
+    // (it advances the row in the same transaction). Rows are read after the
+    // extents above, so a legitimate append can never trip this.
+    const tails = new Map(
+      (await tenantClient.auditPartitionState.findMany()).map((r) => [
+        r.partition,
+        r.latestSeq,
+      ]),
+    );
+    for (const [partition, extent] of extents) {
+      if (extent.newest > (tails.get(partition) ?? 0)) {
+        return { valid: false, brokenAt: `audit_partition_state:${partition}` };
+      }
+    }
+    const last = sealed.last;
+
+    if (last === null) {
+      // No SEAL left, but the tenant key exists (outside the audit tables):
+      // SEALs were written once, so they were deleted.
+      // Even with no events left: an emptied log is still a deleted one.
+      if (await this.checkpointKeys.hasKey(tenantId)) {
+        const [firstPartition] = extents.keys();
+        return {
+          valid: false,
+          brokenAt: `unsealed:${firstPartition ?? 0}`,
+        };
+      }
+      // Never sealed (a new tenant, or just upgraded): the events' own
+      // timestamps are the only clock left.
+      const cutoff = Date.now() - AuditService.SEAL_GRACE_MS;
+      for (const [partition, extent] of extents) {
+        if (extent.firstAt.getTime() < cutoff) {
+          return { valid: false, brokenAt: `unsealed:${partition}` };
+        }
+      }
+      return { valid: true };
+    }
+
+    // Every head the last SEAL signed still exists unchanged, or retention
+    // pruned it (later events remain, or an anchor names it). Catches a
+    // deleted partition or tail that the chain walk alone cannot see.
+    for (const head of last.heads) {
+      const seq = Number(head.seq);
+      const row = await tenantClient.auditEvent.findUnique({
+        where: {
+          partition_partitionSeq: {
+            partition: head.partition,
+            partitionSeq: seq,
+          },
+        },
+        select: { eventHash: true },
+      });
+      const extent = extents.get(head.partition);
+      const pruned =
+        (extent !== undefined && extent.oldest > seq) ||
+        (anchorsByPartition.get(head.partition)?.has(head.eventHash) ?? false);
+      if (row ? row.eventHash !== head.eventHash : !pruned) {
+        return { valid: false, brokenAt: `checkpoint:${last.seq}` };
+      }
+    }
+
+    // Events after the last SEAL are fine only while that SEAL is recent by
+    // its own signed time; event timestamps can be rewritten, it cannot.
+    if (Date.now() - last.createdAt.getTime() > AuditService.SEAL_GRACE_MS) {
+      const headSeq = new Map(
+        last.heads.map((h) => [h.partition, Number(h.seq)]),
+      );
+      for (const [partition, extent] of extents) {
+        if (extent.newest > (headSeq.get(partition) ?? 0)) {
+          return { valid: false, brokenAt: `unsealed:${partition}` };
+        }
+      }
+    }
+    await this.sealMarks?.setVerified(tenantId, {
+      seq: BigInt(last.seq),
+      hash: last.hash,
+      heads: last.heads,
     });
-    if (state && (state.latestEventHash ?? null) !== expectedPreviousHash) {
-      return { valid: false, brokenAt: 'audit_chain_state' };
-    }
-
     return { valid: true };
   }
 
   /**
-   * One `VERIFY_CHAIN_BATCH_SIZE`-row page of this tenant's chain, in
-   * `sequence` order, starting strictly after `afterSequence`.
-   *
-   * Keyset pagination (`WHERE sequence > ?`), deliberately not `skip`/
-   * `take` offset pagination and not Prisma's `cursor` option:
-   *
-   * - Offset pagination would make the database re-scan and re-sort every
-   *   already-verified row for each subsequent page, and — worse — would
-   *   silently *skip* a row if retention pruned the head of the chain
-   *   mid-walk, which for a chain verifier means reporting a break that
-   *   isn't one.
-   * - Prisma's `cursor` wants a uniquely-identifying field, and
-   *   `AuditEvent.sequence` is a plain `Int @default(autoincrement())` —
-   *   not declared `@unique` in the schema (prisma/tenant.prisma), even
-   *   though Postgres's own sequence makes it so in practice. `WHERE >` is
-   *   correct either way and doesn't depend on that distinction.
-   *
-   * Append-only-ness (see this class's doc comment) is what makes paging
-   * safe at all: rows are never updated or reordered, so a row's
-   * `sequence` — and therefore its position in this pagination — is fixed
-   * from insert onward.
+   * Re-checks the events retention is about to delete (each partition up to
+   * `upTo`), which an incremental run does not re-walk:
+   * - every event's hash and its link to the previous one, through the end
+   *   of the last SEAL range that reaches the cutoff;
+   * - the proof index tiles that span with no holes, and every range in it
+   *   (including one crossing the cutoff) matches its SEAL's signed root;
+   * - the walked span links to what remains (the next event, or the tail).
+   * Returns the verified hash at each `upTo`, which retention signs as the
+   * anchor. Cost is proportional to what is pruned, not to the whole log.
    */
+  async verifyPrunable(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    ranges: { partition: number; upTo: number }[],
+  ): Promise<
+    | { valid: true; anchorHashes: Map<number, string> }
+    | { valid: false; brokenAt: string }
+  > {
+    const anchorsByPartition = await this.verifiedAnchors(
+      tenantClient,
+      tenantId,
+    );
+    const key = await this.lookupKey(tenantId);
+    const anchorHashes = new Map<number, string>();
+    for (const { partition, upTo } of ranges) {
+      const anchors = anchorsByPartition.get(partition) ?? new Set<string>();
+      const sealed = await tenantClient.auditCheckpointRange.findMany({
+        where: { partition, fromSeq: { lte: upTo } },
+        orderBy: { fromSeq: 'asc' },
+      });
+      const walkTo = Math.max(upTo, ...sealed.map((r) => r.toSeq));
+
+      const hashes = new Map<number, string>();
+      let firstSeq: number | null = null;
+      let expected: string | null | undefined;
+      let lastSeq: number | null = null;
+      for (;;) {
+        const events = await this.fetchAuditEventBatch(
+          tenantClient,
+          partition,
+          lastSeq,
+          walkTo,
+        );
+        if (events.length === 0) break;
+        for (const event of events) {
+          const linked =
+            expected === undefined
+              ? event.previousHash === null || anchors.has(event.previousHash)
+              : event.previousHash === expected;
+          const recomputed = computeEventHash({
+            id: event.id,
+            eventType: event.eventType,
+            correlationId: event.correlationId,
+            actor: event.actor,
+            timestamp: event.timestamp.toISOString(),
+            data: event.data,
+            previousHash: event.previousHash,
+          });
+          if (!linked || recomputed !== event.eventHash) {
+            return { valid: false, brokenAt: event.id };
+          }
+          expected = event.eventHash;
+          firstSeq ??= event.partitionSeq;
+          hashes.set(event.partitionSeq, event.eventHash);
+        }
+        lastSeq = events[events.length - 1]!.partitionSeq;
+        if (events.length < AuditService.VERIFY_CHAIN_BATCH_SIZE) break;
+      }
+      const atUpTo = hashes.get(upTo);
+      if (firstSeq === null || atUpTo === undefined || lastSeq === null) {
+        return { valid: false, brokenAt: `audit_partition_state:${partition}` };
+      }
+
+      // The walked span links to what remains: the next event, or else the
+      // partition's recorded tail must be exactly where the walk ended.
+      const next = await tenantClient.auditEvent.findUnique({
+        where: {
+          partition_partitionSeq: { partition, partitionSeq: lastSeq + 1 },
+        },
+        select: { id: true, previousHash: true },
+      });
+      if (next) {
+        if (next.previousHash !== expected) {
+          return { valid: false, brokenAt: next.id };
+        }
+      } else {
+        const tail = await tenantClient.auditPartitionState.findUnique({
+          where: { partition },
+        });
+        if (
+          !tail ||
+          tail.latestSeq !== lastSeq ||
+          tail.latestEventHash !== expected
+        ) {
+          return {
+            valid: false,
+            brokenAt: `audit_partition_state:${partition}`,
+          };
+        }
+      }
+
+      // The index must tile [firstSeq, upTo] contiguously, and each row only
+      // counts once its SEAL is authenticated (hash and signature) and lists
+      // exactly that range in its signed roots. A forged or stretched row
+      // therefore can't vouch for anything.
+      let cursor = firstSeq;
+      for (const range of sealed) {
+        if (range.toSeq < cursor) continue; // wholly pruned before
+        const contiguous =
+          range.fromSeq === cursor ||
+          (cursor === firstSeq && range.fromSeq < firstSeq);
+        if (!contiguous) {
+          return { valid: false, brokenAt: `checkpoint_index:${partition}` };
+        }
+        const cp = await tenantClient.auditCheckpoint.findUnique({
+          where: { seq: range.checkpointSeq },
+        });
+        const cpHeads = (cp?.partitionHeads ??
+          []) as unknown as PartitionHead[];
+        const cpRoots = (cp?.roots ?? []) as unknown as PartitionRoot[];
+        const signed = cpRoots.find(
+          (r) =>
+            r.partition === partition &&
+            Number(r.fromSeq) === range.fromSeq &&
+            Number(r.toSeq) === range.toSeq,
+        );
+        if (
+          !cp ||
+          !key ||
+          !signed ||
+          signed.root !== range.root ||
+          checkpointHashOf({
+            seq: cp.seq,
+            createdAt: cp.createdAt,
+            partitionHeads: cpHeads,
+            roots: cpRoots,
+            previousCheckpointHash: cp.previousCheckpointHash,
+          }) !== cp.checkpointHash ||
+          !verifyCheckpointSignature(
+            cp.checkpointHash,
+            cp.signature,
+            key.publicKeyPem,
+          )
+        ) {
+          return {
+            valid: false,
+            brokenAt: `checkpoint:${range.checkpointSeq}`,
+          };
+        }
+        if (range.fromSeq >= firstSeq) {
+          const leaves: string[] = [];
+          for (let seq = range.fromSeq; seq <= range.toSeq; seq += 1) {
+            const h = hashes.get(seq);
+            if (h === undefined) break;
+            leaves.push(h);
+          }
+          if (
+            leaves.length !== range.toSeq - range.fromSeq + 1 ||
+            merkleRoot(leaves) !== signed.root
+          ) {
+            return {
+              valid: false,
+              brokenAt: `checkpoint:${range.checkpointSeq}`,
+            };
+          }
+        } else {
+          // Start already pruned: the root can't be recomputed, but the end
+          // of the range must still match the head this SEAL signed.
+          const head = cpHeads.find((h) => h.partition === partition);
+          if (
+            !head ||
+            Number(head.seq) !== range.toSeq ||
+            hashes.get(range.toSeq) !== head.eventHash
+          ) {
+            return {
+              valid: false,
+              brokenAt: `checkpoint:${range.checkpointSeq}`,
+            };
+          }
+        }
+        cursor = range.toSeq + 1;
+      }
+      if (cursor <= upTo) {
+        return { valid: false, brokenAt: `checkpoint_index:${partition}` };
+      }
+      anchorHashes.set(partition, atUpTo);
+    }
+    return { valid: true, anchorHashes };
+  }
+
+  /** The tenant's SEAL key, or `null` when it has none (nothing verifies then). */
+  private async lookupKey(
+    tenantId: string,
+  ): Promise<CheckpointPublicKey | null> {
+    try {
+      return await this.checkpointKeys.publicKey(tenantId);
+    } catch (error) {
+      if (error instanceof NoCheckpointKeyError) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Retention anchors that may excuse pruned history, by partition: those
+   * signed with the tenant key over `anchorDigestOf`, plus unsigned anchors
+   * in partition 0, which only pre-partitioning retention could have written
+   * (a planted unsigned anchor there is the one residual; see ADR-0014).
+   */
+  private async verifiedAnchors(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+  ): Promise<Map<number, Set<string>>> {
+    const anchors = await tenantClient.auditChainAnchor.findMany();
+    let key: CheckpointPublicKey | null = null;
+    const byPartition = new Map<number, Set<string>>();
+    for (const anchor of anchors) {
+      let accepted = anchor.signature === null && anchor.partition === 0;
+      if (anchor.signature !== null) {
+        key ??= await this.lookupKey(tenantId);
+        accepted =
+          key !== null &&
+          verifyCheckpointSignature(
+            anchorDigestOf({
+              tenantId: anchor.tenantId,
+              partition: anchor.partition,
+              anchorHash: anchor.anchorHash,
+              eventsPrunedCount: anchor.eventsPrunedCount,
+            }),
+            anchor.signature,
+            key.publicKeyPem,
+          );
+      }
+      if (!accepted) continue;
+      const set = byPartition.get(anchor.partition) ?? new Set<string>();
+      set.add(anchor.anchorHash);
+      byPartition.set(anchor.partition, set);
+    }
+    return byPartition;
+  }
+
+  /**
+   * The `seq` of the first SEAL that fails (or `null`), and the last SEAL:
+   * its signed time and partition heads.
+   */
+  private async verifyCheckpoints(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    start: {
+      seq: bigint;
+      hash: string;
+      createdAt: Date;
+      heads: PartitionHead[];
+    } | null,
+  ): Promise<{
+    broken: string | null;
+    last: {
+      seq: string;
+      hash: string;
+      createdAt: Date;
+      heads: PartitionHead[];
+    } | null;
+  }> {
+    const oldestRemaining = new Map(
+      (
+        await tenantClient.$queryRaw<{ partition: number; oldest: number }[]>`
+          SELECT "partition", MIN("partitionSeq") AS "oldest"
+          FROM "audit_events" GROUP BY "partition"
+        `
+      ).map((r) => [r.partition, Number(r.oldest)]),
+    );
+    let key: CheckpointPublicKey | null = null;
+    let previousHash: string | null = start?.hash ?? null;
+    let expectedSeq = start ? start.seq + 1n : 1n;
+    let last: {
+      seq: string;
+      hash: string;
+      createdAt: Date;
+      heads: PartitionHead[];
+    } | null = start
+      ? {
+          seq: start.seq.toString(),
+          hash: start.hash,
+          createdAt: start.createdAt,
+          heads: start.heads,
+        }
+      : null;
+    const fail = (seq: bigint) => ({ broken: seq.toString(), last });
+
+    for (;;) {
+      const page = await tenantClient.auditCheckpoint.findMany({
+        where: { seq: { gte: expectedSeq } },
+        orderBy: { seq: 'asc' },
+        take: AuditService.VERIFY_CHAIN_BATCH_SIZE,
+      });
+      if (page.length === 0) return { broken: null, last };
+
+      for (const cp of page) {
+        const roots = cp.roots as unknown as PartitionRoot[];
+        const partitionHeads = cp.partitionHeads as unknown as PartitionHead[];
+        if (
+          cp.seq !== expectedSeq ||
+          cp.previousCheckpointHash !== previousHash
+        ) {
+          return fail(cp.seq);
+        }
+        const recomputed = checkpointHashOf({
+          seq: cp.seq,
+          createdAt: cp.createdAt,
+          partitionHeads,
+          roots,
+          previousCheckpointHash: cp.previousCheckpointHash,
+        });
+        key ??= await this.lookupKey(tenantId);
+        if (
+          key === null ||
+          recomputed !== cp.checkpointHash ||
+          cp.keyId !== key.keyId ||
+          !verifyCheckpointSignature(
+            cp.checkpointHash,
+            cp.signature,
+            key.publicKeyPem,
+          )
+        ) {
+          return fail(cp.seq);
+        }
+        for (const r of roots) {
+          const from = Number(r.fromSeq);
+          const to = Number(r.toSeq);
+          const oldest = oldestRemaining.get(r.partition);
+          if (oldest === undefined || from < oldest) {
+            // Retention pruned the start of this range, so its root can't be
+            // recomputed; the surviving tail must still match the signed head.
+            if (oldest !== undefined && oldest <= to) {
+              const head = partitionHeads.find(
+                (h) => h.partition === r.partition && Number(h.seq) === to,
+              );
+              const tail = await tenantClient.auditEvent.findUnique({
+                where: {
+                  partition_partitionSeq: {
+                    partition: r.partition,
+                    partitionSeq: to,
+                  },
+                },
+                select: { eventHash: true },
+              });
+              if (!head || !tail || tail.eventHash !== head.eventHash) {
+                return fail(cp.seq);
+              }
+            }
+            continue;
+          }
+          const events = await tenantClient.auditEvent.findMany({
+            where: {
+              partition: r.partition,
+              partitionSeq: { gte: from, lte: to },
+            },
+            orderBy: { partitionSeq: 'asc' },
+            select: { eventHash: true },
+          });
+          if (
+            events.length !== to - from + 1 ||
+            merkleRoot(events.map((e) => e.eventHash)) !== r.root
+          ) {
+            return fail(cp.seq);
+          }
+        }
+        previousHash = cp.checkpointHash;
+        expectedSeq += 1n;
+        last = {
+          seq: cp.seq.toString(),
+          hash: cp.checkpointHash,
+          createdAt: cp.createdAt,
+          heads: partitionHeads,
+        };
+      }
+    }
+  }
+
+  /** One keyset page of a partition, strictly after `afterSeq`. */
   private async fetchAuditEventBatch(
     tenantClient: TenantPrismaClient,
-    afterSequence: number | null,
+    partition: number,
+    afterSeq: number | null,
+    upTo: number | undefined,
   ): Promise<AuditEvent[]> {
     return tenantClient.auditEvent.findMany({
-      where: afterSequence === null ? {} : { sequence: { gt: afterSequence } },
-      orderBy: { sequence: 'asc' },
+      where: {
+        partition,
+        ...(afterSeq === null && upTo === undefined
+          ? {}
+          : {
+              partitionSeq: {
+                ...(afterSeq === null ? {} : { gt: afterSeq }),
+                ...(upTo === undefined ? {} : { lte: upTo }),
+              },
+            }),
+      },
+      orderBy: { partitionSeq: 'asc' },
       take: AuditService.VERIFY_CHAIN_BATCH_SIZE,
     });
   }

@@ -1,6 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../../generated/tenant-client/client';
 import { AuditService } from '../audit.service';
+import { AuditCheckpointService } from '../checkpoint/audit-checkpoint.service';
+import {
+  anchorDigestOf,
+  type PartitionHead,
+} from '../checkpoint/checkpoint-format';
+import { CheckpointSigner } from '../checkpoint/checkpoint-signer';
 import { AUDIT_EVENT_TYPES } from '../audit-event-types';
 import type {
   PruneAuditEventsInput,
@@ -25,63 +31,168 @@ import type {
 export class AuditRetentionService {
   private readonly logger = new Logger(AuditRetentionService.name);
 
-  constructor(private readonly auditService: AuditService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly signer: CheckpointSigner,
+    private readonly checkpoints: AuditCheckpointService,
+  ) {}
 
   /**
-   * 1. Finds every `AuditEvent` older than the retention window.
-   * 2. If none, a genuine no-op (`prunedCount: 0`) — no anchor, no
-   *    `audit.retention_executed` event; a retention run that found
-   *    nothing to prune has nothing worth auditing about itself.
-   * 3. Otherwise, in one transaction: writes a new `AuditChainAnchor`
-   *    naming the last-to-be-pruned event's `eventHash`, then deletes the
-   *    aged rows — both together, so a crash between the two never leaves
-   *    an anchor with no corresponding deletion (see interface doc comment
-   *    for why an occasional harmless duplicate anchor from an Activity
-   *    retry is an acceptable outcome, but a "deleted without a preceding
-   *    anchor" outcome never is).
-   * 4. Writes `audit.retention_executed` via the *real* `AuditService.record`
-   *    (not `recordSafely` — a retention run's own audit trail is not
-   *    optional/best-effort the way most retrofit call sites are; a
-   *    failure here should fail the whole Activity so Temporal retries
-   *    it) — this new event's `previousHash` comes from the tenant's
-   *    *current* `AuditChainState` exactly like any other event (Section
-   *    48: "this new event naturally becomes the new chain tail" — no
-   *    special-casing needed, since the events being pruned are always
-   *    older than, and therefore never include, the chain's actual tail).
+   * First seals what exists (so pruned events were sealed), then per audit
+   * partition (each is its own hash chain):
+   * 1. Finds the last event older than the retention window; everything up
+   *    to it in that partition is pruned.
+   * 2. If no partition has one, a genuine no-op (`prunedCount: 0`): no
+   *    anchor, no `audit.retention_executed` event.
+   * 3. Otherwise, in one transaction: one `AuditChainAnchor` per pruned
+   *    partition naming that partition's last pruned `eventHash`, then the
+   *    deletes — together, so a crash never leaves a deletion without its
+   *    anchor (a retried Activity may leave a harmless duplicate anchor).
+   * 4. Records `audit.retention_executed` through the real
+   *    `AuditService.record` (not `recordSafely`: a failure must fail the
+   *    Activity so Temporal retries it), listing every anchor.
    */
   async pruneTenantAuditEvents(
     tenantClient: TenantPrismaClient,
     input: PruneAuditEventsInput,
   ): Promise<PruneAuditEventsResult> {
     const cutoff = new Date(Date.now() - input.retentionWindowMs);
+    // Seal before pruning: everything pruned is then covered by a SEAL, and
+    // the tenant key never exists without one.
+    await this.checkpoints.createCheckpoint(tenantClient, input.tenantId);
+    // Never prune or sign anchors over a log that doesn't verify: retention
+    // would otherwise bless tampered rows with the tenant key. The Activity
+    // fails, Temporal retries, and the broken log is left for investigation.
+    // Incremental: from the last verified SEAL, so the cost tracks what is
+    // new rather than the tenant's whole history.
+    const verified = await this.auditService.verifyAuditChain(
+      tenantClient,
+      input.tenantId,
+      { incremental: true },
+    );
+    if (!verified.valid) {
+      throw new Error(
+        `Audit log for tenant "${input.tenantId}" does not verify (broken at ${verified.brokenAt}); not pruning`,
+      );
+    }
 
-    const agedEvents = await tenantClient.auditEvent.findMany({
-      where: { timestamp: { lt: cutoff } },
-      orderBy: { sequence: 'asc' },
+    // Prune only what a SEAL already covers: a partition is pruned no
+    // further than the last SEAL's head for it (sealing is bounded per
+    // round, so a long backlog may still be partly unsealed).
+    const lastSeal = await tenantClient.auditCheckpoint.findFirst({
+      orderBy: { seq: 'desc' },
     });
+    const sealedHead = new Map(
+      ((lastSeal?.partitionHeads ?? []) as unknown as PartitionHead[]).map(
+        (h) => [h.partition, Number(h.seq)],
+      ),
+    );
+    const ranges = (
+      await tenantClient.$queryRaw<
+        { partition: number; cutoffSeq: number; oldest: Date; newest: Date }[]
+      >`
+        SELECT "partition", MAX("partitionSeq") AS "cutoffSeq",
+               MIN("timestamp") AS "oldest", MAX("timestamp") AS "newest"
+        FROM "audit_events"
+        WHERE "timestamp" < ${cutoff}
+        GROUP BY "partition"
+        ORDER BY "partition"
+      `
+    )
+      .map((r) => ({
+        ...r,
+        cutoffSeq: Math.min(
+          Number(r.cutoffSeq),
+          sealedHead.get(r.partition) ?? 0,
+        ),
+      }))
+      .filter((r) => r.cutoffSeq > 0);
 
-    if (agedEvents.length === 0) {
+    if (ranges.length === 0) {
       this.logger.log(
         `Retention run for tenant "${input.tenantId}": no AuditEvent rows older than ${input.retentionWindowMs}ms — nothing to prune`,
       );
-      return { prunedCount: 0, anchorHash: null, retentionEventId: null };
+      return {
+        prunedCount: 0,
+        anchorHash: null,
+        anchors: [],
+        retentionEventId: null,
+      };
     }
 
-    const lastPruned = agedEvents[agedEvents.length - 1]!;
-    const anchorHash = lastPruned.eventHash;
-    const prunedIds = agedEvents.map((event) => event.id);
+    // Incremental verification does not re-walk what it verified before; the
+    // events about to be deleted (and signed for) are re-checked here.
+    const prefix = await this.auditService.verifyPrunable(
+      tenantClient,
+      input.tenantId,
+      ranges.map((r) => ({ partition: r.partition, upTo: r.cutoffSeq })),
+    );
+    if (!prefix.valid) {
+      throw new Error(
+        `Audit log for tenant "${input.tenantId}" does not verify (broken at ${prefix.brokenAt}); not pruning`,
+      );
+    }
+
+    const anchors: {
+      partition: number;
+      anchorHash: string;
+      eventsPrunedCount: number;
+    }[] = [];
+    let windowStart = Infinity;
+    let windowEnd = -Infinity;
+    for (const r of ranges) {
+      const where = {
+        partition: r.partition,
+        partitionSeq: { lte: Number(r.cutoffSeq) },
+      };
+      const [count, span] = await Promise.all([
+        tenantClient.auditEvent.count({ where }),
+        tenantClient.auditEvent.aggregate({
+          where,
+          _min: { timestamp: true },
+          _max: { timestamp: true },
+        }),
+      ]);
+      // The window actually pruned (after the sealed-head clamp).
+      windowStart = Math.min(windowStart, span._min.timestamp!.getTime());
+      windowEnd = Math.max(windowEnd, span._max.timestamp!.getTime());
+      anchors.push({
+        partition: r.partition,
+        // Exactly the hash verifyPrunable checked, not a fresh read.
+        anchorHash: prefix.anchorHashes.get(r.partition)!,
+        eventsPrunedCount: count,
+      });
+    }
+    const prunedCount = anchors.reduce((n, a) => n + a.eventsPrunedCount, 0);
+    const signatures = await Promise.all(
+      anchors.map((a) =>
+        this.signer.sign(
+          input.tenantId,
+          anchorDigestOf({ tenantId: input.tenantId, ...a }),
+        ),
+      ),
+    );
 
     await tenantClient.$transaction([
-      tenantClient.auditChainAnchor.create({
-        data: {
+      tenantClient.auditChainAnchor.createMany({
+        data: anchors.map((a, i) => ({
           tenantId: input.tenantId,
-          anchorHash,
-          eventsPrunedCount: agedEvents.length,
+          ...a,
+          signature: signatures[i]!,
+        })),
+      }),
+      tenantClient.auditEvent.deleteMany({
+        where: {
+          OR: ranges.map((r) => ({
+            partition: r.partition,
+            partitionSeq: { lte: Number(r.cutoffSeq) },
+          })),
         },
       }),
-      tenantClient.auditEvent.deleteMany({ where: { id: { in: prunedIds } } }),
     ]);
 
+    // Kept for readers of the single-chain result: the last anchor written.
+    const anchorHash = anchors[anchors.length - 1]!.anchorHash;
     const retentionEvent = await this.auditService.record(
       tenantClient,
       input.tenantId,
@@ -89,22 +200,27 @@ export class AuditRetentionService {
         eventType: AUDIT_EVENT_TYPES.AUDIT_RETENTION_EXECUTED,
         actor: { type: 'system', id: 'system:audit-retention-workflow' },
         data: {
-          eventsPrunedCount: agedEvents.length,
+          eventsPrunedCount: prunedCount,
           anchorHash,
+          anchors,
           retentionWindowMs: input.retentionWindowMs,
-          prunedWindowStart: agedEvents[0]!.timestamp.toISOString(),
-          prunedWindowEnd: lastPruned.timestamp.toISOString(),
+          prunedWindowStart: new Date(windowStart).toISOString(),
+          prunedWindowEnd: new Date(windowEnd).toISOString(),
         },
       },
     );
 
     this.logger.log(
-      `Retention run for tenant "${input.tenantId}": pruned ${agedEvents.length} AuditEvent row(s), anchored at "${anchorHash}", recorded "${retentionEvent.id}"`,
+      `Retention run for tenant "${input.tenantId}": pruned ${prunedCount} AuditEvent row(s) across ${anchors.length} partition(s), recorded "${retentionEvent.id}"`,
     );
 
     return {
-      prunedCount: agedEvents.length,
+      prunedCount,
       anchorHash,
+      anchors: anchors.map(({ partition, anchorHash: hash }) => ({
+        partition,
+        anchorHash: hash,
+      })),
       retentionEventId: retentionEvent.id,
     };
   }

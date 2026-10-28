@@ -95,9 +95,11 @@ async function bootstrap(): Promise<void> {
  *   went away, so every in-flight request at that instant became a client-
  *   visible 502 rather than a completed response.
  *
- * `enableShutdownHooks` fixes all of that: on the signal, Nest stops the
- * HTTP server, then walks the module graph calling `onModuleDestroy`/
- * `beforeApplicationShutdown`/`onApplicationShutdown` in dependency order.
+ * `enableShutdownHooks` fixes all of that: on the signal, Nest calls
+ * `onModuleDestroy`/`beforeApplicationShutdown` across the module graph,
+ * then closes the HTTP server, then `onApplicationShutdown`. Requests still
+ * in flight after `onModuleDestroy` therefore still run; `AuditService`'s
+ * batcher flushes their audit records at once rather than refusing them.
  *
  * Pairing this with the Helm `preStop` sleep and `terminationGracePeriodSeconds`
  * (deploy/helm/manar-api/templates/deployment.yaml) is what makes rollouts

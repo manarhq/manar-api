@@ -1,4 +1,33 @@
 import { ApiProperty } from '@nestjs/swagger';
+import {
+  CheckpointPublicKeyDto,
+  MerkleProofStepDto,
+  SealedCheckpointDto,
+} from '../audit/audit.dto';
+
+/** An event's inclusion proof; its SEAL is in `bundle.checkpoints`. */
+class EvidenceEventProofDto {
+  @ApiProperty({ format: 'uuid' })
+  eventId!: string;
+
+  @ApiProperty({ minimum: 0, maximum: 63 })
+  partition!: number;
+
+  @ApiProperty({ minimum: 1 })
+  partitionSeq!: number;
+
+  @ApiProperty()
+  leaf!: string;
+
+  @ApiProperty({ type: [MerkleProofStepDto] })
+  proof!: MerkleProofStepDto[];
+
+  @ApiProperty()
+  root!: string;
+
+  @ApiProperty({ description: 'The covering SEAL, in bundle.checkpoints.' })
+  checkpointSeq!: string;
+}
 
 /** Mirrors `EvidenceExportRequestSchema` (`evidence-export.validation.ts`). At least one filter dimension is required. */
 export class EvidenceExportRequestDto {
@@ -62,6 +91,20 @@ class EvidenceEventDto {
 
   @ApiProperty()
   eventHash!: string;
+
+  @ApiProperty({ minimum: 0, maximum: 63 })
+  partition!: number;
+
+  @ApiProperty({ minimum: 1 })
+  partitionSeq!: number;
+
+  @ApiProperty({
+    type: () => EvidenceEventProofDto,
+    nullable: true,
+    description:
+      'Inclusion proof against a signed checkpoint; null until one covers the event.',
+  })
+  proof!: EvidenceEventProofDto | null;
 }
 
 class EvidenceCertificateDto {
@@ -335,6 +378,12 @@ class EvidenceBundleDto {
 
   @ApiProperty({ type: () => EvidenceContextDto })
   context!: EvidenceContextDto;
+
+  @ApiProperty({ type: () => CheckpointPublicKeyDto, nullable: true })
+  checkpointPublicKey!: CheckpointPublicKeyDto | null;
+
+  @ApiProperty({ type: () => SealedCheckpointDto, isArray: true })
+  checkpoints!: SealedCheckpointDto[];
 }
 
 class EvidenceBundleSignatureDto {

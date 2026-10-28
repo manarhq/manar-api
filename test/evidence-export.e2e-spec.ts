@@ -13,8 +13,18 @@ import { AppModule } from '../src/app.module';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
 import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
-import { verifyEvidenceBundle } from '../src/evidence/evidence-signing.util';
-import type { EvidenceExportResult } from '../src/evidence/evidence-export.service';
+import {
+  signEvidenceBundle,
+  verifyEvidenceBundle,
+} from '../src/evidence/evidence-signing.util';
+import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
+import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
+import { verifyInclusion } from '../src/audit/merkle';
+import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
+import {
+  EvidenceExportService,
+  type EvidenceExportResult,
+} from '../src/evidence/evidence-export.service';
 import {
   assignRealmRole,
   createRealmUser,
@@ -205,13 +215,17 @@ describe('Evidence export (e2e)', () => {
     expect(taskContext?.assignedAgentId).toBe(agentId);
     expect(taskContext?.status).toBe('REVOKED');
 
-    // Chain-segment self-consistency: consecutive previousHash/eventHash
-    // linkage among the exported events (Section 49's "let a recipient
-    // verify those specific events weren't tampered with").
-    for (let i = 1; i < result.bundle.events.length; i += 1) {
-      expect(result.bundle.events[i]!.previousHash).toBe(
-        result.bundle.events[i - 1]!.eventHash,
+    // Chain-segment self-consistency within each audit partition: an
+    // exported event directly after another in the same partition links to
+    // it (Section 49's "let a recipient verify those specific events").
+    const events = result.bundle.events;
+    for (const later of events) {
+      const earlier = events.find(
+        (e) =>
+          e.partition === later.partition &&
+          e.partitionSeq + 1 === later.partitionSeq,
       );
+      if (earlier) expect(later.previousHash).toBe(earlier.eventHash);
     }
 
     const verifyGood = await verifyEvidenceBundle(
@@ -251,7 +265,9 @@ describe('Evidence export (e2e)', () => {
         .send({ bundle, signature: exported.signature.signature })
         .expect(200);
 
-    expect((await verify(exported.bundle)).body).toEqual({ valid: true });
+    expect((await verify(exported.bundle)).body).toMatchObject({
+      valid: true,
+    });
     expect(
       (await verify({ ...exported.bundle, tenantId: 'someone-else' })).body,
     ).toMatchObject({ valid: false });
@@ -264,5 +280,125 @@ describe('Evidence export (e2e)', () => {
         signature: exported.signature.signature,
       })
       .expect(403);
+  });
+
+  it('carries an inclusion proof for every sealed event, and verify checks each against the tenant key', async () => {
+    const client = await app.get(TenantDatabaseManager).getClient(tenant.id);
+    await app.get(AuditCheckpointService).createCheckpoint(client, tenant.id);
+
+    const exported = (
+      await request(app.getHttpServer() as App)
+        .post('/evidence/export')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ taskId })
+        .expect(201)
+    ).body as EvidenceExportResult;
+
+    const key = await app.get(CheckpointSigner).publicKey(tenant.id);
+    expect(exported.bundle.checkpointPublicKey).toEqual(key);
+    const sealed = exported.bundle.events.filter((e) => e.proof !== null);
+    expect(sealed.length).toBe(exported.bundle.events.length);
+    for (const e of sealed) {
+      expect(verifyInclusion(e.eventHash, e.proof!.proof, e.proof!.root)).toBe(
+        true,
+      );
+    }
+    // Each SEAL is in the bundle once; proofs point at it by seq.
+    const seqs = exported.bundle.checkpoints.map((c) => c.seq);
+    expect(new Set(seqs).size).toBe(seqs.length);
+    for (const e of sealed) {
+      expect(seqs).toContain(e.proof!.checkpointSeq);
+    }
+
+    const verified = (
+      await request(app.getHttpServer() as App)
+        .post('/evidence/verify')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          bundle: exported.bundle,
+          signature: exported.signature.signature,
+        })
+        .expect(200)
+    ).body as { valid: boolean; proofsVerified: number; proofsMissing: number };
+    expect(verified).toEqual({
+      valid: true,
+      proofsVerified: sealed.length,
+      proofsMissing: 0,
+    });
+
+    // A bundle whose HMAC signature is genuine but whose proof does not lead
+    // to a SEAL signed by the tenant key (a leaked signing secret, say) fails.
+    const forged = {
+      ...exported.bundle,
+      checkpoints: exported.bundle.checkpoints.map((c, i) =>
+        i === 0 ? { ...c, signature: 'AAAA' } : c,
+      ),
+    };
+    const resigned = await signEvidenceBundle(
+      forged,
+      exported.exportId,
+      SIGNING_SECRET,
+    );
+    const service = app.get(EvidenceExportService);
+    expect(
+      await service.verify(forged, resigned.signature, client),
+    ).toMatchObject({ valid: false, reason: 'proof_invalid' });
+
+    // Changed data under an unchanged eventHash/leaf: the hash recomputed
+    // from the event's own fields no longer matches.
+    const edited = {
+      ...exported.bundle,
+      events: exported.bundle.events.map((e, i) =>
+        i === 0 ? { ...e, data: { edited: true } } : e,
+      ),
+    };
+    const editedSig = await signEvidenceBundle(
+      edited,
+      exported.exportId,
+      SIGNING_SECRET,
+    );
+    expect(
+      await service.verify(edited, editedSig.signature, client),
+    ).toMatchObject({ valid: false, reason: 'proof_invalid' });
+
+    // A proof stripped from an event a checkpoint does cover is not
+    // "missing", it was removed.
+    const stripped = {
+      ...exported.bundle,
+      events: exported.bundle.events.map((e, i) =>
+        i === 0 ? { ...e, proof: null } : e,
+      ),
+    };
+    const strippedSig = await signEvidenceBundle(
+      stripped,
+      exported.exportId,
+      SIGNING_SECRET,
+    );
+    expect(
+      await service.verify(stripped, strippedSig.signature, client),
+    ).toMatchObject({ valid: false, reason: 'proof_missing' });
+
+    // Without the bundle's own tenant database, a missing proof can't be
+    // judged: unverifiable, never valid.
+    expect(await service.verify(stripped, strippedSig.signature)).toMatchObject(
+      { valid: false, reason: 'proof_unverifiable' },
+    );
+
+    // An event the tenant's log doesn't hold, with no proof: unverifiable.
+    const invented = {
+      ...exported.bundle,
+      events: [
+        ...exported.bundle.events,
+        { ...exported.bundle.events[0]!, id: randomUUID(), proof: null },
+      ],
+    };
+    const inventedSig = await signEvidenceBundle(
+      invented,
+      exported.exportId,
+      SIGNING_SECRET,
+    );
+    expect(
+      await service.verify(invented, inventedSig.signature, client),
+    ).toMatchObject({ valid: false, reason: 'proof_unverifiable' });
   });
 });

@@ -106,17 +106,21 @@ export class PlatformOpsService {
   /** Full chain check of one tenant's audit log. */
   async verifyTenantAudit(id: string) {
     const db = await this.activeTenantClient(id);
-    return this.verify(db);
+    return this.verify(db, id);
   }
 
-  private async verify(db: TenantPrismaClient) {
-    const result = await this.audit.verifyAuditChain(db);
-    const state = await db.auditChainState.findUnique({
-      where: { id: 'singleton' },
+  private async verify(
+    db: TenantPrismaClient,
+    tenantId: string,
+    opts: { incremental?: boolean } = {},
+  ) {
+    const result = await this.audit.verifyAuditChain(db, tenantId, opts);
+    const states = await db.auditPartitionState.aggregate({
+      _sum: { eventCount: true },
     });
     return {
       valid: result.valid,
-      eventCount: state?.eventCount ?? 0,
+      eventCount: states._sum.eventCount ?? 0,
       brokenAt: result.valid ? null : (result.brokenAt ?? null),
       verifiedAt: new Date().toISOString(),
     };
@@ -405,9 +409,9 @@ export class PlatformOpsService {
       return this.auditCache.summary;
     let checked = 0;
     let broken = 0;
-    for (const db of await this.activeClients()) {
+    for (const { id, db } of await this.activeTenantClients()) {
       try {
-        const r = await this.verify(db);
+        const r = await this.verify(db, id, { incremental: true });
         checked++;
         if (!r.valid) broken++;
       } catch {
@@ -436,14 +440,27 @@ export class PlatformOpsService {
   }
 
   private async activeClients(): Promise<TenantPrismaClient[]> {
+    return (await this.activeTenantClients()).map((t) => t.db);
+  }
+
+  private async activeTenantClients(): Promise<
+    { id: string; db: TenantPrismaClient }[]
+  > {
     const rows = await this.control.tenant.findMany({
       where: { status: 'ACTIVE' },
       select: { id: true },
       orderBy: { id: 'asc' },
     });
     const clients = await Promise.all(
-      rows.map((t) => this.tenants.getClient(t.id).catch(() => null)),
+      rows.map((t) =>
+        this.tenants
+          .getClient(t.id)
+          .then((db) => ({ id: t.id, db }))
+          .catch(() => null),
+      ),
     );
-    return clients.filter((c): c is TenantPrismaClient => c !== null);
+    return clients.filter(
+      (c): c is { id: string; db: TenantPrismaClient } => c !== null,
+    );
   }
 }

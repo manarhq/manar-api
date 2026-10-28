@@ -75,15 +75,26 @@ export class EvidenceController {
   @ApiOperation({
     summary: 'Verify an exported evidence bundle',
     description:
-      'Checks the signature and the bundle hash of a bundle returned by POST /evidence/export. Returns { valid } and, when invalid, a reason.',
+      "Checks the signature and the bundle hash of a bundle returned by POST /evidence/export, then every event's inclusion proof against a checkpoint signed by the tenant's key. Returns { valid, proofsVerified, proofsMissing } or, when invalid, { valid: false, reason }.",
   })
   @ApiResponse({
     status: 200,
-    description: '{ valid: boolean, reason?: string }',
+    description:
+      "{ valid: true, proofsVerified: number, proofsMissing: number } | { valid: false, reason: string }. A missing proof is accepted only for an event of the caller's own tenant that no checkpoint covers yet; otherwise reason is proof_missing or proof_unverifiable.",
   })
   @ApiResponse({ status: 400, type: ErrorResponseDto })
-  async verify(@Body() body: unknown) {
+  async verify(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const input = parseBodyOrThrow(EvidenceVerifyRequestSchema, body);
-    return this.evidenceExportService.verify(input.bundle, input.signature);
+    const ownBundle =
+      typeof input.bundle === 'object' &&
+      input.bundle !== null &&
+      (input.bundle as { tenantId?: unknown }).tenantId === auth.tenant.id;
+    return this.evidenceExportService.verify(
+      input.bundle,
+      input.signature,
+      ownBundle
+        ? await this.tenantDatabaseManager.getClient(auth.tenant.id)
+        : undefined,
+    );
   }
 }

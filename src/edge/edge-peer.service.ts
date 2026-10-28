@@ -878,38 +878,37 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
           });
           if (claimed.count === 0) return null;
         }
-        const out: (() => void)[] = [];
-        for (const { event, agentId } of list) {
-          out.push(
-            await this.audit.recordInTransaction(tx, tenantId, {
-              eventType:
-                event.decision === 'allowed'
-                  ? AUDIT_EVENT_TYPES.AGENT_EGRESS_ALLOWED
-                  : AUDIT_EVENT_TYPES.AGENT_EGRESS_DENIED,
-              actor: { type: 'agent', id: agentId },
-              data: {
-                agentId,
-                peerId: event.peerId,
-                at: event.at,
-                host: event.host,
-                port: event.port,
-                reason: event.reason,
-                bytesUp: event.bytesUp,
-                bytesDown: event.bytesDown,
-                durationMs: event.durationMs,
-                ech: event.ech ?? null,
-                source: 'manar-edge-gateway',
-                ...(batchId ? { batchId } : {}),
-              },
-            }),
-          );
-        }
-        return out;
+        // One call: its partitions are locked once, in ascending order.
+        return this.audit.recordManyInTransaction(
+          tx,
+          tenantId,
+          list.map(({ event, agentId }) => ({
+            eventType:
+              event.decision === 'allowed'
+                ? AUDIT_EVENT_TYPES.AGENT_EGRESS_ALLOWED
+                : AUDIT_EVENT_TYPES.AGENT_EGRESS_DENIED,
+            actor: { type: 'agent', id: agentId },
+            data: {
+              agentId,
+              peerId: event.peerId,
+              at: event.at,
+              host: event.host,
+              port: event.port,
+              reason: event.reason,
+              bytesUp: event.bytesUp,
+              bytesDown: event.bytesDown,
+              durationMs: event.durationMs,
+              ech: event.ech ?? null,
+              source: 'manar-edge-gateway',
+              ...(batchId ? { batchId } : {}),
+            },
+          })),
+        );
       },
       { timeout: 60_000 },
     );
     if (!publishers) return false;
-    publishers.forEach((publish) => publish());
+    publishers();
     return true;
   }
 }

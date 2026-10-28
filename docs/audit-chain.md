@@ -12,6 +12,135 @@ and `docs/approvals.md` for what each retrofitted decision point actually
 does — this document covers only the audit chain itself and how it's wired
 into them.
 
+## Partitions, group commit and SEALs (R2 F1, 2026-10-28; ADR-0014)
+
+**This section supersedes the single-chain description further down**
+(`AuditChainState`, one `FOR UPDATE` per write). The old design capped audit
+at about 45–50 events/s per tenant.
+
+**Partitions.** Each tenant's log is **64 hash chains** (`src/audit/audit-partition.ts`).
+An event belongs to the partition of the agent it is about: the actor if it
+is an agent, else `data.agentId`, else the actor. `AuditEvent` has a
+`partition` and a dense 1-based `partitionSeq`. `previousHash` is the
+previous event **in the same partition**. The `eventHash` formula is
+unchanged. `audit_partition_state` has one row per partition (tail hash,
+`latestSeq`, count) and replaces `audit_chain_state`. The migration turned
+every existing event into partition 0 in its original order.
+
+**Group commit.** `AuditService.record` goes through `AuditBatcher`
+(`src/audit/audit-batcher.ts`). It writes up to 500 events, or whatever
+arrived within 5 ms, per tenant, in one transaction. That transaction locks
+only the touched partition rows, **in ascending order**, so two replicas
+never deadlock and never fork a chain. The unique index on
+`(partition, partitionSeq)` is a second guard. The caller's promise settles
+when its batch commits, so record-before-execution holds. If a batch fails,
+each event is retried alone, so one event Postgres refuses (for example
+U+0000 in `data`) fails only its own caller. `recordInTransaction`
+(ADR-0010) bypasses the batcher and locks its one partition inside the
+caller's transaction.
+
+**SEALs (signed checkpoints).** The worker's `AuditCheckpointScheduler`
+calls `AuditCheckpointService.createCheckpoint` for every active tenant
+once a second. Only one writer per tenant runs at a time (advisory lock).
+Each SEAL (`audit_checkpoints`) holds:
+
+- per advanced partition, the **RFC 6962 Merkle root** (`src/audit/merkle.ts`)
+  of the events since the previous SEAL
+- every partition's head
+- the previous SEAL's hash
+- an **Ed25519 signature by the tenant's own key**: OpenBao KV
+  `audit/checkpoint-signing-key/<tenantId>`, created on first use with
+  check-and-set
+
+The pure format (what is hashed and signed, with domain labels) is in
+`src/audit/checkpoint/checkpoint-format.ts`. `AuditService` never imports
+the OpenBao client: it is on the decision path
+(`decision-path-dependencies.spec.ts`).
+
+**Proofs.** `GET /audit/events/:id/proof` returns the event's Merkle path to
+a root in a signed SEAL, plus that SEAL. It returns 409
+`audit_event_not_checkpointed` until a SEAL covers the event (within about
+a second). `GET /audit/checkpoints/public-key` returns the tenant's key.
+Evidence bundles carry a proof per sealed event plus the tenant key.
+`POST /evidence/verify` checks each one:
+
+1. the recomputed event hash
+2. the Merkle path
+3. the SEAL hash
+4. the signature by the tenant's real key
+
+A missing proof is accepted only for an event of the caller's own tenant
+that is stored with the same hash and not yet sealed. Otherwise the reason
+is `proof_missing`, `proof_invalid` or `proof_unverifiable`.
+
+**What `verifyAuditChain(client, tenantId)` checks**, in order:
+
+1. Each partition's chain: linkage, recomputed hashes, and the tail against
+   its partition row.
+2. Each SEAL in sequence: its link to the previous SEAL, its hash, its
+   signature by the tenant key, and every root whose range still exists.
+   Where retention pruned the start of a range, the surviving tail must
+   still match the signed head.
+3. Every head in the last SEAL still exists unchanged, or retention pruned
+   it.
+4. Events after the last SEAL are accepted only while that SEAL is younger
+   than `SEAL_GRACE_MS` (2 min) **by its own signed time**. If the tenant
+   key exists in OpenBao but no SEAL is left, the log is broken even if
+   empty.
+
+The `brokenAt` values:
+
+- `<eventId>`
+- `audit_partition_state:<n>`
+- `checkpoint:<seq>`
+- `unsealed:<n>`
+
+**Retention** prunes each partition separately:
+
+1. It seals first.
+2. It **verifies the whole log and refuses to prune a log that does not
+   verify**.
+3. It writes one anchor per pruned partition, **signed with the tenant
+   key**. Verification only accepts signed anchors. Unsigned ones are
+   accepted in partition 0 only, because they predate partitioning; that
+   is a known residual.
+
+**SEAL mark (control database).** `audit_seal_marks` records each tenant's
+newest SEAL outside the tenant database:
+
+- The worker refuses to seal (`SealContinuityError`), and verification
+  fails (`checkpoint:<seq>`), when the tenant database no longer holds that
+  SEAL unchanged.
+- The same row is the **verification watermark**: the last SEAL verified
+  and the heads it covered.
+
+**Full and incremental verification:**
+
+- `GET /audit/verify` and `pnpm manar audit:verify` run the **full** walk.
+- Retention and the fleet summary run **incremental** verification. It
+  resumes at the watermark (re-authenticated by hash and signature) and
+  checks everything after it.
+- Retention also re-checks the events it is about to delete
+  (`verifyPrunable`). It prunes only up to the last SEAL's head.
+
+**Bounded sealing.** A SEAL covers at most `MAX_RANGE` (50,000) events per
+partition, so the first SEAL after the upgrade seals existing history over
+several rounds. Ranges are indexed in `audit_checkpoint_ranges` for proof
+lookup. The signed `roots` stay authoritative, and a missing index row is
+`checkpoint_index_mismatch`.
+
+**Measured** (`pnpm manar audit:bench`, a throwaway tenant, i7-12700F,
+local Compose stack, final code): **5,508 events/s** sustained for 60 s,
+p50 35 ms, **p99 49 ms**, 60 SEALs, and 330,600 events verified.
+
+**Not here yet:**
+
+- **RFC 3161 timestamps on evidence:** come with the HUB (plan H2).
+- **Hierarchical anchoring:** also H2. It takes the newest SEAL off the SITE
+  entirely.
+- **Large-tenant full verification:** a full walk of a very large tenant
+  still grows with its history. It becomes a background job in plan P.
+
 ## Local infra: Kafka
 
 `deploy/docker-compose.yml` adds `kafka` (`apache/kafka:4.3.1`, the

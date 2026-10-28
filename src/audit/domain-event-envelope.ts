@@ -43,6 +43,9 @@ export interface DomainEventEnvelope {
   previousHash?: string | null;
   eventHash?: string;
   sequence?: number;
+  /** The event's audit partition and its position in it. */
+  partition?: number;
+  partitionSeq?: number;
 }
 
 /** This phase ships exactly one envelope schema version — see `DomainEventEnvelope.eventVersion`'s doc comment. */

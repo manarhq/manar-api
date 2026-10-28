@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Client as PgClient } from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { NativeConnection, Worker } from '@temporalio/worker';
@@ -12,6 +12,12 @@ import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { AuditService } from '../src/audit/audit.service';
+import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
+import { AuditRetentionService } from '../src/audit/retention/audit-retention.service';
+import { ControlSealMarkStore } from '../src/audit/checkpoint/seal-mark.store';
+import { anchorDigestOf } from '../src/audit/checkpoint/checkpoint-format';
+import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
+import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
 import { WorkerAppModule } from '../src/temporal/worker-app.module';
@@ -202,7 +208,10 @@ describe('Audit retention (e2e)', () => {
     );
     kafkaPublisher = new KafkaPublisherService(fakeConfigService());
     await kafkaPublisher.onModuleInit();
-    auditService = new AuditService(kafkaPublisher);
+    auditService = new AuditService(
+      kafkaPublisher,
+      new CheckpointSigner(new OpenBaoKvClient(fakeConfigService())),
+    );
 
     workerModuleFixture = await Test.createTestingModule({
       imports: [WorkerAppModule],
@@ -264,28 +273,25 @@ describe('Audit retention (e2e)', () => {
     });
     const tenantClient = await manager.getClient(tenant.id);
 
+    // Genuinely old events: recorded under a clock set back past the window,
+    // so their timestamps and hashes agree (retention verifies before it prunes).
+    const oldTimestamp = new Date(
+      Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 24 * 60 * 60 * 1000),
+    );
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(oldTimestamp);
     const oldIds: string[] = [];
     for (let i = 0; i < 5; i += 1) {
       const event = await auditService.record(tenantClient, tenant.id, {
         eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
         actor: { type: 'system', id: 'retention-test-old' },
-        data: { i, age: 'old' },
+        // One agent for old and new events: they share a partition, so
+        // the new events chain off the old ones (asserted below).
+        data: { i, age: 'old', agentId: 'retention-agent' },
       });
       oldIds.push(event.id);
     }
-    // Backdate the "old" events directly (reaching around AuditService,
-    // the same established pattern test/audit-chain.e2e-spec.ts's own
-    // tamper tests use) — timestamp is the only field retention logic
-    // filters on; the resulting hash/timestamp mismatch on these
-    // soon-to-be-deleted rows is never observed by anything (they're
-    // pruned before any verifyAuditChain call).
-    const oldTimestamp = new Date(
-      Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 24 * 60 * 60 * 1000),
-    );
-    await tenantClient.auditEvent.updateMany({
-      where: { id: { in: oldIds } },
-      data: { timestamp: oldTimestamp },
-    });
+    vi.useRealTimers();
     const lastOldEvent = await tenantClient.auditEvent.findUniqueOrThrow({
       where: { id: oldIds[oldIds.length - 1] },
     });
@@ -295,7 +301,7 @@ describe('Audit retention (e2e)', () => {
       const event = await auditService.record(tenantClient, tenant.id, {
         eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
         actor: { type: 'system', id: 'retention-test-new' },
-        data: { i, age: 'new' },
+        data: { i, age: 'new', agentId: 'retention-agent' },
       });
       newIds.push(event.id);
     }
@@ -365,16 +371,376 @@ describe('Audit retention (e2e)', () => {
         ?.eventsPrunedCount,
     ).toBe(5);
 
-    const chainState = await tenantClient.auditChainState.findUnique({
-      where: { id: 'singleton' },
+    const chainState = await tenantClient.auditPartitionState.findUnique({
+      where: { partition: retentionEvent!.partition },
     });
     expect(chainState?.latestEventId).toBe(result.retentionEventId);
 
     // The pruned chain still verifies — anchor-aware verifyAuditChain.
-    const verifyResult = await auditService.verifyAuditChain(tenantClient);
+    const verifyResult = await auditService.verifyAuditChain(
+      tenantClient,
+      tenant.id,
+    );
     expect(verifyResult).toEqual({ valid: true });
 
     expect(await tenantClient.auditEvent.count()).toBe(4); // 3 new + 1 retention_executed
+  }, 60_000);
+
+  it('prunes each partition separately: one anchor per partition, the log and its SEALs still verify', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('parts'),
+      name: 'Retention Partitions Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    const agents = ['ret-a', 'ret-b', 'ret-c'];
+    const oldIds: string[] = [];
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+    );
+    for (const agent of agents) {
+      for (let i = 0; i < 4; i += 1) {
+        const e = await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: agent },
+          data: { i, age: 'old' },
+        });
+        oldIds.push(e.id);
+      }
+    }
+    vi.useRealTimers();
+    // Seal while everything still exists, so verification later has to skip
+    // the pruned ranges rather than flag them.
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    await new AuditCheckpointService(signer).createCheckpoint(
+      tenantClient,
+      tenant.id,
+    );
+
+    for (const agent of agents) {
+      await auditService.record(tenantClient, tenant.id, {
+        eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+        actor: { type: 'agent', id: agent },
+        data: { age: 'new' },
+      });
+    }
+    const lastOld = new Map<number, string>();
+    for (const e of await tenantClient.auditEvent.findMany({
+      where: { id: { in: oldIds } },
+      orderBy: { partitionSeq: 'asc' },
+    })) {
+      lastOld.set(e.partition, e.eventHash);
+    }
+
+    const result = await new AuditRetentionService(
+      auditService,
+      signer,
+      new AuditCheckpointService(signer),
+    ).pruneTenantAuditEvents(tenantClient, {
+      tenantId: tenant.id,
+      retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+    });
+
+    expect(result.prunedCount).toBe(12);
+    expect(
+      [...result.anchors].sort((a, b) => a.partition - b.partition),
+    ).toEqual(
+      [...lastOld.entries()]
+        .map(([partition, anchorHash]) => ({ partition, anchorHash }))
+        .sort((a, b) => a.partition - b.partition),
+    );
+    const anchors = await tenantClient.auditChainAnchor.findMany();
+    expect(anchors.map((a) => [a.partition, a.anchorHash]).sort()).toEqual(
+      [...lastOld.entries()].sort(),
+    );
+    const retentionEvent = await tenantClient.auditEvent.findUniqueOrThrow({
+      where: { id: result.retentionEventId! },
+    });
+    expect(
+      (retentionEvent.data as { anchors: unknown[] }).anchors,
+    ).toHaveLength(lastOld.size);
+    expect(
+      await auditService.verifyAuditChain(tenantClient, tenant.id),
+    ).toEqual({ valid: true });
+  }, 60_000);
+
+  it('prunes only what is sealed, and sealing never stalls on a pruned gap', async () => {
+    const before = AuditCheckpointService.MAX_RANGE;
+    AuditCheckpointService.MAX_RANGE = 10;
+    try {
+      const tenant = await manager.provisionTenant({
+        slug: uniqueSlug('gap'),
+        name: 'Retention Sealing Gap Tenant',
+      });
+      provisioned.push({
+        tenantId: tenant.id,
+        databaseName: tenant.databaseBinding!.databaseName,
+      });
+      const tenantClient = await manager.getClient(tenant.id);
+      const base =
+        Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      for (let i = 0; i < 25; i += 1) {
+        vi.setSystemTime(new Date(base + i * 1000)); // one second apart
+        await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'ret-gap' },
+          data: { i },
+        });
+      }
+      vi.useRealTimers();
+      const signer = new CheckpointSigner(
+        new OpenBaoKvClient(fakeConfigService()),
+      );
+      const checkpoints = new AuditCheckpointService(signer);
+
+      // Retention seals once (10 of 25) and must prune no further than that.
+      const result = await new AuditRetentionService(
+        auditService,
+        signer,
+        checkpoints,
+      ).pruneTenantAuditEvents(tenantClient, {
+        tenantId: tenant.id,
+        retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+      });
+      expect(result.prunedCount).toBe(10);
+      // The recorded window is that of the 10 events pruned, not all 25 aged.
+      const retentionEvent = await tenantClient.auditEvent.findUniqueOrThrow({
+        where: { id: result.retentionEventId! },
+      });
+      expect(
+        (retentionEvent.data as { prunedWindowEnd: string }).prunedWindowEnd,
+      ).toBe(new Date(base + 9 * 1000).toISOString());
+
+      // The rest seals in later rounds, then the log verifies.
+      while (await checkpoints.createCheckpoint(tenantClient, tenant.id));
+      expect(
+        await auditService.verifyAuditChain(tenantClient, tenant.id),
+      ).toEqual({ valid: true });
+    } finally {
+      AuditCheckpointService.MAX_RANGE = before;
+    }
+  }, 60_000);
+
+  it('checks the events it is about to prune even when incremental verification skips them', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('prefix'),
+      name: 'Retention Prefix Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+    );
+    const old = [];
+    for (let i = 0; i < 4; i += 1) {
+      old.push(
+        await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'ret-prefix' },
+          data: { i },
+        }),
+      );
+    }
+    vi.useRealTimers();
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    const marks = new ControlSealMarkStore(control);
+    const markedAudit = new AuditService(kafkaPublisher, signer, marks);
+    const checkpoints = new AuditCheckpointService(signer, marks);
+    await checkpoints.createCheckpoint(tenantClient, tenant.id);
+    // A full run moves the watermark past the old events...
+    expect(await markedAudit.verifyAuditChain(tenantClient, tenant.id)).toEqual(
+      { valid: true },
+    );
+    // ...then one of them is edited. Incremental runs no longer look at it.
+    await tenantClient.$executeRaw`UPDATE "audit_events" SET "data" = '{"x":3}'::jsonb WHERE "id" = ${old[1]!.id}`;
+
+    try {
+      await expect(
+        new AuditRetentionService(
+          markedAudit,
+          signer,
+          checkpoints,
+        ).pruneTenantAuditEvents(tenantClient, {
+          tenantId: tenant.id,
+          retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+        }),
+      ).rejects.toThrow(/does not verify/);
+      expect(await tenantClient.auditEvent.count()).toBe(4);
+    } finally {
+      await markedAudit.onModuleDestroy();
+      await control.auditSealMark.deleteMany({
+        where: { tenantId: tenant.id },
+      });
+    }
+  }, 60_000);
+
+  it('refuses to prune when a proof-index row inside the pruned prefix is missing', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('hole'),
+      name: 'Retention Index Hole Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    const checkpoints = new AuditCheckpointService(signer);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+    );
+    for (let round = 0; round < 3; round += 1) {
+      for (let i = 0; i < 3; i += 1) {
+        await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'ret-hole' },
+          data: { round, i },
+        });
+      }
+      await checkpoints.createCheckpoint(tenantClient, tenant.id);
+    }
+    vi.useRealTimers();
+    await tenantClient.$executeRaw`DELETE FROM "audit_checkpoint_ranges" WHERE "checkpointSeq" = 2`;
+
+    await expect(
+      new AuditRetentionService(
+        auditService,
+        signer,
+        checkpoints,
+      ).pruneTenantAuditEvents(tenantClient, {
+        tenantId: tenant.id,
+        retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+      }),
+    ).rejects.toThrow(/does not verify/);
+    expect(await tenantClient.auditEvent.count()).toBe(9);
+  }, 60_000);
+
+  it('a forged index row over a partly pruned range cannot vouch for the rest', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('forgedrange'),
+      name: 'Retention Forged Range Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    const checkpoints = new AuditCheckpointService(signer);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+    );
+    const events = [];
+    for (let round = 0; round < 3; round += 1) {
+      for (let i = 0; i < 3; i += 1) {
+        events.push(
+          await auditService.record(tenantClient, tenant.id, {
+            eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+            actor: { type: 'agent', id: 'ret-forged' },
+            data: { round, i },
+          }),
+        );
+      }
+      await checkpoints.createCheckpoint(tenantClient, tenant.id);
+    }
+    vi.useRealTimers();
+    // Prune the first event as retention would (signed anchor), so SEAL 1's
+    // range now starts before the oldest remaining event.
+    const anchor = {
+      tenantId: tenant.id,
+      partition: events[0]!.partition,
+      anchorHash: events[0]!.eventHash,
+      eventsPrunedCount: 1,
+    };
+    await tenantClient.auditChainAnchor.create({
+      data: {
+        ...anchor,
+        signature: await signer.sign(tenant.id, anchorDigestOf(anchor)),
+      },
+    });
+    await tenantClient.auditEvent.delete({ where: { id: events[0]!.id } });
+    // Forge SEAL 1's index row to claim the whole span, and drop the others.
+    await tenantClient.$executeRaw`UPDATE "audit_checkpoint_ranges" SET "toSeq" = 9 WHERE "checkpointSeq" = 1`;
+    await tenantClient.$executeRaw`DELETE FROM "audit_checkpoint_ranges" WHERE "checkpointSeq" > 1`;
+
+    await expect(
+      new AuditRetentionService(
+        auditService,
+        signer,
+        checkpoints,
+      ).pruneTenantAuditEvents(tenantClient, {
+        tenantId: tenant.id,
+        retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+      }),
+    ).rejects.toThrow(/does not verify/);
+  }, 60_000);
+
+  it('refuses to prune (and sign anchors) when the log does not verify', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('broken'),
+      name: 'Retention Broken Log Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    const events = [];
+    for (let i = 0; i < 4; i += 1) {
+      events.push(
+        await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'ret-broken' },
+          data: { i },
+        }),
+      );
+    }
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    const checkpoints = new AuditCheckpointService(signer);
+    await checkpoints.createCheckpoint(tenantClient, tenant.id);
+    // Age everything out by editing timestamps in place: each edited event's
+    // hash no longer matches, exactly as a tamper would leave it.
+    await tenantClient.auditEvent.updateMany({
+      data: {
+        timestamp: new Date(
+          Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000),
+        ),
+      },
+    });
+
+    await expect(
+      new AuditRetentionService(
+        auditService,
+        signer,
+        checkpoints,
+      ).pruneTenantAuditEvents(tenantClient, {
+        tenantId: tenant.id,
+        retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+      }),
+    ).rejects.toThrow(/does not verify/);
+    expect(await tenantClient.auditEvent.count()).toBe(4);
+    expect(await tenantClient.auditChainAnchor.count()).toBe(0);
   }, 60_000);
 
   it('a retention run that finds nothing old enough is a genuine no-op', async () => {
@@ -412,6 +778,7 @@ describe('Audit retention (e2e)', () => {
     expect(result).toEqual({
       prunedCount: 0,
       anchorHash: null,
+      anchors: [],
       retentionEventId: null,
     });
     expect(await tenantClient.auditEvent.count()).toBe(1);
