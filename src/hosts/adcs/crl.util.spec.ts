@@ -209,4 +209,87 @@ describe('checkRevocation', () => {
       }
     });
   });
+
+  describe('delta CRLs', () => {
+    const base = 'http://pki.corp.example/ca.crl';
+    const delta = 'http://pki.corp.example/ca+.crl';
+    const fetchFrom =
+      (m: Record<string, Uint8Array | Error>) => (u: string) => {
+        const got = m[u];
+        return got instanceof Uint8Array
+          ? Promise.resolve(got)
+          : Promise.reject(got ?? new Error('unreachable'));
+      };
+
+    it('a certificate revoked in the daily delta is revoked, not good', async () => {
+      const leaf = await makeLeaf(ca, { crlUrl: base, serial: '0d01' });
+      const fetch = fetchFrom({
+        [base]: await makeCrl(ca, [], { crlNumber: 10n, freshest: [delta] }),
+        [delta]: await makeCrl(ca, ['0d01'], {
+          crlNumber: 11n,
+          deltaBase: 10n,
+        }),
+      });
+      expect(await checkRevocation(leaf.cert, ca.cert, fetch)).toBe('revoked');
+    });
+
+    it('good when the delta does not list it', async () => {
+      const leaf = await makeLeaf(ca, { crlUrl: base, serial: '0d02' });
+      const fetch = fetchFrom({
+        [base]: await makeCrl(ca, [], { crlNumber: 10n, freshest: [delta] }),
+        [delta]: await makeCrl(ca, ['0eee'], {
+          crlNumber: 11n,
+          deltaBase: 10n,
+        }),
+      });
+      expect(await checkRevocation(leaf.cert, ca.cert, fetch)).toBe('good');
+    });
+
+    it('unknown when the delta is unreachable, stale, foreign-signed or for a newer base', async () => {
+      const leaf = await makeLeaf(ca, { crlUrl: base, serial: '0d03' });
+      const b = await makeCrl(ca, [], { crlNumber: 10n, freshest: [delta] });
+      const bad: (Uint8Array | Error)[] = [
+        new Error('ECONNREFUSED'),
+        await makeCrl(ca, ['0d03'], {
+          crlNumber: 11n,
+          deltaBase: 10n,
+          nextUpdate: new Date(Date.now() - 1000),
+        }),
+        await makeCrl(ca, ['0d03'], {
+          crlNumber: 11n,
+          deltaBase: 10n,
+          wrongIssuerKey: other,
+        }),
+        // built on base 11, newer than the base CRL we hold (10)
+        await makeCrl(ca, ['0d03'], { crlNumber: 12n, deltaBase: 11n }),
+        // not a delta at all
+        await makeCrl(ca, ['0d03'], { crlNumber: 11n }),
+      ];
+      for (const d of bad) {
+        expect(
+          await checkRevocation(
+            leaf.cert,
+            ca.cert,
+            fetchFrom({ [base]: b, [delta]: d }),
+          ),
+        ).toBe('unknown');
+      }
+    });
+
+    it('freshest CRL on the leaf is honoured too', async () => {
+      const leaf = await makeLeaf(ca, {
+        crlUrl: base,
+        serial: '0d04',
+        freshestCrlUrl: delta,
+      });
+      const fetch = fetchFrom({
+        [base]: await makeCrl(ca, [], { crlNumber: 10n }),
+        [delta]: await makeCrl(ca, ['0d04'], {
+          crlNumber: 11n,
+          deltaBase: 10n,
+        }),
+      });
+      expect(await checkRevocation(leaf.cert, ca.cert, fetch)).toBe('revoked');
+    });
+  });
 });

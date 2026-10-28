@@ -31,6 +31,11 @@ describe('LdapsAdDirectory (in-process LDAPS server)', () => {
       password: 'correct horse',
       computers: [
         { dn, dNSHostName: 'pc01.corp.example' },
+        {
+          dn: 'CN=OFF,OU=Laptops,OU=Finance,DC=corp,DC=example',
+          dNSHostName: 'off.corp.example',
+          disabled: true,
+        },
         { dn: 'CN=DUP1,DC=corp,DC=example', dNSHostName: 'dup.corp.example' },
         { dn: 'CN=DUP2,DC=corp,DC=example', dNSHostName: 'dup.corp.example' },
       ],
@@ -57,6 +62,12 @@ describe('LdapsAdDirectory (in-process LDAPS server)', () => {
       found: false,
     });
     expect(await dir.findComputer(base, 'dup.corp.example')).toEqual({
+      found: false,
+    });
+  });
+
+  it('does not find a disabled computer account', async () => {
+    expect(await dir.findComputer(base, 'off.corp.example')).toEqual({
       found: false,
     });
   });

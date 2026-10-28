@@ -64,7 +64,8 @@ export class LdapsAdDirectory extends AdDirectory {
       await client.bind(connection.bindDn, connection.password);
       const { searchEntries } = await client.search(connection.baseDn, {
         scope: 'sub',
-        filter: `(&(objectClass=computer)(dNSHostName=${escapeLdapFilter(dnsName)}))`,
+        // Disabled accounts (userAccountControl bit 2) are not machines.
+        filter: `(&(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(dNSHostName=${escapeLdapFilter(dnsName)}))`,
         attributes: ['dNSHostName'],
         sizeLimit: 5,
       });

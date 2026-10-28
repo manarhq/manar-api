@@ -73,6 +73,7 @@ export async function makeLeaf(
     notAfter?: Date;
     serial?: string;
     crlUrl?: string;
+    freshestCrlUrl?: string;
     keys?: CryptoKeyPair;
     extra?: x509.Extension[];
   } = {},
@@ -96,6 +97,15 @@ export async function makeLeaf(
   if (opts.crlUrl) {
     extensions.push(new x509.CRLDistributionPointsExtension([opts.crlUrl]));
   }
+  if (opts.freshestCrlUrl) {
+    extensions.push(
+      new x509.Extension(
+        '2.5.29.46',
+        false,
+        new x509.CRLDistributionPointsExtension([opts.freshestCrlUrl]).value,
+      ),
+    );
+  }
   extensions.push(...(opts.extra ?? []));
   const cert = await x509.X509CertificateGenerator.create({
     serialNumber: opts.serial ?? '0a0b0c',
@@ -111,11 +121,42 @@ export async function makeLeaf(
   return { cert, keys, pem: cert.toString('pem') };
 }
 
+const derInt = (n: bigint) => {
+  let hex = n.toString(16);
+  if (hex.length % 2) hex = '0' + hex;
+  if (parseInt(hex.slice(0, 2), 16) >= 0x80) hex = '00' + hex;
+  const body = Buffer.from(hex, 'hex');
+  return new Uint8Array([0x02, body.length, ...body]);
+};
+
 export async function makeCrl(
   issuer: TestCa,
   revokedSerials: string[],
-  opts: { nextUpdate?: Date } = {},
+  opts: {
+    nextUpdate?: Date;
+    crlNumber?: bigint;
+    /** Makes this a delta CRL on that base CRL number. */
+    deltaBase?: bigint;
+    /** Delta CRL locations the base points at (Freshest CRL). */
+    freshest?: string[];
+    wrongIssuerKey?: TestCa;
+  } = {},
 ): Promise<Uint8Array> {
+  const extensions: x509.Extension[] = [];
+  if (opts.crlNumber !== undefined) {
+    extensions.push(
+      new x509.Extension('2.5.29.20', false, derInt(opts.crlNumber)),
+    );
+  }
+  if (opts.deltaBase !== undefined) {
+    extensions.push(
+      new x509.Extension('2.5.29.27', true, derInt(opts.deltaBase)),
+    );
+  }
+  if (opts.freshest) {
+    const dp = new x509.CRLDistributionPointsExtension(opts.freshest);
+    extensions.push(new x509.Extension('2.5.29.46', false, dp.value));
+  }
   const crl = await x509.X509CrlGenerator.create({
     issuer: issuer.cert.subject,
     thisUpdate: new Date(Date.now() - 3_600_000),
@@ -124,8 +165,9 @@ export async function makeCrl(
       serialNumber,
       revocationDate: new Date(Date.now() - 1_800_000),
     })),
+    extensions,
     signingAlgorithm: RSA,
-    signingKey: issuer.keys.privateKey,
+    signingKey: (opts.wrongIssuerKey ?? issuer).keys.privateKey,
   });
   return new Uint8Array(crl.rawData);
 }
