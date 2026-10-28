@@ -5,6 +5,7 @@ import { KeycloakModule } from '../keycloak/keycloak.module';
 import { OpenSearchIndexModule } from '../audit/opensearch/opensearch-index.module';
 import { TenantCreateCommand } from './commands/tenant-create.command';
 import { AuditReindexCommand } from './commands/audit-reindex.command';
+import { AuditBenchCommand } from './commands/audit-bench.command';
 import { AuditVerifyCommand } from './commands/audit-verify.command';
 import { AuditService } from '../audit/audit.service';
 import { KafkaPublisherService } from '../audit/kafka-publisher.service';
@@ -50,6 +51,7 @@ import { LicenseVerifyCommand } from './commands/license-verify.command';
     TenantCreateCommand,
     AuditReindexCommand,
     AuditVerifyCommand,
+    AuditBenchCommand,
     // audit:verify only reads the chain; the CLI never publishes audit events.
     AuditService,
     {

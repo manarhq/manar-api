@@ -37,6 +37,21 @@ design.
 - **Signed checkpoints (SEALs)** every second, with RFC 6962 Merkle roots per partition range,
   Ed25519 signatures and one key per tenant. Inclusion proofs follow in the same plan.
 
+### Hardening added during the build (automated security review)
+
+- **Anchors are signed by retention.** Retention seals first, verifies the whole log, and refuses
+  to prune a log that does not verify.
+- **SEAL freshness uses the SEAL's signed time.** Event timestamps are not trusted for it.
+- **Signed heads are checked.** Every head in the last SEAL must still exist or have been pruned
+  by retention.
+- **A tenant key with no SEALs is a broken log,** including when the log is empty.
+- **Evidence verification checks every proof against the real tenant key.** It accepts a missing
+  proof only for a stored, not-yet-sealed event.
+- **`partitionSeq` is a 32-bit integer.** A BigInt made `JSON.stringify` of a row throw; 32 bits
+  is about 870 years of headroom per partition at the design peak.
+- **Residual:** an unsigned anchor planted in partition 0 is accepted (pre-partitioning history).
+  Keeping the latest SEAL outside the tenant database comes with the HUB (plan H2).
+
 ## Alternatives considered
 
 - **Do nothing:** caps the product at ~50 audited decisions/s per tenant, two orders of magnitude
