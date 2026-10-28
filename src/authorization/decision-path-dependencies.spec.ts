@@ -183,4 +183,52 @@ describe('ADR-004 — synchronous decision path dependencies', () => {
       .map((f) => f.replace(`${SRC}/`, ''));
     expect(offenders).toEqual([]);
   });
+
+  /**
+   * Spec 7.2-7.3 (F4): the caches and the epoch store are on the path by design, and reach only
+   * Valkey (node-redis through BoundedRedis) and OpenFGA. A Kafka, OpenSearch, gRPC or HTTP-client
+   * import anywhere on the path would add a dependency the decision must not wait on.
+   */
+  it('the F4 cache modules are on the path, so the checks below mean something', () => {
+    for (const f of [
+      'kill-switches/kill-switch-epoch.service.ts',
+      'common/redis/bounded-redis.ts',
+      'authorization/openfga-client.service.ts',
+    ]) {
+      expect(graph.has(resolve(SRC, f)), f).toBe(true);
+    }
+  });
+
+  it('the kill-switch epoch store imports Valkey access and nothing networked besides', () => {
+    const specifiers = [
+      ...readFileSync(
+        resolve(SRC, 'kill-switches/kill-switch-epoch.service.ts'),
+        'utf8',
+      ).matchAll(IMPORT_RE),
+    ].map((m) => m[1]);
+    expect(specifiers.sort()).toEqual([
+      '../audit/live/redis.config',
+      '../common/redis/bounded-redis',
+      '../config/env.validation',
+      '@nestjs/common',
+      '@nestjs/config',
+    ]);
+  });
+
+  it('nothing on the path imports a Kafka, OpenSearch or gRPC package', () => {
+    const banned =
+      /kafkajs|@opensearch|@elastic|@grpc|@connectrpc|openai|@anthropic/;
+    const offenders = [...graph.keys()].filter((file) =>
+      [...readFileSync(file, 'utf8').matchAll(IMPORT_RE)].some((m) =>
+        banned.test(m[1] ?? ''),
+      ),
+    );
+    expect(offenders.map((f) => f.replace(`${SRC}/`, ''))).toEqual([]);
+  });
+
+  it('the token lease store is not on the decision path (nothing calls it yet)', () => {
+    expect(graph.has(resolve(SRC, 'rate-limit/token-lease.service.ts'))).toBe(
+      false,
+    );
+  });
 });
