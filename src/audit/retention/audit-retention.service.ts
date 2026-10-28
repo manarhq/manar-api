@@ -57,6 +57,18 @@ export class AuditRetentionService {
     // Seal before pruning: everything pruned is then covered by a SEAL, and
     // the tenant key never exists without one.
     await this.checkpoints.createCheckpoint(tenantClient, input.tenantId);
+    // Never prune or sign anchors over a log that doesn't verify: retention
+    // would otherwise bless tampered rows with the tenant key. The Activity
+    // fails, Temporal retries, and the broken log is left for investigation.
+    const verified = await this.auditService.verifyAuditChain(
+      tenantClient,
+      input.tenantId,
+    );
+    if (!verified.valid) {
+      throw new Error(
+        `Audit log for tenant "${input.tenantId}" does not verify (broken at ${verified.brokenAt}); not pruning`,
+      );
+    }
 
     const ranges = await tenantClient.$queryRaw<
       { partition: number; cutoffSeq: number; oldest: Date; newest: Date }[]

@@ -483,12 +483,13 @@ export class AuditService implements OnModuleDestroy {
     if (last === null) {
       // No SEAL left, but the tenant key exists (outside the audit tables):
       // SEALs were written once, so they were deleted.
-      const [firstPartition] = extents.keys();
-      if (
-        firstPartition !== undefined &&
-        (await this.checkpointKeys.hasKey(tenantId))
-      ) {
-        return { valid: false, brokenAt: `unsealed:${firstPartition}` };
+      // Even with no events left: an emptied log is still a deleted one.
+      if (await this.checkpointKeys.hasKey(tenantId)) {
+        const [firstPartition] = extents.keys();
+        return {
+          valid: false,
+          brokenAt: `unsealed:${firstPartition ?? 0}`,
+        };
       }
       // Never sealed (a new tenant, or just upgraded): the events' own
       // timestamps are the only clock left.

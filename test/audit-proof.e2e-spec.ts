@@ -260,6 +260,17 @@ describe('Audit proofs (e2e)', () => {
     expect((result as { brokenAt: string }).brokenAt).toMatch(/^unsealed:/);
   }, 60_000);
 
+  it('wiping the whole log (events, SEALs, bookkeeping) is reported once the tenant key exists', async () => {
+    const t = await tenantWithEvents('wipeall', 6);
+    await checkpoints.createCheckpoint(t.client, t.id);
+    await t.client.$executeRaw`DELETE FROM "audit_events"`;
+    await t.client.$executeRaw`DELETE FROM "audit_checkpoints"`;
+    await t.client.$executeRaw`DELETE FROM "audit_partition_state"`;
+
+    const result = await audit.verifyAuditChain(t.client, t.id);
+    expect(result.valid).toBe(false);
+  }, 60_000);
+
   it('a forged (unsigned) retention anchor does not excuse deleted events', async () => {
     const t = await tenantWithEvents('anchor', 1);
     let n = 0;

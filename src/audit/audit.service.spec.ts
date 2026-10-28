@@ -162,12 +162,17 @@ function fakeTenantClient(options: FakeClientOptions): {
   return { client, pageSizes };
 }
 
+/** A tenant that has never been sealed: no checkpoint key in OpenBao yet. */
+const noKeys = {
+  hasKey: () => Promise.resolve(false),
+} as unknown as CheckpointKeyLookup;
+
 function makeService(): AuditService {
   const kafkaPublisher = {
     publish: () => Promise.resolve(),
   } as unknown as KafkaPublisherService;
 
-  return new AuditService(kafkaPublisher, {} as CheckpointKeyLookup);
+  return new AuditService(kafkaPublisher, noKeys);
 }
 
 describe('AuditService.verifyAuditChain', () => {
@@ -517,7 +522,7 @@ describe('AuditService.record (partitioned, group commit)', () => {
     const publish = vi.fn(() => Promise.resolve());
     const service = new AuditService(
       { publish } as unknown as KafkaPublisherService,
-      {} as CheckpointKeyLookup,
+      noKeys,
     );
     const fake = fakeWriteTx();
 

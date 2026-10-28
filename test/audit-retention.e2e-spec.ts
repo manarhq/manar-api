@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Client as PgClient } from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { NativeConnection, Worker } from '@temporalio/worker';
@@ -271,6 +271,13 @@ describe('Audit retention (e2e)', () => {
     });
     const tenantClient = await manager.getClient(tenant.id);
 
+    // Genuinely old events: recorded under a clock set back past the window,
+    // so their timestamps and hashes agree (retention verifies before it prunes).
+    const oldTimestamp = new Date(
+      Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 24 * 60 * 60 * 1000),
+    );
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(oldTimestamp);
     const oldIds: string[] = [];
     for (let i = 0; i < 5; i += 1) {
       const event = await auditService.record(tenantClient, tenant.id, {
@@ -282,19 +289,7 @@ describe('Audit retention (e2e)', () => {
       });
       oldIds.push(event.id);
     }
-    // Backdate the "old" events directly (reaching around AuditService,
-    // the same established pattern test/audit-chain.e2e-spec.ts's own
-    // tamper tests use) — timestamp is the only field retention logic
-    // filters on; the resulting hash/timestamp mismatch on these
-    // soon-to-be-deleted rows is never observed by anything (they're
-    // pruned before any verifyAuditChain call).
-    const oldTimestamp = new Date(
-      Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 24 * 60 * 60 * 1000),
-    );
-    await tenantClient.auditEvent.updateMany({
-      where: { id: { in: oldIds } },
-      data: { timestamp: oldTimestamp },
-    });
+    vi.useRealTimers();
     const lastOldEvent = await tenantClient.auditEvent.findUniqueOrThrow({
       where: { id: oldIds[oldIds.length - 1] },
     });
@@ -401,6 +396,10 @@ describe('Audit retention (e2e)', () => {
     const tenantClient = await manager.getClient(tenant.id);
     const agents = ['ret-a', 'ret-b', 'ret-c'];
     const oldIds: string[] = [];
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+    );
     for (const agent of agents) {
       for (let i = 0; i < 4; i += 1) {
         const e = await auditService.record(tenantClient, tenant.id, {
@@ -411,6 +410,7 @@ describe('Audit retention (e2e)', () => {
         oldIds.push(e.id);
       }
     }
+    vi.useRealTimers();
     // Seal while everything still exists, so verification later has to skip
     // the pruned ranges rather than flag them.
     const signer = new CheckpointSigner(
@@ -420,14 +420,7 @@ describe('Audit retention (e2e)', () => {
       tenantClient,
       tenant.id,
     );
-    await tenantClient.auditEvent.updateMany({
-      where: { id: { in: oldIds } },
-      data: {
-        timestamp: new Date(
-          Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000),
-        ),
-      },
-    });
+
     for (const agent of agents) {
       await auditService.record(tenantClient, tenant.id, {
         eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
@@ -473,6 +466,55 @@ describe('Audit retention (e2e)', () => {
     expect(
       await auditService.verifyAuditChain(tenantClient, tenant.id),
     ).toEqual({ valid: true });
+  }, 60_000);
+
+  it('refuses to prune (and sign anchors) when the log does not verify', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('broken'),
+      name: 'Retention Broken Log Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    const events = [];
+    for (let i = 0; i < 4; i += 1) {
+      events.push(
+        await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'ret-broken' },
+          data: { i },
+        }),
+      );
+    }
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    const checkpoints = new AuditCheckpointService(signer);
+    await checkpoints.createCheckpoint(tenantClient, tenant.id);
+    // Age everything out by editing timestamps in place: each edited event's
+    // hash no longer matches, exactly as a tamper would leave it.
+    await tenantClient.auditEvent.updateMany({
+      data: {
+        timestamp: new Date(
+          Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000),
+        ),
+      },
+    });
+
+    await expect(
+      new AuditRetentionService(
+        auditService,
+        signer,
+        checkpoints,
+      ).pruneTenantAuditEvents(tenantClient, {
+        tenantId: tenant.id,
+        retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+      }),
+    ).rejects.toThrow(/does not verify/);
+    expect(await tenantClient.auditEvent.count()).toBe(4);
+    expect(await tenantClient.auditChainAnchor.count()).toBe(0);
   }, 60_000);
 
   it('a retention run that finds nothing old enough is a genuine no-op', async () => {

@@ -54,6 +54,8 @@ export function checkpointHashOf(content: {
   return createHash('sha256')
     .update(
       canonicalize({
+        // Domain label: a SEAL digest can never be mistaken for an anchor's.
+        domain: 'manar.audit.seal.v1',
         seq: content.seq.toString(),
         createdAt: content.createdAt.toISOString(),
         partitionHeads: content.partitionHeads,
@@ -96,6 +98,7 @@ export function anchorDigestOf(anchor: {
   return createHash('sha256')
     .update(
       canonicalize({
+        domain: 'manar.audit.anchor.v1',
         tenantId: anchor.tenantId,
         partition: anchor.partition,
         anchorHash: anchor.anchorHash,
