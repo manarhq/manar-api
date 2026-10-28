@@ -13,7 +13,7 @@
 --     CONSTRAINT "audit_chain_state_pkey" PRIMARY KEY ("id"));
 --   INSERT INTO "audit_chain_state" SELECT 'singleton', "latestEventId", "latestEventHash", "eventCount",
 --     CURRENT_TIMESTAMP FROM "audit_partition_state" WHERE "partition" = 0;
---   DROP TABLE "audit_checkpoints"; DROP TABLE "audit_partition_state";
+--   DROP TABLE "audit_checkpoint_ranges"; DROP TABLE "audit_checkpoints"; DROP TABLE "audit_partition_state";
 --   ALTER TABLE "audit_chain_anchors" DROP COLUMN "signature", DROP COLUMN "partition";
 --   DROP INDEX "audit_events_partition_partitionSeq_key";
 --   ALTER TABLE "audit_events" DROP COLUMN "partitionSeq", DROP COLUMN "partition";
@@ -72,6 +72,20 @@ CREATE TABLE "audit_checkpoints" (
 
 -- CreateIndex
 CREATE UNIQUE INDEX "audit_checkpoints_checkpointHash_key" ON "audit_checkpoints"("checkpointHash");
+
+-- CreateTable
+CREATE TABLE "audit_checkpoint_ranges" (
+    "partition" INTEGER NOT NULL,
+    "fromSeq" INTEGER NOT NULL,
+    "toSeq" INTEGER NOT NULL,
+    "checkpointSeq" BIGINT NOT NULL,
+    "root" TEXT NOT NULL,
+
+    CONSTRAINT "audit_checkpoint_ranges_pkey" PRIMARY KEY ("partition","fromSeq")
+);
+
+-- CreateIndex
+CREATE INDEX "audit_checkpoint_ranges_partition_toSeq_idx" ON "audit_checkpoint_ranges"("partition", "toSeq");
 
 -- DropTable
 DROP TABLE "audit_chain_state";

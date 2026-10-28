@@ -10,7 +10,16 @@ import {
   AuditEventNotCheckpointedError,
   type AuditEventProof,
   AuditProofService,
+  type SealedCheckpoint,
 } from '../audit/checkpoint/audit-proof.service';
+
+/** An event's inclusion proof in a bundle; its SEAL is in `bundle.checkpoints`. */
+export type EvidenceEventProof = Omit<AuditEventProof, 'checkpoint'> & {
+  checkpointSeq: string;
+};
+
+/** Proofs are built this many at a time, not all at once. */
+const PROOF_CONCURRENCY = 16;
 import {
   CHECKPOINT_PUBLIC_KEYS,
   type CheckpointKeyLookup,
@@ -71,10 +80,12 @@ export interface EvidenceBundleContent {
     partition: number;
     partitionSeq: number;
     /** `null` while no SEAL covers the event yet (they are written every second). */
-    proof: AuditEventProof | null;
+    proof: EvidenceEventProof | null;
   }[];
   /** The tenant's SEAL signing key, for offline checks of every `proof`. */
   checkpointPublicKey: CheckpointPublicKey | null;
+  /** Every SEAL a proof in `events` refers to (by `proof.checkpointSeq`), once each. */
+  checkpoints: SealedCheckpoint[];
   /**
    * Directly-relevant context pulled from the *real* tables the retrofitted
    * decision points already write to (Section 49: "don't duplicate data
@@ -296,6 +307,30 @@ export class EvidenceExportService {
     ]);
 
     const exportId = randomUUID();
+    const checkpoints = new Map<string, SealedCheckpoint>();
+    const proofs: (EvidenceEventProof | null)[] = [];
+    for (let start = 0; start < events.length; start += PROOF_CONCURRENCY) {
+      const chunk = await Promise.all(
+        events.slice(start, start + PROOF_CONCURRENCY).map((event) =>
+          this.proofs
+            .proveEvent(tenantClient, event.id)
+            .catch((error: unknown) => {
+              if (error instanceof AuditEventNotCheckpointedError) return null;
+              throw error;
+            }),
+        ),
+      );
+      for (const proof of chunk) {
+        if (!proof) {
+          proofs.push(null);
+          continue;
+        }
+        const { checkpoint, ...rest } = proof;
+        checkpoints.set(checkpoint.seq, checkpoint);
+        proofs.push({ ...rest, checkpointSeq: checkpoint.seq });
+      }
+    }
+
     const bundle: EvidenceBundleContent = {
       tenantId,
       exportId,
@@ -308,27 +343,21 @@ export class EvidenceExportService {
         taskId: filter.taskId ?? null,
         correlationId: filter.correlationId ?? null,
       },
-      events: await Promise.all(
-        events.map(async (event) => ({
-          id: event.id,
-          sequence: event.sequence,
-          eventType: event.eventType,
-          correlationId: event.correlationId,
-          actor: event.actor,
-          timestamp: event.timestamp.toISOString(),
-          data: event.data,
-          previousHash: event.previousHash,
-          eventHash: event.eventHash,
-          partition: event.partition,
-          partitionSeq: event.partitionSeq,
-          proof: await this.proofs
-            .proveEvent(tenantClient, event.id)
-            .catch((error: unknown) => {
-              if (error instanceof AuditEventNotCheckpointedError) return null;
-              throw error;
-            }),
-        })),
-      ),
+      events: events.map((event, i) => ({
+        id: event.id,
+        sequence: event.sequence,
+        eventType: event.eventType,
+        correlationId: event.correlationId,
+        actor: event.actor,
+        timestamp: event.timestamp.toISOString(),
+        data: event.data,
+        previousHash: event.previousHash,
+        eventHash: event.eventHash,
+        partition: event.partition,
+        partitionSeq: event.partitionSeq,
+        proof: proofs[i]!,
+      })),
+      checkpoints: [...checkpoints.values()],
       checkpointPublicKey: await this.checkpointKeys
         .publicKey(tenantId)
         .catch((error: unknown) => {
@@ -492,8 +521,14 @@ export class EvidenceExportService {
     if (!key || bundle.checkpointPublicKey?.publicKeyPem !== key.publicKeyPem) {
       return { valid: false, reason: 'proof_invalid' };
     }
+    const sealed = new Map(
+      (Array.isArray(bundle.checkpoints) ? bundle.checkpoints : []).map((c) => [
+        c.seq,
+        c,
+      ]),
+    );
     for (const event of withProof) {
-      if (!proofHolds(event, key)) {
+      if (!proofHolds(event, key, sealed)) {
         return { valid: false, reason: 'proof_invalid' };
       }
     }
@@ -564,9 +599,11 @@ function eventHashHolds(
 function proofHolds(
   event: EvidenceBundleContent['events'][number],
   key: CheckpointPublicKey,
+  sealed: Map<string, SealedCheckpoint>,
 ): boolean {
   const p = event.proof!;
-  const cp = p.checkpoint;
+  const cp = sealed.get(p.checkpointSeq);
+  if (!cp) return false;
   try {
     // The leaf must be this event's hash recomputed from its own fields,
     // not just the eventHash the bundle claims.

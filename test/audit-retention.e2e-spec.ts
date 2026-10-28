@@ -468,6 +468,57 @@ describe('Audit retention (e2e)', () => {
     ).toEqual({ valid: true });
   }, 60_000);
 
+  it('prunes only what is sealed, and sealing never stalls on a pruned gap', async () => {
+    const before = AuditCheckpointService.MAX_RANGE;
+    AuditCheckpointService.MAX_RANGE = 10;
+    try {
+      const tenant = await manager.provisionTenant({
+        slug: uniqueSlug('gap'),
+        name: 'Retention Sealing Gap Tenant',
+      });
+      provisioned.push({
+        tenantId: tenant.id,
+        databaseName: tenant.databaseBinding!.databaseName,
+      });
+      const tenantClient = await manager.getClient(tenant.id);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(
+        new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+      );
+      for (let i = 0; i < 25; i += 1) {
+        await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'ret-gap' },
+          data: { i },
+        });
+      }
+      vi.useRealTimers();
+      const signer = new CheckpointSigner(
+        new OpenBaoKvClient(fakeConfigService()),
+      );
+      const checkpoints = new AuditCheckpointService(signer);
+
+      // Retention seals once (10 of 25) and must prune no further than that.
+      const result = await new AuditRetentionService(
+        auditService,
+        signer,
+        checkpoints,
+      ).pruneTenantAuditEvents(tenantClient, {
+        tenantId: tenant.id,
+        retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+      });
+      expect(result.prunedCount).toBe(10);
+
+      // The rest seals in later rounds, then the log verifies.
+      while (await checkpoints.createCheckpoint(tenantClient, tenant.id));
+      expect(
+        await auditService.verifyAuditChain(tenantClient, tenant.id),
+      ).toEqual({ valid: true });
+    } finally {
+      AuditCheckpointService.MAX_RANGE = before;
+    }
+  }, 60_000);
+
   it('refuses to prune (and sign anchors) when the log does not verify', async () => {
     const tenant = await manager.provisionTenant({
       slug: uniqueSlug('broken'),

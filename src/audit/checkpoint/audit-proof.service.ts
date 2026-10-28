@@ -66,17 +66,18 @@ export class AuditProofService {
       );
     }
 
-    const [checkpoint] = await tenantClient.$queryRaw<CheckpointRow[]>`
-      SELECT c.* FROM "audit_checkpoints" c
-      WHERE EXISTS (
-        SELECT 1 FROM jsonb_array_elements(c."roots") r
-        WHERE (r->>'partition')::int = ${event.partition}
-          AND (r->>'fromSeq')::bigint <= ${event.partitionSeq}
-          AND (r->>'toSeq')::bigint >= ${event.partitionSeq}
-      )
-      ORDER BY c."seq"
-      LIMIT 1
-    `;
+    const covering = await tenantClient.auditCheckpointRange.findFirst({
+      where: {
+        partition: event.partition,
+        fromSeq: { lte: event.partitionSeq },
+        toSeq: { gte: event.partitionSeq },
+      },
+    });
+    const checkpoint = covering
+      ? ((await tenantClient.auditCheckpoint.findUnique({
+          where: { seq: covering.checkpointSeq },
+        })) as unknown as CheckpointRow | null)
+      : null;
     if (!checkpoint) {
       throw new AuditEventNotCheckpointedError(
         `AuditEvent "${eventId}" is not covered by a checkpoint yet`,
@@ -87,7 +88,12 @@ export class AuditProofService {
         r.partition === event.partition &&
         Number(r.fromSeq) <= event.partitionSeq &&
         Number(r.toSeq) >= event.partitionSeq,
-    )!;
+    );
+    if (!range) {
+      throw new AuditEventNotCheckpointedError(
+        `AuditEvent "${eventId}": its checkpoint range does not match the signed roots`,
+      );
+    }
     const events = await tenantClient.auditEvent.findMany({
       where: {
         partition: event.partition,

@@ -303,6 +303,12 @@ describe('Evidence export (e2e)', () => {
         true,
       );
     }
+    // Each SEAL is in the bundle once; proofs point at it by seq.
+    const seqs = exported.bundle.checkpoints.map((c) => c.seq);
+    expect(new Set(seqs).size).toBe(seqs.length);
+    for (const e of sealed) {
+      expect(seqs).toContain(e.proof!.checkpointSeq);
+    }
 
     const verified = (
       await request(app.getHttpServer() as App)
@@ -324,16 +330,8 @@ describe('Evidence export (e2e)', () => {
     // to a SEAL signed by the tenant key (a leaked signing secret, say) fails.
     const forged = {
       ...exported.bundle,
-      events: exported.bundle.events.map((e, i) =>
-        i === 0 && e.proof
-          ? {
-              ...e,
-              proof: {
-                ...e.proof,
-                checkpoint: { ...e.proof.checkpoint, signature: 'AAAA' },
-              },
-            }
-          : e,
+      checkpoints: exported.bundle.checkpoints.map((c, i) =>
+        i === 0 ? { ...c, signature: 'AAAA' } : c,
       ),
     };
     const resigned = await signEvidenceBundle(

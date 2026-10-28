@@ -80,8 +80,19 @@ export class AuditCheckpointService {
     );
     const roots: PartitionRoot[] = [];
     for (const state of states) {
-      const from = (sealedUpTo.get(state.partition) ?? 0) + 1;
+      let from = (sealedUpTo.get(state.partition) ?? 0) + 1;
       if (state.latestSeq < from) continue;
+      // Skip a gap retention left: start at the first surviving event.
+      const first = await tx.auditEvent.findFirst({
+        where: {
+          partition: state.partition,
+          partitionSeq: { gte: from, lte: state.latestSeq },
+        },
+        orderBy: { partitionSeq: 'asc' },
+        select: { partitionSeq: true },
+      });
+      if (!first) continue;
+      from = first.partitionSeq;
       const to = Math.min(
         state.latestSeq,
         from + AuditCheckpointService.MAX_RANGE - 1,
@@ -127,7 +138,7 @@ export class AuditCheckpointService {
     const signature = await this.signer.sign(tenantId, checkpointHash);
     const { keyId } = await this.signer.publicKey(tenantId);
 
-    return tx.auditCheckpoint.create({
+    const checkpoint = await tx.auditCheckpoint.create({
       data: {
         seq,
         createdAt,
@@ -139,5 +150,15 @@ export class AuditCheckpointService {
         keyId,
       },
     });
+    await tx.auditCheckpointRange.createMany({
+      data: roots.map((r) => ({
+        partition: r.partition,
+        fromSeq: Number(r.fromSeq),
+        toSeq: Number(r.toSeq),
+        checkpointSeq: seq,
+        root: r.root,
+      })),
+    });
+    return checkpoint;
   }
 }

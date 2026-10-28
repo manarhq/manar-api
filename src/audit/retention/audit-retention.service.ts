@@ -2,7 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../../generated/tenant-client/client';
 import { AuditService } from '../audit.service';
 import { AuditCheckpointService } from '../checkpoint/audit-checkpoint.service';
-import { anchorDigestOf } from '../checkpoint/checkpoint-format';
+import {
+  anchorDigestOf,
+  type PartitionHead,
+} from '../checkpoint/checkpoint-format';
 import { CheckpointSigner } from '../checkpoint/checkpoint-signer';
 import { AUDIT_EVENT_TYPES } from '../audit-event-types';
 import type {
@@ -70,16 +73,37 @@ export class AuditRetentionService {
       );
     }
 
-    const ranges = await tenantClient.$queryRaw<
-      { partition: number; cutoffSeq: number; oldest: Date; newest: Date }[]
-    >`
-      SELECT "partition", MAX("partitionSeq") AS "cutoffSeq",
-             MIN("timestamp") AS "oldest", MAX("timestamp") AS "newest"
-      FROM "audit_events"
-      WHERE "timestamp" < ${cutoff}
-      GROUP BY "partition"
-      ORDER BY "partition"
-    `;
+    // Prune only what a SEAL already covers: a partition is pruned no
+    // further than the last SEAL's head for it (sealing is bounded per
+    // round, so a long backlog may still be partly unsealed).
+    const lastSeal = await tenantClient.auditCheckpoint.findFirst({
+      orderBy: { seq: 'desc' },
+    });
+    const sealedHead = new Map(
+      ((lastSeal?.partitionHeads ?? []) as unknown as PartitionHead[]).map(
+        (h) => [h.partition, Number(h.seq)],
+      ),
+    );
+    const ranges = (
+      await tenantClient.$queryRaw<
+        { partition: number; cutoffSeq: number; oldest: Date; newest: Date }[]
+      >`
+        SELECT "partition", MAX("partitionSeq") AS "cutoffSeq",
+               MIN("timestamp") AS "oldest", MAX("timestamp") AS "newest"
+        FROM "audit_events"
+        WHERE "timestamp" < ${cutoff}
+        GROUP BY "partition"
+        ORDER BY "partition"
+      `
+    )
+      .map((r) => ({
+        ...r,
+        cutoffSeq: Math.min(
+          Number(r.cutoffSeq),
+          sealedHead.get(r.partition) ?? 0,
+        ),
+      }))
+      .filter((r) => r.cutoffSeq > 0);
 
     if (ranges.length === 0) {
       this.logger.log(

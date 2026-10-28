@@ -1394,6 +1394,22 @@ model AuditCheckpoint {
   @@map("audit_checkpoints")
 }
 
+/// One row per range a SEAL covers (a copy of its `roots`), indexed so an
+/// event's covering SEAL is found without scanning every SEAL's JSON.
+/// Written in the same transaction as the SEAL; the SEAL's signed `roots`
+/// stay authoritative.
+model AuditCheckpointRange {
+  partition     Int
+  fromSeq       Int
+  toSeq         Int
+  checkpointSeq BigInt
+  root          String
+
+  @@id([partition, fromSeq])
+  @@index([partition, toSeq])
+  @@map("audit_checkpoint_ranges")
+}
+
 /// Phase 9b (Retention, Section 48). Written exclusively by
 /// `AuditRetentionWorkflow`'s Activity (`src/audit/retention/`), immediately
 /// before it deletes the aged-out `AuditEvent` rows a given retention run
