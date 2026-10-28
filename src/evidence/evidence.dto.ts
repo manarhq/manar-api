@@ -67,8 +67,8 @@ class EvidenceEventDto {
   @ApiProperty({ minimum: 0, maximum: 63 })
   partition!: number;
 
-  @ApiProperty({ description: 'Decimal string.' })
-  partitionSeq!: string;
+  @ApiProperty({ minimum: 1 })
+  partitionSeq!: number;
 
   @ApiProperty({
     type: () => AuditEventProofDto,

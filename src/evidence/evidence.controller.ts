@@ -83,8 +83,18 @@ export class EvidenceController {
       '{ valid: true, proofsVerified: number, proofsMissing: number } | { valid: false, reason: string }',
   })
   @ApiResponse({ status: 400, type: ErrorResponseDto })
-  async verify(@Body() body: unknown) {
+  async verify(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const input = parseBodyOrThrow(EvidenceVerifyRequestSchema, body);
-    return this.evidenceExportService.verify(input.bundle, input.signature);
+    const ownBundle =
+      typeof input.bundle === 'object' &&
+      input.bundle !== null &&
+      (input.bundle as { tenantId?: unknown }).tenantId === auth.tenant.id;
+    return this.evidenceExportService.verify(
+      input.bundle,
+      input.signature,
+      ownBundle
+        ? await this.tenantDatabaseManager.getClient(auth.tenant.id)
+        : undefined,
+    );
   }
 }

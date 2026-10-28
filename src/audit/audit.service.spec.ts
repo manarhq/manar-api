@@ -40,7 +40,7 @@ interface StoredEvent {
   previousHash: string | null;
   eventHash: string;
   partition: number;
-  partitionSeq: bigint;
+  partitionSeq: number;
   createdAt: Date;
 }
 
@@ -79,7 +79,7 @@ function buildChain(length: number): StoredEvent[] {
       previousHash,
       eventHash,
       partition: 0,
-      partitionSeq: BigInt(index + 1),
+      partitionSeq: index + 1,
       createdAt: new Date(content.timestamp),
     });
     previousHash = eventHash;
@@ -111,7 +111,7 @@ function fakeTenantClient(options: FakeClientOptions): {
   const client = {
     auditEvent: {
       findMany: (args: {
-        where: { partition: number; partitionSeq?: { gt?: bigint } };
+        where: { partition: number; partitionSeq?: { gt?: number } };
         take?: number;
       }) => {
         const after = args.where.partitionSeq?.gt;
@@ -330,7 +330,7 @@ interface FakeTx {
 
 /** A transaction client that keeps partition state in memory, like the real tables would. */
 function fakeWriteTx(): FakeTx {
-  const state = new Map<number, { hash: string | null; seq: bigint }>();
+  const state = new Map<number, { hash: string | null; seq: number }>();
   const lockedPartitions: number[][] = [];
   const inserted: Record<string, unknown>[] = [];
   let sequence = 0;
@@ -339,7 +339,7 @@ function fakeWriteTx(): FakeTx {
       createMany: ({ data }: { data: { partition: number }[] }) => {
         for (const { partition } of data) {
           if (!state.has(partition))
-            state.set(partition, { hash: null, seq: 0n });
+            state.set(partition, { hash: null, seq: 0 });
         }
         return Promise.resolve({ count: data.length });
       },
@@ -366,7 +366,7 @@ function fakeWriteTx(): FakeTx {
         for (const row of rows) {
           state.set(row.partition as number, {
             hash: row.eventHash as string,
-            seq: row.partitionSeq as bigint,
+            seq: row.partitionSeq as number,
           });
         }
         return Promise.resolve(rows);
@@ -402,7 +402,7 @@ describe('AuditService.record (partitioned, group commit)', () => {
     );
 
     expect(events.map((e) => e.partition)).toEqual([5, 5, 5]);
-    expect(events.map((e) => e.partitionSeq)).toEqual([1n, 2n, 3n]);
+    expect(events.map((e) => e.partitionSeq)).toEqual([1, 2, 3]);
     expect(events[0]!.previousHash).toBeNull();
     expect(events[1]!.previousHash).toBe(events[0]!.eventHash);
     expect(events[2]!.previousHash).toBe(events[1]!.eventHash);
@@ -530,7 +530,7 @@ describe('AuditService.record (partitioned, group commit)', () => {
         eventId: event.id,
         tenantId: 'tenant-1',
         partition: 2,
-        partitionSeq: '1',
+        partitionSeq: 1,
       }),
     );
     await service.onModuleDestroy();

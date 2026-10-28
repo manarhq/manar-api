@@ -223,7 +223,7 @@ describe('Evidence export (e2e)', () => {
       const earlier = events.find(
         (e) =>
           e.partition === later.partition &&
-          BigInt(e.partitionSeq) + 1n === BigInt(later.partitionSeq),
+          e.partitionSeq + 1 === later.partitionSeq,
       );
       if (earlier) expect(later.previousHash).toBe(earlier.eventHash);
     }
@@ -341,8 +341,43 @@ describe('Evidence export (e2e)', () => {
       exported.exportId,
       SIGNING_SECRET,
     );
+    const service = app.get(EvidenceExportService);
     expect(
-      await app.get(EvidenceExportService).verify(forged, resigned.signature),
+      await service.verify(forged, resigned.signature, client),
     ).toMatchObject({ valid: false, reason: 'proof_invalid' });
+
+    // Changed data under an unchanged eventHash/leaf: the hash recomputed
+    // from the event's own fields no longer matches.
+    const edited = {
+      ...exported.bundle,
+      events: exported.bundle.events.map((e, i) =>
+        i === 0 ? { ...e, data: { edited: true } } : e,
+      ),
+    };
+    const editedSig = await signEvidenceBundle(
+      edited,
+      exported.exportId,
+      SIGNING_SECRET,
+    );
+    expect(
+      await service.verify(edited, editedSig.signature, client),
+    ).toMatchObject({ valid: false, reason: 'proof_invalid' });
+
+    // A proof stripped from an event a checkpoint does cover is not
+    // "missing", it was removed.
+    const stripped = {
+      ...exported.bundle,
+      events: exported.bundle.events.map((e, i) =>
+        i === 0 ? { ...e, proof: null } : e,
+      ),
+    };
+    const strippedSig = await signEvidenceBundle(
+      stripped,
+      exported.exportId,
+      SIGNING_SECRET,
+    );
+    expect(
+      await service.verify(stripped, strippedSig.signature, client),
+    ).toMatchObject({ valid: false, reason: 'proof_missing' });
   });
 });

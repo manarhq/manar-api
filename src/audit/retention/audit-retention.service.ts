@@ -48,7 +48,7 @@ export class AuditRetentionService {
     const cutoff = new Date(Date.now() - input.retentionWindowMs);
 
     const ranges = await tenantClient.$queryRaw<
-      { partition: number; cutoffSeq: bigint; oldest: Date; newest: Date }[]
+      { partition: number; cutoffSeq: number; oldest: Date; newest: Date }[]
     >`
       SELECT "partition", MAX("partitionSeq") AS "cutoffSeq",
              MIN("timestamp") AS "oldest", MAX("timestamp") AS "newest"
@@ -78,14 +78,14 @@ export class AuditRetentionService {
     for (const r of ranges) {
       const where = {
         partition: r.partition,
-        partitionSeq: { lte: BigInt(r.cutoffSeq) },
+        partitionSeq: { lte: Number(r.cutoffSeq) },
       };
       const [last, count] = await Promise.all([
         tenantClient.auditEvent.findUniqueOrThrow({
           where: {
             partition_partitionSeq: {
               partition: r.partition,
-              partitionSeq: BigInt(r.cutoffSeq),
+              partitionSeq: Number(r.cutoffSeq),
             },
           },
           select: { eventHash: true },
@@ -108,7 +108,7 @@ export class AuditRetentionService {
         where: {
           OR: ranges.map((r) => ({
             partition: r.partition,
-            partitionSeq: { lte: BigInt(r.cutoffSeq) },
+            partitionSeq: { lte: Number(r.cutoffSeq) },
           })),
         },
       }),

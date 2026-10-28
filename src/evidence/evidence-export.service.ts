@@ -18,6 +18,7 @@ import {
   checkpointHashOf,
   verifyCheckpointSignature,
 } from '../audit/checkpoint/checkpoint-format';
+import { computeEventHash } from '../audit/audit-hash';
 import { verifyInclusion } from '../audit/merkle';
 import type { EvidenceExportRequest } from './evidence-export.validation';
 import {
@@ -67,8 +68,7 @@ export interface EvidenceBundleContent {
     previousHash: string | null;
     eventHash: string;
     partition: number;
-    /** Decimal string (a bigint). */
-    partitionSeq: string;
+    partitionSeq: number;
     /** `null` while no SEAL covers the event yet (they are written every second). */
     proof: AuditEventProof | null;
   }[];
@@ -319,7 +319,7 @@ export class EvidenceExportService {
           previousHash: event.previousHash,
           eventHash: event.eventHash,
           partition: event.partition,
-          partitionSeq: event.partitionSeq.toString(),
+          partitionSeq: event.partitionSeq,
           proof: await this.proofs
             .proveEvent(tenantClient, event.id)
             .catch((error: unknown) => {
@@ -432,9 +432,15 @@ export class EvidenceExportService {
    * from the API's `.env`). Offline verification with a public key is
    * finding F10's fix.
    */
+  /**
+   * `tenantClient`, when it is the bundle's own tenant, lets verify tell a
+   * proof that was never available (event not yet sealed at export) from one
+   * that was stripped from the bundle (a checkpoint covers the event now).
+   */
   async verify(
     bundle: unknown,
     signature: string,
+    tenantClient?: TenantPrismaClient,
   ): Promise<EvidenceVerifyResult> {
     const signed = await verifyEvidenceBundle(
       bundle,
@@ -442,7 +448,10 @@ export class EvidenceExportService {
       this.configService.get('APPROVAL_GRANT_SIGNING_SECRET', { infer: true }),
     );
     if (!signed.valid) return signed;
-    return this.verifyProofs(bundle as Partial<EvidenceBundleContent>);
+    return this.verifyProofs(
+      bundle as Partial<EvidenceBundleContent>,
+      tenantClient,
+    );
   }
 
   /**
@@ -452,9 +461,15 @@ export class EvidenceExportService {
    */
   private async verifyProofs(
     bundle: Partial<EvidenceBundleContent>,
+    tenantClient: TenantPrismaClient | undefined,
   ): Promise<EvidenceVerifyResult> {
     const events = Array.isArray(bundle.events) ? bundle.events : [];
     const withProof = events.filter((e) => e.proof);
+    for (const event of events.filter((e) => !e.proof)) {
+      if (tenantClient && (await this.isSealed(tenantClient, event.id))) {
+        return { valid: false, reason: 'proof_missing' };
+      }
+    }
     if (withProof.length === 0) {
       return { valid: true, proofsVerified: 0, proofsMissing: events.length };
     }
@@ -476,6 +491,18 @@ export class EvidenceExportService {
       proofsMissing: events.length - withProof.length,
     };
   }
+
+  private async isSealed(
+    tenantClient: TenantPrismaClient,
+    eventId: string,
+  ): Promise<boolean> {
+    try {
+      await this.proofs.proveEvent(tenantClient, eventId);
+      return true;
+    } catch {
+      return false; // not sealed yet, or pruned since export
+    }
+  }
 }
 
 export type EvidenceVerifyResult =
@@ -489,11 +516,23 @@ function proofHolds(
   const p = event.proof!;
   const cp = p.checkpoint;
   try {
+    // The leaf must be this event's hash recomputed from its own fields,
+    // not just the eventHash the bundle claims.
+    const recomputed = computeEventHash({
+      id: event.id,
+      eventType: event.eventType,
+      correlationId: event.correlationId,
+      actor: event.actor,
+      timestamp: event.timestamp,
+      data: event.data,
+      previousHash: event.previousHash,
+    });
+    if (recomputed !== event.eventHash) return false;
     const range = cp.roots.find(
       (r) =>
         r.partition === event.partition &&
-        BigInt(r.fromSeq) <= BigInt(event.partitionSeq) &&
-        BigInt(r.toSeq) >= BigInt(event.partitionSeq),
+        Number(r.fromSeq) <= event.partitionSeq &&
+        Number(r.toSeq) >= event.partitionSeq,
     );
     return (
       p.eventId === event.id &&

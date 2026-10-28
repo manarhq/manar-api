@@ -33,7 +33,7 @@ export interface SealedCheckpoint {
 export interface AuditEventProof {
   eventId: string;
   partition: number;
-  partitionSeq: string;
+  partitionSeq: number;
   leaf: string;
   proof: MerkleProofStep[];
   root: string;
@@ -85,13 +85,16 @@ export class AuditProofService {
     const range = checkpoint.roots.find(
       (r) =>
         r.partition === event.partition &&
-        BigInt(r.fromSeq) <= event.partitionSeq &&
-        BigInt(r.toSeq) >= event.partitionSeq,
+        Number(r.fromSeq) <= event.partitionSeq &&
+        Number(r.toSeq) >= event.partitionSeq,
     )!;
     const events = await tenantClient.auditEvent.findMany({
       where: {
         partition: event.partition,
-        partitionSeq: { gte: BigInt(range.fromSeq), lte: BigInt(range.toSeq) },
+        partitionSeq: {
+          gte: Number(range.fromSeq),
+          lte: Number(range.toSeq),
+        },
       },
       orderBy: { partitionSeq: 'asc' },
       select: { id: true, eventHash: true },
@@ -101,7 +104,7 @@ export class AuditProofService {
     return {
       eventId: event.id,
       partition: event.partition,
-      partitionSeq: event.partitionSeq.toString(),
+      partitionSeq: event.partitionSeq,
       leaf: event.eventHash,
       proof: inclusionProof(
         events.map((e) => e.eventHash),

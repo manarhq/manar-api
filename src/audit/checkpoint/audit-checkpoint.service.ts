@@ -52,7 +52,7 @@ export class AuditCheckpointService {
     });
     const sealedUpTo = new Map(
       ((previous?.partitionHeads ?? []) as unknown as PartitionHead[]).map(
-        (h) => [h.partition, BigInt(h.seq)],
+        (h) => [h.partition, Number(h.seq)],
       ),
     );
     const states = (await tx.auditPartitionState.findMany({
@@ -60,13 +60,13 @@ export class AuditCheckpointService {
       orderBy: { partition: 'asc' },
     })) as {
       partition: number;
-      latestSeq: bigint;
+      latestSeq: number;
       latestEventHash: string | null;
     }[];
 
     const roots: PartitionRoot[] = [];
     for (const state of states) {
-      const from = (sealedUpTo.get(state.partition) ?? 0n) + 1n;
+      const from = (sealedUpTo.get(state.partition) ?? 0) + 1;
       if (state.latestSeq < from) continue;
       // ponytail: one in-memory tree per range; a SITE down for hours makes
       // one large range. Fine to ~10^6 events; chunk ranges if that bites.

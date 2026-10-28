@@ -1320,7 +1320,7 @@ model AuditEvent {
 
   /// 1-based position within `partition`. Dense and strictly increasing per
   /// partition, so a checkpoint (`AuditCheckpoint.roots`) can name a range.
-  partitionSeq BigInt
+  partitionSeq Int
 
   createdAt DateTime @default(now())
 
@@ -1353,7 +1353,7 @@ model AuditPartitionState {
   latestEventHash String?
 
   /// `partitionSeq` of the latest event (0 before the first).
-  latestSeq BigInt @default(0)
+  latestSeq Int @default(0)
 
   eventCount Int @default(0)
 

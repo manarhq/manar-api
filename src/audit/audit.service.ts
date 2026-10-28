@@ -54,7 +54,7 @@ export interface AuditEventRecord {
   /** Which of the tenant's 64 chains (`src/audit/audit-partition.ts`). */
   partition: number;
   /** 1-based position within `partition`. */
-  partitionSeq: bigint;
+  partitionSeq: number;
 }
 
 export type VerifyAuditChainResult =
@@ -73,7 +73,7 @@ interface PendingAuditEvent {
 interface PartitionLockRow {
   partition: number;
   latestEventHash: string | null;
-  latestSeq: bigint;
+  latestSeq: number;
 }
 
 /**
@@ -230,14 +230,14 @@ export class AuditService implements OnModuleDestroy {
     const tails = new Map(
       locked.map((row) => [
         row.partition,
-        { hash: row.latestEventHash, seq: BigInt(row.latestSeq) },
+        { hash: row.latestEventHash, seq: Number(row.latestSeq) },
       ]),
     );
 
     const rows = items.map((item) => {
-      const tail = tails.get(item.partition) ?? { hash: null, seq: 0n };
+      const tail = tails.get(item.partition) ?? { hash: null, seq: 0 };
       const previousHash = tail.hash;
-      const partitionSeq = tail.seq + 1n;
+      const partitionSeq = tail.seq + 1;
       const eventHash = computeEventHash({
         id: item.id,
         eventType: item.input.eventType,
@@ -271,7 +271,7 @@ export class AuditService implements OnModuleDestroy {
         partition,
         id: last.id,
         hash: last.eventHash,
-        seq: last.partitionSeq.toString(),
+        seq: last.partitionSeq,
         count: rows.filter((r) => r.partition === partition).length,
       };
     });
@@ -286,7 +286,7 @@ export class AuditService implements OnModuleDestroy {
         ${touched.map((t) => t.partition)}::int[],
         ${touched.map((t) => t.id)}::text[],
         ${touched.map((t) => t.hash)}::text[],
-        ${touched.map((t) => t.seq)}::text[]::bigint[],
+        ${touched.map((t) => t.seq)}::int[],
         ${touched.map((t) => t.count)}::int[]
       ) AS v(p, id, hash, seq, n)
       WHERE s."partition" = v.p
@@ -313,7 +313,7 @@ export class AuditService implements OnModuleDestroy {
       eventHash: event.eventHash,
       sequence: event.sequence,
       partition: event.partition,
-      partitionSeq: event.partitionSeq.toString(),
+      partitionSeq: event.partitionSeq,
     };
 
     // Deliberately not awaited — see `record`.
@@ -407,7 +407,7 @@ export class AuditService implements OnModuleDestroy {
       const anchors = anchorsByPartition.get(partition) ?? new Set<string>();
       let expectedPreviousHash: string | null = null;
       let isFirstRemainingEvent = true;
-      let lastSeq: bigint | null = null;
+      let lastSeq: number | null = null;
 
       for (;;) {
         const events = await this.fetchAuditEventBatch(
@@ -464,7 +464,7 @@ export class AuditService implements OnModuleDestroy {
     const extents = new Map(
       (
         await tenantClient.$queryRaw<
-          { partition: number; oldest: bigint; newest: bigint; firstAt: Date }[]
+          { partition: number; oldest: number; newest: number; firstAt: Date }[]
         >`
           SELECT "partition", MIN("partitionSeq") AS "oldest",
                  MAX("partitionSeq") AS "newest", MIN("timestamp") AS "firstAt"
@@ -473,8 +473,8 @@ export class AuditService implements OnModuleDestroy {
       ).map((r) => [
         r.partition,
         {
-          oldest: BigInt(r.oldest),
-          newest: BigInt(r.newest),
+          oldest: Number(r.oldest),
+          newest: Number(r.newest),
           firstAt: new Date(r.firstAt),
         },
       ]),
@@ -496,7 +496,7 @@ export class AuditService implements OnModuleDestroy {
     // pruned it (later events remain, or an anchor names it). Catches a
     // deleted partition or tail that the chain walk alone cannot see.
     for (const head of last.heads) {
-      const seq = BigInt(head.seq);
+      const seq = Number(head.seq);
       const row = await tenantClient.auditEvent.findUnique({
         where: {
           partition_partitionSeq: {
@@ -519,10 +519,10 @@ export class AuditService implements OnModuleDestroy {
     // its own signed time; event timestamps can be rewritten, it cannot.
     if (Date.now() - last.createdAt.getTime() > AuditService.SEAL_GRACE_MS) {
       const headSeq = new Map(
-        last.heads.map((h) => [h.partition, BigInt(h.seq)]),
+        last.heads.map((h) => [h.partition, Number(h.seq)]),
       );
       for (const [partition, extent] of extents) {
-        if (extent.newest > (headSeq.get(partition) ?? 0n)) {
+        if (extent.newest > (headSeq.get(partition) ?? 0)) {
           return { valid: false, brokenAt: `unsealed:${partition}` };
         }
       }
@@ -543,11 +543,11 @@ export class AuditService implements OnModuleDestroy {
   }> {
     const oldestRemaining = new Map(
       (
-        await tenantClient.$queryRaw<{ partition: number; oldest: bigint }[]>`
+        await tenantClient.$queryRaw<{ partition: number; oldest: number }[]>`
           SELECT "partition", MIN("partitionSeq") AS "oldest"
           FROM "audit_events" GROUP BY "partition"
         `
-      ).map((r) => [r.partition, BigInt(r.oldest)]),
+      ).map((r) => [r.partition, Number(r.oldest)]),
     );
     let key: CheckpointPublicKey | null = null;
     let previousHash: string | null = null;
@@ -593,15 +593,15 @@ export class AuditService implements OnModuleDestroy {
           return fail(cp.seq);
         }
         for (const r of roots) {
-          const from = BigInt(r.fromSeq);
-          const to = BigInt(r.toSeq);
+          const from = Number(r.fromSeq);
+          const to = Number(r.toSeq);
           const oldest = oldestRemaining.get(r.partition);
           if (oldest === undefined || from < oldest) {
             // Retention pruned the start of this range, so its root can't be
             // recomputed; the surviving tail must still match the signed head.
             if (oldest !== undefined && oldest <= to) {
               const head = partitionHeads.find(
-                (h) => h.partition === r.partition && BigInt(h.seq) === to,
+                (h) => h.partition === r.partition && Number(h.seq) === to,
               );
               const tail = await tenantClient.auditEvent.findUnique({
                 where: {
@@ -627,7 +627,7 @@ export class AuditService implements OnModuleDestroy {
             select: { eventHash: true },
           });
           if (
-            BigInt(events.length) !== to - from + 1n ||
+            events.length !== to - from + 1 ||
             merkleRoot(events.map((e) => e.eventHash)) !== r.root
           ) {
             return fail(cp.seq);
@@ -648,7 +648,7 @@ export class AuditService implements OnModuleDestroy {
   private async fetchAuditEventBatch(
     tenantClient: TenantPrismaClient,
     partition: number,
-    afterSeq: bigint | null,
+    afterSeq: number | null,
   ): Promise<AuditEvent[]> {
     return tenantClient.auditEvent.findMany({
       where:

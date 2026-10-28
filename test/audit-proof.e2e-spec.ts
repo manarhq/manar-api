@@ -98,7 +98,7 @@ describe('Audit proofs (e2e)', () => {
 
     expect(proof.leaf).toBe(target.eventHash);
     expect(proof.partition).toBe(target.partition);
-    expect(proof.partitionSeq).toBe(target.partitionSeq.toString());
+    expect(proof.partitionSeq).toBe(target.partitionSeq);
     expect(verifyInclusion(proof.leaf, proof.proof, proof.root)).toBe(true);
     expect(
       proof.checkpoint.roots.some(

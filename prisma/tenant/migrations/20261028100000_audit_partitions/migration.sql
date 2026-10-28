@@ -20,10 +20,10 @@
 
 -- AlterTable
 ALTER TABLE "audit_events" ADD COLUMN "partition" INTEGER NOT NULL DEFAULT 0,
-ADD COLUMN "partitionSeq" BIGINT;
+ADD COLUMN "partitionSeq" INTEGER;
 
 UPDATE "audit_events" AS e
-SET "partitionSeq" = r.rn
+SET "partitionSeq" = r.rn::int
 FROM (SELECT "id", ROW_NUMBER() OVER (ORDER BY "sequence") AS rn FROM "audit_events") AS r
 WHERE e."id" = r."id";
 
@@ -42,7 +42,7 @@ CREATE TABLE "audit_partition_state" (
     "partition" INTEGER NOT NULL,
     "latestEventId" TEXT,
     "latestEventHash" TEXT,
-    "latestSeq" BIGINT NOT NULL DEFAULT 0,
+    "latestSeq" INTEGER NOT NULL DEFAULT 0,
     "eventCount" INTEGER NOT NULL DEFAULT 0,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -50,7 +50,7 @@ CREATE TABLE "audit_partition_state" (
 );
 
 INSERT INTO "audit_partition_state" ("partition", "latestEventId", "latestEventHash", "latestSeq", "eventCount", "updatedAt")
-SELECT 0, s."latestEventId", s."latestEventHash", (SELECT COUNT(*) FROM "audit_events"), s."eventCount", CURRENT_TIMESTAMP
+SELECT 0, s."latestEventId", s."latestEventHash", (SELECT COUNT(*) FROM "audit_events")::int, s."eventCount", CURRENT_TIMESTAMP
 FROM "audit_chain_state" AS s
 WHERE s."id" = 'singleton';
 

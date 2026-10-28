@@ -123,7 +123,7 @@ describe('Audit checkpoints (e2e)', () => {
       const events = await t.client.auditEvent.findMany({
         where: {
           partition: r.partition,
-          partitionSeq: { gte: BigInt(r.fromSeq), lte: BigInt(r.toSeq) },
+          partitionSeq: { gte: Number(r.fromSeq), lte: Number(r.toSeq) },
         },
         orderBy: { partitionSeq: 'asc' },
       });
@@ -147,7 +147,7 @@ describe('Audit checkpoints (e2e)', () => {
       const head = (
         first!.partitionHeads as { partition: number; seq: string }[]
       ).find((h) => h.partition === r.partition);
-      expect(BigInt(r.fromSeq)).toBe(BigInt(head?.seq ?? '0') + 1n);
+      expect(Number(r.fromSeq)).toBe(Number(head?.seq ?? '0') + 1);
     }
   }, 90_000);
 

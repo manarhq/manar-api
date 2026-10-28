@@ -527,7 +527,7 @@ describe('Audit chain (e2e)', () => {
         const state = await client.auditPartitionState.findUnique({
           where: { partition: 0 },
         });
-        expect(state?.latestSeq).toBe(20n);
+        expect(state?.latestSeq).toBe(20);
         expect(state?.latestEventHash).toBe(previousHash);
 
         // A new event for a system actor that lands in partition 0 chains on the old tail.
@@ -542,7 +542,7 @@ describe('Audit chain (e2e)', () => {
           data: {},
         });
         expect(next.previousHash).toBe(previousHash);
-        expect(next.partitionSeq).toBe(21n);
+        expect(next.partitionSeq).toBe(21);
         expect(
           await auditService.verifyAuditChain(client, 'legacy-tenant'),
         ).toEqual({

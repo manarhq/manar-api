@@ -83,8 +83,8 @@ export class AuditEventProofDto {
   @ApiProperty({ minimum: 0, maximum: 63 })
   partition!: number;
 
-  @ApiProperty({ description: 'Decimal string.' })
-  partitionSeq!: string;
+  @ApiProperty({ minimum: 1 })
+  partitionSeq!: number;
 
   @ApiProperty({ description: 'The event hash (leaf).' })
   leaf!: string;
