@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import type { AuditService } from '../audit/audit.service';
+import type { KillSwitchEpochService } from '../kill-switches/kill-switch-epoch.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import {
   AiSystemInvalidTransitionError,
@@ -711,5 +712,78 @@ describe('AiSystemsService — agent links', () => {
         actorUserId: 'user-manager',
       }),
     ).rejects.toBeInstanceOf(AiSystemRetiredError);
+  });
+});
+
+describe('AiSystemsService bumps the kill-switch epoch (docs/decision-path.md)', () => {
+  const epochs = () => {
+    const bumpTenant = vi.fn(() => Promise.resolve());
+    return {
+      bumpTenant,
+      service: { bumpTenant } as unknown as KillSwitchEpochService,
+    };
+  };
+
+  it('a lifecycle transition bumps the tenant epoch', async () => {
+    const { client } = makeTenantClient({
+      aiSystems: [aiSystemRow({ lifecycleState: 'DRAFT' })],
+    });
+    const { auditService } = makeAuditService();
+    const e = epochs();
+    await new AiSystemsService(
+      auditService,
+      undefined,
+      e.service,
+    ).transitionState(client, {
+      toState: 'REVIEW',
+      reason: 'r',
+      tenantId: 'tenant-1',
+      aiSystemId: 'ai-1',
+      actorUserId: 'user-submitter',
+    });
+    expect(e.bumpTenant).toHaveBeenCalledWith('tenant-1');
+  });
+
+  it('linking an agent bumps the tenant epoch', async () => {
+    const { client } = makeTenantClient({
+      aiSystems: [aiSystemRow({ lifecycleState: 'ACTIVE' })],
+      agents: [{ id: 'agent-1' }],
+    });
+    const { auditService } = makeAuditService();
+    const e = epochs();
+    const result = await new AiSystemsService(
+      auditService,
+      undefined,
+      e.service,
+    ).linkAgent(client, {
+      tenantId: 'tenant-1',
+      aiSystemId: 'ai-1',
+      agentId: 'agent-1',
+      actorUserId: 'user-a',
+    });
+    expect(result.linked).toBe(true);
+    expect(e.bumpTenant).toHaveBeenCalledWith('tenant-1');
+  });
+
+  it('unlinking an agent bumps the tenant epoch', async () => {
+    const { client } = makeTenantClient({
+      aiSystems: [aiSystemRow({ lifecycleState: 'ACTIVE' })],
+      agents: [{ id: 'agent-1' }],
+      agentLinks: [{ aiSystemId: 'ai-1', agentId: 'agent-1' }],
+    });
+    const { auditService } = makeAuditService();
+    const e = epochs();
+    const result = await new AiSystemsService(
+      auditService,
+      undefined,
+      e.service,
+    ).unlinkAgent(client, {
+      tenantId: 'tenant-1',
+      aiSystemId: 'ai-1',
+      agentId: 'agent-1',
+      actorUserId: 'user-a',
+    });
+    expect(result.unlinked).toBe(true);
+    expect(e.bumpTenant).toHaveBeenCalledWith('tenant-1');
   });
 });

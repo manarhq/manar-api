@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { KillSwitchEpochService } from '../kill-switches/kill-switch-epoch.service';
 import type { ConfigService } from '@nestjs/config';
 import type { AuditService } from '../audit/audit.service';
 import type { AppConfig } from '../config/env.validation';
@@ -49,6 +50,47 @@ describe('platform kill switch answers before the tenant audit chains are writte
     await expect(
       c.release({ staff: 'Ali', expectedEngagementId: at.toISOString() }, req),
     ).resolves.toMatchObject({ active: false });
+  });
+});
+
+describe('platform kill switch release bumps the platform epoch', () => {
+  it('after the row is committed', async () => {
+    const bumpPlatform = vi.fn(() => Promise.resolve());
+    const ops = {
+      auditPlatformSwitch: () => Promise.resolve({ audited: 0, failed: 0 }),
+    } as unknown as PlatformOpsService;
+    const ks = {
+      getState: () => Promise.resolve({ ...row, active: false }),
+    } as unknown as PlatformKillSwitchService;
+    const control = {
+      platformKillSwitch: { updateMany: () => Promise.resolve({ count: 1 }) },
+    } as unknown as ControlPrismaService;
+    const c = new PlatformOpsController(ops, ks, control, undefined, {
+      bumpPlatform,
+    } as unknown as KillSwitchEpochService);
+    await c.release(
+      { staff: 'Ali', expectedEngagementId: at.toISOString() },
+      req,
+    );
+    expect(bumpPlatform).toHaveBeenCalledTimes(1);
+  });
+
+  it('not when the release is refused (engagement changed)', async () => {
+    const bumpPlatform = vi.fn(() => Promise.resolve());
+    const control = {
+      platformKillSwitch: { updateMany: () => Promise.resolve({ count: 0 }) },
+    } as unknown as ControlPrismaService;
+    const c = new PlatformOpsController(
+      {} as PlatformOpsService,
+      {} as PlatformKillSwitchService,
+      control,
+      undefined,
+      { bumpPlatform } as unknown as KillSwitchEpochService,
+    );
+    await expect(
+      c.release({ staff: 'Ali', expectedEngagementId: at.toISOString() }, req),
+    ).rejects.toThrow();
+    expect(bumpPlatform).not.toHaveBeenCalled();
   });
 });
 
