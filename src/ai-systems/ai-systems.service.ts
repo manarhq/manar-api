@@ -5,6 +5,7 @@ import {
   Inject,
   forwardRef,
 } from '@nestjs/common';
+import { KillSwitchEpochService } from '../kill-switches/kill-switch-epoch.service';
 import { EdgePeerService } from '../edge/edge-peer.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
@@ -255,6 +256,7 @@ export class AiSystemsService {
     @Optional()
     @Inject(forwardRef(() => EdgePeerService))
     private readonly edgePeers?: EdgePeerService,
+    @Optional() private readonly epochs?: KillSwitchEpochService,
   ) {}
 
   /**
@@ -593,6 +595,7 @@ export class AiSystemsService {
     });
     // docs/edge.md: SUSPENDED/RETIRED cuts the edge peers of this system's agents; ACTIVE again
     // restores those nothing else stops.
+    await this.epochs?.bumpTenant(input.tenantId);
     if (this.edgePeers) {
       const links = await tenantClient.aiSystemAgentLink.findMany({
         where: { aiSystemId: updated.id },
@@ -697,6 +700,7 @@ export class AiSystemsService {
         linkedBy: input.actorUserId,
       },
     });
+    await this.epochs?.bumpTenant(input.tenantId);
     await this.edgePeers?.agentChanged(input.tenantId, input.agentId);
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
@@ -726,6 +730,7 @@ export class AiSystemsService {
     if (deleted.count === 0) {
       return { unlinked: false };
     }
+    await this.epochs?.bumpTenant(input.tenantId);
     await this.edgePeers?.agentChanged(input.tenantId, input.agentId);
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
