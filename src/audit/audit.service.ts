@@ -674,24 +674,39 @@ export class AuditService implements OnModuleDestroy {
 
   /**
    * Re-checks the events retention is about to delete (each partition up to
-   * `upTo`), which an incremental run does not re-walk: every event's hash,
-   * its link to the previous one, and every SEAL range wholly inside the
-   * prefix against that SEAL's signed root. Cost is proportional to what is
-   * pruned, not to the whole log.
+   * `upTo`), which an incremental run does not re-walk:
+   * - every event's hash and its link to the previous one, through the end
+   *   of the last SEAL range that reaches the cutoff;
+   * - the proof index tiles that span with no holes, and every range in it
+   *   (including one crossing the cutoff) matches its SEAL's signed root;
+   * - the walked span links to what remains (the next event, or the tail).
+   * Returns the verified hash at each `upTo`, which retention signs as the
+   * anchor. Cost is proportional to what is pruned, not to the whole log.
    */
   async verifyPrunable(
     tenantClient: TenantPrismaClient,
     tenantId: string,
     ranges: { partition: number; upTo: number }[],
-  ): Promise<VerifyAuditChainResult> {
+  ): Promise<
+    | { valid: true; anchorHashes: Map<number, string> }
+    | { valid: false; brokenAt: string }
+  > {
     const anchorsByPartition = await this.verifiedAnchors(
       tenantClient,
       tenantId,
     );
     const key = await this.lookupKey(tenantId);
+    const anchorHashes = new Map<number, string>();
     for (const { partition, upTo } of ranges) {
       const anchors = anchorsByPartition.get(partition) ?? new Set<string>();
+      const sealed = await tenantClient.auditCheckpointRange.findMany({
+        where: { partition, fromSeq: { lte: upTo } },
+        orderBy: { fromSeq: 'asc' },
+      });
+      const walkTo = Math.max(upTo, ...sealed.map((r) => r.toSeq));
+
       const hashes = new Map<number, string>();
+      let firstSeq: number | null = null;
       let expected: string | null | undefined;
       let lastSeq: number | null = null;
       for (;;) {
@@ -699,7 +714,7 @@ export class AuditService implements OnModuleDestroy {
           tenantClient,
           partition,
           lastSeq,
-          upTo,
+          walkTo,
         );
         if (events.length === 0) break;
         for (const event of events) {
@@ -720,23 +735,60 @@ export class AuditService implements OnModuleDestroy {
             return { valid: false, brokenAt: event.id };
           }
           expected = event.eventHash;
+          firstSeq ??= event.partitionSeq;
           hashes.set(event.partitionSeq, event.eventHash);
         }
         lastSeq = events[events.length - 1]!.partitionSeq;
         if (events.length < AuditService.VERIFY_CHAIN_BATCH_SIZE) break;
       }
-      const sealedRanges = await tenantClient.auditCheckpointRange.findMany({
-        where: { partition, toSeq: { lte: upTo } },
-        orderBy: { fromSeq: 'asc' },
+      const atUpTo = hashes.get(upTo);
+      if (firstSeq === null || atUpTo === undefined || lastSeq === null) {
+        return { valid: false, brokenAt: `audit_partition_state:${partition}` };
+      }
+
+      // The walked span links to what remains.
+      const next = await tenantClient.auditEvent.findUnique({
+        where: {
+          partition_partitionSeq: { partition, partitionSeq: lastSeq + 1 },
+        },
+        select: { id: true, previousHash: true },
       });
-      for (const range of sealedRanges) {
+      if (next) {
+        if (next.previousHash !== expected) {
+          return { valid: false, brokenAt: next.id };
+        }
+      } else {
+        const tail = await tenantClient.auditPartitionState.findUnique({
+          where: { partition },
+        });
+        if (
+          tail &&
+          tail.latestSeq === lastSeq &&
+          tail.latestEventHash !== expected
+        ) {
+          return {
+            valid: false,
+            brokenAt: `audit_partition_state:${partition}`,
+          };
+        }
+      }
+
+      // The index must tile [firstSeq, upTo] with no holes; each range in
+      // it must match its SEAL's signed root.
+      let cursor = firstSeq;
+      for (const range of sealed) {
+        if (range.toSeq < cursor) continue; // pruned before: nothing remains
+        if (range.fromSeq > cursor) {
+          return { valid: false, brokenAt: `checkpoint_index:${partition}` };
+        }
+        cursor = range.toSeq + 1;
+        if (range.fromSeq < firstSeq) continue; // start already pruned
         const leaves: string[] = [];
         for (let seq = range.fromSeq; seq <= range.toSeq; seq += 1) {
           const h = hashes.get(seq);
-          if (h === undefined) break; // pruned earlier: nothing to compare
+          if (h === undefined) break;
           leaves.push(h);
         }
-        if (leaves.length !== range.toSeq - range.fromSeq + 1) continue;
         const cp = await tenantClient.auditCheckpoint.findUnique({
           where: { seq: range.checkpointSeq },
         });
@@ -744,16 +796,14 @@ export class AuditService implements OnModuleDestroy {
           (cp?.roots ?? []) as unknown as PartitionRoot[]
         ).find(
           (r) =>
-            r.partition === partition && Number(r.fromSeq) === range.fromSeq,
+            r.partition === partition &&
+            Number(r.fromSeq) === range.fromSeq &&
+            Number(r.toSeq) === range.toSeq,
         )?.root;
         if (
+          leaves.length !== range.toSeq - range.fromSeq + 1 ||
           !cp ||
           !key ||
-          !verifyCheckpointSignature(
-            cp.checkpointHash,
-            cp.signature,
-            key.publicKeyPem,
-          ) ||
           checkpointHashOf({
             seq: cp.seq,
             createdAt: cp.createdAt,
@@ -761,6 +811,11 @@ export class AuditService implements OnModuleDestroy {
             roots: cp.roots as unknown as PartitionRoot[],
             previousCheckpointHash: cp.previousCheckpointHash,
           }) !== cp.checkpointHash ||
+          !verifyCheckpointSignature(
+            cp.checkpointHash,
+            cp.signature,
+            key.publicKeyPem,
+          ) ||
           signedRoot !== merkleRoot(leaves)
         ) {
           return {
@@ -769,8 +824,12 @@ export class AuditService implements OnModuleDestroy {
           };
         }
       }
+      if (cursor <= upTo) {
+        return { valid: false, brokenAt: `checkpoint_index:${partition}` };
+      }
+      anchorHashes.set(partition, atUpTo);
     }
-    return { valid: true };
+    return { valid: true, anchorHashes };
   }
 
   /** The tenant's SEAL key, or `null` when it has none (nothing verifies then). */

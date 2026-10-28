@@ -586,6 +586,50 @@ describe('Audit retention (e2e)', () => {
     }
   }, 60_000);
 
+  it('refuses to prune when a proof-index row inside the pruned prefix is missing', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('hole'),
+      name: 'Retention Index Hole Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    const checkpoints = new AuditCheckpointService(signer);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+    );
+    for (let round = 0; round < 3; round += 1) {
+      for (let i = 0; i < 3; i += 1) {
+        await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'ret-hole' },
+          data: { round, i },
+        });
+      }
+      await checkpoints.createCheckpoint(tenantClient, tenant.id);
+    }
+    vi.useRealTimers();
+    await tenantClient.$executeRaw`DELETE FROM "audit_checkpoint_ranges" WHERE "checkpointSeq" = 2`;
+
+    await expect(
+      new AuditRetentionService(
+        auditService,
+        signer,
+        checkpoints,
+      ).pruneTenantAuditEvents(tenantClient, {
+        tenantId: tenant.id,
+        retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+      }),
+    ).rejects.toThrow(/does not verify/);
+    expect(await tenantClient.auditEvent.count()).toBe(9);
+  }, 60_000);
+
   it('refuses to prune (and sign anchors) when the log does not verify', async () => {
     const tenant = await manager.provisionTenant({
       slug: uniqueSlug('broken'),

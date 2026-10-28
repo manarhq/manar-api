@@ -145,16 +145,7 @@ export class AuditRetentionService {
         partition: r.partition,
         partitionSeq: { lte: Number(r.cutoffSeq) },
       };
-      const [last, count, span] = await Promise.all([
-        tenantClient.auditEvent.findUniqueOrThrow({
-          where: {
-            partition_partitionSeq: {
-              partition: r.partition,
-              partitionSeq: Number(r.cutoffSeq),
-            },
-          },
-          select: { eventHash: true },
-        }),
+      const [count, span] = await Promise.all([
         tenantClient.auditEvent.count({ where }),
         tenantClient.auditEvent.aggregate({
           where,
@@ -167,7 +158,8 @@ export class AuditRetentionService {
       windowEnd = Math.max(windowEnd, span._max.timestamp!.getTime());
       anchors.push({
         partition: r.partition,
-        anchorHash: last.eventHash,
+        // Exactly the hash verifyPrunable checked, not a fresh read.
+        anchorHash: prefix.anchorHashes.get(r.partition)!,
         eventsPrunedCount: count,
       });
     }
