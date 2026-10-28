@@ -37,8 +37,8 @@ describe('Audit checkpoints (e2e)', () => {
     );
     kafka = new KafkaPublisherService(fakeConfigService());
     await kafka.onModuleInit();
-    audit = new AuditService(kafka);
     signer = new CheckpointSigner(new OpenBaoKvClient(fakeConfigService()));
+    audit = new AuditService(kafka, signer);
     checkpoints = new AuditCheckpointService(signer);
   }, 60_000);
 

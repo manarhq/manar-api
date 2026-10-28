@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import type {
   AuditEvent,
   Prisma,
@@ -14,7 +14,17 @@ import {
   CURRENT_EVENT_VERSION,
   DomainEventEnvelope,
 } from './domain-event-envelope';
+import {
+  CHECKPOINT_PUBLIC_KEYS,
+  type CheckpointKeyLookup,
+  type CheckpointPublicKey,
+  checkpointHashOf,
+  type PartitionHead,
+  type PartitionRoot,
+  verifyCheckpointSignature,
+} from './checkpoint/checkpoint-format';
 import { KafkaPublisherService } from './kafka-publisher.service';
+import { merkleRoot } from './merkle';
 
 export interface RecordAuditEventInput {
   eventType: AuditEventType;
@@ -93,7 +103,11 @@ export class AuditService implements OnModuleDestroy {
     (_tenantId, items) => this.flushBatch(items),
   );
 
-  constructor(private readonly kafkaPublisher: KafkaPublisherService) {}
+  constructor(
+    private readonly kafkaPublisher: KafkaPublisherService,
+    @Inject(CHECKPOINT_PUBLIC_KEYS)
+    private readonly checkpointKeys: CheckpointKeyLookup,
+  ) {}
 
   /** Commits whatever is still queued before the process exits. */
   async onModuleDestroy(): Promise<void> {
@@ -349,9 +363,15 @@ export class AuditService implements OnModuleDestroy {
    * **Bounded memory**: keyset pages of `VERIFY_CHAIN_BATCH_SIZE` per
    * partition; the running hash carries across page boundaries exactly as
    * across adjacent rows (`audit.service.spec.ts` pins a tamper in page two).
+   *
+   * **SEALs**: then walks the signed checkpoints in order — each must link
+   * to the previous one, hash to its stored `checkpointHash`, carry a valid
+   * signature by this tenant's key, and every root whose range still exists
+   * must equal the Merkle root of those events (`brokenAt: 'checkpoint:<seq>'`).
    */
   async verifyAuditChain(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
   ): Promise<VerifyAuditChainResult> {
     // Read before walking: retention only ever adds anchors, so reading them
     // first can never make the walk reject a head an anchor written mid-walk
@@ -422,7 +442,95 @@ export class AuditService implements OnModuleDestroy {
       }
     }
 
+    const brokenCheckpoint = await this.verifyCheckpoints(
+      tenantClient,
+      tenantId,
+    );
+    if (brokenCheckpoint !== null) {
+      return { valid: false, brokenAt: `checkpoint:${brokenCheckpoint}` };
+    }
     return { valid: true };
+  }
+
+  /** The `seq` of the first SEAL that fails, or `null` when all hold. */
+  private async verifyCheckpoints(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+  ): Promise<string | null> {
+    const oldestRemaining = new Map(
+      (
+        await tenantClient.$queryRaw<{ partition: number; oldest: bigint }[]>`
+          SELECT "partition", MIN("partitionSeq") AS "oldest"
+          FROM "audit_events" GROUP BY "partition"
+        `
+      ).map((r) => [r.partition, BigInt(r.oldest)]),
+    );
+    let key: CheckpointPublicKey | null = null;
+    let previousHash: string | null = null;
+    let expectedSeq = 1n;
+
+    for (;;) {
+      const page = await tenantClient.auditCheckpoint.findMany({
+        where: { seq: { gte: expectedSeq } },
+        orderBy: { seq: 'asc' },
+        take: AuditService.VERIFY_CHAIN_BATCH_SIZE,
+      });
+      if (page.length === 0) return null;
+
+      for (const cp of page) {
+        const broken = cp.seq.toString();
+        const roots = cp.roots as unknown as PartitionRoot[];
+        const partitionHeads = cp.partitionHeads as unknown as PartitionHead[];
+        if (
+          cp.seq !== expectedSeq ||
+          cp.previousCheckpointHash !== previousHash
+        ) {
+          return broken;
+        }
+        const recomputed = checkpointHashOf({
+          seq: cp.seq,
+          createdAt: cp.createdAt,
+          partitionHeads,
+          roots,
+          previousCheckpointHash: cp.previousCheckpointHash,
+        });
+        key ??= await this.checkpointKeys.publicKey(tenantId);
+        if (
+          recomputed !== cp.checkpointHash ||
+          cp.keyId !== key.keyId ||
+          !verifyCheckpointSignature(
+            cp.checkpointHash,
+            cp.signature,
+            key.publicKeyPem,
+          )
+        ) {
+          return broken;
+        }
+        for (const r of roots) {
+          const from = BigInt(r.fromSeq);
+          const to = BigInt(r.toSeq);
+          const oldest = oldestRemaining.get(r.partition);
+          // Retention pruned this range (or its start): nothing left to recompute.
+          if (oldest === undefined || from < oldest) continue;
+          const events = await tenantClient.auditEvent.findMany({
+            where: {
+              partition: r.partition,
+              partitionSeq: { gte: from, lte: to },
+            },
+            orderBy: { partitionSeq: 'asc' },
+            select: { eventHash: true },
+          });
+          if (
+            BigInt(events.length) !== to - from + 1n ||
+            merkleRoot(events.map((e) => e.eventHash)) !== r.root
+          ) {
+            return broken;
+          }
+        }
+        previousHash = cp.checkpointHash;
+        expectedSeq += 1n;
+      }
+    }
   }
 
   /** One keyset page of a partition, strictly after `afterSeq`. */

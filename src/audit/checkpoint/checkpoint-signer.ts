@@ -1,20 +1,19 @@
 import {
-  createHash,
   createPrivateKey,
-  createPublicKey,
   generateKeyPairSync,
   type KeyObject,
   sign,
-  verify,
 } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { OpenBaoKvClient } from '../../openbao/openbao-kv.client';
+import {
+  type CheckpointKeyLookup,
+  type CheckpointPublicKey,
+  keyIdOf,
+  verifyCheckpointSignature,
+} from './checkpoint-format';
 
-export interface CheckpointPublicKey {
-  keyId: string;
-  algorithm: 'Ed25519';
-  publicKeyPem: string;
-}
+export type { CheckpointPublicKey };
 
 interface TenantSigningKey extends CheckpointPublicKey {
   privateKey: KeyObject;
@@ -31,7 +30,7 @@ const DIGEST = /^[0-9a-f]{64}$/;
  * it end up with the same key. Keys are cached in memory after first load.
  */
 @Injectable()
-export class CheckpointSigner {
+export class CheckpointSigner implements CheckpointKeyLookup {
   private readonly keys = new Map<string, Promise<TenantSigningKey>>();
 
   constructor(private readonly kv: OpenBaoKvClient) {}
@@ -62,25 +61,11 @@ export class CheckpointSigner {
     signatureB64: string,
     publicKeyPem: string,
   ): boolean {
-    if (!DIGEST.test(checkpointHashHex)) return false;
-    try {
-      return verify(
-        null,
-        Buffer.from(checkpointHashHex, 'hex'),
-        createPublicKey(publicKeyPem),
-        Buffer.from(signatureB64, 'base64'),
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  static keyIdOf(publicKeyPem: string): string {
-    const der = createPublicKey(publicKeyPem).export({
-      type: 'spki',
-      format: 'der',
-    });
-    return createHash('sha256').update(der).digest('hex').slice(0, 16);
+    return verifyCheckpointSignature(
+      checkpointHashHex,
+      signatureB64,
+      publicKeyPem,
+    );
   }
 
   private keyFor(tenantId: string): Promise<TenantSigningKey> {
@@ -135,7 +120,7 @@ export class CheckpointSigner {
       privateKey,
       algorithm: 'Ed25519',
       publicKeyPem: secret.publicKeyPem,
-      keyId: CheckpointSigner.keyIdOf(secret.publicKeyPem),
+      keyId: keyIdOf(secret.publicKeyPem),
     };
   }
 }

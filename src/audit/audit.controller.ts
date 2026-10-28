@@ -1,8 +1,12 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   Get,
+  NotFoundException,
+  Param,
+  ParseUUIDPipe,
   Post,
   Query,
   UseGuards,
@@ -27,7 +31,15 @@ import { parseLimit } from '../common/pagination/cursor-pagination';
 import { AuditSearchService } from './audit-search.service';
 import { AuditService } from './audit.service';
 import {
+  AuditEventNotCheckpointedError,
+  AuditEventNotFoundError,
+  AuditProofService,
+} from './checkpoint/audit-proof.service';
+import { CheckpointSigner } from './checkpoint/checkpoint-signer';
+import {
+  AuditEventProofDto,
   AuditSearchResponseDto,
+  CheckpointPublicKeyDto,
   InvestigateAuditRequestDto,
   InvestigateAuditResponseDto,
   VerifyAuditChainResponseDto,
@@ -82,6 +94,8 @@ export class AuditController {
     private readonly auditService: AuditService,
     private readonly auditSearchService: AuditSearchService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly auditProofService: AuditProofService,
+    private readonly checkpointSigner: CheckpointSigner,
   ) {}
 
   @Get()
@@ -232,6 +246,57 @@ export class AuditController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    return this.auditService.verifyAuditChain(tenantClient);
+    return this.auditService.verifyAuditChain(tenantClient, auth.tenant.id);
+  }
+
+  @Get('events/:id/proof')
+  @ApiOperation({
+    summary: 'Inclusion proof for one audit event',
+    description:
+      "The event's Merkle path to a root in a signed checkpoint (SEAL), plus that checkpoint, so a recipient can verify the event without trusting Manar. 409 while the event is not yet covered by a checkpoint (they are written every second). Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER.",
+  })
+  @ApiResponse({ status: 200, type: AuditEventProofDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  @ApiResponse({ status: 409, type: ErrorResponseDto })
+  async proof(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    try {
+      return await this.auditProofService.proveEvent(tenantClient, id);
+    } catch (error) {
+      if (error instanceof AuditEventNotFoundError) {
+        throw new NotFoundException({
+          code: error.code,
+          message: error.message,
+        });
+      }
+      if (error instanceof AuditEventNotCheckpointedError) {
+        throw new ConflictException({
+          code: error.code,
+          message: error.message,
+          retryAfterMs: error.retryAfterMs,
+        });
+      }
+      throw error;
+    }
+  }
+
+  @Get('checkpoints/public-key')
+  @ApiOperation({
+    summary: "This tenant's checkpoint signing key",
+    description:
+      "The Ed25519 public key that signs this tenant's audit checkpoints (SEALs). Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER.",
+  })
+  @ApiResponse({ status: 200, type: CheckpointPublicKeyDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async publicKey(@CurrentAuth() auth: AuthContext) {
+    return this.checkpointSigner.publicKey(auth.tenant.id);
   }
 }

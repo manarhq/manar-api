@@ -24,6 +24,8 @@ import {
 } from '../src/audit/audit.service';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
+import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
+import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { computeEventHash } from '../src/audit/audit-hash';
 import { partitionFor } from '../src/audit/audit-partition';
 import { PrismaClient as TenantPrismaClient } from '../src/generated/tenant-client/client';
@@ -91,7 +93,10 @@ describe('Audit chain (e2e)', () => {
     );
     kafkaPublisher = new KafkaPublisherService(fakeConfigService());
     await kafkaPublisher.onModuleInit();
-    auditService = new AuditService(kafkaPublisher);
+    auditService = new AuditService(
+      kafkaPublisher,
+      new CheckpointSigner(new OpenBaoKvClient(fakeConfigService())),
+    );
 
     tenantGrowth = await manager.provisionTenant({
       slug: uniqueSlug('growth'),
@@ -139,7 +144,10 @@ describe('Audit chain (e2e)', () => {
       });
     }
 
-    const result = await auditService.verifyAuditChain(tenantClient);
+    const result = await auditService.verifyAuditChain(
+      tenantClient,
+      tenantGrowth.id,
+    );
     expect(result).toEqual({ valid: true });
 
     const count = await tenantClient.auditEvent.count();
@@ -172,7 +180,10 @@ describe('Audit chain (e2e)', () => {
     const after = await tenantClient.auditEvent.count();
     expect(after).toBe(before + concurrency);
 
-    const result = await auditService.verifyAuditChain(tenantClient);
+    const result = await auditService.verifyAuditChain(
+      tenantClient,
+      tenantGrowth.id,
+    );
     expect(result).toEqual({ valid: true });
 
     const events = await tenantClient.auditEvent.findMany({
@@ -215,7 +226,9 @@ describe('Audit chain (e2e)', () => {
     });
 
     // Verifies cleanly before tampering.
-    expect(await auditService.verifyAuditChain(tenantClient)).toEqual({
+    expect(
+      await auditService.verifyAuditChain(tenantClient, tenantTamperData.id),
+    ).toEqual({
       valid: true,
     });
 
@@ -227,7 +240,10 @@ describe('Audit chain (e2e)', () => {
       data: { data: { original: false, tampered: true } },
     });
 
-    const result = await auditService.verifyAuditChain(tenantClient);
+    const result = await auditService.verifyAuditChain(
+      tenantClient,
+      tenantTamperData.id,
+    );
     expect(result).toEqual({ valid: false, brokenAt: first.id });
   }, 30_000);
 
@@ -254,7 +270,9 @@ describe('Audit chain (e2e)', () => {
       data: { seq: 3 },
     });
 
-    expect(await auditService.verifyAuditChain(tenantClient)).toEqual({
+    expect(
+      await auditService.verifyAuditChain(tenantClient, tenantTamperHash.id),
+    ).toEqual({
       valid: true,
     });
 
@@ -263,7 +281,10 @@ describe('Audit chain (e2e)', () => {
       data: { eventHash: 'a'.repeat(64) },
     });
 
-    const result = await auditService.verifyAuditChain(tenantClient);
+    const result = await auditService.verifyAuditChain(
+      tenantClient,
+      tenantTamperHash.id,
+    );
     expect(result).toEqual({ valid: false, brokenAt: second.id });
   }, 30_000);
 
@@ -275,7 +296,10 @@ describe('Audit chain (e2e)', () => {
       fakeConfigService(),
       new EnvSecretProvider(),
     );
-    const service2 = new AuditService(kafkaPublisher);
+    const service2 = new AuditService(
+      kafkaPublisher,
+      new CheckpointSigner(new OpenBaoKvClient(fakeConfigService())),
+    );
     const tenant = await manager.provisionTenant({
       slug: uniqueSlug('replicas'),
       name: 'Audit Two Replicas Tenant',
@@ -306,7 +330,7 @@ describe('Audit chain (e2e)', () => {
       );
     }
 
-    expect(await auditService.verifyAuditChain(clientA)).toEqual({
+    expect(await auditService.verifyAuditChain(clientA, tenant.id)).toEqual({
       valid: true,
     });
     const states = await clientA.auditPartitionState.findMany();
@@ -351,7 +375,7 @@ describe('Audit chain (e2e)', () => {
       'fulfilled',
     ]);
     expect(await client.auditEvent.count()).toBe(2);
-    expect(await auditService.verifyAuditChain(client)).toEqual({
+    expect(await auditService.verifyAuditChain(client, tenant.id)).toEqual({
       valid: true,
     });
   }, 60_000);
@@ -382,7 +406,7 @@ describe('Audit chain (e2e)', () => {
 
     await client.$executeRaw`UPDATE "audit_events" SET "data" = '{"tampered":true}'::jsonb WHERE "id" = ${target.id}`;
 
-    expect(await auditService.verifyAuditChain(client)).toEqual({
+    expect(await auditService.verifyAuditChain(client, tenant.id)).toEqual({
       valid: false,
       brokenAt: target.id,
     });
@@ -486,7 +510,9 @@ describe('Audit chain (e2e)', () => {
         adapter: new PrismaPg({ connectionString: url.toString() }),
       });
       try {
-        expect(await auditService.verifyAuditChain(client)).toEqual({
+        expect(
+          await auditService.verifyAuditChain(client, 'legacy-tenant'),
+        ).toEqual({
           valid: true,
         });
         const state = await client.auditPartitionState.findUnique({
@@ -508,7 +534,9 @@ describe('Audit chain (e2e)', () => {
         });
         expect(next.previousHash).toBe(previousHash);
         expect(next.partitionSeq).toBe(21n);
-        expect(await auditService.verifyAuditChain(client)).toEqual({
+        expect(
+          await auditService.verifyAuditChain(client, 'legacy-tenant'),
+        ).toEqual({
           valid: true,
         });
       } finally {

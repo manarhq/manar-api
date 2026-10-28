@@ -12,6 +12,8 @@ import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { AuditService } from '../src/audit/audit.service';
+import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
+import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
 import { WorkerAppModule } from '../src/temporal/worker-app.module';
@@ -202,7 +204,10 @@ describe('Audit retention (e2e)', () => {
     );
     kafkaPublisher = new KafkaPublisherService(fakeConfigService());
     await kafkaPublisher.onModuleInit();
-    auditService = new AuditService(kafkaPublisher);
+    auditService = new AuditService(
+      kafkaPublisher,
+      new CheckpointSigner(new OpenBaoKvClient(fakeConfigService())),
+    );
 
     workerModuleFixture = await Test.createTestingModule({
       imports: [WorkerAppModule],
@@ -371,7 +376,10 @@ describe('Audit retention (e2e)', () => {
     expect(chainState?.latestEventId).toBe(result.retentionEventId);
 
     // The pruned chain still verifies — anchor-aware verifyAuditChain.
-    const verifyResult = await auditService.verifyAuditChain(tenantClient);
+    const verifyResult = await auditService.verifyAuditChain(
+      tenantClient,
+      tenant.id,
+    );
     expect(verifyResult).toEqual({ valid: true });
 
     expect(await tenantClient.auditEvent.count()).toBe(4); // 3 new + 1 retention_executed

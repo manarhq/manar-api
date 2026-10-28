@@ -1,48 +1,19 @@
-import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type {
   AuditCheckpoint,
   Prisma,
   PrismaClient as TenantPrismaClient,
 } from '../../generated/tenant-client/client';
-import { canonicalize } from '../canonical-json';
 import { merkleRoot } from '../merkle';
+import {
+  checkpointHashOf,
+  type PartitionHead,
+  type PartitionRoot,
+} from './checkpoint-format';
 import { CheckpointSigner } from './checkpoint-signer';
 
-export interface PartitionHead {
-  partition: number;
-  seq: string;
-  eventHash: string;
-}
-
-export interface PartitionRoot {
-  partition: number;
-  fromSeq: string;
-  toSeq: string;
-  root: string;
-}
-
-/** The exact content a checkpoint's hash and signature cover. */
-export function checkpointHashOf(content: {
-  seq: bigint;
-  createdAt: Date;
-  partitionHeads: PartitionHead[];
-  roots: PartitionRoot[];
-  previousCheckpointHash: string | null;
-}): string {
-  return createHash('sha256')
-    .update(
-      canonicalize({
-        seq: content.seq.toString(),
-        createdAt: content.createdAt.toISOString(),
-        partitionHeads: content.partitionHeads,
-        roots: content.roots,
-        previousCheckpointHash: content.previousCheckpointHash,
-      }),
-      'utf8',
-    )
-    .digest('hex');
-}
+export type { PartitionHead, PartitionRoot } from './checkpoint-format';
+export { checkpointHashOf } from './checkpoint-format';
 
 /**
  * Builds SEALs: every call that finds new audit events writes one

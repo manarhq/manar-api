@@ -1,6 +1,8 @@
 import { Global, Module } from '@nestjs/common';
 import { AuditService } from './audit.service';
 import { AuditCheckpointService } from './checkpoint/audit-checkpoint.service';
+import { AuditProofService } from './checkpoint/audit-proof.service';
+import { CHECKPOINT_PUBLIC_KEYS } from './checkpoint/checkpoint-format';
 import { CheckpointSigner } from './checkpoint/checkpoint-signer';
 import { KafkaPublisherService } from './kafka-publisher.service';
 
@@ -27,7 +29,14 @@ import { KafkaPublisherService } from './kafka-publisher.service';
     AuditService,
     CheckpointSigner,
     AuditCheckpointService,
+    AuditProofService,
+    { provide: CHECKPOINT_PUBLIC_KEYS, useExisting: CheckpointSigner },
   ],
-  exports: [AuditService, CheckpointSigner, AuditCheckpointService],
+  exports: [
+    AuditService,
+    CheckpointSigner,
+    AuditCheckpointService,
+    AuditProofService,
+  ],
 })
 export class AuditModule {}

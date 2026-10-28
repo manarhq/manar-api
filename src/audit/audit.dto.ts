@@ -10,11 +10,93 @@ export class VerifyAuditChainResponseDto {
 
   @ApiProperty({
     required: false,
-    format: 'uuid',
     description:
-      'Present only when valid=false: the AuditEvent.id where verification first failed.',
+      "Present only when valid=false: the AuditEvent.id where verification first failed, 'audit_partition_state:<n>' for a partition whose tail disagrees with its bookkeeping row, or 'checkpoint:<seq>' for a signed checkpoint that fails.",
   })
   brokenAt?: string;
+}
+
+/** `GET /audit/checkpoints/public-key`. */
+export class CheckpointPublicKeyDto {
+  @ApiProperty({ example: '3f9a1c0b2d4e5f60' })
+  keyId!: string;
+
+  @ApiProperty({ enum: ['Ed25519'] })
+  algorithm!: 'Ed25519';
+
+  @ApiProperty({ description: 'SPKI PEM.' })
+  publicKeyPem!: string;
+}
+
+export class MerkleProofStepDto {
+  @ApiProperty({ enum: ['L', 'R'], description: "The sibling's side." })
+  side!: 'L' | 'R';
+
+  @ApiProperty({ description: 'sha256 hex' })
+  hash!: string;
+}
+
+export class SealedCheckpointDto {
+  @ApiProperty({ description: 'Decimal string.' })
+  seq!: string;
+
+  @ApiProperty({ format: 'date-time' })
+  createdAt!: string;
+
+  @ApiProperty({
+    description:
+      '`{ partition, seq, eventHash }` for every partition with events.',
+    type: 'array',
+    items: { type: 'object' },
+  })
+  partitionHeads!: unknown[];
+
+  @ApiProperty({
+    description:
+      '`{ partition, fromSeq, toSeq, root }` for each partition that advanced.',
+    type: 'array',
+    items: { type: 'object' },
+  })
+  roots!: unknown[];
+
+  @ApiProperty({ nullable: true, type: String })
+  previousCheckpointHash!: string | null;
+
+  @ApiProperty()
+  checkpointHash!: string;
+
+  @ApiProperty({
+    description:
+      'Base64 Ed25519 signature over the 32 bytes of checkpointHash.',
+  })
+  signature!: string;
+
+  @ApiProperty()
+  keyId!: string;
+}
+
+/** `GET /audit/events/:id/proof`. */
+export class AuditEventProofDto {
+  @ApiProperty({ format: 'uuid' })
+  eventId!: string;
+
+  @ApiProperty({ minimum: 0, maximum: 63 })
+  partition!: number;
+
+  @ApiProperty({ description: 'Decimal string.' })
+  partitionSeq!: string;
+
+  @ApiProperty({ description: 'The event hash (leaf).' })
+  leaf!: string;
+
+  @ApiProperty({ type: [MerkleProofStepDto] })
+  proof!: MerkleProofStepDto[];
+
+  @ApiProperty({ description: 'The signed root this proof ends at.' })
+  root!: string;
+
+  @ApiProperty({ type: SealedCheckpointDto })
+  checkpoint!: SealedCheckpointDto;
 }
 
 /**

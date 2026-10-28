@@ -45,7 +45,7 @@ export class AuditVerifyCommand extends CommandRunner {
     for (const { id } of tenants) {
       const client = await this.tenantDatabaseManager.getClient(id);
       const events = await client.auditEvent.count();
-      const result = await this.auditService.verifyAuditChain(client);
+      const result = await this.auditService.verifyAuditChain(client, id);
       if (result.valid) {
         this.logger.log(`tenant ${id}: chain valid (${events} events)`);
       } else {

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { computeEventHash } from './audit-hash';
 import { partitionFor } from './audit-partition';
+import type { CheckpointKeyLookup } from './checkpoint/checkpoint-format';
 import { AuditService } from './audit.service';
 import type { KafkaPublisherService } from './kafka-publisher.service';
 
@@ -135,6 +136,9 @@ function fakeTenantClient(options: FakeClientOptions): {
           })),
         ),
     },
+    // No SEALs in these fixtures: the checkpoint walk finds nothing to check.
+    $queryRaw: () => Promise.resolve([]),
+    auditCheckpoint: { findMany: () => Promise.resolve([]) },
     auditPartitionState: {
       findMany: () =>
         Promise.resolve(
@@ -161,7 +165,7 @@ function makeService(): AuditService {
     publish: () => Promise.resolve(),
   } as unknown as KafkaPublisherService;
 
-  return new AuditService(kafkaPublisher);
+  return new AuditService(kafkaPublisher, {} as CheckpointKeyLookup);
 }
 
 describe('AuditService.verifyAuditChain', () => {
@@ -169,9 +173,11 @@ describe('AuditService.verifyAuditChain', () => {
     const events = buildChain(CHAIN_LENGTH);
     const { client, pageSizes } = fakeTenantClient({ events });
 
-    await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
-      valid: true,
-    });
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: true,
+      },
+    );
 
     // The memory fix itself: more than one page was fetched, and no single
     // page held the whole table.
@@ -192,10 +198,12 @@ describe('AuditService.verifyAuditChain', () => {
 
     const { client, pageSizes } = fakeTenantClient({ events });
 
-    await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
-      valid: false,
-      brokenAt: tampered.id,
-    });
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: false,
+        brokenAt: tampered.id,
+      },
+    );
 
     // Proves the detection happened after a page boundary rather than
     // inside the first page.
@@ -212,10 +220,12 @@ describe('AuditService.verifyAuditChain', () => {
 
     // The next event's `previousHash` now points at a hash no remaining
     // event has — the deletion is caught at the row that lost its parent.
-    await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
-      valid: false,
-      brokenAt: orphaned.id,
-    });
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: false,
+        brokenAt: orphaned.id,
+      },
+    );
   });
 
   it('detects tampering in the FIRST batch too, at the right event', async () => {
@@ -226,10 +236,12 @@ describe('AuditService.verifyAuditChain', () => {
 
     const { client } = fakeTenantClient({ events });
 
-    await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
-      valid: false,
-      brokenAt: tampered.id,
-    });
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: false,
+        brokenAt: tampered.id,
+      },
+    );
   });
 
   it('stays anchor-aware across batching: a retention-pruned head validates against a known anchor', async () => {
@@ -245,9 +257,11 @@ describe('AuditService.verifyAuditChain', () => {
       anchorHashes: [anchorHash],
     });
 
-    await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
-      valid: true,
-    });
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: true,
+      },
+    );
   });
 
   it('rejects a pruned head whose previousHash matches no known anchor', async () => {
@@ -261,10 +275,12 @@ describe('AuditService.verifyAuditChain', () => {
       anchorHashes: ['0'.repeat(64)],
     });
 
-    await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
-      valid: false,
-      brokenAt: orphanedHead.id,
-    });
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: false,
+        brokenAt: orphanedHead.id,
+      },
+    );
   });
 
   it("still checks the chain tail against its partition's AuditPartitionState after the last batch", async () => {
@@ -274,10 +290,12 @@ describe('AuditService.verifyAuditChain', () => {
       latestEventHash: 'f'.repeat(64),
     });
 
-    await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
-      valid: false,
-      brokenAt: 'audit_partition_state:0',
-    });
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: false,
+        brokenAt: 'audit_partition_state:0',
+      },
+    );
   });
 
   it('validates an empty chain without fetching a second page', async () => {
@@ -286,9 +304,11 @@ describe('AuditService.verifyAuditChain', () => {
       hasChainState: false,
     });
 
-    await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
-      valid: true,
-    });
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: true,
+      },
+    );
     // One empty page per partition, never a second page for any of them.
     expect(pageSizes).toEqual(new Array(64).fill(0));
   });
@@ -493,9 +513,10 @@ describe('AuditService.record (partitioned, group commit)', () => {
 
   it('publishes each committed event to Kafka with its partition position', async () => {
     const publish = vi.fn(() => Promise.resolve());
-    const service = new AuditService({
-      publish,
-    } as unknown as KafkaPublisherService);
+    const service = new AuditService(
+      { publish } as unknown as KafkaPublisherService,
+      {} as CheckpointKeyLookup,
+    );
     const fake = fakeWriteTx();
 
     const event = await service.record(writeClient(fake), 'tenant-1', {
