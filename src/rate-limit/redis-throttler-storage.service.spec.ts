@@ -98,6 +98,25 @@ describe('RedisThrottlerStorageService (real Redis)', () => {
     expect(other.isBlocked).toBe(false);
   });
 
+  it('a caller that went over stays blocked for blockDuration even once a slot has refilled', async () => {
+    const key = uniqueKey();
+    // 3 per 300 ms (a slot every 100 ms), 800 ms block.
+    for (let i = 0; i < 3; i += 1) {
+      await service.increment(key, 300, 3, 800, 'test');
+    }
+    expect((await service.increment(key, 300, 3, 800, 'test')).isBlocked).toBe(
+      true,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect((await service.increment(key, 300, 3, 800, 'test')).isBlocked).toBe(
+      true,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect((await service.increment(key, 300, 3, 800, 'test')).isBlocked).toBe(
+      false,
+    );
+  }, 10_000);
+
   it('recovers after one emission interval (rate is limit per window, not a window cliff)', async () => {
     const key = uniqueKey();
     // limit 2 per 600 ms: one slot every 300 ms.

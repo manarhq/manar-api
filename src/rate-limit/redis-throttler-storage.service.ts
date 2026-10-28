@@ -27,14 +27,23 @@ interface ThrottlerStorageRecord {
  * `ttl` and `limit` map to an emission interval of `ttl / limit` and a burst of `limit`, so
  * "N requests per window" keeps its meaning while the window no longer resets in a cliff. One
  * string per key holds the theoretical arrival time (TAT, ms). Time comes from the server
- * (`TIME`), so replica clock skew cannot move a limit. A denied check changes nothing. The
- * throttler's `blockDuration` is not used: a limited caller is admitted again as soon as one
- * interval has passed, and the reply carries that wait.
+ * (`TIME`), so replica clock skew cannot move a limit. A denied check does not move the
+ * TAT. As before, the throttler's `blockDuration` still holds a caller that went over its limit
+ * for that long (a separate key); with `blockDuration` 0 the caller is admitted again as soon as
+ * one interval has passed.
  */
 const GCRA_SCRIPT = `
 local key = KEYS[1]
+local blockKey = KEYS[2]
 local ttl = tonumber(ARGV[1])
 local limit = tonumber(ARGV[2])
+local blockDuration = tonumber(ARGV[3])
+
+local blockLeft = redis.call("PTTL", blockKey)
+if blockLeft > 0 then
+  return {limit + 1, 0, 1, blockLeft}
+end
+
 local t = redis.call("TIME")
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local interval = ttl / limit
@@ -45,7 +54,12 @@ if tat == nil or tat < now then tat = now end
 local newTat = tat + interval
 local allowAt = newTat - ttl
 if now < allowAt then
-  return {limit + 1, math.ceil(tat - now), 1, math.ceil(allowAt - now)}
+  local wait = math.ceil(allowAt - now)
+  if blockDuration > 0 then
+    redis.call("SET", blockKey, "1", "PX", blockDuration)
+    wait = blockDuration
+  end
+  return {limit + 1, math.ceil(tat - now), 1, wait}
 end
 
 redis.call("SET", key, string.format("%.3f", newTat), "PX", math.ceil(newTat - now) + 1000)
@@ -110,15 +124,15 @@ export class RedisThrottlerStorageService
     key: string,
     ttl: number,
     limit: number,
-    _blockDuration: number,
+    blockDuration: number,
     throttlerName: string,
   ): Promise<ThrottlerStorageRecord> {
     const client = await this.redis.get();
     const redisKey = `manar:throttle:${throttlerName}:${key}`;
 
     const result = (await client.eval(GCRA_SCRIPT, {
-      keys: [redisKey],
-      arguments: [String(ttl), String(limit)],
+      keys: [redisKey, `${redisKey}:block`],
+      arguments: [String(ttl), String(limit), String(blockDuration)],
     })) as [number, number, number, number];
 
     const [totalHitsMs, timeToExpireMs, isBlocked, timeToBlockExpireMs] =
