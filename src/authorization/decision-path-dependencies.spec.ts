@@ -215,15 +215,44 @@ describe('ADR-004 — synchronous decision path dependencies', () => {
     ]);
   });
 
-  it('nothing on the path imports a Kafka, OpenSearch or gRPC package', () => {
-    const banned =
-      /kafkajs|@opensearch|@elastic|@grpc|@connectrpc|openai|@anthropic/;
-    const offenders = [...graph.keys()].filter((file) =>
-      [...readFileSync(file, 'utf8').matchAll(IMPORT_RE)].some((m) =>
-        banned.test(m[1] ?? ''),
-      ),
-    );
+  /**
+   * The audit record is written in PostgreSQL by the decision; after the commit
+   * `AuditService` hands the envelope to Kafka without awaiting it
+   * (`this.kafkaPublisher.publish(envelope).catch(...)`), so the decision never waits on
+   * Kafka. That publisher is the one permitted Kafka module on the path; the exemption is by
+   * file name and the next test pins the call that justifies it.
+   */
+  const KAFKA_FIRE_AND_FORGET = resolve(
+    SRC,
+    'audit/kafka-publisher.service.ts',
+  );
+  const BANNED_PACKAGES =
+    /kafka|@opensearch|@elastic|@grpc|@connectrpc|openai|@anthropic/i;
+
+  it('nothing on the path imports a Kafka, OpenSearch or gRPC package, except the fire-and-forget audit publisher', () => {
+    const offenders = [...graph.keys()]
+      .filter((file) => file !== KAFKA_FIRE_AND_FORGET)
+      .filter((file) =>
+        [...readFileSync(file, 'utf8').matchAll(IMPORT_RE)].some(
+          (m) =>
+            !(m[1] ?? '.').startsWith('.') && BANNED_PACKAGES.test(m[1] ?? ''),
+        ),
+      );
     expect(offenders.map((f) => f.replace(`${SRC}/`, ''))).toEqual([]);
+  });
+
+  it('the pattern catches the real Kafka client and the exemption is still needed and still unawaited', () => {
+    expect(BANNED_PACKAGES.test('@confluentinc/kafka-javascript')).toBe(true);
+    expect(BANNED_PACKAGES.test('kafkajs')).toBe(true);
+    expect(graph.has(KAFKA_FIRE_AND_FORGET)).toBe(true);
+    expect(
+      [...readFileSync(KAFKA_FIRE_AND_FORGET, 'utf8').matchAll(IMPORT_RE)].some(
+        (m) => !(m[1] ?? '.').startsWith('.') && /kafka/i.test(m[1] ?? ''),
+      ),
+    ).toBe(true);
+    const audit = readFileSync(resolve(SRC, 'audit/audit.service.ts'), 'utf8');
+    expect(audit).toMatch(/this\.kafkaPublisher\.publish\(envelope\)\.catch\(/);
+    expect(audit).not.toMatch(/await\s+this\.kafkaPublisher/);
   });
 
   it('the token lease store is not on the decision path (nothing calls it yet)', () => {
