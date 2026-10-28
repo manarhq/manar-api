@@ -22,6 +22,7 @@ import type { FastifyInstance } from 'fastify';
 import request from 'supertest';
 import { decodeJwt } from 'jose';
 import { AppModule } from '../src/app.module';
+import { KillSwitchEpochService } from '../src/kill-switches/kill-switch-epoch.service';
 import { httpAdapterOptions } from '../src/config/trusted-proxy';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
@@ -652,6 +653,8 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
           quarantinedAt: new Date(),
         },
       });
+      // A direct DB write bypasses the app's epoch bump (docs/decision-path.md).
+      await app.get(KillSwitchEpochService).bumpTenant(tenantA.id);
       try {
         const res = await mcp(path, token, 'tools/call', {
           name: 'microsoft-graph__entra.user.get',
@@ -667,6 +670,7 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
         await tenantClient.agentQuarantine.deleteMany({
           where: { agentId: agent.agent.id },
         });
+        await app.get(KillSwitchEpochService).bumpTenant(tenantA.id);
       }
     });
 

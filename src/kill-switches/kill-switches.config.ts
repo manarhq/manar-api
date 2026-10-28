@@ -20,6 +20,17 @@ export const KillSwitchesConfigSchema = z.object({
   /** ADR-0009: at most this many agents quarantined by one agent per window, server side (defaults 5 per 10 min, in `AgentQuarantineService`). */
   QUARANTINE_MAX_PER_AGENT: z.coerce.number().int().positive().optional(),
   QUARANTINE_WINDOW_MS: z.coerce.number().int().positive().optional(),
+  /**
+   * Spec §7.2 (docs/decision-path.md): the longest an in-memory kill-switch result is served, even
+   * with an unchanged epoch. Default 2000; 0 turns the cache off. Capped at 10 s: a kill switch is never older
+   * than this on the decision path.
+   */
+  KILL_SWITCH_CACHE_MAX_AGE_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(10_000)
+    .optional(),
 });
 
 export type KillSwitchesConfig = z.infer<typeof KillSwitchesConfigSchema>;

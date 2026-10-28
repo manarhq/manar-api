@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
+import { KillSwitchEpochService } from '../kill-switches/kill-switch-epoch.service';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
@@ -22,7 +23,10 @@ export const PLATFORM_SWITCH_TARGET = 'platform:manar-fleet';
  */
 @Injectable()
 export class PlatformSuspension {
-  constructor(private readonly audit: AuditService) {}
+  constructor(
+    private readonly audit: AuditService,
+    @Optional() private readonly epochs?: KillSwitchEpochService,
+  ) {}
 
   async engage(
     db: TenantPrismaClient,
@@ -57,6 +61,7 @@ export class PlatformSuspension {
       });
     });
     publish();
+    await this.epochs?.bumpTenant(tenantId);
   }
 
   /** Turns off the platform's own row only. Returns false if it was not active. */
@@ -84,6 +89,7 @@ export class PlatformSuspension {
       });
     });
     result?.();
+    if (result !== null) await this.epochs?.bumpTenant(tenantId);
     return result !== null;
   }
 }

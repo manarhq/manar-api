@@ -561,18 +561,26 @@ export class AuthorizationService {
 
     let exactAllowed = false;
     let wildcardAllowed = false;
+    // Spec 7.2: redeeming an approved grant is the high-risk path; it bypasses the allow cache.
+    const consistency = redemption ? ('high' as const) : undefined;
     try {
       [exactAllowed, wildcardAllowed] = await Promise.all([
-        this.openFga.check({
-          user: agentSubject,
-          relation: 'can_use',
-          object: exactGrant,
-        }),
-        this.openFga.check({
-          user: agentSubject,
-          relation: 'can_use',
-          object: wildcardGrant,
-        }),
+        this.openFga.check(
+          {
+            user: agentSubject,
+            relation: 'can_use',
+            object: exactGrant,
+          },
+          { consistency },
+        ),
+        this.openFga.check(
+          {
+            user: agentSubject,
+            relation: 'can_use',
+            object: wildcardGrant,
+          },
+          { consistency },
+        ),
       ]);
     } catch (error) {
       this.logger.error(

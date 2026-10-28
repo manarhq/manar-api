@@ -1,4 +1,10 @@
-import { Injectable, Optional, Inject, forwardRef } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  Optional,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
@@ -9,6 +15,7 @@ import {
 } from '../common/pagination/cursor-pagination';
 import { PlatformKillSwitchService } from './platform-kill-switch.service';
 import { EdgePeerService } from '../edge/edge-peer.service';
+import { KillSwitchEpochService } from './kill-switch-epoch.service';
 
 /** The four tenant-scoped kill-switch levels — see `KillSwitch` in `prisma/tenant.prisma`. */
 export type TenantKillSwitchScope = 'TENANT' | 'AGENT_GROUP' | 'AGENT' | 'TOOL';
@@ -70,6 +77,14 @@ export interface KillSwitchCheckResult {
  */
 @Injectable()
 export class KillSwitchService {
+  private readonly logger = new Logger(KillSwitchService.name);
+  /** Spec §7.2 cache, keyed `tenant|agent|tool`; see `checkAll`. Bounded; oldest entry out first. */
+  private readonly cache = new Map<
+    string,
+    { result: KillSwitchCheckResult; epoch: string; at: number }
+  >();
+  private static readonly CACHE_MAX_ENTRIES = 10_000;
+
   constructor(
     private readonly auditService: AuditService,
     private readonly platformKillSwitchService: PlatformKillSwitchService,
@@ -77,6 +92,8 @@ export class KillSwitchService {
     @Optional()
     @Inject(forwardRef(() => EdgePeerService))
     private readonly edgePeers?: EdgePeerService,
+    // Absent only in unit harnesses: no epoch store, no cache, every check reads PostgreSQL.
+    @Optional() private readonly epochs?: KillSwitchEpochService,
   ) {}
 
   /** docs/edge.md: cut or restore the edge peers this switch covers. TOOL scope covers none. */
@@ -154,6 +171,7 @@ export class KillSwitchService {
         reason: input.reason ?? null,
       },
     });
+    await this.epochs?.bumpTenant(tenantId);
     await this.refreshEdge(tenantClient, tenantId, input.scope, input.targetId);
 
     return row;
@@ -189,6 +207,7 @@ export class KillSwitchService {
         targetId: input.targetId,
       },
     });
+    await this.epochs?.bumpTenant(tenantId);
     await this.refreshEdge(tenantClient, tenantId, input.scope, input.targetId);
 
     return row;
@@ -201,10 +220,56 @@ export class KillSwitchService {
    * requirement — re-checked at redemption time, not just at issuance)
    * both call. Short-circuits on the first active switch found, in the
    * spec's own cheapest-first order.
+   *
+   * Spec §7.2 (docs/decision-path.md): the result is held in memory and
+   * trusted only while (1) the Valkey epoch pair read now equals the one it
+   * was loaded under and (2) it is younger than `maxAgeMs` (default 2 s). A
+   * stale epoch rereads PostgreSQL. If the epoch cannot be read nothing is
+   * trusted or cached: PostgreSQL is read directly, and if that fails the
+   * call throws and the pipeline denies `enforcement_dependency_unavailable`.
    */
   async checkAll(
     tenantClient: TenantPrismaClient,
-    _tenantId: string,
+    tenantId: string,
+    params: KillSwitchCheckParams,
+    options?: { fresh?: boolean },
+  ): Promise<KillSwitchCheckResult> {
+    const epochs = this.epochs;
+    // `fresh`: stored state (edge peers) is recomputed from PostgreSQL, never from the cache.
+    if (!epochs || epochs.maxAgeMs === 0 || options?.fresh) {
+      return this.loadAll(tenantClient, params);
+    }
+    let epoch: string;
+    try {
+      epoch = await epochs.read(tenantId);
+    } catch (error) {
+      this.logger.warn(
+        `Kill-switch epoch unreadable; reading PostgreSQL uncached: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return this.loadAll(tenantClient, params);
+    }
+    const key = `${tenantId}|${params.agentId}|${params.toolId ?? ''}`;
+    const hit = this.cache.get(key);
+    if (
+      hit &&
+      hit.epoch === epoch &&
+      performance.now() - hit.at <= epochs.maxAgeMs
+    ) {
+      return hit.result;
+    }
+    const at = performance.now();
+    const result = await this.loadAll(tenantClient, params);
+    this.cache.delete(key);
+    this.cache.set(key, { result, epoch, at });
+    if (this.cache.size > KillSwitchService.CACHE_MAX_ENTRIES) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
+    return result;
+  }
+
+  private async loadAll(
+    tenantClient: TenantPrismaClient,
     params: KillSwitchCheckParams,
   ): Promise<KillSwitchCheckResult> {
     if (await this.platformKillSwitchService.isActive()) {
@@ -348,6 +413,7 @@ export class KillSwitchService {
     tenantClient: TenantPrismaClient,
     tenantId: string,
     agentId: string,
+    options?: { fresh?: boolean },
   ): Promise<KillSwitchCheckResult> {
     const agent = await tenantClient.agent.findUnique({
       where: { id: agentId },
@@ -362,7 +428,7 @@ export class KillSwitchService {
         reason: `agent_status_${agent.status.toLowerCase()}`,
       };
     }
-    return this.checkAll(tenantClient, tenantId, { agentId });
+    return this.checkAll(tenantClient, tenantId, { agentId }, options);
   }
 
   /**

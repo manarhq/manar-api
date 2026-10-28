@@ -583,7 +583,9 @@ export class EdgePeerService implements OnModuleInit, OnModuleDestroy {
       allowHosts,
       certNotAfter,
     });
-    const check = await killSwitches.checkAgent(db, tenantId, agentId);
+    const check = await killSwitches.checkAgent(db, tenantId, agentId, {
+      fresh: true,
+    });
     if (check.killed) return cut(check.reason ?? 'agent_stopped');
     const certificate = await db.agentCertificate.findFirst({
       where: { agentId, revokedAt: null },

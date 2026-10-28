@@ -30,6 +30,7 @@ import {
 } from '../audit/audit-event-types';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { PlatformKillSwitchService } from '../kill-switches/platform-kill-switch.service';
+import { KillSwitchEpochService } from '../kill-switches/kill-switch-epoch.service';
 import {
   PlatformAuthGuard,
   type RequestWithPlatformCaller,
@@ -142,6 +143,7 @@ export class PlatformOpsController {
     @Optional()
     @Inject(forwardRef(() => EdgePeerService))
     private readonly edgePeers?: EdgePeerService,
+    @Optional() private readonly epochs?: KillSwitchEpochService,
   ) {}
 
   @Get('kill-switch')
@@ -212,6 +214,7 @@ export class PlatformOpsController {
         message: 'engagement_changed',
       });
     }
+    await this.epochs?.bumpPlatform();
     // docs/edge.md: restores the edge peers nothing else stops.
     await this.edgePeers?.allChanged();
     this.logger.warn(

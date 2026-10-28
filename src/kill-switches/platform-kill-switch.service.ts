@@ -1,5 +1,6 @@
 import { Injectable, Optional, Inject, forwardRef } from '@nestjs/common';
 import { EdgePeerService } from '../edge/edge-peer.service';
+import { KillSwitchEpochService } from './kill-switch-epoch.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 
 /** Fixed, known id — a deployment only ever has exactly one platform-wide switch (the same `AuditChainState`/`"singleton"` convention `prisma/tenant.prisma` already uses). */
@@ -41,6 +42,7 @@ export class PlatformKillSwitchService {
     @Optional()
     @Inject(forwardRef(() => EdgePeerService))
     private readonly edgePeers?: EdgePeerService,
+    @Optional() private readonly epochs?: KillSwitchEpochService,
   ) {}
 
   async isActive(): Promise<boolean> {
@@ -83,6 +85,7 @@ export class PlatformKillSwitchService {
         deactivatedAt: null,
       },
     });
+    await this.epochs?.bumpPlatform();
     // docs/edge.md: the platform switch cuts every edge peer.
     await this.edgePeers?.allChanged();
     return state;

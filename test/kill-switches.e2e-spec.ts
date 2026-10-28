@@ -16,6 +16,7 @@ import { NativeConnection, Worker } from '@temporalio/worker';
 import { FileIdentityStore, ManarAgent } from '@manar/sdk-node';
 import type { AgentIdentity, AuthorizeDecision } from '@manar/sdk-node';
 import { AppModule } from '../src/app.module';
+import { KillSwitchEpochService } from '../src/kill-switches/kill-switch-epoch.service';
 import { AgentMtlsAppModule } from '../src/agent-mtls/agent-mtls-app.module';
 import { WorkerAppModule } from '../src/temporal/worker-app.module';
 import { ApprovalActivitiesFactory } from '../src/temporal/activities/approval.activities';
@@ -396,6 +397,9 @@ describe('Kill Switches (e2e)', () => {
       where: { id: 'singleton' },
       data: { active: false },
     });
+    // A direct DB write bypasses the app's own epoch bump (docs/decision-path.md); without it
+    // the stale "killed" entry would live for the 2 s cache bound.
+    await agentMtlsApp?.get(KillSwitchEpochService).bumpPlatform();
   }
 
   interface RawResponse {

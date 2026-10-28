@@ -14,7 +14,7 @@ function fakeConfigService(
 }
 
 /**
- * `RedisThrottlerStorageService.increment`'s Lua script, against a real
+ * `RedisThrottlerStorageService.increment`'s GCRA script (spec 7.3), against a real
  * local Redis (`pnpm infra:up`) — the `@nestjs/throttler`-documented
  * `ThrottlerStorage` contract this class implements. Every test uses its
  * own random key so concurrently-running tests (and other suites sharing
@@ -59,34 +59,21 @@ describe('RedisThrottlerStorageService (real Redis)', () => {
     ]);
   });
 
-  it('reports isBlocked once totalHits exceeds the limit, and stays blocked on subsequent calls within the block window', async () => {
+  it('blocks request limit+1 of a burst and reports how long to wait', async () => {
     const key = uniqueKey();
     const limit = 2;
-    let last;
     for (let i = 0; i < limit; i += 1) {
-      last = await service.increment(key, 10_000, limit, 5_000, 'test');
-      expect(last.isBlocked).toBe(false);
+      const ok = await service.increment(key, 10_000, limit, 5_000, 'test');
+      expect(ok.isBlocked).toBe(false);
     }
-    // The (limit + 1)th call exceeds the limit.
-    const overLimit = await service.increment(
-      key,
-      10_000,
-      limit,
-      5_000,
-      'test',
-    );
-    expect(overLimit.isBlocked).toBe(true);
-    expect(overLimit.timeToBlockExpire).toBeGreaterThan(0);
-
-    // Still blocked on a further call, within the block window.
-    const stillBlocked = await service.increment(
-      key,
-      10_000,
-      limit,
-      5_000,
-      'test',
-    );
-    expect(stillBlocked.isBlocked).toBe(true);
+    const over = await service.increment(key, 10_000, limit, 5_000, 'test');
+    expect(over.isBlocked).toBe(true);
+    expect(over.totalHits).toBe(limit + 1);
+    expect(over.timeToBlockExpire).toBeGreaterThan(0);
+    // A denied check changes nothing: it stays blocked, the wait does not grow.
+    const again = await service.increment(key, 10_000, limit, 5_000, 'test');
+    expect(again.isBlocked).toBe(true);
+    expect(again.timeToBlockExpire).toBeLessThanOrEqual(over.timeToBlockExpire);
   });
 
   it('two different keys never share a counter (tenant/agent partitioning at the storage layer)', async () => {
@@ -97,35 +84,62 @@ describe('RedisThrottlerStorageService (real Redis)', () => {
     const blockedA = await service.increment(keyA, 10_000, 2, 10_000, 'test');
     expect(blockedA.isBlocked).toBe(true);
 
-    // keyB's own first hit is unaffected by keyA's block.
     const freshB = await service.increment(keyB, 10_000, 2, 10_000, 'test');
     expect(freshB.isBlocked).toBe(false);
     expect(freshB.totalHits).toBe(1);
   });
 
-  it('the block expires after blockDuration elapses, and a subsequent call is no longer blocked', async () => {
+  it('the same key under another throttler name is a separate limit', async () => {
     const key = uniqueKey();
-    const limit = 1;
-    const blockDurationMs = 300;
-    await service.increment(key, 10_000, limit, blockDurationMs, 'test'); // 1st, not blocked
-    const blocked = await service.increment(
-      key,
-      10_000,
-      limit,
-      blockDurationMs,
-      'test',
-    ); // 2nd, exceeds limit
+    await service.increment(key, 10_000, 1, 10_000, 'human');
+    const blocked = await service.increment(key, 10_000, 1, 10_000, 'human');
+    expect(blocked.isBlocked).toBe(true);
+    const other = await service.increment(key, 10_000, 1, 10_000, 'agent');
+    expect(other.isBlocked).toBe(false);
+  });
+
+  it('a caller that went over stays blocked for blockDuration even once a slot has refilled', async () => {
+    const key = uniqueKey();
+    // 3 per 300 ms (a slot every 100 ms), 800 ms block.
+    for (let i = 0; i < 3; i += 1) {
+      await service.increment(key, 300, 3, 800, 'test');
+    }
+    expect((await service.increment(key, 300, 3, 800, 'test')).isBlocked).toBe(
+      true,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect((await service.increment(key, 300, 3, 800, 'test')).isBlocked).toBe(
+      true,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect((await service.increment(key, 300, 3, 800, 'test')).isBlocked).toBe(
+      false,
+    );
+  }, 10_000);
+
+  it('recovers after one emission interval (rate is limit per window, not a window cliff)', async () => {
+    const key = uniqueKey();
+    // limit 2 per 600 ms: one slot every 300 ms.
+    await service.increment(key, 600, 2, 0, 'test');
+    await service.increment(key, 600, 2, 0, 'test');
+    const blocked = await service.increment(key, 600, 2, 0, 'test');
     expect(blocked.isBlocked).toBe(true);
 
-    await new Promise((resolve) => setTimeout(resolve, blockDurationMs + 200));
+    await new Promise((resolve) => setTimeout(resolve, 400));
 
-    const afterBlockExpires = await service.increment(
-      key,
-      10_000,
-      limit,
-      blockDurationMs,
-      'test',
-    );
-    expect(afterBlockExpires.isBlocked).toBe(false);
+    const admitted = await service.increment(key, 600, 2, 0, 'test');
+    expect(admitted.isBlocked).toBe(false);
+    const again = await service.increment(key, 600, 2, 0, 'test');
+    expect(again.isBlocked).toBe(true); // only one slot had refilled
   }, 10_000);
+
+  it('Valkey unreachable: increment rejects, never reports an allowance', async () => {
+    const down = new RedisThrottlerStorageService(
+      fakeConfigService('redis://127.0.0.1:1'),
+    );
+    await expect(
+      down.increment(uniqueKey(), 10_000, 5, 10_000, 'test'),
+    ).rejects.toThrow();
+    await down.onModuleDestroy();
+  });
 });
