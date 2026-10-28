@@ -62,6 +62,33 @@ describe('inclusionProof / verifyInclusion', () => {
     );
   });
 
+  it('rejects hashes that are not exactly 64 lowercase hex characters', () => {
+    const root = merkleRoot(L);
+    const proof = inclusionProof(L, 2);
+    const leaf = L[2]!;
+    // Buffer.from(hex) silently drops what it can't parse; these must not verify.
+    expect(verifyInclusion(`${leaf}zz`, proof, root)).toBe(false);
+    expect(verifyInclusion(leaf.toUpperCase(), proof, root)).toBe(false);
+    expect(
+      verifyInclusion(
+        leaf,
+        proof.map((s, i) => (i === 0 ? { ...s, hash: `${s.hash}0` } : s)),
+        root,
+      ),
+    ).toBe(false);
+    expect(verifyInclusion(leaf, proof, `${root}zz`)).toBe(false);
+    expect(
+      verifyInclusion(
+        leaf,
+        proof.map((s, i) =>
+          i === 0 ? { ...s, side: 'X' as unknown as 'L' } : s,
+        ),
+        root,
+      ),
+    ).toBe(false);
+    expect(() => merkleRoot([`${leaf}zz`])).toThrow('not a sha256 hex digest');
+  });
+
   it('rejects an index outside the tree', () => {
     expect(() => inclusionProof(L, 5)).toThrow();
     expect(() => inclusionProof(L, -1)).toThrow();

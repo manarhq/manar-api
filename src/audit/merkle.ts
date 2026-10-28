@@ -22,7 +22,21 @@ const sha256 = (...parts: Buffer[]) =>
 const LEAF = Buffer.from([0x00]);
 const NODE = Buffer.from([0x01]);
 
-const leafHash = (hex: string) => sha256(LEAF, Buffer.from(hex, 'hex'));
+const DIGEST = /^[0-9a-f]{64}$/;
+const isDigest = (hex: unknown): hex is string =>
+  typeof hex === 'string' && DIGEST.test(hex);
+
+/**
+ * `Buffer.from(hex, 'hex')` stops at the first non-hex character instead of
+ * failing, so two different strings could hash the same. Only exact 64-char
+ * lowercase digests are ever decoded.
+ */
+function digestBytes(hex: string): Buffer {
+  if (!isDigest(hex)) throw new Error('not a sha256 hex digest');
+  return Buffer.from(hex, 'hex');
+}
+
+const leafHash = (hex: string) => sha256(LEAF, digestBytes(hex));
 const nodeHash = (left: Buffer, right: Buffer) => sha256(NODE, left, right);
 
 /** Largest power of two strictly below n (n ≥ 2). */
@@ -81,9 +95,15 @@ export function verifyInclusion(
   proof: MerkleProofStep[],
   expectedRoot: string,
 ): boolean {
+  if (!isDigest(leaf) || !isDigest(expectedRoot)) return false;
+  if (
+    !proof.every((s) => (s.side === 'L' || s.side === 'R') && isDigest(s.hash))
+  ) {
+    return false;
+  }
   let acc = leafHash(leaf);
   for (const step of proof) {
-    const sibling = Buffer.from(step.hash, 'hex');
+    const sibling = digestBytes(step.hash);
     acc = step.side === 'L' ? nodeHash(sibling, acc) : nodeHash(acc, sibling);
   }
   return acc.toString('hex') === expectedRoot;
