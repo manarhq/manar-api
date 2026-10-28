@@ -7,6 +7,14 @@ export class AuditEventNotFoundError extends Error {
   readonly code = 'audit_event_not_found';
 }
 
+/**
+ * The proof index (`audit_checkpoint_ranges`) disagrees with the signed
+ * SEALs: rows deleted or changed. An integrity failure, never "not sealed".
+ */
+export class AuditCheckpointIndexError extends Error {
+  readonly code = 'checkpoint_index_mismatch';
+}
+
 /** The event exists but no SEAL covers it yet (they are written every second). */
 export class AuditEventNotCheckpointedError extends Error {
   readonly code = 'audit_event_not_checkpointed';
@@ -73,14 +81,30 @@ export class AuditProofService {
         toSeq: { gte: event.partitionSeq },
       },
     });
-    const checkpoint = covering
-      ? ((await tenantClient.auditCheckpoint.findUnique({
-          where: { seq: covering.checkpointSeq },
-        })) as unknown as CheckpointRow | null)
-      : null;
-    if (!checkpoint) {
+    if (!covering) {
+      // "Not sealed" only when the signed heads of the newest SEAL agree.
+      const newest = await tenantClient.auditCheckpoint.findFirst({
+        orderBy: { seq: 'desc' },
+        select: { partitionHeads: true },
+      });
+      const head = (
+        (newest?.partitionHeads ?? []) as unknown as PartitionHead[]
+      ).find((h) => h.partition === event.partition);
+      if (head && event.partitionSeq <= Number(head.seq)) {
+        throw new AuditCheckpointIndexError(
+          `AuditEvent "${eventId}" is sealed but the proof index has no range for it`,
+        );
+      }
       throw new AuditEventNotCheckpointedError(
         `AuditEvent "${eventId}" is not covered by a checkpoint yet`,
+      );
+    }
+    const checkpoint = (await tenantClient.auditCheckpoint.findUnique({
+      where: { seq: covering.checkpointSeq },
+    })) as unknown as CheckpointRow | null;
+    if (!checkpoint) {
+      throw new AuditCheckpointIndexError(
+        `AuditEvent "${eventId}": the proof index names a checkpoint that does not exist`,
       );
     }
     const range = checkpoint.roots.find(
@@ -90,7 +114,7 @@ export class AuditProofService {
         Number(r.toSeq) >= event.partitionSeq,
     );
     if (!range) {
-      throw new AuditEventNotCheckpointedError(
+      throw new AuditCheckpointIndexError(
         `AuditEvent "${eventId}": its checkpoint range does not match the signed roots`,
       );
     }

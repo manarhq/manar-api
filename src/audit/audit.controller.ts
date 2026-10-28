@@ -31,6 +31,7 @@ import { parseLimit } from '../common/pagination/cursor-pagination';
 import { AuditSearchService } from './audit-search.service';
 import { AuditService } from './audit.service';
 import {
+  AuditCheckpointIndexError,
   AuditEventNotCheckpointedError,
   AuditEventNotFoundError,
   AuditProofService,
@@ -284,6 +285,13 @@ export class AuditController {
           code: error.code,
           message: error.message,
           retryAfterMs: error.retryAfterMs,
+        });
+      }
+      if (error instanceof AuditCheckpointIndexError) {
+        // An integrity failure in this tenant's audit store, not a retry case.
+        throw new ConflictException({
+          code: error.code,
+          message: error.message,
         });
       }
       throw error;

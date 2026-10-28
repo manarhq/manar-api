@@ -481,11 +481,11 @@ describe('Audit retention (e2e)', () => {
         databaseName: tenant.databaseBinding!.databaseName,
       });
       const tenantClient = await manager.getClient(tenant.id);
+      const base =
+        Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000);
       vi.useFakeTimers({ toFake: ['Date'] });
-      vi.setSystemTime(
-        new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
-      );
       for (let i = 0; i < 25; i += 1) {
+        vi.setSystemTime(new Date(base + i * 1000)); // one second apart
         await auditService.record(tenantClient, tenant.id, {
           eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
           actor: { type: 'agent', id: 'ret-gap' },
@@ -508,6 +508,13 @@ describe('Audit retention (e2e)', () => {
         retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
       });
       expect(result.prunedCount).toBe(10);
+      // The recorded window is that of the 10 events pruned, not all 25 aged.
+      const retentionEvent = await tenantClient.auditEvent.findUniqueOrThrow({
+        where: { id: result.retentionEventId! },
+      });
+      expect(
+        (retentionEvent.data as { prunedWindowEnd: string }).prunedWindowEnd,
+      ).toBe(new Date(base + 9 * 1000).toISOString());
 
       // The rest seals in later rounds, then the log verifies.
       while (await checkpoints.createCheckpoint(tenantClient, tenant.id));

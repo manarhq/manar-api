@@ -6,6 +6,7 @@ import { AuditService } from '../src/audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
 import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
 import {
+  AuditCheckpointIndexError,
   AuditEventNotCheckpointedError,
   AuditEventNotFoundError,
   AuditProofService,
@@ -123,6 +124,16 @@ describe('Audit proofs (e2e)', () => {
       ),
     ).toBe(true);
   }, 90_000);
+
+  it('a deleted proof-index row is an integrity error, never "not sealed yet"', async () => {
+    const t = await tenantWithEvents('index', 5);
+    await checkpoints.createCheckpoint(t.client, t.id);
+    await t.client.$executeRaw`DELETE FROM "audit_checkpoint_ranges"`;
+
+    await expect(
+      proofs.proveEvent(t.client, t.events[0]!.id),
+    ).rejects.toBeInstanceOf(AuditCheckpointIndexError);
+  }, 60_000);
 
   it('refuses to prove an event recorded after the last SEAL, or one that does not exist', async () => {
     const t = await tenantWithEvents('pending', 5);

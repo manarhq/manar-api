@@ -7,6 +7,7 @@ import type {
 } from '../generated/tenant-client/client';
 import type { AppConfig } from '../config/env.validation';
 import {
+  AuditCheckpointIndexError,
   AuditEventNotCheckpointedError,
   type AuditEventProof,
   AuditProofService,
@@ -567,6 +568,7 @@ export class EvidenceExportService {
       if (error instanceof AuditEventNotCheckpointedError) {
         return 'not_sealed_yet';
       }
+      if (error instanceof AuditCheckpointIndexError) return 'proof_invalid';
       throw error;
     }
   }

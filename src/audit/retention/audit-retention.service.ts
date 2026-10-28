@@ -125,12 +125,14 @@ export class AuditRetentionService {
       anchorHash: string;
       eventsPrunedCount: number;
     }[] = [];
+    let windowStart = Infinity;
+    let windowEnd = -Infinity;
     for (const r of ranges) {
       const where = {
         partition: r.partition,
         partitionSeq: { lte: Number(r.cutoffSeq) },
       };
-      const [last, count] = await Promise.all([
+      const [last, count, span] = await Promise.all([
         tenantClient.auditEvent.findUniqueOrThrow({
           where: {
             partition_partitionSeq: {
@@ -141,7 +143,15 @@ export class AuditRetentionService {
           select: { eventHash: true },
         }),
         tenantClient.auditEvent.count({ where }),
+        tenantClient.auditEvent.aggregate({
+          where,
+          _min: { timestamp: true },
+          _max: { timestamp: true },
+        }),
       ]);
+      // The window actually pruned (after the sealed-head clamp).
+      windowStart = Math.min(windowStart, span._min.timestamp!.getTime());
+      windowEnd = Math.max(windowEnd, span._max.timestamp!.getTime());
       anchors.push({
         partition: r.partition,
         anchorHash: last.eventHash,
@@ -189,12 +199,8 @@ export class AuditRetentionService {
           anchorHash,
           anchors,
           retentionWindowMs: input.retentionWindowMs,
-          prunedWindowStart: new Date(
-            Math.min(...ranges.map((r) => new Date(r.oldest).getTime())),
-          ).toISOString(),
-          prunedWindowEnd: new Date(
-            Math.max(...ranges.map((r) => new Date(r.newest).getTime())),
-          ).toISOString(),
+          prunedWindowStart: new Date(windowStart).toISOString(),
+          prunedWindowEnd: new Date(windowEnd).toISOString(),
         },
       },
     );
