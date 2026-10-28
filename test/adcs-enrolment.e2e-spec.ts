@@ -968,6 +968,7 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
         await tpm.addRoot(t.client, t.id, admin, {
           label: 'azure',
           certPem: root.pem,
+          purpose: 'AK',
         });
       }
       const akKeys = await newKeys();
@@ -981,10 +982,16 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       return { root, inter, akKeys, akCert, hostKeys, hostTpm };
     }
     type Ak = Awaited<ReturnType<typeof setupAk>>;
-    const challenge = (t: T, machineId: string, s: Ak) =>
+    const challenge = (
+      t: T,
+      machineId: string,
+      s: Ak,
+      certs: string[] = [s.akCert.pem, s.inter.pem],
+    ) =>
       tpm.akChallenge({
         tenantSlug: t.slug,
         machineId,
+        akCertificates: certs,
         hostKeyPublic: s.hostTpm.toString('base64'),
       });
     async function certify(
@@ -1094,17 +1101,6 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
         async () => ({ signWith: await nodePrivate(await newKeys()) }),
       ],
       ['a non-certify attestation', () => Promise.resolve({ type: 0x8018 })],
-      [
-        'an AK certificate without the AIK EKU',
-        async (_t, s) => {
-          const noEku = await makeLeaf(s.inter, {
-            keys: s.akKeys,
-            dns: null,
-            eku: ['1.3.6.1.5.5.7.3.2'],
-          });
-          return { certs: [noEku.pem, s.inter.pem] };
-        },
-      ],
     ];
     it.each(refused)(
       'does not verify: %s',
@@ -1129,8 +1125,9 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
         label: 'other',
         certPem: otherCa.pem,
       });
-      const c = await challenge(t, 'az-u', s);
-      expect(await certify(t, c, s)).toBe(false);
+      await expect(challenge(t, 'az-u', s)).rejects.toBeInstanceOf(
+        TpmAttestationError,
+      );
     }, 90_000);
 
     it('a replayed nonce is refused', async () => {
@@ -1162,6 +1159,110 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       );
       expect(r.status).toBe('PENDING');
     }, 90_000);
+
+    describe('trust and abuse limits', () => {
+      it('refuses at step 1, creating no row, for each bad AK chain or certificate', async () => {
+        const t = await fresh(noAd);
+        const s = await setupAk(t);
+        const before = await t.client.tpmChallenge.count();
+        const leaf = (
+          o: Parameters<typeof makeLeaf>[1],
+          ca: TestCa = s.inter,
+        ) => makeLeaf(ca, { keys: s.akKeys, dns: null, eku: [AIK_EKU], ...o });
+        const restricting = await makeCa('Restricting CA', {
+          issuer: s.root,
+          eku: ['1.3.6.1.5.5.7.3.2'],
+        });
+        const asCa = await makeCa('AK that is a CA', {
+          issuer: s.inter,
+          keys: s.akKeys,
+          eku: [AIK_EKU],
+        });
+        const noSig = await leaf({
+          extra: [
+            new x509.KeyUsagesExtension(
+              x509.KeyUsageFlags.keyEncipherment,
+              true,
+            ),
+          ],
+        });
+        const wrongEku = await leaf({ eku: ['1.3.6.1.5.5.7.3.2'] });
+        const underRestricting = await leaf({}, restricting);
+        const bad: [string, string[]][] = [
+          ['leaf without the AIK EKU', [wrongEku.pem, s.inter.pem]],
+          [
+            'intermediate limiting EKU',
+            [underRestricting.pem, restricting.pem],
+          ],
+          ['leaf that is a CA', [asCa.pem, s.inter.pem]],
+          ['leaf without digitalSignature', [noSig.pem, s.inter.pem]],
+        ];
+        for (const [name, certs] of bad) {
+          await expect(
+            challenge(t, 'az-bad', s, certs),
+            name,
+          ).rejects.toBeInstanceOf(TpmAttestationError);
+        }
+        expect(await t.client.tpmChallenge.count()).toBe(before);
+      }, 90_000);
+
+      it('keeps AK roots and EK roots apart', async () => {
+        const t = await fresh(noAd);
+        // an AK chain under a root added for EK certificates is not trusted for AKs
+        const s = await setupAk(t, { withRoot: false });
+        await tpm.addRoot(t.client, t.id, admin, {
+          label: 'azure-as-ek',
+          certPem: s.root.pem,
+        });
+        await expect(challenge(t, 'az-p', s)).rejects.toBeInstanceOf(
+          TpmAttestationError,
+        );
+        // and an EK chain under a root added for AKs is not trusted for EKs
+        const vendor = await makeCa('EK Vendor Root');
+        await tpm.addRoot(t.client, t.id, admin, {
+          label: 'vendor-as-ak',
+          certPem: vendor.pem,
+          purpose: 'AK',
+        });
+        const ekKeys = await newKeys();
+        const ekCert = await makeLeaf(vendor, {
+          keys: ekKeys,
+          dns: null,
+          eku: null,
+        });
+        await expect(
+          tpm.challenge({
+            tenantSlug: t.slug,
+            machineId: 'ek-p',
+            ekCertificates: [ekCert.pem],
+            hostKeyPublic: s.hostTpm.toString('base64'),
+          }),
+        ).rejects.toBeInstanceOf(TpmAttestationError);
+      }, 90_000);
+
+      it('caps open challenges per machine', async () => {
+        const t = await fresh(noAd);
+        const s = await setupAk(t);
+        for (let i = 0; i < 3; i += 1) await challenge(t, 'az-cap', s);
+        await expect(challenge(t, 'az-cap', s)).rejects.toThrow('too many');
+        await challenge(t, 'az-cap-other', s); // another machine is not affected
+      }, 90_000);
+
+      it('refuses a different AK at certify than the one bound at step 1', async () => {
+        const t = await fresh(noAd);
+        const s = await setupAk(t);
+        const c = await challenge(t, 'az-swap', s);
+        const otherKeys = await newKeys();
+        const otherCert = await makeLeaf(s.inter, {
+          keys: otherKeys,
+          dns: null,
+          eku: [AIK_EKU],
+        });
+        expect(
+          await certify(t, c, { ...s, akKeys: otherKeys, akCert: otherCert }),
+        ).toBe(false);
+      }, 90_000);
+    });
 
     it('a host key sent in certify that differs from the challenge is refused', async () => {
       const t = await fresh(noAd);

@@ -141,7 +141,7 @@ register with `tpmChallengeId`, on either register route):
    stays the same, reset when a rekey is approved).
 
 **Trust roots.** No manufacturer roots are shipped. Add the roots (or the vendor intermediate) your
-fleet's TPMs chain to with `POST /tpm-trust-roots` `{ label, certPem }` (audited; take them from
+fleet's TPMs chain to with `POST /tpm-trust-roots` `{ label, certPem, purpose }` (`purpose` is `EK`, the default, or `AK`; a certificate can have one purpose) (audited; take them from
 the TPM vendors' published EK root pages and verify the fingerprints yourself). Not covered: ECC
 EKs, EK certificates fetched from a vendor service (the host sends them), and a real-TPM interop
 run, which needs manar-edge.
@@ -153,21 +153,27 @@ certificate** at NV `0x01C101D0` instead (chain: AK cert, `Azure Cloud Virtual T
 `Azure Cloud Virtual TPM CA 2025`, root `Azure Virtual TPM Root Certificate Authority 2023`). The host
 proves its key with `TPM2_Certify` by that AK:
 
-1. `POST /hosts/tpm/ak-challenge` `{ tenantSlug, machineId, hostKeyPublic }` (base64 `TPMT_PUBLIC`,
-   same rules as above) returns `{ challengeId, nonce (base64, 32 bytes), expiresAt }`.
+1. `POST /hosts/tpm/ak-challenge` `{ tenantSlug, machineId, akCertificates (PEM, AK cert first then
+intermediates), hostKeyPublic (base64 TPMT_PUBLIC, same rules as above) }`. The AK chain is
+   validated here, before any row is created; a bad chain gets a 400 and costs nothing. Reply
+   `{ challengeId, nonce (base64, 32 bytes), expiresAt }`. The challenge is bound to that AK
+   certificate; at most 3 open challenges per machine, in addition to the global cap.
 2. The host runs Certify with the AK as signing key, the host key as the object, and the nonce bytes
    as qualifying data, then `POST /hosts/tpm/ak-certify` `{ tenantSlug, challengeId, akCertificates
-(PEM, AK cert first then intermediates), hostKeyPublic, certifyInfo (base64 TPMS_ATTEST),
-signature (base64 TPMT_SIGNATURE) }`. Reply `{ verified }`.
+(the same chain), hostKeyPublic, certifyInfo (base64 TPMS_ATTEST), signature (base64
+TPMT_SIGNATURE) }`. Reply `{ verified }`.
 3. Register with `tpmChallengeId` as before.
 
-`verified` is true only when: the AK certificate chains to a tenant TPM root and carries EKU
-`2.23.133.8.3`; the AK is RSA (2048 bits or more) and its RSASSA or RSAPSS (SHA-2) signature covers the
-attestation; the attestation is a certify (`TPM_GENERATED_VALUE`, `TPM_ST_ATTEST_CERTIFY`) whose
-`extraData` is the nonce and whose certified name is the name of `hostKeyPublic` (same key as at the
-challenge, so the CSR key); and the key has `fixedTPM`, `fixedParent`, `sensitiveDataOrigin`. Anything
-else is `false` (three tries per challenge, 10 minutes, one use). Not covered: ECC AKs, and the
-Azure intermediates, which the host sends (they rotate; take them from the AK certificate's AIA URLs).
+`verified` is true only when: the AK certificate chains to a tenant TPM root **with purpose `AK`**
+(roots added for EK certificates are not used here, and AK roots are not used for EK certificates),
+every intermediate allows EKU `2.23.133.8.3` and the AK certificate carries it, the AK certificate is
+not a CA and, if it states key usage, has digitalSignature; the AK is RSA (2048 bits or more) and its
+RSASSA or RSAPSS (SHA-2) signature covers the attestation; the AK is the one bound at step 1; the
+attestation is a certify (`TPM_GENERATED_VALUE`, `TPM_ST_ATTEST_CERTIFY`) whose `extraData` is the
+nonce and whose certified name is the name of `hostKeyPublic` (same key as at the challenge, so the
+CSR key); and the key has `fixedTPM`, `fixedParent`, `sensitiveDataOrigin`. Anything else is `false`
+(three tries per challenge, 10 minutes, one use). Not covered: ECC AKs, and the Azure intermediates,
+which the host sends (they rotate; take them from the AK certificate's AIA URLs).
 
 Read the AK certificate on the host: `tpm2_nvread 0x1c101d0 -C o -o ak.der`, then
 `openssl x509 -inform DER -in ak.der -out ak.pem`. Add the Azure root to the tenant trust list
@@ -179,7 +185,7 @@ see the Trusted Launch FAQ) and check its SHA-256 before adding:
 ```bash
 openssl x509 -inform DER -in azure-vtpm-root-2023.crt -out root.pem
 openssl x509 -in root.pem -noout -fingerprint -sha256   # must match the value above
-# then POST /tpm-trust-roots { "label": "Azure vTPM Root 2023", "certPem": "<root.pem>" }
+# then POST /tpm-trust-roots { "label": "Azure vTPM Root 2023", "certPem": "<root.pem>", "purpose": "AK" }
 ```
 
 The audit event is `host.tpm_verified` (`method: ak-certify`; `ekFingerprint` is the AK certificate's).

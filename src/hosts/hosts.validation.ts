@@ -50,8 +50,18 @@ export const TpmChallengeSchema = z
   })
   .strict();
 
+export const TpmRootSchema = z
+  .object({
+    label: z.string().trim().min(1).max(200),
+    certPem: pem,
+    purpose: z.enum(['EK', 'AK']).default('EK'),
+  })
+  .strict();
+
 export const TpmAkChallengeSchema = z
   .object({
+    /** AK certificate first, then its intermediates (PEM). */
+    akCertificates: z.array(pem).min(1).max(5),
     tenantSlug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
     machineId: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
     /** Base64 marshalled TPMT_PUBLIC of the host key. */
@@ -63,7 +73,7 @@ export const TpmAkCertifySchema = z
   .object({
     tenantSlug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
     challengeId: uuid,
-    /** AK certificate first, then its intermediates (PEM). */
+    /** The same AK certificate chain as at ak-challenge. */
     akCertificates: z.array(pem).min(1).max(5),
     hostKeyPublic: b64(2048),
     /** Base64 TPMS_ATTEST from TPM2_Certify (the TPM2B_ATTEST body, without its size prefix). */

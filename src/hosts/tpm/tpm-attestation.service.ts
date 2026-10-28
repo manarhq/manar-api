@@ -39,6 +39,7 @@ export class TpmAttestationError extends Error {}
 const EKU_AIK_CERTIFICATE = '2.23.133.8.3';
 /** `secretHash` prefix of an AK-certify challenge: no ActivateCredential secret can hash to it. */
 const AK_PREFIX = 'ak:';
+const MAX_OPEN_PER_MACHINE = 3;
 const CHALLENGE_TTL_MS = 10 * 60_000;
 const MAX_OPEN_CHALLENGES = 500;
 const sha256 = (b: Uint8Array | string) =>
@@ -87,7 +88,9 @@ export class TpmAttestationService {
     const { tenant, client } = await this.tenantClient(input.tenantSlug);
     const [ekPem, ...chainPem] = input.ekCertificates;
     if (!ekPem) throw new TpmAttestationError('no EK certificate');
-    const roots = await client.tpmTrustRoot.findMany();
+    const roots = await client.tpmTrustRoot.findMany({
+      where: { purpose: 'EK' },
+    });
     let ek;
     try {
       ek = (
@@ -183,10 +186,31 @@ export class TpmAttestationService {
   async akChallenge(input: {
     tenantSlug: string;
     machineId: string;
+    akCertificates: string[];
     hostKeyPublic: string;
   }) {
     const { tenant, client } = await this.tenantClient(input.tenantSlug);
     const { keyFingerprint } = this.hostKey(input.hostKeyPublic);
+    // Validated before any row exists, so bad requests cost the store nothing.
+    let akFingerprint: string;
+    try {
+      akFingerprint = (await this.validateAk(client, input.akCertificates))
+        .fingerprint;
+    } catch (error) {
+      throw new TpmAttestationError(
+        `AK certificate refused: ${error instanceof CertChainError ? error.reason : error instanceof Error ? error.message : 'invalid'}`,
+      );
+    }
+    const perMachine = await client.tpmChallenge.count({
+      where: {
+        machineId: input.machineId,
+        expiresAt: { gt: new Date() },
+        consumedAt: null,
+      },
+    });
+    if (perMachine >= MAX_OPEN_PER_MACHINE) {
+      throw new TpmAttestationError('too many open challenges for machine');
+    }
     const open = await client.tpmChallenge.count({
       where: { expiresAt: { gt: new Date() }, consumedAt: null },
     });
@@ -198,7 +222,8 @@ export class TpmAttestationService {
       data: {
         machineId: input.machineId,
         keyFingerprint,
-        ekFingerprint: '',
+        // the AK certificate this challenge is bound to; verified again at ak-certify
+        ekFingerprint: akFingerprint,
         secretHash: AK_PREFIX + sha256(nonce),
         expiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
       },
@@ -282,7 +307,11 @@ export class TpmAttestationService {
   /** Throws unless the attestation is complete and correct; returns the AK certificate fingerprint. */
   private async checkCertify(
     client: TenantPrismaClient,
-    row: { keyFingerprint: string; secretHash: string },
+    row: {
+      keyFingerprint: string;
+      secretHash: string;
+      ekFingerprint: string;
+    },
     input: {
       akCertificates: string[];
       hostKeyPublic: string;
@@ -290,31 +319,12 @@ export class TpmAttestationService {
       signature: string;
     },
   ): Promise<string> {
-    const [akPem, ...chainPem] = input.akCertificates;
-    if (!akPem) throw new Error('no AK certificate');
-    const roots = await client.tpmTrustRoot.findMany();
-    const ak = (
-      await validateChain({
-        leafPem: akPem,
-        intermediatesPem: chainPem,
-        anchorsPem: roots.map((r) => r.certPem),
-      })
-    ).leaf;
-    // Checked here, not in the chain walk, so a CA's own EKU limits cannot hide it.
-    const eku = ak.getExtension(x509.ExtendedKeyUsageExtension);
-    if (!eku?.usages.map(String).includes(EKU_AIK_CERTIFICATE)) {
-      throw new Error('AK certificate lacks the AIK extended key usage');
-    }
-    const akKey = createPublicKey({
-      key: Buffer.from(ak.publicKey.rawData),
-      format: 'der',
-      type: 'spki',
-    });
-    if (
-      akKey.asymmetricKeyType !== 'rsa' ||
-      (akKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048
-    ) {
-      throw new Error('only RSA AK of 2048 bits or more');
+    const { akKey, fingerprint } = await this.validateAk(
+      client,
+      input.akCertificates,
+    );
+    if (fingerprint !== row.ekFingerprint) {
+      throw new Error('AK differs from the one at the challenge');
     }
     const certifyInfo = Buffer.from(input.certifyInfo, 'base64');
     if (
@@ -341,7 +351,48 @@ export class TpmAttestationService {
     ) {
       throw new Error('certified name is not the host key');
     }
-    return sha256(Buffer.from(ak.rawData));
+    return fingerprint;
+  }
+
+  /**
+   * AK certificate rules: chains to a tenant AK root (never an EK root), the
+   * AIK EKU is allowed all the way up (`requireEku`), the leaf is not a CA, has
+   * digitalSignature when it states key usage, and holds an RSA key of 2048
+   * bits or more.
+   */
+  private async validateAk(client: TenantPrismaClient, certificates: string[]) {
+    const [akPem, ...chainPem] = certificates;
+    if (!akPem) throw new Error('no AK certificate');
+    const roots = await client.tpmTrustRoot.findMany({
+      where: { purpose: 'AK' },
+    });
+    const ak = (
+      await validateChain({
+        leafPem: akPem,
+        intermediatesPem: chainPem,
+        anchorsPem: roots.map((r) => r.certPem),
+        requireEku: EKU_AIK_CERTIFICATE,
+      })
+    ).leaf;
+    if (ak.getExtension(x509.BasicConstraintsExtension)?.ca) {
+      throw new Error('AK certificate is a CA');
+    }
+    const usage = ak.getExtension(x509.KeyUsagesExtension);
+    if (usage && !(usage.usages & x509.KeyUsageFlags.digitalSignature)) {
+      throw new Error('AK certificate lacks digitalSignature');
+    }
+    const akKey = createPublicKey({
+      key: Buffer.from(ak.publicKey.rawData),
+      format: 'der',
+      type: 'spki',
+    });
+    if (
+      akKey.asymmetricKeyType !== 'rsa' ||
+      (akKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048
+    ) {
+      throw new Error('only RSA AK of 2048 bits or more');
+    }
+    return { akKey, fingerprint: sha256(Buffer.from(ak.rawData)) };
   }
 
   /** True when the returned secret is the one wrapped for this challenge. */
@@ -440,7 +491,7 @@ export class TpmAttestationService {
     client: TenantPrismaClient,
     tenantId: string,
     actor: AuditActor,
-    input: { label: string; certPem: string },
+    input: { label: string; certPem: string; purpose?: 'EK' | 'AK' },
   ) {
     const cert = parsePem(input.certPem);
     if (cert.notAfter < new Date()) {
@@ -452,6 +503,7 @@ export class TpmAttestationService {
           label: input.label,
           certPem: cert.toString('pem'),
           subject: cert.subject,
+          purpose: input.purpose ?? 'EK',
           fingerprint: sha256(Buffer.from(cert.rawData)),
           notAfter: cert.notAfter,
           createdBy: actor.id,
