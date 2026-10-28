@@ -5,6 +5,7 @@ import { KeycloakModule } from '../keycloak/keycloak.module';
 import { OpenSearchIndexModule } from '../audit/opensearch/opensearch-index.module';
 import { TenantCreateCommand } from './commands/tenant-create.command';
 import { AuditReindexCommand } from './commands/audit-reindex.command';
+import { AuditModule } from '../audit/audit.module';
 import { AuditBenchCommand } from './commands/audit-bench.command';
 import { AuditVerifyCommand } from './commands/audit-verify.command';
 import { AuditService } from '../audit/audit.service';
@@ -43,6 +44,8 @@ import { LicenseVerifyCommand } from './commands/license-verify.command';
   imports: [
     AppConfigModule,
     DatabaseModule,
+    // AuditModule's key lookup and SEAL marks back the CLI's own AuditService.
+    AuditModule,
     KeycloakModule,
     OpenSearchIndexModule,
     FleetHeartbeatModule,

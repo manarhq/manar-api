@@ -6,8 +6,9 @@
 -- "audit_partition_state" row; the singleton table is then dropped. Adds "audit_checkpoints"
 -- (signed Merkle SEALs) and a partition column on retention anchors.
 --
--- Rollback (only while every event is still in partition 0, i.e. before the new code has written
--- to any other partition; after that the old single-chain code cannot verify the log):
+-- Forward-only in practice: the new code writes to other partitions within seconds of deploy,
+-- after which the old single-chain code cannot verify the log. The SQL below restores the old
+-- tables only if nothing was written since the migration ran:
 --   CREATE TABLE "audit_chain_state" ("id" TEXT NOT NULL, "latestEventId" TEXT, "latestEventHash" TEXT,
 --     "eventCount" INTEGER NOT NULL DEFAULT 0, "updatedAt" TIMESTAMP(3) NOT NULL,
 --     CONSTRAINT "audit_chain_state_pkey" PRIMARY KEY ("id"));

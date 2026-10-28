@@ -105,13 +105,41 @@ The `brokenAt` values:
    accepted in partition 0 only, because they predate partitioning; that
    is a known residual.
 
-**Measured** (`pnpm manar audit:bench`, a throwaway tenant, i7-12700F,
-local Compose stack): 5,543 events/s sustained for 60 s, p50 35 ms, p99
-46 ms, 60 SEALs, and 332,600 events verified.
+**SEAL mark (control database).** `audit_seal_marks` records each tenant's
+newest SEAL outside the tenant database:
 
-**Not here yet:** a copy of the latest SEAL outside the tenant database. The
-HUB's hierarchical anchoring (R2 plan H2) adds it. The RFC 3161 timestamp
-on evidence also comes with H2.
+- The worker refuses to seal (`SealContinuityError`), and verification
+  fails (`checkpoint:<seq>`), when the tenant database no longer holds that
+  SEAL unchanged.
+- The same row is the **verification watermark**: the last SEAL verified
+  and the heads it covered.
+
+**Full and incremental verification:**
+
+- `GET /audit/verify` and `pnpm manar audit:verify` run the **full** walk.
+- Retention and the fleet summary run **incremental** verification. It
+  resumes at the watermark (re-authenticated by hash and signature) and
+  checks everything after it.
+- Retention also re-checks the events it is about to delete
+  (`verifyPrunable`). It prunes only up to the last SEAL's head.
+
+**Bounded sealing.** A SEAL covers at most `MAX_RANGE` (50,000) events per
+partition, so the first SEAL after the upgrade seals existing history over
+several rounds. Ranges are indexed in `audit_checkpoint_ranges` for proof
+lookup. The signed `roots` stay authoritative, and a missing index row is
+`checkpoint_index_mismatch`.
+
+**Measured** (`pnpm manar audit:bench`, a throwaway tenant, i7-12700F,
+local Compose stack, final code): **5,508 events/s** sustained for 60 s,
+p50 35 ms, **p99 49 ms**, 60 SEALs, and 330,600 events verified.
+
+**Not here yet:**
+
+- **RFC 3161 timestamps on evidence:** come with the HUB (plan H2).
+- **Hierarchical anchoring:** also H2. It takes the newest SEAL off the SITE
+  entirely.
+- **Large-tenant full verification:** a full walk of a very large tenant
+  still grows with its history. It becomes a background job in plan P.
 
 ## Local infra: Kafka
 

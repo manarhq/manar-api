@@ -49,8 +49,20 @@ design.
   proof only for a stored, not-yet-sealed event.
 - **`partitionSeq` is a 32-bit integer.** A BigInt made `JSON.stringify` of a row throw; 32 bits
   is about 870 years of headroom per partition at the design peak.
-- **Residual:** an unsigned anchor planted in partition 0 is accepted (pre-partitioning history).
-  Keeping the latest SEAL outside the tenant database comes with the HUB (plan H2).
+- **The newest SEAL is recorded in the control database** (`audit_seal_marks`). The worker
+  refuses to seal on top of a missing or changed SEAL, so it can't re-sign rewritten history.
+- **The same row is an authenticated watermark for incremental verification.** Retention and the
+  fleet summary use incremental runs; the API and CLI run the full walk.
+- **Retention re-checks what it prunes,** and prunes only up to the last SEAL's head.
+- **Bounded sealing:** at most 50,000 events per partition per SEAL.
+- **Indexed proof lookup.** A mismatch in the index is an integrity error.
+- **Group commit doesn't deadlock across multi-event transactions**
+  (`recordManyInTransaction`), and late events at shutdown flush at once.
+- **Residuals:**
+  - An unsigned anchor planted in partition 0 is accepted (pre-partitioning history).
+  - An attacker who controls both the tenant and control databases is out of scope until the
+    HUB (plan H2).
+  - A full walk of a very large tenant grows with history; it becomes a background job in plan P.
 
 ## Alternatives considered
 
