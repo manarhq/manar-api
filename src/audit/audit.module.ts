@@ -1,5 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { AuditService } from './audit.service';
+import { AuditCheckpointService } from './checkpoint/audit-checkpoint.service';
+import { CheckpointSigner } from './checkpoint/checkpoint-signer';
 import { KafkaPublisherService } from './kafka-publisher.service';
 
 /**
@@ -20,7 +22,12 @@ import { KafkaPublisherService } from './kafka-publisher.service';
  */
 @Global()
 @Module({
-  providers: [KafkaPublisherService, AuditService],
-  exports: [AuditService],
+  providers: [
+    KafkaPublisherService,
+    AuditService,
+    CheckpointSigner,
+    AuditCheckpointService,
+  ],
+  exports: [AuditService, CheckpointSigner, AuditCheckpointService],
 })
 export class AuditModule {}

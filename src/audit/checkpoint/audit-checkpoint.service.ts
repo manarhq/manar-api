@@ -1,0 +1,155 @@
+import { createHash } from 'node:crypto';
+import { Injectable } from '@nestjs/common';
+import type {
+  AuditCheckpoint,
+  Prisma,
+  PrismaClient as TenantPrismaClient,
+} from '../../generated/tenant-client/client';
+import { canonicalize } from '../canonical-json';
+import { merkleRoot } from '../merkle';
+import { CheckpointSigner } from './checkpoint-signer';
+
+export interface PartitionHead {
+  partition: number;
+  seq: string;
+  eventHash: string;
+}
+
+export interface PartitionRoot {
+  partition: number;
+  fromSeq: string;
+  toSeq: string;
+  root: string;
+}
+
+/** The exact content a checkpoint's hash and signature cover. */
+export function checkpointHashOf(content: {
+  seq: bigint;
+  createdAt: Date;
+  partitionHeads: PartitionHead[];
+  roots: PartitionRoot[];
+  previousCheckpointHash: string | null;
+}): string {
+  return createHash('sha256')
+    .update(
+      canonicalize({
+        seq: content.seq.toString(),
+        createdAt: content.createdAt.toISOString(),
+        partitionHeads: content.partitionHeads,
+        roots: content.roots,
+        previousCheckpointHash: content.previousCheckpointHash,
+      }),
+      'utf8',
+    )
+    .digest('hex');
+}
+
+/**
+ * Builds SEALs: every call that finds new audit events writes one
+ * `AuditCheckpoint` holding, per advanced partition, the RFC 6962 root of
+ * the events since the previous checkpoint, linked to that checkpoint and
+ * signed with the tenant's key. Only one writer at a time per tenant
+ * database (transaction-scoped advisory lock); a concurrent caller gets
+ * `null` rather than waiting.
+ */
+@Injectable()
+export class AuditCheckpointService {
+  constructor(private readonly signer: CheckpointSigner) {}
+
+  async createCheckpoint(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+  ): Promise<AuditCheckpoint | null> {
+    return tenantClient.$transaction(
+      async (tx) => {
+        const [lock] = await tx.$queryRaw<{ locked: boolean }[]>`
+          SELECT pg_try_advisory_xact_lock(hashtext('manar.audit.checkpoint')) AS locked
+        `;
+        if (!lock?.locked) return null;
+        return this.build(tx, tenantId);
+      },
+      { timeout: 30_000 },
+    );
+  }
+
+  private async build(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+  ): Promise<AuditCheckpoint | null> {
+    const previous = await tx.auditCheckpoint.findFirst({
+      orderBy: { seq: 'desc' },
+    });
+    const sealedUpTo = new Map(
+      ((previous?.partitionHeads ?? []) as unknown as PartitionHead[]).map(
+        (h) => [h.partition, BigInt(h.seq)],
+      ),
+    );
+    const states = (await tx.auditPartitionState.findMany({
+      where: { latestSeq: { gt: 0 } },
+      orderBy: { partition: 'asc' },
+    })) as {
+      partition: number;
+      latestSeq: bigint;
+      latestEventHash: string | null;
+    }[];
+
+    const roots: PartitionRoot[] = [];
+    for (const state of states) {
+      const from = (sealedUpTo.get(state.partition) ?? 0n) + 1n;
+      if (state.latestSeq < from) continue;
+      // ponytail: one in-memory tree per range; a SITE down for hours makes
+      // one large range. Fine to ~10^6 events; chunk ranges if that bites.
+      const events = await tx.auditEvent.findMany({
+        where: {
+          partition: state.partition,
+          partitionSeq: { gte: from, lte: state.latestSeq },
+        },
+        orderBy: { partitionSeq: 'asc' },
+        select: { eventHash: true },
+      });
+      if (events.length === 0) continue; // range already pruned by retention
+      roots.push({
+        partition: state.partition,
+        fromSeq: from.toString(),
+        toSeq: state.latestSeq.toString(),
+        root: merkleRoot(events.map((e) => e.eventHash)),
+      });
+    }
+    if (roots.length === 0) return null;
+
+    const partitionHeads: PartitionHead[] = states
+      .filter((s) => s.latestEventHash !== null)
+      .map((s) => ({
+        partition: s.partition,
+        seq: s.latestSeq.toString(),
+        eventHash: s.latestEventHash!,
+      }));
+    const seq = (previous?.seq ?? 0n) + 1n;
+    const createdAt = new Date();
+    const previousCheckpointHash = previous?.checkpointHash ?? null;
+    const checkpointHash = checkpointHashOf({
+      seq,
+      createdAt,
+      partitionHeads,
+      roots,
+      previousCheckpointHash,
+    });
+    const [signature, { keyId }] = await Promise.all([
+      this.signer.sign(tenantId, checkpointHash),
+      this.signer.publicKey(tenantId),
+    ]);
+
+    return tx.auditCheckpoint.create({
+      data: {
+        seq,
+        createdAt,
+        partitionHeads: partitionHeads as unknown as Prisma.InputJsonValue,
+        roots: roots as unknown as Prisma.InputJsonValue,
+        previousCheckpointHash,
+        checkpointHash,
+        signature,
+        keyId,
+      },
+    });
+  }
+}

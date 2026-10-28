@@ -64,6 +64,43 @@ export class OpenBaoKvClient {
   }
 
   /**
+   * Like `readSecret`, but `null` when nothing was ever written at `path`,
+   * so a caller can tell "absent" from "OpenBao failed" (which still throws).
+   * A deleted current version also throws: treating it as absent would let a
+   * caller silently replace a key that signed records still need.
+   */
+  async readSecretIfPresent(
+    path: string,
+  ): Promise<Record<string, unknown> | null> {
+    const response = await this.request<{
+      data: Record<string, unknown>;
+      metadata: { version: number; deletion_time?: string };
+    } | null>('GET', `${this.mountPath}/data/${path}`, undefined, true);
+    if (response === null) return null;
+    if (response.metadata?.deletion_time) {
+      throw new Error(
+        `OpenBao KV secret at "${path}" has been deleted (version ${response.metadata.version})`,
+      );
+    }
+    return response.data;
+  }
+
+  /**
+   * Writes `data` only if nothing exists at `path` yet (KV v2 check-and-set
+   * with `cas: 0`); throws if something does. For values that must never be
+   * replaced once written, such as a signing key.
+   */
+  async writeSecretIfAbsent(
+    path: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    await this.request('POST', `${this.mountPath}/data/${path}`, {
+      data,
+      options: { cas: 0 },
+    });
+  }
+
+  /**
    * Writes a new version of the KV v2 secret at `path`, replacing whatever
    * `data` object was previously stored there (KV v2 versions the whole
    * object per write, not per key — see the design's docs/tool-gateway.md
