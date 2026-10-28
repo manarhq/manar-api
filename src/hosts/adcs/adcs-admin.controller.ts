@@ -24,6 +24,7 @@ import { TenantDatabaseManager } from '../../database/tenant-database-manager.se
 import {
   AdcsSettingsSchema,
   AdcsTrustedCaSchema,
+  TpmRootSchema,
   AdOuRuleSchema,
   UpdateAdOuRuleSchema,
 } from '../hosts.validation';
@@ -240,8 +241,7 @@ export class AdcsAdminController {
   @Get('tpm-trust-roots')
   @RequireRole(...READ)
   @ApiOperation({
-    summary:
-      'List the TPM manufacturer roots this tenant accepts for EK certificates',
+    summary: 'List the TPM roots this tenant accepts (purpose EK or AK)',
   })
   async listRoots(@CurrentAuth() auth: AuthContext) {
     return this.tpm.listRoots(await this.client(auth));
@@ -251,10 +251,10 @@ export class AdcsAdminController {
   @RequireRole(...WRITE)
   @ApiOperation({
     summary:
-      'Accept a TPM manufacturer root (or intermediate) for EK certificates (audited)',
+      'Accept a TPM root (or intermediate) for EK certificates or, with purpose AK, vendor AK certificates such as Azure vTPM (audited)',
   })
   async addRoot(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
-    const input = parseBodyOrThrow(AdcsTrustedCaSchema, body);
+    const input = parseBodyOrThrow(TpmRootSchema, body);
     return Promise.resolve()
       .then(async () =>
         this.tpm.addRoot(

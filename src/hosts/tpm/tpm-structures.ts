@@ -6,6 +6,7 @@ import {
   createPublicKey,
   publicEncrypt,
   randomBytes,
+  verify,
 } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 
@@ -229,4 +230,65 @@ export function makeCredential(input: {
     credentialBlob: Buffer.concat([be16(body.length), body]),
     encryptedSecret: Buffer.concat([be16(encryptedSeed.length), encryptedSeed]),
   };
+}
+
+const TPM_GENERATED_VALUE = 0xff544347;
+const TPM_ST_ATTEST_CERTIFY = 0x8017;
+
+/** Parses a TPMS_ATTEST from TPM2_Certify. Throws `TpmStructureError` unless it is a well-formed certify attestation. */
+export function parseCertifyAttest(raw: Buffer): {
+  extraData: Buffer;
+  certifiedName: Buffer;
+} {
+  const r = new Reader(raw);
+  if (r.u32() !== TPM_GENERATED_VALUE) {
+    throw new TpmStructureError('not TPM generated');
+  }
+  if (r.u16() !== TPM_ST_ATTEST_CERTIFY) {
+    throw new TpmStructureError('not a certify attestation');
+  }
+  r.sized(); // qualifiedSigner
+  const extraData = Buffer.from(r.sized());
+  r.take(17); // clockInfo
+  r.take(8); // firmwareVersion
+  const certifiedName = Buffer.from(r.sized());
+  r.sized(); // qualifiedName
+  if (!r.done) throw new TpmStructureError('trailing bytes');
+  return { extraData, certifiedName };
+}
+
+/**
+ * Checks a marshalled TPMT_SIGNATURE (RSASSA or RSAPSS, SHA-2) over `attest`
+ * with an RSA key. False on anything wrong, including a malformed signature.
+ */
+export function verifyAttestSignature(
+  akPublicKey: KeyObject,
+  attest: Buffer,
+  tpmtSignature: Buffer,
+): boolean {
+  try {
+    const r = new Reader(tpmtSignature);
+    const scheme = r.u16();
+    const hash = HASHES[r.u16()];
+    const sig = r.sized();
+    if (!r.done || !hash || akPublicKey.asymmetricKeyType !== 'rsa') {
+      return false;
+    }
+    if (scheme !== 0x0014 && scheme !== 0x0016) return false;
+    return verify(
+      hash,
+      attest,
+      {
+        key: akPublicKey,
+        padding:
+          scheme === 0x0014
+            ? constants.RSA_PKCS1_PADDING
+            : constants.RSA_PKCS1_PSS_PADDING,
+        saltLength: constants.RSA_PSS_SALTLEN_AUTO,
+      },
+      sig,
+    );
+  } catch {
+    return false;
+  }
 }
