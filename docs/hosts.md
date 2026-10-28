@@ -146,6 +146,46 @@ the TPM vendors' published EK root pages and verify the fingerprints yourself). 
 EKs, EK certificates fetched from a vendor service (the host sends them), and a real-TPM interop
 run, which needs manar-edge.
 
+### Azure Trusted Launch vTPM (AK certificate path)
+
+An Azure vTPM has no EK certificate (NV `0x01C00002` is undefined). Azure writes an **AK
+certificate** at NV `0x01C101D0` instead (chain: AK cert, `Azure Cloud Virtual TPM CA - 11`,
+`Azure Cloud Virtual TPM CA 2025`, root `Azure Virtual TPM Root Certificate Authority 2023`). The host
+proves its key with `TPM2_Certify` by that AK:
+
+1. `POST /hosts/tpm/ak-challenge` `{ tenantSlug, machineId, hostKeyPublic }` (base64 `TPMT_PUBLIC`,
+   same rules as above) returns `{ challengeId, nonce (base64, 32 bytes), expiresAt }`.
+2. The host runs Certify with the AK as signing key, the host key as the object, and the nonce bytes
+   as qualifying data, then `POST /hosts/tpm/ak-certify` `{ tenantSlug, challengeId, akCertificates
+(PEM, AK cert first then intermediates), hostKeyPublic, certifyInfo (base64 TPMS_ATTEST),
+signature (base64 TPMT_SIGNATURE) }`. Reply `{ verified }`.
+3. Register with `tpmChallengeId` as before.
+
+`verified` is true only when: the AK certificate chains to a tenant TPM root and carries EKU
+`2.23.133.8.3`; the AK is RSA (2048 bits or more) and its RSASSA or RSAPSS (SHA-2) signature covers the
+attestation; the attestation is a certify (`TPM_GENERATED_VALUE`, `TPM_ST_ATTEST_CERTIFY`) whose
+`extraData` is the nonce and whose certified name is the name of `hostKeyPublic` (same key as at the
+challenge, so the CSR key); and the key has `fixedTPM`, `fixedParent`, `sensitiveDataOrigin`. Anything
+else is `false` (three tries per challenge, 10 minutes, one use). Not covered: ECC AKs, and the
+Azure intermediates, which the host sends (they rotate; take them from the AK certificate's AIA URLs).
+
+Read the AK certificate on the host: `tpm2_nvread 0x1c101d0 -C o -o ak.der`, then
+`openssl x509 -inform DER -in ak.der -out ak.pem`. Add the Azure root to the tenant trust list
+(download from
+`https://www.microsoft.com/pkiops/certs/Azure%20Virtual%20TPM%20Root%20Certificate%20Authority%202023.crt`,
+see the Trusted Launch FAQ) and check its SHA-256 before adding:
+`E6:C5:96:B1:7F:8F:FE:FB:A5:C3:00:F7:14:CF:B1:26:0C:60:28:70:4E:CF:7B:EC:C4:AB:50:18:EF:B0:0E:95`:
+
+```bash
+openssl x509 -inform DER -in azure-vtpm-root-2023.crt -out root.pem
+openssl x509 -in root.pem -noout -fingerprint -sha256   # must match the value above
+# then POST /tpm-trust-roots { "label": "Azure vTPM Root 2023", "certPem": "<root.pem>" }
+```
+
+The audit event is `host.tpm_verified` (`method: ak-certify`; `ekFingerprint` is the AK certificate's).
+Azure vTPM attestation shows the key is in Azure's virtual TPM, which Microsoft's hypervisor
+provides; a host admin on the VM can still use it. It is not the same assurance as a hardware EK.
+
 ## Admin API
 
 Writes need `TENANT_OWNER` or `SECURITY_ADMIN`; reads also allow `AUDITOR`.

@@ -34,6 +34,8 @@ import {
   RegisterAdcsRequestSchema,
   RegisterHostRequestSchema,
   TpmActivateSchema,
+  TpmAkCertifySchema,
+  TpmAkChallengeSchema,
   TpmChallengeSchema,
 } from './hosts.validation';
 
@@ -180,6 +182,50 @@ export class HostRegisterController {
     const input = parseBodyOrThrow(TpmActivateSchema, body);
     try {
       return { verified: await this.tpm.activate(input) };
+    } catch (error) {
+      if (error instanceof TpmAttestationError) {
+        throw new BadRequestException('TPM attestation request not accepted');
+      }
+      throw error;
+    }
+  }
+
+  @Post('tpm/ak-challenge')
+  @ApiOperation({
+    summary: 'Start TPM attestation by a vendor-certified AK (Azure vTPM)',
+    description:
+      'For TPMs with an AK certificate instead of an EK certificate. Send machineId and the TPMT_PUBLIC of the host key; the reply carries a nonce to use as the qualifying data of TPM2_Certify. Answer with POST /hosts/tpm/ak-certify, then register with tpmChallengeId.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: '{ challengeId, nonce, expiresAt }',
+  })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  async tpmAkChallenge(@Body() body: unknown) {
+    const input = parseBodyOrThrow(TpmAkChallengeSchema, body);
+    try {
+      return await this.tpm.akChallenge(input);
+    } catch (error) {
+      if (error instanceof TpmAttestationError) {
+        Logger.warn(error.message, HostRegisterController.name);
+        throw new BadRequestException('TPM attestation request not accepted');
+      }
+      throw error;
+    }
+  }
+
+  @Post('tpm/ak-certify')
+  @ApiOperation({
+    summary: 'Complete TPM attestation by a vendor-certified AK',
+    description:
+      'Send the AK certificate chain, the host key TPMT_PUBLIC, and the TPM2_Certify result (TPMS_ATTEST and TPMT_SIGNATURE) made by the AK over the host key with the nonce as qualifying data. verified is false for anything that does not check out; three failures end the challenge.',
+  })
+  @ApiResponse({ status: 201, description: '{ verified: boolean }' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  async tpmAkCertify(@Body() body: unknown) {
+    const input = parseBodyOrThrow(TpmAkCertifySchema, body);
+    try {
+      return { verified: await this.tpm.akCertify(input) };
     } catch (error) {
       if (error instanceof TpmAttestationError) {
         throw new BadRequestException('TPM attestation request not accepted');

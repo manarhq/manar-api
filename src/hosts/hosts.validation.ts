@@ -50,6 +50,29 @@ export const TpmChallengeSchema = z
   })
   .strict();
 
+export const TpmAkChallengeSchema = z
+  .object({
+    tenantSlug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
+    machineId: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
+    /** Base64 marshalled TPMT_PUBLIC of the host key. */
+    hostKeyPublic: b64(2048),
+  })
+  .strict();
+
+export const TpmAkCertifySchema = z
+  .object({
+    tenantSlug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
+    challengeId: uuid,
+    /** AK certificate first, then its intermediates (PEM). */
+    akCertificates: z.array(pem).min(1).max(5),
+    hostKeyPublic: b64(2048),
+    /** Base64 TPMS_ATTEST from TPM2_Certify (the TPM2B_ATTEST body, without its size prefix). */
+    certifyInfo: b64(2048),
+    /** Base64 marshalled TPMT_SIGNATURE. */
+    signature: b64(1024),
+  })
+  .strict();
+
 export const TpmActivateSchema = z
   .object({
     tenantSlug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),

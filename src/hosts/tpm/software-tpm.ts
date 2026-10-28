@@ -4,10 +4,11 @@ import {
   createHmac,
   generateKeyPairSync,
   privateDecrypt,
+  sign,
   timingSafeEqual,
 } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
-import { kdfa } from './tpm-structures';
+import { kdfa, tpmName } from './tpm-structures';
 
 /**
  * Test double for the TPM side: ActivateCredential written from the TCG
@@ -98,4 +99,64 @@ export function rsaTpmtPublic(
 
 export function newRsaKeys() {
   return generateKeyPairSync('rsa', { modulusLength: 2048 });
+}
+
+export interface SoftCertifyOptions {
+  nonce: Buffer;
+  /** Name written into the attestation; defaults to the name of `hostTpmPublic`. */
+  certifiedName?: Buffer;
+  magic?: number;
+  type?: number;
+  sigScheme?: number;
+  /** Sign with this instead of `akPrivate` (bad signature test). */
+  signWith?: KeyObject;
+}
+
+/**
+ * Test double for TPM2_Certify: TPMS_ATTEST (TCG Part 2 section 10.12.8) and
+ * TPMT_SIGNATURE written from the spec. Tests only.
+ */
+export function softCertify(
+  akPrivate: KeyObject,
+  hostTpmPublic: Buffer,
+  o: SoftCertifyOptions,
+): { certifyInfo: Buffer; signature: Buffer } {
+  const u16 = (v: number) => {
+    const b = Buffer.alloc(2);
+    b.writeUInt16BE(v);
+    return b;
+  };
+  const u32 = (v: number) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(v);
+    return b;
+  };
+  const sized = (b: Buffer) => Buffer.concat([u16(b.length), b]);
+  const name = o.certifiedName ?? tpmName(hostTpmPublic);
+  const certifyInfo = Buffer.concat([
+    u32(o.magic ?? 0xff544347),
+    u16(o.type ?? 0x8017),
+    sized(Buffer.from('qualified-signer')),
+    sized(o.nonce),
+    Buffer.alloc(17), // clockInfo
+    Buffer.alloc(8), // firmwareVersion
+    sized(name),
+    sized(Buffer.from('qualified-name')),
+  ]);
+  const sig = sign('sha256', certifyInfo, {
+    key: o.signWith ?? akPrivate,
+    padding:
+      (o.sigScheme ?? 0x0014) === 0x0014
+        ? constants.RSA_PKCS1_PADDING
+        : constants.RSA_PKCS1_PSS_PADDING,
+    saltLength: constants.RSA_PSS_SALTLEN_DIGEST,
+  });
+  return {
+    certifyInfo,
+    signature: Buffer.concat([
+      u16(o.sigScheme ?? 0x0014),
+      u16(0x000b),
+      sized(sig),
+    ]),
+  };
 }

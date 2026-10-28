@@ -1,11 +1,18 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { activateCredential, newRsaKeys, rsaTpmtPublic } from './software-tpm';
+import {
+  activateCredential,
+  newRsaKeys,
+  rsaTpmtPublic,
+  softCertify,
+} from './software-tpm';
 import {
   makeCredential,
+  parseCertifyAttest,
   parseTpmtPublic,
   TpmStructureError,
   tpmName,
+  verifyAttestSignature,
 } from './tpm-structures';
 
 describe('TPM structures', () => {
@@ -102,5 +109,44 @@ describe('TPM structures', () => {
         encryptedSecret,
       }),
     ).toThrow('TPM_RC_INTEGRITY');
+  });
+});
+
+describe('Certify structures', () => {
+  const ak = newRsaKeys();
+  const host = rsaTpmtPublic(newRsaKeys().publicKey);
+  const nonce = randomBytes(32);
+
+  it('reads extraData and the certified name from a TPMS_ATTEST', () => {
+    const { certifyInfo } = softCertify(ak.privateKey, host, { nonce });
+    const a = parseCertifyAttest(certifyInfo);
+    expect(a.extraData.equals(nonce)).toBe(true);
+    expect(a.certifiedName.equals(tpmName(host))).toBe(true);
+  });
+
+  it('refuses a wrong magic, a wrong type, and trailing bytes', () => {
+    for (const o of [{ magic: 1 }, { type: 0x8018 }]) {
+      const { certifyInfo } = softCertify(ak.privateKey, host, { nonce, ...o });
+      expect(() => parseCertifyAttest(certifyInfo)).toThrow(TpmStructureError);
+    }
+    const { certifyInfo } = softCertify(ak.privateKey, host, { nonce });
+    expect(() =>
+      parseCertifyAttest(Buffer.concat([certifyInfo, Buffer.from([0])])),
+    ).toThrow(TpmStructureError);
+  });
+
+  it('verifies RSASSA and RSAPSS signatures and refuses another key', () => {
+    for (const sigScheme of [0x0014, 0x0016]) {
+      const { certifyInfo, signature } = softCertify(ak.privateKey, host, {
+        nonce,
+        sigScheme,
+      });
+      expect(verifyAttestSignature(ak.publicKey, certifyInfo, signature)).toBe(
+        true,
+      );
+      expect(
+        verifyAttestSignature(newRsaKeys().publicKey, certifyInfo, signature),
+      ).toBe(false);
+    }
   });
 });

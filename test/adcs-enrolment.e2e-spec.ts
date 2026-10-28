@@ -6,6 +6,7 @@ import {
   randomUUID,
   webcrypto,
 } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import * as x509 from '@peculiar/x509';
 import { Client as PgClient } from 'pg';
 import type { PrismaClient } from '../src/generated/tenant-client/client';
@@ -41,6 +42,8 @@ import { InstallKeysService } from '../src/hosts/install-keys.service';
 import {
   activateCredential,
   rsaTpmtPublic,
+  softCertify,
+  type SoftCertifyOptions,
 } from '../src/hosts/tpm/software-tpm';
 import {
   TpmAttestationError,
@@ -950,6 +953,222 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
           hostKeyPublic: exportable,
         }),
       ).rejects.toThrow('not TPM-resident');
+    }, 60_000);
+  });
+
+  describe('Azure vTPM (AK certify)', () => {
+    const AIK_EKU = '2.23.133.8.3';
+    async function setupAk(
+      t: T,
+      o: { withRoot?: boolean; eku?: string[] } = {},
+    ) {
+      const root = await makeCa('Azure vTPM Root');
+      const inter = await makeCa('Azure vTPM CA', { issuer: root });
+      if (o.withRoot ?? true) {
+        await tpm.addRoot(t.client, t.id, admin, {
+          label: 'azure',
+          certPem: root.pem,
+        });
+      }
+      const akKeys = await newKeys();
+      const akCert = await makeLeaf(inter, {
+        keys: akKeys,
+        dns: null,
+        eku: o.eku ?? [AIK_EKU],
+      });
+      const hostKeys = await newKeys();
+      const hostTpm = rsaTpmtPublic(await nodePublic(hostKeys));
+      return { root, inter, akKeys, akCert, hostKeys, hostTpm };
+    }
+    type Ak = Awaited<ReturnType<typeof setupAk>>;
+    const challenge = (t: T, machineId: string, s: Ak) =>
+      tpm.akChallenge({
+        tenantSlug: t.slug,
+        machineId,
+        hostKeyPublic: s.hostTpm.toString('base64'),
+      });
+    async function certify(
+      t: T,
+      c: Awaited<ReturnType<typeof challenge>>,
+      s: Ak,
+      o: Partial<SoftCertifyOptions> & {
+        hostTpm?: Buffer;
+        certs?: string[];
+      } = {},
+    ) {
+      const { certifyInfo, signature } = softCertify(
+        await nodePrivate(s.akKeys),
+        o.hostTpm ?? s.hostTpm,
+        { nonce: Buffer.from(c.nonce, 'base64'), ...o },
+      );
+      return tpm.akCertify({
+        tenantSlug: t.slug,
+        challengeId: c.challengeId,
+        akCertificates: o.certs ?? [s.akCert.pem, s.inter.pem],
+        hostKeyPublic: (o.hostTpm ?? s.hostTpm).toString('base64'),
+        certifyInfo: certifyInfo.toString('base64'),
+        signature: signature.toString('base64'),
+      });
+    }
+    async function registers(t: T, machineId: string, s: Ak, id: string) {
+      const key = await new InstallKeysService(audit).create(
+        t.client,
+        t,
+        admin,
+        {
+          hostGroupId: t.def.id,
+          label: 'ak',
+        },
+      );
+      return hosts.register({
+        installKey: key.raw,
+        csr: await makeCsrPem(s.hostKeys, `host://${t.slug}/${machineId}`),
+        machineId,
+        hostname: 'AZ-VM',
+        os: 'Ubuntu 24.04',
+        keyType: 'TPM',
+        tpmChallengeId: id,
+        ip: '10.0.0.8',
+      });
+    }
+
+    it('a vTPM that certifies the host key is tpmVerified and satisfies requireTpm', async () => {
+      const t = await fresh(noAd);
+      await hostsAdmin.createApprovalRule(t.client, t.id, admin, {
+        requireTpm: true,
+      });
+      const s = await setupAk(t);
+      const c = await challenge(t, 'az-1', s);
+      expect(await certify(t, c, s)).toBe(true);
+      const r = await registers(t, 'az-1', s, c.challengeId);
+      expect(r.status).toBe('APPROVED');
+      const host = await t.client.host.findUniqueOrThrow({
+        where: { id: r.hostId },
+      });
+      expect(host).toMatchObject({ tpmVerified: true, keyType: 'TPM' });
+    }, 90_000);
+
+    it('the nonce is not an ActivateCredential secret', async () => {
+      const t = await fresh(noAd);
+      const s = await setupAk(t);
+      const c = await challenge(t, 'az-n', s);
+      expect(
+        await tpm.activate({
+          tenantSlug: t.slug,
+          challengeId: c.challengeId,
+          secret: c.nonce,
+        }),
+      ).toBe(false);
+    }, 60_000);
+
+    const refused: [
+      string,
+      (
+        t: T,
+        s: Ak,
+      ) => Promise<
+        Partial<SoftCertifyOptions> & { hostTpm?: Buffer; certs?: string[] }
+      >,
+    ][] = [
+      ['a wrong nonce', () => Promise.resolve({ nonce: randomBytes(32) })],
+      [
+        'a certified name for another key',
+        async () => ({
+          certifiedName: tpmName(
+            rsaTpmtPublic(await nodePublic(await newKeys())),
+          ),
+        }),
+      ],
+      [
+        'a host key without fixedTPM',
+        async (_t, s) => {
+          const hostTpm = rsaTpmtPublic(
+            await nodePublic(s.hostKeys),
+            0x20 | 0x10,
+          );
+          return { hostTpm };
+        },
+      ],
+      [
+        'a signature by another key',
+        async () => ({ signWith: await nodePrivate(await newKeys()) }),
+      ],
+      ['a non-certify attestation', () => Promise.resolve({ type: 0x8018 })],
+      [
+        'an AK certificate without the AIK EKU',
+        async (_t, s) => {
+          const noEku = await makeLeaf(s.inter, {
+            keys: s.akKeys,
+            dns: null,
+            eku: ['1.3.6.1.5.5.7.3.2'],
+          });
+          return { certs: [noEku.pem, s.inter.pem] };
+        },
+      ],
+    ];
+    it.each(refused)(
+      'does not verify: %s',
+      async (_name, mutate) => {
+        const t = await fresh(noAd);
+        const s = await setupAk(t);
+        const m = `az-${randomBytes(3).toString('hex')}`;
+        const c = await challenge(t, m, s);
+        const o = await mutate(t, s);
+        // key/name mismatch variants must still verify the signature over what they send
+        expect(await certify(t, c, s, o)).toBe(false);
+        const r = await registers(t, m, s, c.challengeId);
+        expect(r.status).toBe('PENDING');
+      },
+      90_000,
+    );
+
+    it('does not verify an AK certificate chained to an untrusted root', async () => {
+      const t = await fresh(noAd);
+      const s = await setupAk(t, { withRoot: false });
+      await tpm.addRoot(t.client, t.id, admin, {
+        label: 'other',
+        certPem: otherCa.pem,
+      });
+      const c = await challenge(t, 'az-u', s);
+      expect(await certify(t, c, s)).toBe(false);
+    }, 90_000);
+
+    it('a replayed nonce is refused', async () => {
+      const t = await fresh(noAd);
+      const s = await setupAk(t);
+      const c = await challenge(t, 'az-r', s);
+      expect(await certify(t, c, s)).toBe(true);
+      expect(await certify(t, c, s)).toBe(false); // single use
+      const r = await registers(t, 'az-r', s, c.challengeId);
+      const host = await t.client.host.findUniqueOrThrow({
+        where: { id: r.hostId },
+      });
+      expect(host.tpmVerified).toBe(true); // the first verification stands
+    }, 90_000);
+
+    it('a verified attestation cannot vouch for a different CSR key', async () => {
+      const t = await fresh(noAd);
+      await hostsAdmin.createApprovalRule(t.client, t.id, admin, {
+        requireTpm: true,
+      });
+      const s = await setupAk(t);
+      const c = await challenge(t, 'az-k', s);
+      expect(await certify(t, c, s)).toBe(true);
+      const r = await registers(
+        t,
+        'az-k',
+        { ...s, hostKeys: await newKeys() },
+        c.challengeId,
+      );
+      expect(r.status).toBe('PENDING');
+    }, 90_000);
+
+    it('a host key sent in certify that differs from the challenge is refused', async () => {
+      const t = await fresh(noAd);
+      const s = await setupAk(t);
+      const c = await challenge(t, 'az-d', s);
+      const other = rsaTpmtPublic(await nodePublic(await newKeys()));
+      expect(await certify(t, c, s, { hostTpm: other })).toBe(false);
     }, 60_000);
   });
 
