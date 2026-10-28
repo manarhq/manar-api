@@ -25,6 +25,13 @@ export { checkpointHashOf } from './checkpoint-format';
  */
 @Injectable()
 export class AuditCheckpointService {
+  /**
+   * At most this many events per partition go into one SEAL, so a long
+   * backlog (the first SEAL after the upgrade covers all existing history)
+   * is sealed over several rounds instead of one unbounded in-memory tree.
+   */
+  static MAX_RANGE = 50_000;
+
   constructor(private readonly signer: CheckpointSigner) {}
 
   async createCheckpoint(
@@ -64,37 +71,48 @@ export class AuditCheckpointService {
       latestEventHash: string | null;
     }[];
 
+    // Heads are what is sealed: carried over from the previous SEAL, and
+    // moved to the end of each range sealed now.
+    const heads = new Map(
+      ((previous?.partitionHeads ?? []) as unknown as PartitionHead[]).map(
+        (h) => [h.partition, h],
+      ),
+    );
     const roots: PartitionRoot[] = [];
     for (const state of states) {
       const from = (sealedUpTo.get(state.partition) ?? 0) + 1;
       if (state.latestSeq < from) continue;
-      // ponytail: one in-memory tree per range; a SITE down for hours makes
-      // one large range. Fine to ~10^6 events; chunk ranges if that bites.
+      const to = Math.min(
+        state.latestSeq,
+        from + AuditCheckpointService.MAX_RANGE - 1,
+      );
       const events = await tx.auditEvent.findMany({
         where: {
           partition: state.partition,
-          partitionSeq: { gte: from, lte: state.latestSeq },
+          partitionSeq: { gte: from, lte: to },
         },
         orderBy: { partitionSeq: 'asc' },
-        select: { eventHash: true },
+        select: { eventHash: true, partitionSeq: true },
       });
       if (events.length === 0) continue; // range already pruned by retention
       roots.push({
         partition: state.partition,
         fromSeq: from.toString(),
-        toSeq: state.latestSeq.toString(),
+        toSeq: to.toString(),
         root: merkleRoot(events.map((e) => e.eventHash)),
+      });
+      const last = events[events.length - 1]!;
+      heads.set(state.partition, {
+        partition: state.partition,
+        seq: last.partitionSeq.toString(),
+        eventHash: last.eventHash,
       });
     }
     if (roots.length === 0) return null;
 
-    const partitionHeads: PartitionHead[] = states
-      .filter((s) => s.latestEventHash !== null)
-      .map((s) => ({
-        partition: s.partition,
-        seq: s.latestSeq.toString(),
-        eventHash: s.latestEventHash!,
-      }));
+    const partitionHeads: PartitionHead[] = [...heads.values()].sort(
+      (a, b) => a.partition - b.partition,
+    );
     const seq = (previous?.seq ?? 0n) + 1n;
     const createdAt = new Date();
     const previousCheckpointHash = previous?.checkpointHash ?? null;
@@ -105,10 +123,9 @@ export class AuditCheckpointService {
       roots,
       previousCheckpointHash,
     });
-    const [signature, { keyId }] = await Promise.all([
-      this.signer.sign(tenantId, checkpointHash),
-      this.signer.publicKey(tenantId),
-    ]);
+    // Sign first: signing creates the tenant key on the very first SEAL.
+    const signature = await this.signer.sign(tenantId, checkpointHash);
+    const { keyId } = await this.signer.publicKey(tenantId);
 
     return tx.auditCheckpoint.create({
       data: {

@@ -163,4 +163,34 @@ describe('Audit checkpoints (e2e)', () => {
     expect(results.filter((r) => r !== null)).toHaveLength(1);
     expect(await t.client.auditCheckpoint.count()).toBe(1);
   }, 60_000);
+
+  it('seals a long backlog in bounded steps: each SEAL covers at most MAX_RANGE events per partition', async () => {
+    const before = AuditCheckpointService.MAX_RANGE;
+    AuditCheckpointService.MAX_RANGE = 10;
+    try {
+      const t = await tenant('backlog');
+      for (let i = 0; i < 25; i += 1) {
+        await audit.record(t.client, t.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'agent-backlog' },
+          data: { i },
+        });
+      }
+
+      const sizes: number[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const cp = await checkpoints.createCheckpoint(t.client, t.id);
+        const [r] = cp!.roots as { fromSeq: string; toSeq: string }[];
+        sizes.push(Number(r!.toSeq) - Number(r!.fromSeq) + 1);
+      }
+
+      expect(sizes).toEqual([10, 10, 5]);
+      expect(await checkpoints.createCheckpoint(t.client, t.id)).toBeNull();
+      expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+        valid: true,
+      });
+    } finally {
+      AuditCheckpointService.MAX_RANGE = before;
+    }
+  }, 60_000);
 });
