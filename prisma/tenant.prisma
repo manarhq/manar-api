@@ -2149,6 +2149,8 @@ model HostGroup {
   hosts         Host[]
   installKeys   InstallKey[]
   approvalRules HostApprovalRule[]
+  adcsSettings  AdcsSettings[]
+  adOuRules     AdOuRule[]
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
@@ -2212,6 +2214,15 @@ model Host {
   /// here for an admin; nothing about the bound machine changes meanwhile.
   pendingKeyFingerprint String?
   pendingHostGroupId    String?
+  /// `INSTALL_KEY` or `ADCS` (computer certificate; the OU decides the group).
+  enrolmentMethod  String            @default("INSTALL_KEY")
+  /// ADCS hosts: the certificate's DNS name and the DN last read from AD.
+  adcsDnsName      String?
+  adDn             String?
+  adDnCheckedAt    DateTime?
+  /// The host key passed TPM credential activation (bound to `keyFingerprint`).
+  tpmVerified      Boolean           @default(false)
+  tpmEkFingerprint String?
   certificates     HostCertificate[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
@@ -2249,10 +2260,94 @@ model HostApprovalRule {
   hostnamePattern String?
   /// Empty means any address.
   cidrs           String[]
+  /// Verified TPM only (credential activation), not the installer's claim.
   requireTpm      Boolean    @default(false)
+  /// A computer certificate from a CA the tenant trusts, not revoked.
+  requireAdcs     Boolean    @default(false)
+  /// The host's DN, read from AD, is at or under this OU.
+  adOuDn          String?
   enabled         Boolean    @default(true)
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
   @@map("host_approval_rules")
+}
+
+/// A customer CA certificate the tenant trusts for key-less host enrolment.
+model AdcsTrustedCa {
+  id          String   @id @default(uuid())
+  label       String
+  certPem     String
+  subject     String
+  /// SHA-256 of the DER certificate.
+  fingerprint String   @unique
+  notAfter    DateTime
+  createdBy   String
+  createdAt   DateTime @default(now())
+
+  @@map("adcs_trusted_cas")
+}
+
+/// One row per tenant (`id = 'default'`). The bind password is in OpenBao KV, never here.
+model AdcsSettings {
+  id                 String    @id @default("default")
+  /// Receives ADCS hosts whose OU is unmapped or unknown (they stay PENDING).
+  defaultHostGroupId String
+  defaultHostGroup   HostGroup @relation(fields: [defaultHostGroupId], references: [id])
+  ldapsUrl           String?
+  baseDn             String?
+  bindDn             String?
+  /// CA that signed the LDAPS server certificate (verification is mandatory).
+  serverCaPem        String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@map("adcs_settings")
+}
+
+/// AD OU (DN suffix, longest match wins) to host group.
+model AdOuRule {
+  id          String    @id @default(uuid())
+  ouDn        String
+  /// Lower-cased, trimmed form; unique so one OU has one rule.
+  ouDnKey     String    @unique
+  hostGroupId String
+  hostGroup   HostGroup @relation(fields: [hostGroupId], references: [id], onDelete: Restrict)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([hostGroupId])
+  @@map("ad_ou_rules")
+}
+
+/// A TPM manufacturer (or intermediate) root the tenant accepts for EK certificates.
+model TpmTrustRoot {
+  id          String   @id @default(uuid())
+  label       String
+  certPem     String
+  subject     String
+  fingerprint String   @unique
+  notAfter    DateTime
+  createdBy   String
+  createdAt   DateTime @default(now())
+
+  @@map("tpm_trust_roots")
+}
+
+/// One credential-activation round: the secret is kept only as a hash.
+model TpmChallenge {
+  id             String    @id @default(uuid())
+  machineId      String
+  /// SHA-256 of the SPKI of the key the TPM named; must equal the CSR key at registration.
+  keyFingerprint String
+  ekFingerprint  String
+  secretHash     String
+  attemptsLeft   Int       @default(3)
+  expiresAt      DateTime
+  verifiedAt     DateTime?
+  consumedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([expiresAt])
+  @@map("tpm_challenges")
 }

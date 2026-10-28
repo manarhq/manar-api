@@ -11,7 +11,10 @@ export type ChainFailure =
   | 'not_yet_valid'
   | 'wrong_eku'
   | 'not_a_ca'
-  | 'too_deep';
+  | 'too_deep'
+  | 'path_length'
+  | 'critical_extension'
+  | 'ca_eku';
 
 /** A certificate was not acceptable; `reason` is for the log, never for the caller. */
 export class CertChainError extends Error {
@@ -22,6 +25,51 @@ export class CertChainError extends Error {
 
 const MAX_DEPTH = 5;
 export const EKU_CLIENT_AUTH = '1.3.6.1.5.5.7.3.2';
+const EKU_ANY = '2.5.29.37.0';
+
+/** Extensions this validator evaluates. Any other critical extension means refuse (RFC 5280 4.2). */
+const PROCESSED_CRITICAL = new Set([
+  '2.5.29.19', // basicConstraints
+  '2.5.29.15', // keyUsage
+  '2.5.29.37', // extendedKeyUsage
+  '2.5.29.17', // subjectAltName (read by the caller)
+  '2.5.29.14', // subjectKeyIdentifier
+  '2.5.29.35', // authorityKeyIdentifier
+  '2.5.29.31', // cRLDistributionPoints
+]);
+
+/**
+ * Whole-path rules that need the finished chain (leaf first, anchor last):
+ * no critical extension we do not evaluate (name constraints, policy
+ * constraints and the like are refused, not ignored), pathLenConstraint of
+ * every CA counted against the CAs below it, and an intermediate that
+ * restricts EKU must allow `requireEku` (or anyExtendedKeyUsage).
+ */
+function checkPath(chain: x509.X509Certificate[], requireEku?: string): void {
+  for (const cert of chain) {
+    if (
+      cert.extensions.some((e) => e.critical && !PROCESSED_CRITICAL.has(e.type))
+    ) {
+      throw new CertChainError('critical_extension');
+    }
+  }
+  for (let i = 1; i < chain.length; i += 1) {
+    const max = chain[i]!.getExtension(
+      x509.BasicConstraintsExtension,
+    )?.pathLength;
+    // CA certificates strictly between this issuer and the leaf.
+    if (max !== undefined && max < i - 1)
+      throw new CertChainError('path_length');
+    const isAnchor = i === chain.length - 1;
+    const eku = chain[i]!.getExtension(x509.ExtendedKeyUsageExtension);
+    if (requireEku && !isAnchor && eku) {
+      const usages = eku.usages.map(String);
+      if (!usages.includes(requireEku) && !usages.includes(EKU_ANY)) {
+        throw new CertChainError('ca_eku');
+      }
+    }
+  }
+}
 
 export function parsePem(pem: string): x509.X509Certificate {
   try {
@@ -108,7 +156,10 @@ export async function validateChain(input: {
         continue;
       }
       chain.push(issuer);
-      if (anchors.some((a) => same(a, issuer))) return { leaf, chain };
+      if (anchors.some((a) => same(a, issuer))) {
+        checkPath(chain, input.requireEku);
+        return { leaf, chain };
+      }
       current = issuer;
       advanced = true;
       break;

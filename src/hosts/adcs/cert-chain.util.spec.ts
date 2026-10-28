@@ -126,4 +126,118 @@ describe('validateChain', () => {
       'untrusted',
     );
   });
+
+  describe('path rules', () => {
+    const critical = (oid: string) =>
+      new x509.Extension(oid, true, new Uint8Array([0x30, 0x00]));
+
+    it('enforces pathLenConstraint (root pathLen 0 cannot have two CAs below)', async () => {
+      const r0 = await makeCa('PathLen Root', { pathLen: 0 });
+      const mid = await makeCa('PathLen Mid', { issuer: r0 });
+      const leaf = await makeLeaf(mid);
+      expect(
+        await reasonOf(
+          validateChain({
+            leafPem: leaf.pem,
+            intermediatesPem: [mid.pem],
+            anchorsPem: [r0.pem],
+            requireEku: EKU_CLIENT_AUTH,
+          }),
+        ),
+      ).toBe('path_length');
+      const direct = await makeLeaf(r0);
+      expect(
+        await reasonOf(
+          validateChain({ leafPem: direct.pem, anchorsPem: [r0.pem] }),
+        ),
+      ).toBe('ok');
+    });
+
+    it('accepts a pathLen that is large enough', async () => {
+      const r1 = await makeCa('PathLen1 Root', { pathLen: 1 });
+      const mid = await makeCa('PathLen1 Mid', { issuer: r1 });
+      const leaf = await makeLeaf(mid);
+      expect(
+        await reasonOf(
+          validateChain({
+            leafPem: leaf.pem,
+            intermediatesPem: [mid.pem],
+            anchorsPem: [r1.pem],
+          }),
+        ),
+      ).toBe('ok');
+    });
+
+    it('refuses a critical extension it does not process (name constraints)', async () => {
+      const nc = await makeCa('NC Mid', {
+        issuer: root,
+        extra: [critical('2.5.29.30')],
+      });
+      const leaf = await makeLeaf(nc);
+      expect(
+        await reasonOf(run(leaf.pem, { intermediatesPem: [nc.pem] })),
+      ).toBe('critical_extension');
+      const pc = await makeCa('PC Mid', {
+        issuer: root,
+        extra: [critical('2.5.29.36')],
+      });
+      expect(
+        await reasonOf(
+          run((await makeLeaf(pc)).pem, { intermediatesPem: [pc.pem] }),
+        ),
+      ).toBe('critical_extension');
+    });
+
+    it('refuses a critical unknown extension on the leaf', async () => {
+      const leaf = await makeLeaf(root, { extra: [critical('1.2.3.4.5')] });
+      expect(await reasonOf(run(leaf.pem))).toBe('critical_extension');
+    });
+
+    it('ignores a non-critical unknown extension', async () => {
+      const leaf = await makeLeaf(root, {
+        extra: [new x509.Extension('1.2.3.4.5', false, new Uint8Array([5, 0]))],
+      });
+      expect(await reasonOf(run(leaf.pem))).toBe('ok');
+    });
+
+    it('refuses an issuer whose keyUsage lacks keyCertSign', async () => {
+      const noSign = await makeCa('NoSign Mid', {
+        issuer: root,
+        keyUsages: x509.KeyUsageFlags.cRLSign,
+      });
+      const leaf = await makeLeaf(noSign);
+      expect(
+        await reasonOf(run(leaf.pem, { intermediatesPem: [noSign.pem] })),
+      ).toBe('not_a_ca');
+    });
+
+    it('an intermediate with an EKU must allow clientAuth', async () => {
+      const web = await makeCa('Web Mid', {
+        issuer: root,
+        eku: [x509.ExtendedKeyUsage.serverAuth],
+      });
+      const leaf = await makeLeaf(web);
+      expect(
+        await reasonOf(run(leaf.pem, { intermediatesPem: [web.pem] })),
+      ).toBe('ca_eku');
+      const ok = await makeCa('Client Mid', {
+        issuer: root,
+        eku: [x509.ExtendedKeyUsage.clientAuth],
+      });
+      expect(
+        await reasonOf(
+          run((await makeLeaf(ok)).pem, { intermediatesPem: [ok.pem] }),
+        ),
+      ).toBe('ok');
+      const any = await makeCa('Any Mid', {
+        issuer: root,
+        eku: ['2.5.29.37.0'],
+      });
+      expect(
+        await reasonOf(
+          run((await makeLeaf(any)).pem, { intermediatesPem: [any.pem] }),
+        ),
+      ).toBe('ok');
+    });
+  });
 });

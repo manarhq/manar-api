@@ -21,7 +21,15 @@ const day = 86_400_000;
 
 export async function makeCa(
   name: string,
-  opts: { issuer?: TestCa; notBefore?: Date; notAfter?: Date } = {},
+  opts: {
+    issuer?: TestCa;
+    notBefore?: Date;
+    notAfter?: Date;
+    pathLen?: number;
+    keyUsages?: number;
+    eku?: string[];
+    extra?: x509.Extension[];
+  } = {},
 ): Promise<TestCa> {
   const keys = (await webcrypto.subtle.generateKey(RSA, true, [
     'sign',
@@ -37,11 +45,14 @@ export async function makeCa(
     publicKey: keys.publicKey,
     signingKey: opts.issuer ? opts.issuer.keys.privateKey : keys.privateKey,
     extensions: [
-      new x509.BasicConstraintsExtension(true, undefined, true),
+      new x509.BasicConstraintsExtension(true, opts.pathLen, true),
       new x509.KeyUsagesExtension(
-        x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign,
+        opts.keyUsages ??
+          x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign,
         true,
       ),
+      ...(opts.eku ? [new x509.ExtendedKeyUsageExtension(opts.eku)] : []),
+      ...(opts.extra ?? []),
     ],
   });
   return { cert, keys, pem: cert.toString('pem') };
@@ -63,6 +74,7 @@ export async function makeLeaf(
     serial?: string;
     crlUrl?: string;
     keys?: CryptoKeyPair;
+    extra?: x509.Extension[];
   } = {},
 ): Promise<TestLeaf> {
   const keys =
@@ -84,6 +96,7 @@ export async function makeLeaf(
   if (opts.crlUrl) {
     extensions.push(new x509.CRLDistributionPointsExtension([opts.crlUrl]));
   }
+  extensions.push(...(opts.extra ?? []));
   const cert = await x509.X509CertificateGenerator.create({
     serialNumber: opts.serial ?? '0a0b0c',
     subject: `CN=${dns ?? 'nobody'}`,

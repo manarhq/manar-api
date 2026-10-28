@@ -1,4 +1,9 @@
 import * as x509 from '@peculiar/x509';
+import {
+  safeOutboundFetch,
+  type DnsLookupFn,
+} from '../../common/ssrf/url-safety';
+import type { SsrfPolicy } from '../../common/ssrf/ssrf.config';
 
 export type Revocation = 'good' | 'revoked' | 'unknown';
 
@@ -15,19 +20,64 @@ export function crlUrls(cert: x509.X509Certificate): string[] {
   return urls;
 }
 
-const CRL_TIMEOUT_MS = 5_000;
-const CRL_MAX_BYTES = 5 * 1024 * 1024;
+export const CRL_TIMEOUT_MS = 5_000;
+export const CRL_MAX_BYTES = 5 * 1024 * 1024;
 
-/** One bounded fetch: no redirects, 5 s, 5 MB. Throws on any problem. */
-export async function fetchCrlHttp(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, {
-    redirect: 'error',
-    signal: AbortSignal.timeout(CRL_TIMEOUT_MS),
+export interface CrlFetchOptions {
+  /** `SSRF_ALLOWED_HOSTS` / loopback policy; a private PKI host must be allow-listed there. */
+  policy?: SsrfPolicy;
+  fetchImpl?: typeof fetch;
+  lookup?: DnsLookupFn;
+  timeoutMs?: number;
+  maxBytes?: number;
+}
+
+/**
+ * One bounded fetch through the SSRF guard (the URL comes from a certificate
+ * the client presented): http/https only, private ranges refused unless the
+ * host is allow-listed, no redirects, a timeout, and the body counted as it
+ * streams and cancelled the moment it passes the cap. Throws on any problem.
+ */
+export async function fetchCrlHttp(
+  url: string,
+  options: CrlFetchOptions = {},
+): Promise<Uint8Array> {
+  const maxBytes = options.maxBytes ?? CRL_MAX_BYTES;
+  const response = await safeOutboundFetch(url, {
+    method: 'GET',
+    headers: {},
+    maxRedirects: 0,
+    signal: AbortSignal.timeout(options.timeoutMs ?? CRL_TIMEOUT_MS),
+    fetchImpl: options.fetchImpl,
+    lookup: options.lookup,
+    allowedHosts: options.policy?.allowedHosts,
+    allowLoopback: options.policy?.allowLoopback,
   });
-  if (!response.ok) throw new Error(`CRL fetch status ${response.status}`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > CRL_MAX_BYTES) throw new Error('CRL too large');
-  return bytes;
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`CRL fetch status ${response.status}`);
+  }
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error('CRL too large');
+  }
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) throw new Error('CRL too large');
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return Buffer.concat(chunks);
 }
 
 /**
@@ -39,7 +89,7 @@ export async function fetchCrlHttp(url: string): Promise<Uint8Array> {
 export async function checkRevocation(
   leaf: x509.X509Certificate,
   issuer: x509.X509Certificate,
-  fetchCrl: (url: string) => Promise<Uint8Array> = fetchCrlHttp,
+  fetchCrl: (url: string) => Promise<Uint8Array> = (url) => fetchCrlHttp(url),
   now: Date = new Date(),
 ): Promise<Revocation> {
   for (const url of crlUrls(leaf)) {
