@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import type {
   AuditCheckpoint,
   Prisma,
@@ -11,6 +11,11 @@ import {
   type PartitionRoot,
 } from './checkpoint-format';
 import { CheckpointSigner } from './checkpoint-signer';
+import {
+  SEAL_MARKS,
+  SealContinuityError,
+  type SealMarkStore,
+} from './seal-mark.store';
 
 export type { PartitionHead, PartitionRoot } from './checkpoint-format';
 export { checkpointHashOf } from './checkpoint-format';
@@ -32,13 +37,18 @@ export class AuditCheckpointService {
    */
   static MAX_RANGE = 50_000;
 
-  constructor(private readonly signer: CheckpointSigner) {}
+  constructor(
+    private readonly signer: CheckpointSigner,
+    @Optional()
+    @Inject(SEAL_MARKS)
+    private readonly sealMarks?: SealMarkStore,
+  ) {}
 
   async createCheckpoint(
     tenantClient: TenantPrismaClient,
     tenantId: string,
   ): Promise<AuditCheckpoint | null> {
-    return tenantClient.$transaction(
+    const checkpoint = await tenantClient.$transaction(
       async (tx) => {
         const [lock] = await tx.$queryRaw<{ locked: boolean }[]>`
           SELECT pg_try_advisory_xact_lock(hashtext('manar.audit.checkpoint')) AS locked
@@ -48,6 +58,14 @@ export class AuditCheckpointService {
       },
       { timeout: 30_000 },
     );
+    if (checkpoint) {
+      await this.sealMarks?.setSeal(
+        tenantId,
+        checkpoint.seq,
+        checkpoint.checkpointHash,
+      );
+    }
+    return checkpoint;
   }
 
   private async build(
@@ -57,6 +75,19 @@ export class AuditCheckpointService {
     const previous = await tx.auditCheckpoint.findFirst({
       orderBy: { seq: 'desc' },
     });
+    // Never seal on top of a log whose newest SEAL (as the control database
+    // records it) is gone or changed: that would re-sign rewritten history.
+    const mark = this.sealMarks ? await this.sealMarks.get(tenantId) : null;
+    if (mark) {
+      const atMark = await tx.auditCheckpoint.findUnique({
+        where: { seq: mark.sealSeq },
+      });
+      if (!atMark || atMark.checkpointHash !== mark.sealHash) {
+        throw new SealContinuityError(
+          `tenant ${tenantId}: SEAL ${mark.sealSeq} is missing or changed; refusing to seal`,
+        );
+      }
+    }
     const sealedUpTo = new Map(
       ((previous?.partitionHeads ?? []) as unknown as PartitionHead[]).map(
         (h) => [h.partition, Number(h.seq)],

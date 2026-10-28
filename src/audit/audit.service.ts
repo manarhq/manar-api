@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  Optional,
+} from '@nestjs/common';
 import type {
   AuditEvent,
   Prisma,
@@ -25,6 +31,7 @@ import {
   type PartitionRoot,
   verifyCheckpointSignature,
 } from './checkpoint/checkpoint-format';
+import { SEAL_MARKS, type SealMarkStore } from './checkpoint/seal-mark.store';
 import { KafkaPublisherService } from './kafka-publisher.service';
 import { merkleRoot } from './merkle';
 
@@ -117,6 +124,9 @@ export class AuditService implements OnModuleDestroy {
     private readonly kafkaPublisher: KafkaPublisherService,
     @Inject(CHECKPOINT_PUBLIC_KEYS)
     private readonly checkpointKeys: CheckpointKeyLookup,
+    @Optional()
+    @Inject(SEAL_MARKS)
+    private readonly sealMarks?: SealMarkStore,
   ) {}
 
   /** Commits whatever is still queued before the process exits. */
@@ -410,7 +420,46 @@ export class AuditService implements OnModuleDestroy {
   async verifyAuditChain(
     tenantClient: TenantPrismaClient,
     tenantId: string,
+    opts: { incremental?: boolean } = {},
   ): Promise<VerifyAuditChainResult> {
+    // The control database names the newest SEAL; the tenant database must
+    // still hold it unchanged (deleting SEALs to rewrite history fails here).
+    const mark = this.sealMarks ? await this.sealMarks.get(tenantId) : null;
+    if (mark) {
+      const atMark = await tenantClient.auditCheckpoint.findUnique({
+        where: { seq: mark.sealSeq },
+      });
+      if (!atMark || atMark.checkpointHash !== mark.sealHash) {
+        return { valid: false, brokenAt: `checkpoint:${mark.sealSeq}` };
+      }
+    }
+    // Incremental: resume from the last SEAL a previous run verified. Events
+    // it covered are not re-walked (a full run does that); everything after
+    // its heads, and every later SEAL, is checked as usual.
+    let start: {
+      seq: bigint;
+      hash: string;
+      createdAt: Date;
+      heads: PartitionHead[];
+    } | null = null;
+    if (opts.incremental && mark?.verified) {
+      const atWatermark = await tenantClient.auditCheckpoint.findUnique({
+        where: { seq: mark.verified.seq },
+      });
+      if (!atWatermark || atWatermark.checkpointHash !== mark.verified.hash) {
+        return { valid: false, brokenAt: `checkpoint:${mark.verified.seq}` };
+      }
+      start = {
+        seq: atWatermark.seq,
+        hash: atWatermark.checkpointHash,
+        createdAt: atWatermark.createdAt,
+        heads: atWatermark.partitionHeads as unknown as PartitionHead[],
+      };
+    }
+    const startHeads = new Map(
+      (start?.heads ?? []).map((h) => [h.partition, h]),
+    );
+
     // Read before walking: retention only ever adds anchors, so reading them
     // first can never make the walk reject a head an anchor written mid-walk
     // would have explained.
@@ -430,6 +479,27 @@ export class AuditService implements OnModuleDestroy {
       let expectedPreviousHash: string | null = null;
       let isFirstRemainingEvent = true;
       let lastSeq: number | null = null;
+      const startHead = startHeads.get(partition);
+      if (startHead) {
+        const headRow = await tenantClient.auditEvent.findUnique({
+          where: {
+            partition_partitionSeq: {
+              partition,
+              partitionSeq: Number(startHead.seq),
+            },
+          },
+          select: { id: true, eventHash: true },
+        });
+        if (headRow) {
+          if (headRow.eventHash !== startHead.eventHash) {
+            return { valid: false, brokenAt: headRow.id };
+          }
+          lastSeq = Number(startHead.seq);
+          expectedPreviousHash = startHead.eventHash;
+          isFirstRemainingEvent = false;
+        }
+        // Head pruned since: walk what remains from the start.
+      }
 
       for (;;) {
         const events = await this.fetchAuditEventBatch(
@@ -478,7 +548,7 @@ export class AuditService implements OnModuleDestroy {
       }
     }
 
-    const sealed = await this.verifyCheckpoints(tenantClient, tenantId);
+    const sealed = await this.verifyCheckpoints(tenantClient, tenantId, start);
     if (sealed.broken !== null) {
       return { valid: false, brokenAt: `checkpoint:${sealed.broken}` };
     }
@@ -574,6 +644,11 @@ export class AuditService implements OnModuleDestroy {
         }
       }
     }
+    await this.sealMarks?.setVerified(tenantId, {
+      seq: BigInt(last.seq),
+      hash: last.hash,
+      heads: last.heads,
+    });
     return { valid: true };
   }
 
@@ -634,9 +709,20 @@ export class AuditService implements OnModuleDestroy {
   private async verifyCheckpoints(
     tenantClient: TenantPrismaClient,
     tenantId: string,
+    start: {
+      seq: bigint;
+      hash: string;
+      createdAt: Date;
+      heads: PartitionHead[];
+    } | null,
   ): Promise<{
     broken: string | null;
-    last: { seq: string; createdAt: Date; heads: PartitionHead[] } | null;
+    last: {
+      seq: string;
+      hash: string;
+      createdAt: Date;
+      heads: PartitionHead[];
+    } | null;
   }> {
     const oldestRemaining = new Map(
       (
@@ -647,10 +733,21 @@ export class AuditService implements OnModuleDestroy {
       ).map((r) => [r.partition, Number(r.oldest)]),
     );
     let key: CheckpointPublicKey | null = null;
-    let previousHash: string | null = null;
-    let expectedSeq = 1n;
-    let last: { seq: string; createdAt: Date; heads: PartitionHead[] } | null =
-      null;
+    let previousHash: string | null = start?.hash ?? null;
+    let expectedSeq = start ? start.seq + 1n : 1n;
+    let last: {
+      seq: string;
+      hash: string;
+      createdAt: Date;
+      heads: PartitionHead[];
+    } | null = start
+      ? {
+          seq: start.seq.toString(),
+          hash: start.hash,
+          createdAt: start.createdAt,
+          heads: start.heads,
+        }
+      : null;
     const fail = (seq: bigint) => ({ broken: seq.toString(), last });
 
     for (;;) {
@@ -735,6 +832,7 @@ export class AuditService implements OnModuleDestroy {
         expectedSeq += 1n;
         last = {
           seq: cp.seq.toString(),
+          hash: cp.checkpointHash,
           createdAt: cp.createdAt,
           heads: partitionHeads,
         };

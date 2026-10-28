@@ -273,3 +273,21 @@ model EdgeState {
 
   @@map("edge_state")
 }
+
+/// The newest audit SEAL (signed checkpoint) of each tenant, kept outside the
+/// tenant's own database. The worker refuses to seal, and verification
+/// fails, when the tenant database no longer holds this SEAL unchanged, so
+/// deleting SEALs and rewriting history can't be re-signed by the worker.
+/// Also the incremental-verification watermark: the last SEAL verified and
+/// the partition heads it covered.
+model AuditSealMark {
+  tenantId      String   @id
+  sealSeq       BigInt
+  sealHash      String
+  verifiedSeq   BigInt?
+  verifiedHash  String?
+  verifiedHeads Json?
+  updatedAt     DateTime @updatedAt
+
+  @@map("audit_seal_marks")
+}

@@ -3,6 +3,7 @@ import { AuditService } from './audit.service';
 import { AuditCheckpointService } from './checkpoint/audit-checkpoint.service';
 import { AuditProofService } from './checkpoint/audit-proof.service';
 import { CHECKPOINT_PUBLIC_KEYS } from './checkpoint/checkpoint-format';
+import { ControlSealMarkStore, SEAL_MARKS } from './checkpoint/seal-mark.store';
 import { CheckpointSigner } from './checkpoint/checkpoint-signer';
 import { KafkaPublisherService } from './kafka-publisher.service';
 
@@ -31,6 +32,8 @@ import { KafkaPublisherService } from './kafka-publisher.service';
     AuditCheckpointService,
     AuditProofService,
     { provide: CHECKPOINT_PUBLIC_KEYS, useExisting: CheckpointSigner },
+    ControlSealMarkStore,
+    { provide: SEAL_MARKS, useExisting: ControlSealMarkStore },
   ],
   exports: [
     AuditService,
@@ -38,6 +41,7 @@ import { KafkaPublisherService } from './kafka-publisher.service';
     AuditCheckpointService,
     AuditProofService,
     CHECKPOINT_PUBLIC_KEYS,
+    SEAL_MARKS,
   ],
 })
 export class AuditModule {}

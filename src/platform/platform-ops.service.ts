@@ -109,8 +109,12 @@ export class PlatformOpsService {
     return this.verify(db, id);
   }
 
-  private async verify(db: TenantPrismaClient, tenantId: string) {
-    const result = await this.audit.verifyAuditChain(db, tenantId);
+  private async verify(
+    db: TenantPrismaClient,
+    tenantId: string,
+    opts: { incremental?: boolean } = {},
+  ) {
+    const result = await this.audit.verifyAuditChain(db, tenantId, opts);
     const states = await db.auditPartitionState.aggregate({
       _sum: { eventCount: true },
     });
@@ -407,7 +411,7 @@ export class PlatformOpsService {
     let broken = 0;
     for (const { id, db } of await this.activeTenantClients()) {
       try {
-        const r = await this.verify(db, id);
+        const r = await this.verify(db, id, { incremental: true });
         checked++;
         if (!r.valid) broken++;
       } catch {

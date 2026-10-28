@@ -23,6 +23,10 @@ import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
+import {
+  ControlSealMarkStore,
+  SealContinuityError,
+} from '../src/audit/checkpoint/seal-mark.store';
 import { fakeConfigService } from './support/audit-test-config';
 
 /** Inclusion proofs against SEALs, and SEAL checks inside `verifyAuditChain`. */
@@ -424,4 +428,98 @@ describe('Audit proofs (e2e)', () => {
       brokenAt: 'checkpoint:1',
     });
   }, 60_000);
+
+  describe('with the SEAL mark kept in the control database', () => {
+    let marks: ControlSealMarkStore;
+    let markedAudit: AuditService;
+    let markedCheckpoints: AuditCheckpointService;
+    beforeAll(() => {
+      marks = new ControlSealMarkStore(control);
+      markedAudit = new AuditService(kafka, signer, marks);
+      markedCheckpoints = new AuditCheckpointService(signer, marks);
+    });
+    afterAll(async () => {
+      await markedAudit.onModuleDestroy();
+      await control.auditSealMark.deleteMany({
+        where: { tenantId: { in: provisioned.map((p) => p.tenantId) } },
+      });
+    });
+
+    it('deleting the newest SEALs is refused by the sealer and reported by verification', async () => {
+      const t = await tenantWithEvents('mark', 6);
+      await markedCheckpoints.createCheckpoint(t.client, t.id);
+      await markedAudit.record(t.client, t.id, {
+        eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+        actor: { type: 'agent', id: 'agent-0' },
+        data: { late: true },
+      });
+      await markedCheckpoints.createCheckpoint(t.client, t.id);
+      expect((await marks.get(t.id))?.sealSeq).toBe(2n);
+
+      await t.client
+        .$executeRaw`DELETE FROM "audit_checkpoint_ranges" WHERE "checkpointSeq" = 2`;
+      await t.client
+        .$executeRaw`DELETE FROM "audit_checkpoints" WHERE "seq" = 2`;
+
+      await expect(
+        markedCheckpoints.createCheckpoint(t.client, t.id),
+      ).rejects.toBeInstanceOf(SealContinuityError);
+      expect(await markedAudit.verifyAuditChain(t.client, t.id)).toEqual({
+        valid: false,
+        brokenAt: 'checkpoint:2',
+      });
+    }, 60_000);
+
+    it('incremental verification starts at the watermark and still checks everything after it', async () => {
+      const t = await tenantWithEvents('incremental', 8);
+      await markedCheckpoints.createCheckpoint(t.client, t.id);
+      expect(await markedAudit.verifyAuditChain(t.client, t.id)).toEqual({
+        valid: true,
+      });
+      expect((await marks.get(t.id))?.verified?.seq).toBe(1n);
+
+      const later = [];
+      for (let i = 0; i < 4; i += 1) {
+        later.push(
+          await markedAudit.record(t.client, t.id, {
+            eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+            actor: { type: 'agent', id: 'agent-1' },
+            data: { i },
+          }),
+        );
+      }
+      await markedCheckpoints.createCheckpoint(t.client, t.id);
+      expect(
+        await markedAudit.verifyAuditChain(t.client, t.id, {
+          incremental: true,
+        }),
+      ).toEqual({ valid: true });
+
+      // The watermark is now SEAL 2. Events after it are still checked.
+      const newer = [];
+      for (let i = 0; i < 3; i += 1) {
+        newer.push(
+          await markedAudit.record(t.client, t.id, {
+            eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+            actor: { type: 'agent', id: 'agent-1' },
+            data: { newer: i },
+          }),
+        );
+      }
+      await markedCheckpoints.createCheckpoint(t.client, t.id);
+      await t.client
+        .$executeRaw`UPDATE "audit_events" SET "data" = '{"x":1}'::jsonb WHERE "id" = ${newer[1]!.id}`;
+      expect(
+        await markedAudit.verifyAuditChain(t.client, t.id, {
+          incremental: true,
+        }),
+      ).toEqual({ valid: false, brokenAt: newer[1]!.id });
+      // A full run re-walks everything and finds it too.
+      expect(await markedAudit.verifyAuditChain(t.client, t.id)).toEqual({
+        valid: false,
+        brokenAt: newer[1]!.id,
+      });
+      expect(later).toHaveLength(4);
+    }, 60_000);
+  });
 });

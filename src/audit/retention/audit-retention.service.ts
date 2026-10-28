@@ -63,9 +63,12 @@ export class AuditRetentionService {
     // Never prune or sign anchors over a log that doesn't verify: retention
     // would otherwise bless tampered rows with the tenant key. The Activity
     // fails, Temporal retries, and the broken log is left for investigation.
+    // Incremental: from the last verified SEAL, so the cost tracks what is
+    // new rather than the tenant's whole history.
     const verified = await this.auditService.verifyAuditChain(
       tenantClient,
       input.tenantId,
+      { incremental: true },
     );
     if (!verified.valid) {
       throw new Error(
