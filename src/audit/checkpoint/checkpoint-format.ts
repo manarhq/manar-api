@@ -29,7 +29,14 @@ export interface CheckpointPublicKey {
 
 /** Looks up a tenant's SEAL public key (provided by `CheckpointSigner`). */
 export interface CheckpointKeyLookup {
+  /** Creates the key on first use. */
   publicKey(tenantId: string): Promise<CheckpointPublicKey>;
+  /**
+   * Whether the tenant's key exists yet (it is created by the first SEAL).
+   * Kept in OpenBao, outside the audit tables, so deleting every SEAL can't
+   * also erase the evidence that SEALs were being written.
+   */
+  hasKey(tenantId: string): Promise<boolean>;
 }
 
 export const CHECKPOINT_PUBLIC_KEYS = Symbol('CHECKPOINT_PUBLIC_KEYS');
@@ -74,6 +81,29 @@ export function verifyCheckpointSignature(
   } catch {
     return false;
   }
+}
+
+/**
+ * What retention signs for each anchor, so a planted anchor can't excuse
+ * deleted events (only the retention process holds the tenant key).
+ */
+export function anchorDigestOf(anchor: {
+  tenantId: string;
+  partition: number;
+  anchorHash: string;
+  eventsPrunedCount: number;
+}): string {
+  return createHash('sha256')
+    .update(
+      canonicalize({
+        tenantId: anchor.tenantId,
+        partition: anchor.partition,
+        anchorHash: anchor.anchorHash,
+        eventsPrunedCount: anchor.eventsPrunedCount,
+      }),
+      'utf8',
+    )
+    .digest('hex');
 }
 
 /** First 16 hex chars of SHA-256 over the key's SPKI DER. */

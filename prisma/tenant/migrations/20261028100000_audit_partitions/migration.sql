@@ -14,7 +14,7 @@
 --   INSERT INTO "audit_chain_state" SELECT 'singleton', "latestEventId", "latestEventHash", "eventCount",
 --     CURRENT_TIMESTAMP FROM "audit_partition_state" WHERE "partition" = 0;
 --   DROP TABLE "audit_checkpoints"; DROP TABLE "audit_partition_state";
---   ALTER TABLE "audit_chain_anchors" DROP COLUMN "partition";
+--   ALTER TABLE "audit_chain_anchors" DROP COLUMN "signature", DROP COLUMN "partition";
 --   DROP INDEX "audit_events_partition_partitionSeq_key";
 --   ALTER TABLE "audit_events" DROP COLUMN "partitionSeq", DROP COLUMN "partition";
 
@@ -36,6 +36,8 @@ CREATE UNIQUE INDEX "audit_events_partition_partitionSeq_key" ON "audit_events"(
 ALTER TABLE "audit_chain_anchors" ADD COLUMN "partition" INTEGER NOT NULL DEFAULT 0;
 -- Existing anchors continue the old chain (partition 0); new ones must name their partition.
 ALTER TABLE "audit_chain_anchors" ALTER COLUMN "partition" DROP DEFAULT;
+-- New anchors are signed by retention; existing ones stay unsigned (accepted in partition 0 only).
+ALTER TABLE "audit_chain_anchors" ADD COLUMN "signature" TEXT;
 
 -- CreateTable
 CREATE TABLE "audit_partition_state" (

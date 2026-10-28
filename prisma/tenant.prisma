@@ -1438,6 +1438,12 @@ model AuditChainAnchor {
   /// land in partition 0. Anchors from before partitioning were set to 0.
   partition Int
 
+  /// Base64 Ed25519 signature by the tenant's checkpoint key over
+  /// `anchorDigestOf` (`src/audit/checkpoint/checkpoint-format.ts`), written
+  /// by retention. Verification only accepts signed anchors; `null` only on
+  /// anchors from before partitioning (partition 0).
+  signature String?
+
   createdAt DateTime @default(now())
 
   @@index([tenantId])

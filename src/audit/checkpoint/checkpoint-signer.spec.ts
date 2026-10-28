@@ -100,4 +100,12 @@ describe('CheckpointSigner', () => {
     );
     expect(raw.writeSecretIfAbsent).not.toHaveBeenCalled();
   });
+
+  it('hasKey is false before the first SEAL key exists and true after', async () => {
+    const { kv } = fakeKv();
+    expect(await new CheckpointSigner(kv).hasKey('t1')).toBe(false);
+    await new CheckpointSigner(kv).publicKey('t1');
+    expect(await new CheckpointSigner(kv).hasKey('t1')).toBe(true);
+    expect(await new CheckpointSigner(kv).hasKey('t2')).toBe(false);
+  });
 });

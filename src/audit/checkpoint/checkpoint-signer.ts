@@ -51,6 +51,15 @@ export class CheckpointSigner implements CheckpointKeyLookup {
     ).toString('base64');
   }
 
+  async hasKey(tenantId: string): Promise<boolean> {
+    if (this.keys.has(tenantId)) return true;
+    return (
+      (await this.kv.readSecretIfPresent(
+        CheckpointSigner.keyPath(tenantId),
+      )) !== null
+    );
+  }
+
   async publicKey(tenantId: string): Promise<CheckpointPublicKey> {
     const { keyId, algorithm, publicKeyPem } = await this.keyFor(tenantId);
     return { keyId, algorithm, publicKeyPem };

@@ -10,9 +10,11 @@ import {
   AuditEventNotFoundError,
   AuditProofService,
 } from '../src/audit/checkpoint/audit-proof.service';
+import { anchorDigestOf } from '../src/audit/checkpoint/checkpoint-format';
 import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
 import { computeEventHash } from '../src/audit/audit-hash';
+import { partitionFor } from '../src/audit/audit-partition';
 import { verifyInclusion } from '../src/audit/merkle';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
@@ -248,6 +250,55 @@ describe('Audit proofs (e2e)', () => {
     }, 60_000);
   });
 
+  it('deleting every SEAL is reported even inside the grace period, once the tenant key exists', async () => {
+    const t = await tenantWithEvents('nokey', 8);
+    await checkpoints.createCheckpoint(t.client, t.id);
+    await t.client.$executeRaw`DELETE FROM "audit_checkpoints"`;
+
+    const result = await audit.verifyAuditChain(t.client, t.id);
+    expect(result.valid).toBe(false);
+    expect((result as { brokenAt: string }).brokenAt).toMatch(/^unsealed:/);
+  }, 60_000);
+
+  it('a forged (unsigned) retention anchor does not excuse deleted events', async () => {
+    const t = await tenantWithEvents('anchor', 1);
+    let n = 0;
+    while (partitionFor({ type: 'agent', id: `agent-anchor-${n}` }, null) === 0)
+      n += 1;
+    const agent = `agent-anchor-${n}`;
+    const events = [];
+    for (let i = 0; i < 5; i += 1) {
+      events.push(
+        await audit.record(t.client, t.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: agent },
+          data: { i },
+        }),
+      );
+    }
+    expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+      valid: true,
+    });
+    // Delete the first two events and plant the anchor retention would
+    // write, but without the retention process's signature.
+    await t.client.auditChainAnchor.create({
+      data: {
+        tenantId: t.id,
+        partition: events[0]!.partition,
+        anchorHash: events[1]!.eventHash,
+        eventsPrunedCount: 2,
+      },
+    });
+    await t.client.auditEvent.deleteMany({
+      where: { id: { in: [events[0]!.id, events[1]!.id] } },
+    });
+
+    expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+      valid: false,
+      brokenAt: events[2]!.id,
+    });
+  }, 60_000);
+
   it("deleting a whole partition (events and bookkeeping row) is caught by the last SEAL's heads", async () => {
     const t = await tenantWithEvents('wipe', 14);
     await checkpoints.createCheckpoint(t.client, t.id);
@@ -287,13 +338,18 @@ describe('Audit proofs (e2e)', () => {
     await checkpoints.createCheckpoint(client, t.id);
     const partition = events[0]!.partition;
 
-    // Prune the first two as retention would: delete them, anchor the second.
+    // Prune the first two as retention would: delete them, and write the
+    // anchor naming the second, signed with the tenant key.
+    const anchor = {
+      tenantId: t.id,
+      partition,
+      anchorHash: events[1]!.eventHash,
+      eventsPrunedCount: 2,
+    };
     await client.auditChainAnchor.create({
       data: {
-        tenantId: t.id,
-        partition,
-        anchorHash: events[1]!.eventHash,
-        eventsPrunedCount: 2,
+        ...anchor,
+        signature: await signer.sign(t.id, anchorDigestOf(anchor)),
       },
     });
     await client.auditEvent.deleteMany({

@@ -445,6 +445,8 @@ describe('Audit retention (e2e)', () => {
 
     const result = await new AuditRetentionService(
       auditService,
+      signer,
+      new AuditCheckpointService(signer),
     ).pruneTenantAuditEvents(tenantClient, {
       tenantId: tenant.id,
       retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,

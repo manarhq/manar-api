@@ -130,9 +130,11 @@ function fakeTenantClient(options: FakeClientOptions): {
     auditChainAnchor: {
       findMany: () =>
         Promise.resolve(
+          // Unsigned partition-0 anchors: pre-partitioning retention.
           (options.anchorHashes ?? []).map((anchorHash) => ({
             anchorHash,
             partition: 0,
+            signature: null,
           })),
         ),
     },

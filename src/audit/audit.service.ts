@@ -15,6 +15,7 @@ import {
   DomainEventEnvelope,
 } from './domain-event-envelope';
 import {
+  anchorDigestOf,
   CHECKPOINT_PUBLIC_KEYS,
   type CheckpointKeyLookup,
   type CheckpointPublicKey,
@@ -390,12 +391,10 @@ export class AuditService implements OnModuleDestroy {
     // Read before walking: retention only ever adds anchors, so reading them
     // first can never make the walk reject a head an anchor written mid-walk
     // would have explained.
-    const anchorsByPartition = new Map<number, Set<string>>();
-    for (const anchor of await tenantClient.auditChainAnchor.findMany()) {
-      const set = anchorsByPartition.get(anchor.partition) ?? new Set();
-      set.add(anchor.anchorHash);
-      anchorsByPartition.set(anchor.partition, set);
-    }
+    const anchorsByPartition = await this.verifiedAnchors(
+      tenantClient,
+      tenantId,
+    );
     const states = new Map(
       (await tenantClient.auditPartitionState.findMany()).map((state) => [
         state.partition,
@@ -482,7 +481,17 @@ export class AuditService implements OnModuleDestroy {
     const last = sealed.last;
 
     if (last === null) {
-      // No SEAL at all: the events' own timestamps are the only clock left.
+      // No SEAL left, but the tenant key exists (outside the audit tables):
+      // SEALs were written once, so they were deleted.
+      const [firstPartition] = extents.keys();
+      if (
+        firstPartition !== undefined &&
+        (await this.checkpointKeys.hasKey(tenantId))
+      ) {
+        return { valid: false, brokenAt: `unsealed:${firstPartition}` };
+      }
+      // Never sealed (a new tenant, or just upgraded): the events' own
+      // timestamps are the only clock left.
       const cutoff = Date.now() - AuditService.SEAL_GRACE_MS;
       for (const [partition, extent] of extents) {
         if (extent.firstAt.getTime() < cutoff) {
@@ -528,6 +537,42 @@ export class AuditService implements OnModuleDestroy {
       }
     }
     return { valid: true };
+  }
+
+  /**
+   * Retention anchors that may excuse pruned history, by partition: those
+   * signed with the tenant key over `anchorDigestOf`, plus unsigned anchors
+   * in partition 0, which only pre-partitioning retention could have written
+   * (a planted unsigned anchor there is the one residual; see ADR-0014).
+   */
+  private async verifiedAnchors(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+  ): Promise<Map<number, Set<string>>> {
+    const anchors = await tenantClient.auditChainAnchor.findMany();
+    let key: CheckpointPublicKey | null = null;
+    const byPartition = new Map<number, Set<string>>();
+    for (const anchor of anchors) {
+      let accepted = anchor.signature === null && anchor.partition === 0;
+      if (anchor.signature !== null) {
+        key ??= await this.checkpointKeys.publicKey(tenantId);
+        accepted = verifyCheckpointSignature(
+          anchorDigestOf({
+            tenantId: anchor.tenantId,
+            partition: anchor.partition,
+            anchorHash: anchor.anchorHash,
+            eventsPrunedCount: anchor.eventsPrunedCount,
+          }),
+          anchor.signature,
+          key.publicKeyPem,
+        );
+      }
+      if (!accepted) continue;
+      const set = byPartition.get(anchor.partition) ?? new Set<string>();
+      set.add(anchor.anchorHash);
+      byPartition.set(anchor.partition, set);
+    }
+    return byPartition;
   }
 
   /**

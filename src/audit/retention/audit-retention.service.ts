@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../../generated/tenant-client/client';
 import { AuditService } from '../audit.service';
+import { AuditCheckpointService } from '../checkpoint/audit-checkpoint.service';
+import { anchorDigestOf } from '../checkpoint/checkpoint-format';
+import { CheckpointSigner } from '../checkpoint/checkpoint-signer';
 import { AUDIT_EVENT_TYPES } from '../audit-event-types';
 import type {
   PruneAuditEventsInput,
@@ -25,10 +28,15 @@ import type {
 export class AuditRetentionService {
   private readonly logger = new Logger(AuditRetentionService.name);
 
-  constructor(private readonly auditService: AuditService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly signer: CheckpointSigner,
+    private readonly checkpoints: AuditCheckpointService,
+  ) {}
 
   /**
-   * Per audit partition (each is its own hash chain):
+   * First seals what exists (so pruned events were sealed), then per audit
+   * partition (each is its own hash chain):
    * 1. Finds the last event older than the retention window; everything up
    *    to it in that partition is pruned.
    * 2. If no partition has one, a genuine no-op (`prunedCount: 0`): no
@@ -46,6 +54,9 @@ export class AuditRetentionService {
     input: PruneAuditEventsInput,
   ): Promise<PruneAuditEventsResult> {
     const cutoff = new Date(Date.now() - input.retentionWindowMs);
+    // Seal before pruning: everything pruned is then covered by a SEAL, and
+    // the tenant key never exists without one.
+    await this.checkpoints.createCheckpoint(tenantClient, input.tenantId);
 
     const ranges = await tenantClient.$queryRaw<
       { partition: number; cutoffSeq: number; oldest: Date; newest: Date }[]
@@ -99,10 +110,22 @@ export class AuditRetentionService {
       });
     }
     const prunedCount = anchors.reduce((n, a) => n + a.eventsPrunedCount, 0);
+    const signatures = await Promise.all(
+      anchors.map((a) =>
+        this.signer.sign(
+          input.tenantId,
+          anchorDigestOf({ tenantId: input.tenantId, ...a }),
+        ),
+      ),
+    );
 
     await tenantClient.$transaction([
       tenantClient.auditChainAnchor.createMany({
-        data: anchors.map((a) => ({ tenantId: input.tenantId, ...a })),
+        data: anchors.map((a, i) => ({
+          tenantId: input.tenantId,
+          ...a,
+          signature: signatures[i]!,
+        })),
       }),
       tenantClient.auditEvent.deleteMany({
         where: {
