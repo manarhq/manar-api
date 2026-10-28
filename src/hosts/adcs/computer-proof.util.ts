@@ -1,6 +1,7 @@
 import { createHash, createPublicKey, sign, verify } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 import type * as x509 from '@peculiar/x509';
+import { keyAcceptable } from './key-policy';
 
 /** How far a proof's timestamp may differ from the server clock. */
 export const PROOF_SKEW_MS = 5 * 60_000;
@@ -55,6 +56,7 @@ export function verifyProof(
   if (!Number.isFinite(at) || Math.abs(now.getTime() - at) > PROOF_SKEW_MS) {
     return false;
   }
+  if (!keyAcceptable(new Uint8Array(cert.publicKey.rawData))) return false;
   try {
     const key = createPublicKey({
       key: Buffer.from(cert.publicKey.rawData),

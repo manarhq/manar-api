@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { webcrypto } from 'node:crypto';
 import * as x509 from '@peculiar/x509';
+import { keyAcceptable, signatureAcceptable } from './key-policy';
 
 x509.cryptoProvider.set(webcrypto as unknown as Crypto);
 
@@ -14,7 +15,8 @@ export type ChainFailure =
   | 'too_deep'
   | 'path_length'
   | 'critical_extension'
-  | 'ca_eku';
+  | 'ca_eku'
+  | 'weak_algorithm';
 
 /** A certificate was not acceptable; `reason` is for the log, never for the caller. */
 export class CertChainError extends Error {
@@ -46,6 +48,15 @@ const PROCESSED_CRITICAL = new Set([
  * restricts EKU must allow `requireEku` (or anyExtendedKeyUsage).
  */
 function checkPath(chain: x509.X509Certificate[], requireEku?: string): void {
+  chain.forEach((cert, i) => {
+    // The trust anchor is self-issued: its key counts, its own signature is not relied on.
+    if (
+      !keyAcceptable(new Uint8Array(cert.publicKey.rawData)) ||
+      (i < chain.length - 1 && !signatureAcceptable(cert))
+    ) {
+      throw new CertChainError('weak_algorithm');
+    }
+  });
   for (const cert of chain) {
     if (
       cert.extensions.some((e) => e.critical && !PROCESSED_CRITICAL.has(e.type))

@@ -26,22 +26,27 @@ export async function makeCa(
     notBefore?: Date;
     notAfter?: Date;
     pathLen?: number;
+    sigHash?: string;
+    keys?: CryptoKeyPair;
     keyUsages?: number;
     eku?: string[];
     extra?: x509.Extension[];
   } = {},
 ): Promise<TestCa> {
-  const keys = (await webcrypto.subtle.generateKey(RSA, true, [
-    'sign',
-    'verify',
-  ])) as CryptoKeyPair;
+  const keys =
+    opts.keys ??
+    ((await webcrypto.subtle.generateKey(
+      { ...RSA, hash: opts.sigHash ?? 'SHA-256' },
+      true,
+      ['sign', 'verify'],
+    )) as CryptoKeyPair);
   const cert = await x509.X509CertificateGenerator.create({
     serialNumber: '01' + Buffer.from(name).toString('hex').slice(0, 8),
     subject: `CN=${name}`,
     issuer: opts.issuer ? opts.issuer.cert.subject : `CN=${name}`,
     notBefore: opts.notBefore ?? new Date(Date.now() - day),
     notAfter: opts.notAfter ?? new Date(Date.now() + 365 * day),
-    signingAlgorithm: RSA,
+    signingAlgorithm: { ...RSA, hash: opts.sigHash ?? 'SHA-256' },
     publicKey: keys.publicKey,
     signingKey: opts.issuer ? opts.issuer.keys.privateKey : keys.privateKey,
     extensions: [
@@ -186,6 +191,23 @@ export async function makeCsrPem(
     ],
   });
   return csr.toString('pem');
+}
+
+export async function newRsaKeys(
+  modulusLength: number,
+): Promise<CryptoKeyPair> {
+  return (await webcrypto.subtle.generateKey({ ...RSA, modulusLength }, true, [
+    'sign',
+    'verify',
+  ])) as CryptoKeyPair;
+}
+
+export async function newEcKeys(namedCurve: string): Promise<CryptoKeyPair> {
+  return (await webcrypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve },
+    true,
+    ['sign', 'verify'],
+  )) as CryptoKeyPair;
 }
 
 export async function newKeys(): Promise<CryptoKeyPair> {

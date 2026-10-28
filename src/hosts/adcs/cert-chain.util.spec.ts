@@ -1,7 +1,13 @@
 import 'reflect-metadata';
 import { beforeAll, describe, expect, it } from 'vitest';
 import * as x509 from '@peculiar/x509';
-import { makeCa, makeLeaf, type TestCa } from '../../../test/support/test-pki';
+import {
+  makeCa,
+  makeLeaf,
+  newEcKeys,
+  newRsaKeys,
+  type TestCa,
+} from '../../../test/support/test-pki';
 import {
   CertChainError,
   EKU_CLIENT_AUTH,
@@ -238,6 +244,61 @@ describe('validateChain', () => {
           run((await makeLeaf(any)).pem, { intermediatesPem: [any.pem] }),
         ),
       ).toBe('ok');
+    });
+  });
+
+  describe('algorithm policy', () => {
+    it('accepts RSA 2048+ and EC P-256/P-384 keys with SHA-2 signatures', async () => {
+      for (const keys of [
+        await newRsaKeys(3072),
+        await newEcKeys('P-256'),
+        await newEcKeys('P-384'),
+      ]) {
+        const leaf = await makeLeaf(root, { keys });
+        expect(await reasonOf(run(leaf.pem))).toBe('ok');
+      }
+      for (const sigHash of ['SHA-384', 'SHA-512']) {
+        const strong = await makeCa(`${sigHash} Root`, { sigHash });
+        expect(
+          await reasonOf(
+            run((await makeLeaf(strong)).pem, { anchorsPem: [strong.pem] }),
+          ),
+        ).toBe('ok');
+      }
+    });
+
+    it('refuses a SHA-1 signature on the leaf and on an intermediate', async () => {
+      // A CA whose signing key is a SHA-1 key signs with SHA-1.
+      const sha1Root = await makeCa('SHA1 Root', { sigHash: 'SHA-1' });
+      const sha1Leaf = await makeLeaf(sha1Root);
+      expect(
+        await reasonOf(run(sha1Leaf.pem, { anchorsPem: [sha1Root.pem] })),
+      ).toBe('weak_algorithm');
+      const mid = await makeCa('SHA1 Signed Mid', { issuer: sha1Root });
+      const leaf = await makeLeaf(mid);
+      expect(
+        await reasonOf(
+          run(leaf.pem, {
+            intermediatesPem: [mid.pem],
+            anchorsPem: [sha1Root.pem],
+          }),
+        ),
+      ).toBe('weak_algorithm');
+    });
+
+    it('refuses weak keys: RSA 1024, EC P-521, on the leaf and on an intermediate', async () => {
+      const rsa1024 = await makeLeaf(root, { keys: await newRsaKeys(1024) });
+      expect(await reasonOf(run(rsa1024.pem))).toBe('weak_algorithm');
+      const p521 = await makeLeaf(root, { keys: await newEcKeys('P-521') });
+      expect(await reasonOf(run(p521.pem))).toBe('weak_algorithm');
+      const smallCa = await makeCa('Small Mid', {
+        issuer: root,
+        keys: await newRsaKeys(1024),
+      });
+      const leaf = await makeLeaf(smallCa);
+      expect(
+        await reasonOf(run(leaf.pem, { intermediatesPem: [smallCa.pem] })),
+      ).toBe('weak_algorithm');
     });
   });
 });
