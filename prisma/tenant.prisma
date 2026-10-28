@@ -2232,7 +2232,8 @@ model HostApprovalRule {
   id              String     @id @default(uuid())
   /// Null: applies to every group.
   hostGroupId     String?
-  hostGroup       HostGroup? @relation(fields: [hostGroupId], references: [id])
+  /// Restrict: deleting a group must never turn its rules into global ones.
+  hostGroup       HostGroup? @relation(fields: [hostGroupId], references: [id], onDelete: Restrict)
   /// Glob over the hostname (`*` and `?`), case-insensitive.
   hostnamePattern String?
   /// Empty means any address.

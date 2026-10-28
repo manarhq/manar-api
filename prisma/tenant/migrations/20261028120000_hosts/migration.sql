@@ -144,5 +144,5 @@ ALTER TABLE "hosts" ADD CONSTRAINT "hosts_hostGroupId_fkey" FOREIGN KEY ("hostGr
 ALTER TABLE "host_certificates" ADD CONSTRAINT "host_certificates_hostId_fkey" FOREIGN KEY ("hostId") REFERENCES "hosts"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "host_approval_rules" ADD CONSTRAINT "host_approval_rules_hostGroupId_fkey" FOREIGN KEY ("hostGroupId") REFERENCES "host_groups"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "host_approval_rules" ADD CONSTRAINT "host_approval_rules_hostGroupId_fkey" FOREIGN KEY ("hostGroupId") REFERENCES "host_groups"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 

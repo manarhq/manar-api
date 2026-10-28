@@ -121,6 +121,15 @@ export const AUDIT_EVENT_TYPES = {
   CLOUD_MCP_TOKEN_REJECTED: 'cloud_mcp.token_rejected',
   /** A tenant admin configured the realm's Entra ID identity provider. */
   IDENTITY_PROVIDER_CONFIGURED: 'tenant.identity_provider_configured',
+
+  /** Hosts (docs/hosts.md): a machine registered with an install key (new or merged). */
+  HOST_REGISTERED: 'host.registered',
+  HOST_APPROVED: 'host.approved',
+  HOST_REJECTED: 'host.rejected',
+  HOST_REVOKED: 'host.revoked',
+  /** An install key was created (its id, group and limits; never the key). */
+  INSTALL_KEY_CREATED: 'install_key.created',
+  INSTALL_KEY_REVOKED: 'install_key.revoked',
 } as const;
 
 export type AuditEventType =
