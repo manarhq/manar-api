@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  callerAddress,
   httpAdapterOptions,
   parseCidrs,
   trustedProxyIssues,
@@ -37,6 +38,22 @@ describe('trusted proxies', () => {
     expect(trustedProxyIssues({ MANAR_MCP_ENABLED: 'false' })).toEqual([]);
     expect(httpAdapterOptions({ MANAR_TRUSTED_PROXY_CIDRS: 'none' })).toEqual(
       {},
+    );
+  });
+});
+
+describe('callerAddress', () => {
+  it('is the request address only when the proxies in front are named', () => {
+    expect(
+      callerAddress('10.1.2.3', { MANAR_TRUSTED_PROXY_CIDRS: '10.42.0.0/16' }),
+    ).toBe('10.1.2.3');
+    expect(
+      callerAddress('10.1.2.3', { MANAR_TRUSTED_PROXY_CIDRS: 'none' }),
+    ).toBe('10.1.2.3');
+    // Unset: request.ip may be the proxy pod, so address checks must not pass on it.
+    expect(callerAddress('10.1.2.3', {})).toBe('unknown');
+    expect(callerAddress('10.1.2.3', { MANAR_TRUSTED_PROXY_CIDRS: ' ' })).toBe(
+      'unknown',
     );
   });
 });

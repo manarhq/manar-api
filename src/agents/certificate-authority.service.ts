@@ -109,6 +109,101 @@ export class CertificateAuthorityService {
   }
 
   /**
+   * Checks a CSR before anything is created for it: proof of possession and
+   * exactly one URI SAN equal to `identifier`. Throws `CsrValidationError`.
+   */
+  async assertCsrNames(csrPem: string, identifier: string): Promise<void> {
+    await this.validateCsr(csrPem, identifier);
+  }
+
+  /**
+   * Hosts (docs/hosts.md): the same issuance as agents, for a machine whose
+   * CSR names `host://<tenantSlug>/<machineId>`; stored as a `HostCertificate`.
+   */
+  async issueHostCertificate(
+    tenantClient: TenantPrismaClient,
+    host: { id: string; identifier: string },
+    csrPem: string,
+  ): Promise<IssuedCertificate> {
+    await this.validateCsr(csrPem, host.identifier);
+    const signed = await this.openBao.signVerbatim(
+      csrPem,
+      CertificateAuthorityService.AGENT_LEAF_CERTIFICATE_TTL,
+    );
+    const issuedCert = new x509.X509Certificate(signed.certificatePem);
+    const serialNumber = normalizeSerialNumber(issuedCert.serialNumber);
+    await tenantClient.hostCertificate.create({
+      data: {
+        hostId: host.id,
+        serialNumber,
+        notBefore: issuedCert.notBefore,
+        notAfter: issuedCert.notAfter,
+      },
+    });
+    return {
+      certificatePem: signed.certificatePem,
+      caChainPem: signed.caChainPem,
+      serialNumber,
+      notBefore: issuedCert.notBefore,
+      notAfter: issuedCert.notAfter,
+    };
+  }
+
+  /** Hosts: revokes one certificate (locally first, then OpenBao). */
+  async revokeHostCertificateSerial(
+    tenantClient: TenantPrismaClient,
+    serialNumber: string,
+  ): Promise<void> {
+    await tenantClient.hostCertificate.updateMany({
+      where: { serialNumber, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    try {
+      await this.openBao.revoke(toColonSeparatedHex(serialNumber));
+      await tenantClient.hostCertificate.updateMany({
+        where: { serialNumber },
+        data: { caRevokedAt: new Date() },
+      });
+    } catch (error) {
+      this.logger.error(
+        `OpenBao revoke of host certificate ${serialNumber} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Hosts: marks every certificate of `hostId` revoked locally (enforced at
+   * once), then asks OpenBao; OpenBao failures are logged, not thrown.
+   */
+  async revokeHostCertificates(
+    tenantClient: TenantPrismaClient,
+    hostId: string,
+  ): Promise<void> {
+    await tenantClient.hostCertificate.updateMany({
+      where: { hostId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    // Every serial revoked here but not yet confirmed by OpenBao (also those
+    // a previous call failed on).
+    const owed = await tenantClient.hostCertificate.findMany({
+      where: { hostId, revokedAt: { not: null }, caRevokedAt: null },
+    });
+    for (const cert of owed) {
+      try {
+        await this.openBao.revoke(toColonSeparatedHex(cert.serialNumber));
+        await tenantClient.hostCertificate.update({
+          where: { id: cert.id },
+          data: { caRevokedAt: new Date() },
+        });
+      } catch (error) {
+        this.logger.error(
+          `OpenBao revoke of host certificate ${cert.serialNumber} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  /**
    * Revokes every certificate for `agentId`, local state first: the
    * certificates' `revokedAt` and `Agent.status = REVOKED` are committed
    * before OpenBao is called. `AgentMtlsGuard` reads both from PostgreSQL on
@@ -233,11 +328,18 @@ export class CertificateAuthorityService {
       (extension): extension is x509.SubjectAlternativeNameExtension =>
         extension instanceof x509.SubjectAlternativeNameExtension,
     );
-    const uriNames = (sanExtension?.names.items ?? [])
+    const names = sanExtension?.names.items ?? [];
+    const uriNames = names
       .filter((name) => name.type === 'url')
       .map((name) => name.value);
 
-    if (uriNames.length !== 1 || uriNames[0] !== expectedIdentifier) {
+    // OpenBao signs verbatim: any other name (DNS, IP, email) in the CSR
+    // would end up in the certificate, so exactly one URI and nothing else.
+    if (
+      names.length !== 1 ||
+      uriNames.length !== 1 ||
+      uriNames[0] !== expectedIdentifier
+    ) {
       throw new CsrValidationError(
         `CSR Subject Alternative Name (URI) does not match this agent's expected identifier. Expected exactly one URI SAN equal to "${expectedIdentifier}", got: ${JSON.stringify(uriNames)}`,
       );
