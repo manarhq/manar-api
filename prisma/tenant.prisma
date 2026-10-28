@@ -2189,8 +2189,10 @@ enum HostKeyType {
   SOFTWARE
 }
 
-/// One machine. Re-registration with the same `machineId` in the same group
-/// merges into this row (VDI golden images register on every boot).
+/// One machine, unique per tenant by `machineId` (its certificate names
+/// `host://<tenantSlug>/<machineId>`). Re-registration merges into this row
+/// (VDI golden images register on every boot); a different key or a key
+/// from another group re-runs the approval rules (docs/hosts.md).
 model Host {
   id               String            @id @default(uuid())
   hostGroupId      String
@@ -2204,11 +2206,14 @@ model Host {
   approvedAt       DateTime?
   lastSeenAt       DateTime?
   registeredFromIp String
+  /// SHA-256 of the SubjectPublicKeyInfo the machine last registered with.
+  keyFingerprint   String
   certificates     HostCertificate[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
-  @@unique([hostGroupId, machineId])
+  @@unique([machineId])
+  @@index([hostGroupId])
   @@index([status])
   @@map("hosts")
 }

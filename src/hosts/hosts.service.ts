@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
+import * as x509 from '@peculiar/x509';
 import type { Host } from '../generated/tenant-client/client';
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
 import { AuditService } from '../audit/audit.service';
@@ -38,11 +40,13 @@ export interface RegisterHostResult {
  * 1. the key's prefix names the tenant (a host never picks its own);
  * 2. the CSR is checked before anything is spent or created;
  * 3. one key use is taken;
- * 4. the Host is created, or merged by `(hostGroupId, machineId)` (VDI),
- *    with status from the approval rules for a new machine, and audited in
- *    the same transaction;
+ * 4. the Host is created, or merged by `machineId` across the whole tenant
+ *    (VDI), and audited in the same transaction. Status comes from the
+ *    approval rules for a new machine, and again whenever a known machine
+ *    shows a different key (its old certificates are revoked) or a key from
+ *    another group (it moves): only the same key keeps an approval;
  * 5. a host certificate is issued for `host://<tenantSlug>/<machineId>`.
- * A rejected or revoked machine stays so and gets nothing.
+ * A rejected or revoked machine stays so in every group and gets nothing.
  */
 @Injectable()
 export class HostsService {
@@ -62,18 +66,20 @@ export class HostsService {
       throw new InstallKeyInvalidError();
     const identifier = `host://${slug}/${input.machineId}`;
     await this.ca.assertCsrNames(input.csr, identifier);
+    const keyFingerprint = createHash('sha256')
+      .update(
+        Buffer.from(
+          new x509.Pkcs10CertificateRequest(input.csr).publicKey.rawData,
+        ),
+      )
+      .digest('hex');
 
     const client = await this.tenants.getClient(tenant.id);
     const key = await this.keys.consume(client, input.installKey, input.ip);
 
     const { host, publish } = await client.$transaction(async (tx) => {
       const existing = await tx.host.findUnique({
-        where: {
-          hostGroupId_machineId: {
-            hostGroupId: key.hostGroupId,
-            machineId: input.machineId,
-          },
-        },
+        where: { machineId: input.machineId },
       });
       if (
         existing &&
@@ -81,7 +87,12 @@ export class HostsService {
       ) {
         throw new HostRefusedError(`host ${existing.id} is ${existing.status}`);
       }
-      const rule = existing
+      const keyChanged =
+        existing !== null && existing.keyFingerprint !== keyFingerprint;
+      const moved =
+        existing !== null && existing.hostGroupId !== key.hostGroupId;
+      const decideAgain = existing === null || keyChanged || moved;
+      const rule = !decideAgain
         ? null
         : matchApprovalRule(
             await tx.hostApprovalRule.findMany({
@@ -98,15 +109,32 @@ export class HostsService {
               keyType: input.keyType,
             },
           );
+      const decided = rule
+        ? {
+            status: 'APPROVED' as const,
+            approvedBy: `rule:${rule.id}`,
+            approvedAt: new Date(),
+          }
+        : { status: 'PENDING' as const, approvedBy: null, approvedAt: null };
+      if (keyChanged) {
+        // One machine, one key: the previous key's certificates stop now.
+        await tx.hostCertificate.updateMany({
+          where: { hostId: existing.id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
       const saved = existing
         ? await tx.host.update({
             where: { id: existing.id },
             data: {
+              hostGroupId: key.hostGroupId,
               hostname: input.hostname,
               os: input.os,
               keyType: input.keyType,
+              keyFingerprint,
               registeredFromIp: input.ip,
               lastSeenAt: new Date(),
+              ...(decideAgain ? decided : {}),
             },
           })
         : await tx.host.create({
@@ -116,15 +144,10 @@ export class HostsService {
               hostname: input.hostname,
               os: input.os,
               keyType: input.keyType,
+              keyFingerprint,
               registeredFromIp: input.ip,
               lastSeenAt: new Date(),
-              ...(rule
-                ? {
-                    status: 'APPROVED' as const,
-                    approvedBy: `rule:${rule.id}`,
-                    approvedAt: new Date(),
-                  }
-                : {}),
+              ...decided,
             },
           });
       const done = await this.audit.recordInTransaction(tx, tenant.id, {
@@ -135,6 +158,8 @@ export class HostsService {
           hostGroupId: saved.hostGroupId,
           installKeyId: key.id,
           merged: existing !== null,
+          keyChanged,
+          movedFromGroupId: moved ? existing.hostGroupId : null,
           status: saved.status,
           approvalRuleId: rule?.id ?? null,
           keyType: saved.keyType,

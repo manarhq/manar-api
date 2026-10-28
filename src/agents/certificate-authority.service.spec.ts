@@ -1,3 +1,6 @@
+import 'reflect-metadata';
+import { webcrypto } from 'node:crypto';
+import * as x509 from '@peculiar/x509';
 import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import type { OpenBaoPkiClient } from '../openbao/openbao-pki.client';
@@ -127,5 +130,48 @@ describe('CertificateAuthorityService.revoke (S10: local first)', () => {
     await service.revoke(client, 'agent-1', 'compromised');
 
     expect(statusSeenByOpenBao).toBe('REVOKED');
+  });
+});
+
+describe('CertificateAuthorityService CSR names', () => {
+  x509.cryptoProvider.set(webcrypto as unknown as Crypto);
+  async function csrWith(names: x509.JsonGeneralName[]): Promise<string> {
+    const alg = { name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' };
+    const keys = (await webcrypto.subtle.generateKey(alg, true, [
+      'sign',
+      'verify',
+    ])) as unknown as CryptoKeyPair;
+    const csr = await x509.Pkcs10CertificateRequestGenerator.create({
+      name: 'CN=test',
+      keys,
+      signingAlgorithm: alg,
+      extensions: [new x509.SubjectAlternativeNameExtension(names)],
+    });
+    return csr.toString('pem');
+  }
+  const ca = new CertificateAuthorityService({} as OpenBaoPkiClient);
+
+  it('accepts exactly the one expected URI name', async () => {
+    await expect(
+      ca.assertCsrNames(
+        await csrWith([{ type: 'url', value: 'host://t/m1' }]),
+        'host://t/m1',
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('refuses any extra name (DNS, IP, email) that would be signed verbatim', async () => {
+    for (const extra of [
+      { type: 'dns', value: 'manar-api.internal' },
+      { type: 'ip', value: '10.0.0.1' },
+      { type: 'email', value: 'x@example.test' },
+    ] as x509.JsonGeneralName[]) {
+      await expect(
+        ca.assertCsrNames(
+          await csrWith([{ type: 'url', value: 'host://t/m1' }, extra]),
+          'host://t/m1',
+        ),
+      ).rejects.toThrow(/Subject Alternative Name/);
+    }
   });
 });

@@ -68,6 +68,7 @@ CREATE TABLE "hosts" (
     "approvedAt" TIMESTAMP(3),
     "lastSeenAt" TIMESTAMP(3),
     "registeredFromIp" TEXT NOT NULL,
+    "keyFingerprint" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -117,10 +118,13 @@ CREATE UNIQUE INDEX "install_keys_keyHash_key" ON "install_keys"("keyHash");
 CREATE INDEX "install_keys_hostGroupId_idx" ON "install_keys"("hostGroupId");
 
 -- CreateIndex
+CREATE INDEX "hosts_hostGroupId_idx" ON "hosts"("hostGroupId");
+
+-- CreateIndex
 CREATE INDEX "hosts_status_idx" ON "hosts"("status");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "hosts_hostGroupId_machineId_key" ON "hosts"("hostGroupId", "machineId");
+CREATE UNIQUE INDEX "hosts_machineId_key" ON "hosts"("machineId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "host_certificates_serialNumber_key" ON "host_certificates"("serialNumber");

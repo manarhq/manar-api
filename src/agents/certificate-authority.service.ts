@@ -150,6 +150,32 @@ export class CertificateAuthorityService {
   }
 
   /**
+   * Hosts: marks every certificate of `hostId` revoked locally (enforced at
+   * once), then asks OpenBao; OpenBao failures are logged, not thrown.
+   */
+  async revokeHostCertificates(
+    tenantClient: TenantPrismaClient,
+    hostId: string,
+  ): Promise<void> {
+    const certs = await tenantClient.hostCertificate.findMany({
+      where: { hostId, revokedAt: null },
+    });
+    await tenantClient.hostCertificate.updateMany({
+      where: { hostId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    for (const cert of certs) {
+      try {
+        await this.openBao.revoke(cert.serialNumber);
+      } catch (error) {
+        this.logger.error(
+          `OpenBao revoke of host certificate ${cert.serialNumber} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  /**
    * Revokes every certificate for `agentId`, local state first: the
    * certificates' `revokedAt` and `Agent.status = REVOKED` are committed
    * before OpenBao is called. `AgentMtlsGuard` reads both from PostgreSQL on
@@ -274,11 +300,18 @@ export class CertificateAuthorityService {
       (extension): extension is x509.SubjectAlternativeNameExtension =>
         extension instanceof x509.SubjectAlternativeNameExtension,
     );
-    const uriNames = (sanExtension?.names.items ?? [])
+    const names = sanExtension?.names.items ?? [];
+    const uriNames = names
       .filter((name) => name.type === 'url')
       .map((name) => name.value);
 
-    if (uriNames.length !== 1 || uriNames[0] !== expectedIdentifier) {
+    // OpenBao signs verbatim: any other name (DNS, IP, email) in the CSR
+    // would end up in the certificate, so exactly one URI and nothing else.
+    if (
+      names.length !== 1 ||
+      uriNames.length !== 1 ||
+      uriNames[0] !== expectedIdentifier
+    ) {
       throw new CsrValidationError(
         `CSR Subject Alternative Name (URI) does not match this agent's expected identifier. Expected exactly one URI SAN equal to "${expectedIdentifier}", got: ${JSON.stringify(uriNames)}`,
       );

@@ -170,7 +170,7 @@ describe('Hosts (e2e)', () => {
       const { csrPem } = await generateAgentCsr(
         `host://${t.slug}/${machineId}`,
       );
-      return hosts.register({
+      const result = await hosts.register({
         installKey: raw,
         csr: csrPem,
         machineId,
@@ -179,6 +179,7 @@ describe('Hosts (e2e)', () => {
         keyType: extra.keyType ?? 'TPM',
         ip: extra.ip ?? '10.0.0.7',
       });
+      return { ...result, csr: csrPem };
     }
 
     it('registers a new machine as PENDING with a host certificate', async () => {
@@ -242,8 +243,15 @@ describe('Hosts (e2e)', () => {
         data: { status: 'APPROVED' },
       });
 
-      const second = await register(t, raw, 'golden-1', {
+      // The same machine key (a persistent VDI identity) re-registering.
+      const second = await hosts.register({
+        installKey: raw,
+        csr: first.csr,
+        machineId: 'golden-1',
         hostname: 'VDI-POOL-17',
+        os: 'Windows 11 24H2',
+        keyType: 'TPM',
+        ip: '10.0.0.7',
       });
 
       expect(second.hostId).toBe(first.hostId);
@@ -257,6 +265,55 @@ describe('Hosts (e2e)', () => {
         (await t.client.host.findUniqueOrThrow({ where: { id: first.hostId } }))
           .hostname,
       ).toBe('VDI-POOL-17');
+    }, 60_000);
+
+    it('a different key for a known machine revokes its certificates and re-runs approval', async () => {
+      const t = await tenant('rekey');
+      const { raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+      const first = await register(t, raw, 'laptop-7');
+      await t.client.host.update({
+        where: { id: first.hostId },
+        data: { status: 'APPROVED' },
+      });
+
+      // register() makes a fresh key pair each call: a different key.
+      const second = await register(t, raw, 'laptop-7');
+
+      expect(second.hostId).toBe(first.hostId);
+      expect(second.status).toBe('PENDING');
+      const certs = await t.client.hostCertificate.findMany({
+        where: { hostId: first.hostId },
+        orderBy: { createdAt: 'asc' },
+      });
+      expect(certs).toHaveLength(2);
+      expect(certs[0]!.revokedAt).not.toBeNull();
+      expect(certs[1]!.revokedAt).toBeNull();
+    }, 60_000);
+
+    it('a revoked machine stays revoked in every group of the tenant', async () => {
+      const t = await tenant('groups');
+      const other = await t.client.hostGroup.create({ data: { name: 'Ops' } });
+      const devKey = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+      const opsKey = await keys.create(t.client, t, admin, {
+        hostGroupId: other.id,
+        label: 'ops',
+      });
+      const first = await register(t, devKey.raw, 'same-box');
+      await t.client.host.update({
+        where: { id: first.hostId },
+        data: { status: 'REVOKED' },
+      });
+
+      await expect(register(t, opsKey.raw, 'same-box')).rejects.toBeInstanceOf(
+        HostRefusedError,
+      );
+      expect(await t.client.host.count()).toBe(1);
     }, 60_000);
 
     it('a revoked machine stays revoked and gets no certificate', async () => {
