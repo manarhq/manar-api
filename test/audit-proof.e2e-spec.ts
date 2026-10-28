@@ -204,6 +204,39 @@ describe('Audit proofs (e2e)', () => {
       expect((result as { brokenAt: string }).brokenAt).toMatch(/^unsealed:/);
     }, 60_000);
 
+    it("forging an unsealed event's timestamp into the future does not hide it: freshness comes from the signed SEAL time", async () => {
+      const t = await tenantWithEvents('future', 6);
+      await checkpoints.createCheckpoint(t.client, t.id);
+      const late = await audit.record(t.client, t.id, {
+        eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+        actor: { type: 'agent', id: 'agent-future' },
+        data: {},
+      });
+      // A consistent rewrite: timestamp a day ahead, hash recomputed, the
+      // partition row updated. Only the signed SEAL time is left to judge by.
+      const future = new Date(Date.now() + 86_400_000);
+      const forged = computeEventHash({
+        id: late.id,
+        eventType: late.eventType,
+        correlationId: late.correlationId,
+        actor: late.actor,
+        timestamp: future.toISOString(),
+        data: late.data,
+        previousHash: late.previousHash,
+      });
+      await t.client.$executeRaw`
+        UPDATE "audit_events" SET "timestamp" = ${future}, "eventHash" = ${forged}
+        WHERE "id" = ${late.id}`;
+      await t.client.$executeRaw`
+        UPDATE "audit_partition_state" SET "latestEventHash" = ${forged}
+        WHERE "partition" = ${late.partition}`;
+
+      expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+        valid: false,
+        brokenAt: `unsealed:${late.partition}`,
+      });
+    }, 60_000);
+
     it('deleting every SEAL is reported', async () => {
       const t = await tenantWithEvents('all', 10);
       await checkpoints.createCheckpoint(t.client, t.id);
@@ -214,6 +247,22 @@ describe('Audit proofs (e2e)', () => {
       expect((result as { brokenAt: string }).brokenAt).toMatch(/^unsealed:/);
     }, 60_000);
   });
+
+  it("deleting a whole partition (events and bookkeeping row) is caught by the last SEAL's heads", async () => {
+    const t = await tenantWithEvents('wipe', 14);
+    await checkpoints.createCheckpoint(t.client, t.id);
+    const partition = t.events[0]!.partition;
+
+    await t.client
+      .$executeRaw`DELETE FROM "audit_events" WHERE "partition" = ${partition}`;
+    await t.client
+      .$executeRaw`DELETE FROM "audit_partition_state" WHERE "partition" = ${partition}`;
+
+    expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+      valid: false,
+      brokenAt: 'checkpoint:1',
+    });
+  }, 60_000);
 
   it('a partly pruned range still checks its sealed head: a consistent rewrite of the tail is caught', async () => {
     const t = await manager.provisionTenant({

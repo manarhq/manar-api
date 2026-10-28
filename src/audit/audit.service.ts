@@ -100,10 +100,10 @@ export class AuditService implements OnModuleDestroy {
   private static readonly VERIFY_CHAIN_BATCH_SIZE = 1000;
 
   /**
-   * How old an event may be before verification requires a SEAL to cover
-   * it. The worker seals every second; two minutes absorbs a worker restart.
-   * Past it, an uncovered event means SEALs were deleted (or sealing has
-   * stopped), and verification fails closed.
+   * How long events may sit after the last SEAL, measured by that SEAL's
+   * signed time. The worker seals every second; two minutes absorbs a worker
+   * restart. Past it, uncovered events mean SEALs were deleted (or sealing
+   * has stopped), and verification fails closed.
    */
   static SEAL_GRACE_MS = 120_000;
 
@@ -377,9 +377,11 @@ export class AuditService implements OnModuleDestroy {
    * signature by this tenant's key, and every root whose range still exists
    * must equal the Merkle root of those events (`brokenAt: 'checkpoint:<seq>'`).
    * Where retention pruned the start of a range, the surviving tail is still
-   * checked against the signed partition head. Finally, every event older
-   * than `SEAL_GRACE_MS` must be covered by the last SEAL, so deleting SEALs
-   * is reported (`brokenAt: 'unsealed:<partition>'`).
+   * checked against the signed partition head. Every head the last SEAL
+   * signed must still exist or be explained by retention. Events after the
+   * last SEAL are accepted only while that SEAL is younger than
+   * `SEAL_GRACE_MS` by its own signed time, so deleting SEALs, or forging
+   * event timestamps, is reported (`brokenAt: 'unsealed:<partition>'`).
    */
   async verifyAuditChain(
     tenantClient: TenantPrismaClient,
@@ -459,32 +461,86 @@ export class AuditService implements OnModuleDestroy {
       return { valid: false, brokenAt: `checkpoint:${sealed.broken}` };
     }
 
-    // Every event older than the grace period must be under the last SEAL;
-    // otherwise SEALs were deleted (or sealing stopped).
-    const cutoff = new Date(Date.now() - AuditService.SEAL_GRACE_MS);
-    const oldEnough = await tenantClient.$queryRaw<
-      { partition: number; maxSeq: bigint }[]
-    >`
-      SELECT "partition", MAX("partitionSeq") AS "maxSeq"
-      FROM "audit_events" WHERE "timestamp" < ${cutoff}
-      GROUP BY "partition" ORDER BY "partition"
-    `;
-    for (const row of oldEnough) {
-      if (BigInt(row.maxSeq) > (sealed.heads.get(row.partition) ?? 0n)) {
-        return { valid: false, brokenAt: `unsealed:${row.partition}` };
+    const extents = new Map(
+      (
+        await tenantClient.$queryRaw<
+          { partition: number; oldest: bigint; newest: bigint; firstAt: Date }[]
+        >`
+          SELECT "partition", MIN("partitionSeq") AS "oldest",
+                 MAX("partitionSeq") AS "newest", MIN("timestamp") AS "firstAt"
+          FROM "audit_events" GROUP BY "partition"
+        `
+      ).map((r) => [
+        r.partition,
+        {
+          oldest: BigInt(r.oldest),
+          newest: BigInt(r.newest),
+          firstAt: new Date(r.firstAt),
+        },
+      ]),
+    );
+    const last = sealed.last;
+
+    if (last === null) {
+      // No SEAL at all: the events' own timestamps are the only clock left.
+      const cutoff = Date.now() - AuditService.SEAL_GRACE_MS;
+      for (const [partition, extent] of extents) {
+        if (extent.firstAt.getTime() < cutoff) {
+          return { valid: false, brokenAt: `unsealed:${partition}` };
+        }
+      }
+      return { valid: true };
+    }
+
+    // Every head the last SEAL signed still exists unchanged, or retention
+    // pruned it (later events remain, or an anchor names it). Catches a
+    // deleted partition or tail that the chain walk alone cannot see.
+    for (const head of last.heads) {
+      const seq = BigInt(head.seq);
+      const row = await tenantClient.auditEvent.findUnique({
+        where: {
+          partition_partitionSeq: {
+            partition: head.partition,
+            partitionSeq: seq,
+          },
+        },
+        select: { eventHash: true },
+      });
+      const extent = extents.get(head.partition);
+      const pruned =
+        (extent !== undefined && extent.oldest > seq) ||
+        (anchorsByPartition.get(head.partition)?.has(head.eventHash) ?? false);
+      if (row ? row.eventHash !== head.eventHash : !pruned) {
+        return { valid: false, brokenAt: `checkpoint:${last.seq}` };
+      }
+    }
+
+    // Events after the last SEAL are fine only while that SEAL is recent by
+    // its own signed time; event timestamps can be rewritten, it cannot.
+    if (Date.now() - last.createdAt.getTime() > AuditService.SEAL_GRACE_MS) {
+      const headSeq = new Map(
+        last.heads.map((h) => [h.partition, BigInt(h.seq)]),
+      );
+      for (const [partition, extent] of extents) {
+        if (extent.newest > (headSeq.get(partition) ?? 0n)) {
+          return { valid: false, brokenAt: `unsealed:${partition}` };
+        }
       }
     }
     return { valid: true };
   }
 
   /**
-   * The `seq` of the first SEAL that fails (or `null`), and the partition
-   * heads the last SEAL covers.
+   * The `seq` of the first SEAL that fails (or `null`), and the last SEAL:
+   * its signed time and partition heads.
    */
   private async verifyCheckpoints(
     tenantClient: TenantPrismaClient,
     tenantId: string,
-  ): Promise<{ broken: string | null; heads: Map<number, bigint> }> {
+  ): Promise<{
+    broken: string | null;
+    last: { seq: string; createdAt: Date; heads: PartitionHead[] } | null;
+  }> {
     const oldestRemaining = new Map(
       (
         await tenantClient.$queryRaw<{ partition: number; oldest: bigint }[]>`
@@ -496,8 +552,9 @@ export class AuditService implements OnModuleDestroy {
     let key: CheckpointPublicKey | null = null;
     let previousHash: string | null = null;
     let expectedSeq = 1n;
-    let heads = new Map<number, bigint>();
-    const fail = (seq: bigint) => ({ broken: seq.toString(), heads });
+    let last: { seq: string; createdAt: Date; heads: PartitionHead[] } | null =
+      null;
+    const fail = (seq: bigint) => ({ broken: seq.toString(), last });
 
     for (;;) {
       const page = await tenantClient.auditCheckpoint.findMany({
@@ -505,7 +562,7 @@ export class AuditService implements OnModuleDestroy {
         orderBy: { seq: 'asc' },
         take: AuditService.VERIFY_CHAIN_BATCH_SIZE,
       });
-      if (page.length === 0) return { broken: null, heads };
+      if (page.length === 0) return { broken: null, last };
 
       for (const cp of page) {
         const roots = cp.roots as unknown as PartitionRoot[];
@@ -578,9 +635,11 @@ export class AuditService implements OnModuleDestroy {
         }
         previousHash = cp.checkpointHash;
         expectedSeq += 1n;
-        heads = new Map(
-          partitionHeads.map((h) => [h.partition, BigInt(h.seq)]),
-        );
+        last = {
+          seq: cp.seq.toString(),
+          createdAt: cp.createdAt,
+          heads: partitionHeads,
+        };
       }
     }
   }
