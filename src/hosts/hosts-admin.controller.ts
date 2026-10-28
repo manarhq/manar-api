@@ -37,6 +37,7 @@ import {
   HostsAdminService,
   HostTransitionError,
   OrgUnitCycleError,
+  UnverifiedRuleError,
   type HostDecision,
 } from './hosts-admin.service';
 import {
@@ -79,7 +80,11 @@ function http(error: unknown): never {
   }
   if (error instanceof HostTransitionError)
     throw new ConflictException(error.message);
-  if (error instanceof OrgUnitCycleError || error instanceof InvalidCidrError) {
+  if (
+    error instanceof OrgUnitCycleError ||
+    error instanceof InvalidCidrError ||
+    error instanceof UnverifiedRuleError
+  ) {
     throw new BadRequestException(error.message);
   }
   throw error;
@@ -335,7 +340,11 @@ export class HostOrganisationController {
 
   @Post('host-approval-rules')
   @RequireRole(...WRITE)
-  @ApiOperation({ summary: 'Create a host approval rule' })
+  @ApiOperation({
+    summary: 'Create a host approval rule',
+    description:
+      'At least one verified condition is required: cidrs, requireAdcs, adOuDn or requireTpm (attested). A hostname pattern alone, or no condition, is refused with 400.',
+  })
   async createRule(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const client = await this.tenants.getClient(auth.tenant.id);
     return Promise.resolve()
@@ -352,7 +361,11 @@ export class HostOrganisationController {
 
   @Patch('host-approval-rules/:id')
   @RequireRole(...WRITE)
-  @ApiOperation({ summary: 'Change or disable a host approval rule' })
+  @ApiOperation({
+    summary: 'Change or disable a host approval rule',
+    description:
+      'The rule as changed must still have a verified condition (400 otherwise).',
+  })
   async updateRule(
     @CurrentAuth() auth: AuthContext,
     @Param('id', new ParseUUIDPipe()) id: string,

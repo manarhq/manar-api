@@ -14,12 +14,22 @@ import {
   type CursorPage,
   type DecodedCursor,
 } from '../common/pagination/cursor-pagination';
+import { ruleHasVerifiedCondition } from './host-approval';
+import { normalizeDn } from './adcs/ou.util';
 import { isValidCidr } from './install-key.util';
 import { InvalidCidrError } from './install-keys.service';
 
 export class HostNotFoundError extends Error {}
 /** The requested change isn't allowed from the host's current status. */
 export class HostTransitionError extends Error {}
+/** An auto-approval rule needs at least one verified condition (F2b, docs/hosts.md). */
+export class UnverifiedRuleError extends Error {
+  constructor() {
+    super(
+      'a rule needs at least one verified condition: an address range, requireAdcs, adOuDn or requireTpm (attested); a hostname pattern is self-reported',
+    );
+  }
+}
 /** Setting this parent would make an org unit its own ancestor. */
 export class OrgUnitCycleError extends Error {}
 
@@ -105,6 +115,9 @@ export class HostsAdminService {
           ...(approve
             ? {
                 keyFingerprint: current.pendingKeyFingerprint,
+                // A new key has not passed TPM attestation.
+                tpmVerified: false,
+                tpmEkFingerprint: null,
                 hostGroupId: current.pendingHostGroupId ?? current.hostGroupId,
                 status: 'APPROVED' as const,
                 approvedBy: actor.id,
@@ -318,7 +331,7 @@ export class HostsAdminService {
     return unit;
   }
 
-  createApprovalRule(
+  async createApprovalRule(
     client: TenantPrismaClient,
     tenantId: string,
     actor: AuditActor,
@@ -327,10 +340,19 @@ export class HostsAdminService {
       hostnamePattern?: string | null;
       cidrs?: string[];
       requireTpm?: boolean;
+      requireAdcs?: boolean;
+      adOuDn?: string | null;
       enabled?: boolean;
     },
   ) {
     assertCidrs(input.cidrs);
+    assertOuDn(input.adOuDn);
+    assertGuard({
+      cidrs: input.cidrs ?? [],
+      requireTpm: input.requireTpm ?? false,
+      requireAdcs: input.requireAdcs ?? false,
+      adOuDn: input.adOuDn ?? null,
+    });
     return this.audited(
       client,
       tenantId,
@@ -343,6 +365,8 @@ export class HostsAdminService {
             hostnamePattern: input.hostnamePattern ?? null,
             cidrs: input.cidrs ?? [],
             requireTpm: input.requireTpm ?? false,
+            requireAdcs: input.requireAdcs ?? false,
+            adOuDn: input.adOuDn ?? null,
             enabled: input.enabled ?? true,
           },
         });
@@ -354,7 +378,7 @@ export class HostsAdminService {
     );
   }
 
-  updateApprovalRule(
+  async updateApprovalRule(
     client: TenantPrismaClient,
     tenantId: string,
     actor: AuditActor,
@@ -363,10 +387,13 @@ export class HostsAdminService {
       hostnamePattern?: string | null;
       cidrs?: string[];
       requireTpm?: boolean;
+      requireAdcs?: boolean;
+      adOuDn?: string | null;
       enabled?: boolean;
     },
   ) {
     assertCidrs(input.cidrs);
+    assertOuDn(input.adOuDn);
     return this.audited(
       client,
       tenantId,
@@ -374,6 +401,15 @@ export class HostsAdminService {
       AUDIT_EVENT_TYPES.HOST_APPROVAL_RULE_CHANGED,
       async (tx) => {
         const before = await tx.hostApprovalRule.findUnique({ where: { id } });
+        // The guard applies to the rule as it will be, not to the patch alone.
+        if (before) {
+          assertGuard({
+            cidrs: input.cidrs ?? before.cidrs,
+            requireTpm: input.requireTpm ?? before.requireTpm,
+            requireAdcs: input.requireAdcs ?? before.requireAdcs,
+            adOuDn: input.adOuDn === undefined ? before.adOuDn : input.adOuDn,
+          });
+        }
         const rule = await tx.hostApprovalRule.update({
           where: { id },
           data: input,
@@ -387,4 +423,16 @@ export class HostsAdminService {
 function assertCidrs(cidrs: string[] | undefined): void {
   const bad = (cidrs ?? []).filter((c) => !isValidCidr(c));
   if (bad.length > 0) throw new InvalidCidrError(bad.join(', '));
+}
+
+function assertGuard(
+  rule: Parameters<typeof ruleHasVerifiedCondition>[0],
+): void {
+  if (!ruleHasVerifiedCondition(rule)) throw new UnverifiedRuleError();
+}
+
+function assertOuDn(dn: string | null | undefined): void {
+  if (dn && normalizeDn(dn) === null) {
+    throw new InvalidCidrError('adOuDn is not a valid DN');
+  }
 }

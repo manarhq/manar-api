@@ -136,6 +136,17 @@ export const AUDIT_EVENT_TYPES = {
   /** An install key was created (its id, group and limits; never the key). */
   INSTALL_KEY_CREATED: 'install_key.created',
   INSTALL_KEY_REVOKED: 'install_key.revoked',
+  /** F2b: customer CA trust, AD connection settings, OU rules and TPM roots changed (before/after, never the AD password). */
+  ADCS_TRUSTED_CA_CHANGED: 'adcs_trusted_ca.changed',
+  ADCS_SETTINGS_CHANGED: 'adcs_settings.changed',
+  AD_OU_RULE_CHANGED: 'ad_ou_rule.changed',
+  TPM_TRUST_ROOT_CHANGED: 'tpm_trust_root.changed',
+  /** A host moved to another group because its AD OU changed (registration or re-sync). */
+  HOST_GROUP_MOVED: 'host.group_moved',
+  /** An admin-triggered AD re-sync ran (counts) or could not run (AD unreachable). */
+  ADCS_RESYNC_RUN: 'adcs.resync_run',
+  /** A host's TPM attestation passed or a challenge was failed. */
+  HOST_TPM_VERIFIED: 'host.tpm_verified',
 } as const;
 
 export type AuditEventType =

@@ -26,6 +26,7 @@ import {
   HostsAdminService,
   HostTransitionError,
 } from '../src/hosts/hosts-admin.service';
+import { TpmAttestationService } from '../src/hosts/tpm/tpm-attestation.service';
 import { generateAgentCsr } from '@manar/sdk-node';
 import { fakeConfigService } from './support/audit-test-config';
 
@@ -59,7 +60,14 @@ describe('Hosts (e2e)', () => {
     const ca = new CertificateAuthorityService(
       new OpenBaoPkiClient(fakeConfigService()),
     );
-    hosts = new HostsService(control, manager, keys, audit, ca);
+    hosts = new HostsService(
+      control,
+      manager,
+      keys,
+      audit,
+      ca,
+      new TpmAttestationService(control, manager, audit),
+    );
     admins = new HostsAdminService(audit, ca);
   }, 60_000);
 
@@ -221,7 +229,6 @@ describe('Hosts (e2e)', () => {
           hostGroupId: t.group.id,
           hostnamePattern: 'dev-*',
           cidrs: ['10.0.0.0/8'],
-          requireTpm: true,
         },
       });
       const { raw } = await keys.create(t.client, t, admin, {
@@ -230,9 +237,9 @@ describe('Hosts (e2e)', () => {
       });
 
       expect((await register(t, raw, 'm1')).status).toBe('APPROVED');
-      expect(
-        (await register(t, raw, 'm2', { keyType: 'SOFTWARE' })).status,
-      ).toBe('PENDING');
+      expect((await register(t, raw, 'm2', { hostname: 'SRV-9' })).status).toBe(
+        'PENDING',
+      );
       expect((await register(t, raw, 'm3', { ip: '192.0.2.4' })).status).toBe(
         'PENDING',
       );
@@ -406,6 +413,7 @@ describe('Hosts (e2e)', () => {
         keys,
         audit,
         racingCa,
+        new TpmAttestationService(control, manager, audit),
       );
 
       await expect(
