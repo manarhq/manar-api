@@ -93,6 +93,8 @@ interface FakeClientOptions {
   anchorHashes?: string[];
   /** Omit for "the bookkeeping row agrees with the chain's tail". */
   latestEventHash?: string | null;
+  /** The row's `latestSeq`; defaults to the last event's position. */
+  latestSeq?: number;
   hasChainState?: boolean;
 }
 
@@ -111,15 +113,20 @@ function fakeTenantClient(options: FakeClientOptions): {
   const client = {
     auditEvent: {
       findMany: (args: {
-        where: { partition: number; partitionSeq?: { gt?: number } };
+        where: {
+          partition: number;
+          partitionSeq?: { gt?: number; lte?: number };
+        };
         take?: number;
       }) => {
         const after = args.where.partitionSeq?.gt;
+        const upTo = args.where.partitionSeq?.lte;
         const page = events
           .filter(
             (event) =>
               event.partition === args.where.partition &&
-              (after === undefined || event.partitionSeq > after),
+              (after === undefined || event.partitionSeq > after) &&
+              (upTo === undefined || event.partitionSeq <= upTo),
           )
           .sort((a, b) => (a.partitionSeq < b.partitionSeq ? -1 : 1))
           .slice(0, args.take);
@@ -142,19 +149,23 @@ function fakeTenantClient(options: FakeClientOptions): {
     $queryRaw: () => Promise.resolve([]),
     auditCheckpoint: { findMany: () => Promise.resolve([]) },
     auditPartitionState: {
-      findMany: () =>
+      // Only the post-walk tail check uses this; extents are empty here.
+      findMany: () => Promise.resolve([]),
+      findUnique: ({ where }: { where: { partition: number } }) =>
         Promise.resolve(
-          options.hasChainState === false
-            ? []
-            : [
-                {
-                  partition: 0,
-                  latestEventHash:
-                    options.latestEventHash === undefined
-                      ? (events[events.length - 1]?.eventHash ?? null)
-                      : options.latestEventHash,
-                },
-              ],
+          options.hasChainState === false || where.partition !== 0
+            ? null
+            : {
+                partition: 0,
+                latestSeq:
+                  options.latestSeq ??
+                  events[events.length - 1]?.partitionSeq ??
+                  0,
+                latestEventHash:
+                  options.latestEventHash === undefined
+                    ? (events[events.length - 1]?.eventHash ?? null)
+                    : options.latestEventHash,
+              },
         ),
     },
   } as unknown as TenantPrismaClient;
@@ -301,6 +312,23 @@ describe('AuditService.verifyAuditChain', () => {
       {
         valid: false,
         brokenAt: 'audit_partition_state:0',
+      },
+    );
+  });
+
+  it('ignores events appended after the partition row was read (a busy log is not "broken")', async () => {
+    const events = buildChain(CHAIN_LENGTH);
+    // The row was read when the partition ended at 2400; 100 more events
+    // committed before the walk reached them.
+    const { client } = fakeTenantClient({
+      events,
+      latestSeq: 2400,
+      latestEventHash: events[2399]!.eventHash,
+    });
+
+    await expect(makeService().verifyAuditChain(client, 't1')).resolves.toEqual(
+      {
+        valid: true,
       },
     );
   });

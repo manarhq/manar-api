@@ -271,6 +271,24 @@ describe('Audit proofs (e2e)', () => {
     expect(result.valid).toBe(false);
   }, 60_000);
 
+  it("a row planted past a partition's recorded tail is reported", async () => {
+    const t = await tenantWithEvents('planted', 3);
+    const p = t.events[0]!.partition;
+    const last = t.events
+      .filter((e) => e.partition === p)
+      .sort((a, b) => a.partitionSeq - b.partitionSeq)
+      .at(-1)!;
+    await t.client.$executeRaw`
+      INSERT INTO "audit_events" ("id","eventType","correlationId","actor","timestamp","data","previousHash","eventHash","partition","partitionSeq")
+      VALUES (${randomUUID()}, 'task.created', 'planted', '{"type":"system","id":"x"}'::jsonb, now(), '{}'::jsonb,
+              ${last.eventHash}, ${'f'.repeat(64)}, ${p}, ${last.partitionSeq + 1})`;
+
+    expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+      valid: false,
+      brokenAt: `audit_partition_state:${p}`,
+    });
+  }, 60_000);
+
   it('a forged (unsigned) retention anchor does not excuse deleted events', async () => {
     const t = await tenantWithEvents('anchor', 1);
     let n = 0;

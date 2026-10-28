@@ -417,15 +417,15 @@ export class AuditService implements OnModuleDestroy {
       tenantClient,
       tenantId,
     );
-    const states = new Map(
-      (await tenantClient.auditPartitionState.findMany()).map((state) => [
-        state.partition,
-        state.latestEventHash ?? null,
-      ]),
-    );
-
     for (let partition = 0; partition < AUDIT_PARTITIONS; partition += 1) {
       const anchors = anchorsByPartition.get(partition) ?? new Set<string>();
+      // Read this partition's row right before walking it, and walk only up
+      // to the tail it names: events committed meanwhile are not "broken".
+      const state = await tenantClient.auditPartitionState.findUnique({
+        where: { partition },
+      });
+      const stateHash = state ? (state.latestEventHash ?? null) : undefined;
+      const upTo = state ? state.latestSeq : undefined;
       let expectedPreviousHash: string | null = null;
       let isFirstRemainingEvent = true;
       let lastSeq: number | null = null;
@@ -435,6 +435,7 @@ export class AuditService implements OnModuleDestroy {
           tenantClient,
           partition,
           lastSeq,
+          upTo,
         );
         if (events.length === 0) break;
 
@@ -464,7 +465,6 @@ export class AuditService implements OnModuleDestroy {
         if (events.length < AuditService.VERIFY_CHAIN_BATCH_SIZE) break;
       }
 
-      const stateHash = states.get(partition);
       const tailMatches = isFirstRemainingEvent
         ? // No events left: fine if never written, or if retention pruned
           // the whole partition (its tail is then a known anchor).
@@ -500,6 +500,20 @@ export class AuditService implements OnModuleDestroy {
         },
       ]),
     );
+    // Rows past a partition's recorded tail were not written by AuditService
+    // (it advances the row in the same transaction). Rows are read after the
+    // extents above, so a legitimate append can never trip this.
+    const tails = new Map(
+      (await tenantClient.auditPartitionState.findMany()).map((r) => [
+        r.partition,
+        r.latestSeq,
+      ]),
+    );
+    for (const [partition, extent] of extents) {
+      if (extent.newest > (tails.get(partition) ?? 0)) {
+        return { valid: false, brokenAt: `audit_partition_state:${partition}` };
+      }
+    }
     const last = sealed.last;
 
     if (last === null) {
@@ -717,12 +731,20 @@ export class AuditService implements OnModuleDestroy {
     tenantClient: TenantPrismaClient,
     partition: number,
     afterSeq: number | null,
+    upTo: number | undefined,
   ): Promise<AuditEvent[]> {
     return tenantClient.auditEvent.findMany({
-      where:
-        afterSeq === null
-          ? { partition }
-          : { partition, partitionSeq: { gt: afterSeq } },
+      where: {
+        partition,
+        ...(afterSeq === null && upTo === undefined
+          ? {}
+          : {
+              partitionSeq: {
+                ...(afterSeq === null ? {} : { gt: afterSeq }),
+                ...(upTo === undefined ? {} : { lte: upTo }),
+              },
+            }),
+      },
       orderBy: { partitionSeq: 'asc' },
       take: AuditService.VERIFY_CHAIN_BATCH_SIZE,
     });
