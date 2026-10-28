@@ -4,6 +4,7 @@ import {
   ConflictException,
   Controller,
   ForbiddenException,
+  Logger,
   Post,
   Req,
   UnauthorizedException,
@@ -21,7 +22,20 @@ import {
   HostsService,
 } from './hosts.service';
 import { InstallKeyInvalidError } from './install-keys.service';
-import { RegisterHostRequestSchema } from './hosts.validation';
+import {
+  AdcsCertificateRejectedError,
+  AdcsEnrolmentService,
+} from './adcs/adcs-enrolment.service';
+import {
+  TpmAttestationError,
+  TpmAttestationService,
+} from './tpm/tpm-attestation.service';
+import {
+  RegisterAdcsRequestSchema,
+  RegisterHostRequestSchema,
+  TpmActivateSchema,
+  TpmChallengeSchema,
+} from './hosts.validation';
 
 /**
  * The machine-facing registration exchange (docs/hosts.md). Unauthenticated
@@ -34,7 +48,17 @@ export class HostRegisterController {
   constructor(
     private readonly hosts: HostsService,
     private readonly config: ConfigService,
+    private readonly adcs: AdcsEnrolmentService,
+    private readonly tpm: TpmAttestationService,
   ) {}
+
+  private address(request: FastifyRequest): string {
+    return callerAddress(request.ip, {
+      MANAR_TRUSTED_PROXY_CIDRS: this.config.get<string>(
+        'MANAR_TRUSTED_PROXY_CIDRS',
+      ),
+    });
+  }
 
   @Post('register')
   @ApiOperation({
@@ -54,11 +78,7 @@ export class HostRegisterController {
     try {
       return await this.hosts.register({
         ...input,
-        ip: callerAddress(request.ip, {
-          MANAR_TRUSTED_PROXY_CIDRS: this.config.get<string>(
-            'MANAR_TRUSTED_PROXY_CIDRS',
-          ),
-        }),
+        ip: this.address(request),
       });
     } catch (error) {
       if (error instanceof InstallKeyInvalidError) {
@@ -76,6 +96,93 @@ export class HostRegisterController {
       }
       if (error instanceof CsrValidationError) {
         throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
+  }
+
+  @Post('register/adcs')
+  @ApiOperation({
+    summary:
+      'Register a domain-joined machine with its AD CS computer certificate',
+    description:
+      'No install key. The certificate chain must lead to a customer CA the tenant trusts (validity, Client Authentication EKU, CRL). The body carries a proof signed by the certificate key over the tenant, machineId, CSR key and time. The host group comes from the machine OU read from AD; any doubt leaves the host PENDING.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: '{ hostId, status, certificatePem, caChainPem }',
+  })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async registerWithCertificate(
+    @Req() request: FastifyRequest,
+    @Body() body: unknown,
+  ) {
+    const input = parseBodyOrThrow(RegisterAdcsRequestSchema, body);
+    try {
+      return await this.adcs.register({ ...input, ip: this.address(request) });
+    } catch (error) {
+      if (error instanceof AdcsCertificateRejectedError) {
+        Logger.warn(error.message, HostRegisterController.name);
+        throw new UnauthorizedException('Computer certificate not accepted');
+      }
+      if (error instanceof HostRekeyPendingError) {
+        throw new ConflictException({
+          code: 'host_rekey_pending',
+          message:
+            'This machine is known with another key or group; an admin must approve the change',
+        });
+      }
+      if (error instanceof HostRefusedError) {
+        throw new ForbiddenException('This machine is not allowed to register');
+      }
+      if (error instanceof CsrValidationError) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
+  }
+
+  @Post('tpm/challenge')
+  @ApiOperation({
+    summary: 'Start TPM credential activation',
+    description:
+      'Send the EK certificate chain and the TPMT_PUBLIC of the host key. The reply carries credentialBlob and encryptedSecret for TPM2_ActivateCredential; answer with POST /hosts/tpm/activate, then register with tpmChallengeId.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: '{ challengeId, credentialBlob, encryptedSecret, expiresAt }',
+  })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  async tpmChallenge(@Body() body: unknown) {
+    const input = parseBodyOrThrow(TpmChallengeSchema, body);
+    try {
+      return await this.tpm.challenge(input);
+    } catch (error) {
+      if (error instanceof TpmAttestationError) {
+        Logger.warn(error.message, HostRegisterController.name);
+        throw new BadRequestException('TPM attestation request not accepted');
+      }
+      throw error;
+    }
+  }
+
+  @Post('tpm/activate')
+  @ApiOperation({
+    summary: 'Complete TPM credential activation',
+    description:
+      'Send the secret the TPM recovered. Three wrong answers end the challenge.',
+  })
+  @ApiResponse({ status: 201, description: '{ verified: boolean }' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  async tpmActivate(@Body() body: unknown) {
+    const input = parseBodyOrThrow(TpmActivateSchema, body);
+    try {
+      return { verified: await this.tpm.activate(input) };
+    } catch (error) {
+      if (error instanceof TpmAttestationError) {
+        throw new BadRequestException('TPM attestation request not accepted');
       }
       throw error;
     }

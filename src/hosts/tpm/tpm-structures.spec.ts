@@ -92,7 +92,8 @@ describe('TPM structures', () => {
       akName,
       secret: randomBytes(32),
     });
-    credentialBlob[credentialBlob.length - 1] ^= 1;
+    credentialBlob[credentialBlob.length - 1] =
+      credentialBlob[credentialBlob.length - 1]! ^ 1;
     expect(() =>
       activateCredential({
         ekPrivateKey: ek.privateKey,

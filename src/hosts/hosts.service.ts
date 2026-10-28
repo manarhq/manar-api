@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import * as x509 from '@peculiar/x509';
-import type { Host } from '../generated/tenant-client/client';
+import type {
+  Host,
+  PrismaClient as TenantPrismaClient,
+} from '../generated/tenant-client/client';
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
-import { matchApprovalRule } from './host-approval';
+import { matchApprovalRule, type VerifiedFacts } from './host-approval';
+import { TpmAttestationService } from './tpm/tpm-attestation.service';
 import { tenantSlugOf } from './install-key.util';
 import {
   InstallKeyInvalidError,
@@ -31,8 +35,41 @@ export interface RegisterHostInput {
   hostname: string;
   os: string;
   keyType: 'TPM' | 'SOFTWARE';
+  /** A verified TPM challenge (docs/hosts.md); without one the TPM claim is not trusted. */
+  tpmChallengeId?: string;
   /** The address the request came from (the server's view, not the client's claim). */
   ip: string;
+}
+
+/** What the registration core needs; both entry points build it after their own checks. */
+export interface CompleteRegistrationInput {
+  tenant: { id: string; slug: string };
+  client: TenantPrismaClient;
+  identifier: string;
+  csr: string;
+  keyFingerprint: string;
+  machineId: string;
+  hostname: string;
+  os: string;
+  /** What the installer reports; shown as TPM only when `verified.tpm`. */
+  keyType: 'TPM' | 'SOFTWARE';
+  ip: string;
+  method: 'INSTALL_KEY' | 'ADCS';
+  /** The group decided by the key or by a verified OU; null: not decided. */
+  hostGroupId: string | null;
+  /** Used when `hostGroupId` is null (a new ADCS host whose OU is unknown). */
+  defaultHostGroupId: string;
+  installKeyId: string | null;
+  /** False: the host is PENDING whatever the rules say (doubt about identity). */
+  autoApprove: boolean;
+  verified: VerifiedFacts;
+  tpmEkFingerprint: string | null;
+  adcs: {
+    dnsName: string;
+    adDn: string | null;
+    revocation: 'good' | 'unknown';
+    adState: string;
+  } | null;
 }
 
 export interface RegisterHostResult {
@@ -64,6 +101,7 @@ export class HostsService {
     private readonly keys: InstallKeysService,
     private readonly audit: AuditService,
     private readonly ca: CertificateAuthorityService,
+    private readonly tpm: TpmAttestationService,
   ) {}
 
   async register(input: RegisterHostInput): Promise<RegisterHostResult> {
@@ -84,6 +122,49 @@ export class HostsService {
 
     const client = await this.tenants.getClient(tenant.id);
     const key = await this.keys.consume(client, input.installKey, input.ip);
+    const redeemed = input.tpmChallengeId
+      ? await this.tpm.redeem(
+          client,
+          input.tpmChallengeId,
+          input.machineId,
+          keyFingerprint,
+        )
+      : null;
+    return this.completeRegistration({
+      tenant: { id: tenant.id, slug },
+      client,
+      identifier,
+      csr: input.csr,
+      keyFingerprint,
+      machineId: input.machineId,
+      hostname: input.hostname,
+      os: input.os,
+      keyType: input.keyType,
+      ip: input.ip,
+      method: 'INSTALL_KEY',
+      hostGroupId: key.hostGroupId,
+      defaultHostGroupId: key.hostGroupId,
+      installKeyId: key.id,
+      autoApprove: true,
+      verified: { adcs: false, adDn: null, tpm: redeemed !== null },
+      tpmEkFingerprint: redeemed?.ekFingerprint ?? null,
+      adcs: null,
+    });
+  }
+
+  /**
+   * The shared registration core (install key and computer certificate):
+   * creates or merges the Host, applies approval rules (only for facts the
+   * server verified), audits in the same transaction, issues the host
+   * certificate. See the class comment for the order and the rekey rules.
+   */
+  async completeRegistration(
+    ctx: CompleteRegistrationInput,
+  ): Promise<RegisterHostResult> {
+    const { client, tenant, keyFingerprint, identifier } = ctx;
+    const input = ctx;
+    const adcs = ctx.method === 'ADCS';
+    const keyType = ctx.verified.tpm ? 'TPM' : ctx.keyType;
 
     const { host, publish, rekeyPending } = await client.$transaction(
       async (tx) => {
@@ -98,10 +179,16 @@ export class HostsService {
             `host ${existing.id} is ${existing.status}`,
           );
         }
+        // A known computer-certificate host follows its OU (when AD was read);
+        // anything else must keep the group its key was issued for.
+        const followsOu = adcs && existing?.enrolmentMethod === 'ADCS';
+        const targetGroupId = followsOu
+          ? (ctx.hostGroupId ?? existing.hostGroupId)
+          : (ctx.hostGroupId ?? ctx.defaultHostGroupId);
         if (
           existing &&
           (existing.keyFingerprint !== keyFingerprint ||
-            existing.hostGroupId !== key.hostGroupId)
+            (!followsOu && existing.hostGroupId !== targetGroupId))
         ) {
           // One pending rekey at a time: a second one never replaces it, so
           // an admin approves exactly the key they looked at.
@@ -111,7 +198,7 @@ export class HostsService {
               where: { id: existing.id },
               data: {
                 pendingKeyFingerprint: keyFingerprint,
-                pendingHostGroupId: key.hostGroupId,
+                pendingHostGroupId: targetGroupId,
               },
             });
           }
@@ -123,10 +210,10 @@ export class HostsService {
               actor: { type: 'system', id: 'system:host-registration' },
               data: {
                 hostId: existing.id,
-                installKeyId: key.id,
+                installKeyId: ctx.installKeyId,
                 keyFingerprint,
                 keyChanged: existing.keyFingerprint !== keyFingerprint,
-                toHostGroupId: key.hostGroupId,
+                toHostGroupId: targetGroupId,
                 ip: input.ip,
                 // One rekey waits at a time; a later one is recorded, never applied.
                 conflictsWithPending,
@@ -135,44 +222,64 @@ export class HostsService {
           );
           return { host: existing, publish: requested, rekeyPending: true };
         }
-        const rule = existing
-          ? null
-          : matchApprovalRule(
-              await tx.hostApprovalRule.findMany({
-                where: {
-                  enabled: true,
-                  OR: [{ hostGroupId: null }, { hostGroupId: key.hostGroupId }],
+        const rule =
+          existing || !ctx.autoApprove
+            ? null
+            : matchApprovalRule(
+                await tx.hostApprovalRule.findMany({
+                  where: {
+                    enabled: true,
+                    OR: [{ hostGroupId: null }, { hostGroupId: targetGroupId }],
+                  },
+                  orderBy: { createdAt: 'asc' },
+                }),
+                {
+                  hostGroupId: targetGroupId,
+                  hostname: input.hostname,
+                  ip: input.ip,
+                  verified: ctx.verified,
                 },
-                orderBy: { createdAt: 'asc' },
-              }),
-              {
-                hostGroupId: key.hostGroupId,
-                hostname: input.hostname,
-                ip: input.ip,
-                keyType: input.keyType,
-              },
-            );
+              );
+        const adFacts = ctx.adcs
+          ? {
+              enrolmentMethod: 'ADCS',
+              adcsDnsName: ctx.adcs.dnsName,
+              ...(ctx.adcs.adDn
+                ? { adDn: ctx.adcs.adDn, adDnCheckedAt: new Date() }
+                : {}),
+            }
+          : {};
+        const tpmFacts = ctx.verified.tpm
+          ? { tpmVerified: true, tpmEkFingerprint: ctx.tpmEkFingerprint }
+          : {};
+        const moved =
+          existing !== null && existing.hostGroupId !== targetGroupId;
         const saved = existing
           ? await tx.host.update({
               where: { id: existing.id },
               data: {
                 hostname: input.hostname,
                 os: input.os,
-                keyType: input.keyType,
+                keyType,
                 registeredFromIp: input.ip,
                 lastSeenAt: new Date(),
+                hostGroupId: targetGroupId,
+                ...(followsOu ? adFacts : {}),
+                ...tpmFacts,
               },
             })
           : await tx.host.create({
               data: {
-                hostGroupId: key.hostGroupId,
+                hostGroupId: targetGroupId,
                 machineId: input.machineId,
                 hostname: input.hostname,
                 os: input.os,
-                keyType: input.keyType,
+                keyType,
                 keyFingerprint,
                 registeredFromIp: input.ip,
                 lastSeenAt: new Date(),
+                ...adFacts,
+                ...tpmFacts,
                 ...(rule
                   ? {
                       status: 'APPROVED' as const,
@@ -188,14 +295,49 @@ export class HostsService {
           data: {
             hostId: saved.id,
             hostGroupId: saved.hostGroupId,
-            installKeyId: key.id,
+            installKeyId: ctx.installKeyId,
+            enrolmentMethod: ctx.method,
             merged: existing !== null,
             status: saved.status,
             approvalRuleId: rule?.id ?? null,
             keyType: saved.keyType,
+            tpmVerified: saved.tpmVerified,
+            ...(ctx.adcs
+              ? {
+                  adcsDnsName: ctx.adcs.dnsName,
+                  revocation: ctx.adcs.revocation,
+                  adState: ctx.adcs.adState,
+                }
+              : {}),
             ip: input.ip,
           },
         });
+        if (moved) {
+          // Followed its OU to another group: its own record, same transaction.
+          const groupMoved = await this.audit.recordInTransaction(
+            tx,
+            tenant.id,
+            {
+              eventType: AUDIT_EVENT_TYPES.HOST_GROUP_MOVED,
+              actor: { type: 'system', id: 'system:host-registration' },
+              data: {
+                hostId: saved.id,
+                fromHostGroupId: existing.hostGroupId,
+                toHostGroupId: targetGroupId,
+                adDn: ctx.adcs?.adDn ?? null,
+                source: 'registration',
+              },
+            },
+          );
+          return {
+            host: saved,
+            publish: () => {
+              done();
+              groupMoved();
+            },
+            rekeyPending: false,
+          };
+        }
         return { host: saved, publish: done, rekeyPending: false };
       },
     );

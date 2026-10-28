@@ -94,7 +94,7 @@ export async function checkRevocation(
 ): Promise<Revocation> {
   for (const url of crlUrls(leaf)) {
     try {
-      const crl = new x509.X509Crl(await fetchCrl(url));
+      const crl = new x509.X509Crl(new Uint8Array(await fetchCrl(url)));
       if (crl.issuer !== issuer.subject) continue;
       if (!(await crl.verify({ publicKey: issuer.publicKey }))) continue;
       if (!crl.nextUpdate || crl.nextUpdate < now || crl.thisUpdate > now)

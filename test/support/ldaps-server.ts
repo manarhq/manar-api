@@ -1,7 +1,28 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- ldapjs handler arguments are untyped */
 import { createPrivateKey, webcrypto } from 'node:crypto';
-import ldap from 'ldapjs';
+import ldapjs from 'ldapjs';
 import type { TestLeaf } from './test-pki';
+
+/** The few ldapjs calls used here (its published types do not cover them). */
+interface LdapLike {
+  createServer(o: { certificate: string; key: string }): LdapServer;
+  InvalidCredentialsError: new () => Error;
+}
+interface LdapServer {
+  bind(dn: string, h: Handler): void;
+  search(base: string, h: Handler): void;
+  listen(port: number, host: string, cb: () => void): void;
+  address(): { port: number };
+  close(cb: () => void): void;
+}
+type Handler = (
+  req: {
+    credentials: string;
+    filter: { matches(a: Record<string, unknown>): boolean };
+  },
+  res: { end(): void; send(e: unknown): void },
+  next: (e?: Error) => void,
+) => void;
+const ldap = ldapjs as unknown as LdapLike;
 
 export interface FakeComputer {
   dn: string;
@@ -54,7 +75,7 @@ export async function startLdapsServer(input: {
   await new Promise<void>((resolve) =>
     server.listen(0, '127.0.0.1', () => resolve()),
   );
-  const port = (server.address() as { port: number }).port;
+  const port = server.address().port;
   return {
     port,
     url: `ldaps://localhost:${port}`,

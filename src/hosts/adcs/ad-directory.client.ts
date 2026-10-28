@@ -65,15 +65,15 @@ export class LdapsAdDirectory extends AdDirectory {
       const { searchEntries } = await client.search(connection.baseDn, {
         scope: 'sub',
         filter: `(&(objectClass=computer)(dNSHostName=${escapeLdapFilter(dnsName)}))`,
-        attributes: ['distinguishedName', 'dNSHostName'],
+        attributes: ['dNSHostName'],
         sizeLimit: 5,
       });
       const [only, ...rest] = searchEntries;
       // None, or more than one: no OU is claimed.
       if (!only || rest.length > 0) return { found: false };
-      const dn = only.distinguishedName ?? only.dn;
-      return typeof dn === 'string' && dn.length > 0
-        ? { found: true, dn }
+      // The entry's own DN is the computer's distinguishedName.
+      return only.dn.length > 0
+        ? { found: true, dn: only.dn }
         : { found: false };
     } catch (error) {
       if (error instanceof Error && error.name === 'SizeLimitExceededError') {
