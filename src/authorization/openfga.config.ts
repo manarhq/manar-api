@@ -45,6 +45,14 @@ export const OpenFgaConfigSchema = z.object({
    */
   OPENFGA_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1000),
 
+  /**
+   * Spec 7.2 (docs/decision-path.md): how long an ALLOW result is reused per (user, relation,
+   * object). Denies and errors are never cached. A tuple delete through the same process clears it;
+   * on another replica a revoked grant is honoured within this bound. Default 3000; 0 turns it off;
+   * capped at 10 s.
+   */
+  OPENFGA_CACHE_TTL_MS: z.coerce.number().int().min(0).max(10_000).optional(),
+
   /** Pins a specific store ID, skipping name-based discovery/creation entirely. */
   OPENFGA_STORE_ID: z.string().min(1).optional(),
 

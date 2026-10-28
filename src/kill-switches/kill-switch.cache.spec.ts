@@ -29,7 +29,7 @@ function harness(maxAgeMs = 2000) {
       ? Promise.reject(new Error('valkey down'))
       : Promise.resolve(epochs.value),
   );
-  const bumpTenant = vi.fn(() => {
+  const bumpTenant = vi.fn<(tenantId: string) => Promise<void>>(() => {
     epochs.value = `0:${Number(epochs.value.split(':')[1]) + 1}`;
     return Promise.resolve();
   });

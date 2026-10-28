@@ -55,6 +55,9 @@ export class OpenFgaClientService implements OnModuleInit {
   private client: OpenFgaClient | null = null;
   /** Checks only: its HTTP timeout is the check bound, so a timed-out check never leaves its socket open. */
   private checkClient: OpenFgaClient | null = null;
+  /** Spec 7.2: tuple key -> expiry (ms epoch) of a cached ALLOW. Bounded; oldest out first. */
+  private readonly allowed = new Map<string, number>();
+  private static readonly CACHE_MAX_ENTRIES = 10_000;
   private _storeId: string | null = null;
   private _authorizationModelId: string | null = null;
 
@@ -115,6 +118,8 @@ export class OpenFgaClientService implements OnModuleInit {
     deletes?: TupleKey[];
   }): Promise<void> {
     if (!input.writes?.length && !input.deletes?.length) return;
+    // A revoked tuple must not be served from this process's cache.
+    if (input.deletes?.length) this.allowed.clear();
     await this.requireClient().write(
       { writes: input.writes, deletes: input.deletes },
       {
@@ -127,7 +132,32 @@ export class OpenFgaClientService implements OnModuleInit {
   }
 
   /** A single relationship check — throws on any transport/server failure, deliberately not swallowed here (see class doc comment). */
-  async check(tuple: TupleKey): Promise<boolean> {
+  async check(
+    tuple: TupleKey,
+    options?: { consistency?: 'high' },
+  ): Promise<boolean> {
+    // Spec 7.2: only ALLOW is reused, for at most OPENFGA_CACHE_TTL_MS; `high` always asks OpenFGA.
+    const ttlMs =
+      this.configService.get('OPENFGA_CACHE_TTL_MS', { infer: true }) ?? 3000;
+    const useCache = ttlMs > 0 && options?.consistency !== 'high';
+    const key = `${tuple.user}|${tuple.relation}|${tuple.object}`;
+    if (useCache) {
+      const expiresAt = this.allowed.get(key);
+      if (expiresAt !== undefined && Date.now() <= expiresAt) return true;
+      this.allowed.delete(key);
+    }
+    const allowed = await this.checkRemote(tuple);
+    if (allowed && useCache) {
+      this.allowed.set(key, Date.now() + ttlMs);
+      if (this.allowed.size > OpenFgaClientService.CACHE_MAX_ENTRIES) {
+        const oldest = this.allowed.keys().next().value;
+        if (oldest !== undefined) this.allowed.delete(oldest);
+      }
+    }
+    return allowed;
+  }
+
+  private async checkRemote(tuple: TupleKey): Promise<boolean> {
     const timeoutMs = this.configService.get('OPENFGA_CHECK_TIMEOUT_MS', {
       infer: true,
     });
