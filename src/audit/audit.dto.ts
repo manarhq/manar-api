@@ -11,7 +11,7 @@ export class VerifyAuditChainResponseDto {
   @ApiProperty({
     required: false,
     description:
-      "Present only when valid=false: the AuditEvent.id where verification first failed, 'audit_partition_state:<n>' for a partition whose tail disagrees with its bookkeeping row, or 'checkpoint:<seq>' for a signed checkpoint that fails.",
+      "Present only when valid=false: the AuditEvent.id where verification first failed, 'audit_partition_state:<n>' for a partition whose tail disagrees with its bookkeeping row, 'checkpoint:<seq>' for a signed checkpoint that fails, or 'unsealed:<partition>' when events older than the grace period are not covered by any checkpoint.",
   })
   brokenAt?: string;
 }

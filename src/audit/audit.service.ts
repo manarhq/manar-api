@@ -99,6 +99,14 @@ export class AuditService implements OnModuleDestroy {
    */
   private static readonly VERIFY_CHAIN_BATCH_SIZE = 1000;
 
+  /**
+   * How old an event may be before verification requires a SEAL to cover
+   * it. The worker seals every second; two minutes absorbs a worker restart.
+   * Past it, an uncovered event means SEALs were deleted (or sealing has
+   * stopped), and verification fails closed.
+   */
+  static SEAL_GRACE_MS = 120_000;
+
   private readonly batcher = new AuditBatcher<PendingAuditEvent, AuditEvent>(
     (_tenantId, items) => this.flushBatch(items),
   );
@@ -368,6 +376,10 @@ export class AuditService implements OnModuleDestroy {
    * to the previous one, hash to its stored `checkpointHash`, carry a valid
    * signature by this tenant's key, and every root whose range still exists
    * must equal the Merkle root of those events (`brokenAt: 'checkpoint:<seq>'`).
+   * Where retention pruned the start of a range, the surviving tail is still
+   * checked against the signed partition head. Finally, every event older
+   * than `SEAL_GRACE_MS` must be covered by the last SEAL, so deleting SEALs
+   * is reported (`brokenAt: 'unsealed:<partition>'`).
    */
   async verifyAuditChain(
     tenantClient: TenantPrismaClient,
@@ -442,21 +454,37 @@ export class AuditService implements OnModuleDestroy {
       }
     }
 
-    const brokenCheckpoint = await this.verifyCheckpoints(
-      tenantClient,
-      tenantId,
-    );
-    if (brokenCheckpoint !== null) {
-      return { valid: false, brokenAt: `checkpoint:${brokenCheckpoint}` };
+    const sealed = await this.verifyCheckpoints(tenantClient, tenantId);
+    if (sealed.broken !== null) {
+      return { valid: false, brokenAt: `checkpoint:${sealed.broken}` };
+    }
+
+    // Every event older than the grace period must be under the last SEAL;
+    // otherwise SEALs were deleted (or sealing stopped).
+    const cutoff = new Date(Date.now() - AuditService.SEAL_GRACE_MS);
+    const oldEnough = await tenantClient.$queryRaw<
+      { partition: number; maxSeq: bigint }[]
+    >`
+      SELECT "partition", MAX("partitionSeq") AS "maxSeq"
+      FROM "audit_events" WHERE "timestamp" < ${cutoff}
+      GROUP BY "partition" ORDER BY "partition"
+    `;
+    for (const row of oldEnough) {
+      if (BigInt(row.maxSeq) > (sealed.heads.get(row.partition) ?? 0n)) {
+        return { valid: false, brokenAt: `unsealed:${row.partition}` };
+      }
     }
     return { valid: true };
   }
 
-  /** The `seq` of the first SEAL that fails, or `null` when all hold. */
+  /**
+   * The `seq` of the first SEAL that fails (or `null`), and the partition
+   * heads the last SEAL covers.
+   */
   private async verifyCheckpoints(
     tenantClient: TenantPrismaClient,
     tenantId: string,
-  ): Promise<string | null> {
+  ): Promise<{ broken: string | null; heads: Map<number, bigint> }> {
     const oldestRemaining = new Map(
       (
         await tenantClient.$queryRaw<{ partition: number; oldest: bigint }[]>`
@@ -468,6 +496,8 @@ export class AuditService implements OnModuleDestroy {
     let key: CheckpointPublicKey | null = null;
     let previousHash: string | null = null;
     let expectedSeq = 1n;
+    let heads = new Map<number, bigint>();
+    const fail = (seq: bigint) => ({ broken: seq.toString(), heads });
 
     for (;;) {
       const page = await tenantClient.auditCheckpoint.findMany({
@@ -475,17 +505,16 @@ export class AuditService implements OnModuleDestroy {
         orderBy: { seq: 'asc' },
         take: AuditService.VERIFY_CHAIN_BATCH_SIZE,
       });
-      if (page.length === 0) return null;
+      if (page.length === 0) return { broken: null, heads };
 
       for (const cp of page) {
-        const broken = cp.seq.toString();
         const roots = cp.roots as unknown as PartitionRoot[];
         const partitionHeads = cp.partitionHeads as unknown as PartitionHead[];
         if (
           cp.seq !== expectedSeq ||
           cp.previousCheckpointHash !== previousHash
         ) {
-          return broken;
+          return fail(cp.seq);
         }
         const recomputed = checkpointHashOf({
           seq: cp.seq,
@@ -504,14 +533,34 @@ export class AuditService implements OnModuleDestroy {
             key.publicKeyPem,
           )
         ) {
-          return broken;
+          return fail(cp.seq);
         }
         for (const r of roots) {
           const from = BigInt(r.fromSeq);
           const to = BigInt(r.toSeq);
           const oldest = oldestRemaining.get(r.partition);
-          // Retention pruned this range (or its start): nothing left to recompute.
-          if (oldest === undefined || from < oldest) continue;
+          if (oldest === undefined || from < oldest) {
+            // Retention pruned the start of this range, so its root can't be
+            // recomputed; the surviving tail must still match the signed head.
+            if (oldest !== undefined && oldest <= to) {
+              const head = partitionHeads.find(
+                (h) => h.partition === r.partition && BigInt(h.seq) === to,
+              );
+              const tail = await tenantClient.auditEvent.findUnique({
+                where: {
+                  partition_partitionSeq: {
+                    partition: r.partition,
+                    partitionSeq: to,
+                  },
+                },
+                select: { eventHash: true },
+              });
+              if (!head || !tail || tail.eventHash !== head.eventHash) {
+                return fail(cp.seq);
+              }
+            }
+            continue;
+          }
           const events = await tenantClient.auditEvent.findMany({
             where: {
               partition: r.partition,
@@ -524,11 +573,14 @@ export class AuditService implements OnModuleDestroy {
             BigInt(events.length) !== to - from + 1n ||
             merkleRoot(events.map((e) => e.eventHash)) !== r.root
           ) {
-            return broken;
+            return fail(cp.seq);
           }
         }
         previousHash = cp.checkpointHash;
         expectedSeq += 1n;
+        heads = new Map(
+          partitionHeads.map((h) => [h.partition, BigInt(h.seq)]),
+        );
       }
     }
   }

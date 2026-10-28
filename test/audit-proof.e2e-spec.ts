@@ -12,6 +12,7 @@ import {
 } from '../src/audit/checkpoint/audit-proof.service';
 import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
+import { computeEventHash } from '../src/audit/audit-hash';
 import { verifyInclusion } from '../src/audit/merkle';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
@@ -157,6 +158,121 @@ describe('Audit proofs (e2e)', () => {
       .$executeRaw`UPDATE "audit_checkpoints" SET "signature" = ${forged} WHERE "seq" = 1`;
 
     expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+      valid: false,
+      brokenAt: 'checkpoint:1',
+    });
+  }, 60_000);
+
+  describe('deleting SEALs is detected', () => {
+    const grace = AuditService.SEAL_GRACE_MS;
+    // Everything recorded in these tests is seconds old; a zero grace period
+    // treats it as old enough that it must already be sealed.
+    beforeAll(() => {
+      AuditService.SEAL_GRACE_MS = 0;
+    });
+    afterAll(() => {
+      AuditService.SEAL_GRACE_MS = grace;
+    });
+
+    it('events no SEAL covers, older than the grace period, break verification', async () => {
+      const t = await tenantWithEvents('unsealed', 12);
+      const result = await audit.verifyAuditChain(t.client, t.id);
+      expect(result.valid).toBe(false);
+      expect((result as { brokenAt: string }).brokenAt).toMatch(
+        /^unsealed:\d+$/,
+      );
+    }, 60_000);
+
+    it('deleting the newest SEAL is reported', async () => {
+      const t = await tenantWithEvents('tail', 10);
+      await checkpoints.createCheckpoint(t.client, t.id);
+      await audit.record(t.client, t.id, {
+        eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+        actor: { type: 'agent', id: 'agent-0' },
+        data: { late: true },
+      });
+      await checkpoints.createCheckpoint(t.client, t.id);
+      expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+        valid: true,
+      });
+
+      await t.client
+        .$executeRaw`DELETE FROM "audit_checkpoints" WHERE "seq" = 2`;
+
+      const result = await audit.verifyAuditChain(t.client, t.id);
+      expect(result.valid).toBe(false);
+      expect((result as { brokenAt: string }).brokenAt).toMatch(/^unsealed:/);
+    }, 60_000);
+
+    it('deleting every SEAL is reported', async () => {
+      const t = await tenantWithEvents('all', 10);
+      await checkpoints.createCheckpoint(t.client, t.id);
+      await t.client.$executeRaw`DELETE FROM "audit_checkpoints"`;
+
+      const result = await audit.verifyAuditChain(t.client, t.id);
+      expect(result.valid).toBe(false);
+      expect((result as { brokenAt: string }).brokenAt).toMatch(/^unsealed:/);
+    }, 60_000);
+  });
+
+  it('a partly pruned range still checks its sealed head: a consistent rewrite of the tail is caught', async () => {
+    const t = await manager.provisionTenant({
+      slug: `proof-head-${randomUUID().slice(0, 8)}`,
+      name: 'Audit proof head',
+    });
+    provisioned.push({
+      tenantId: t.id,
+      databaseName: t.databaseBinding!.databaseName,
+    });
+    const client = await manager.getClient(t.id);
+    const events = [];
+    for (let i = 0; i < 5; i += 1) {
+      events.push(
+        await audit.record(client, t.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'agent-head' },
+          data: { i },
+        }),
+      );
+    }
+    await checkpoints.createCheckpoint(client, t.id);
+    const partition = events[0]!.partition;
+
+    // Prune the first two as retention would: delete them, anchor the second.
+    await client.auditChainAnchor.create({
+      data: {
+        tenantId: t.id,
+        partition,
+        anchorHash: events[1]!.eventHash,
+        eventsPrunedCount: 2,
+      },
+    });
+    await client.auditEvent.deleteMany({
+      where: { id: { in: [events[0]!.id, events[1]!.id] } },
+    });
+    expect(await audit.verifyAuditChain(client, t.id)).toEqual({ valid: true });
+
+    // Rewrite the tail consistently: new data, a correctly recomputed hash,
+    // and the partition's bookkeeping row updated to match. The chain walk
+    // alone cannot see this; the sealed head can.
+    const tail = events[4]!;
+    const forgedHash = computeEventHash({
+      id: tail.id,
+      eventType: tail.eventType,
+      correlationId: tail.correlationId,
+      actor: tail.actor,
+      timestamp: tail.timestamp.toISOString(),
+      data: { i: 4, forged: true },
+      previousHash: tail.previousHash,
+    });
+    await client.$executeRaw`
+      UPDATE "audit_events" SET "data" = '{"i":4,"forged":true}'::jsonb, "eventHash" = ${forgedHash}
+      WHERE "id" = ${tail.id}`;
+    await client.$executeRaw`
+      UPDATE "audit_partition_state" SET "latestEventHash" = ${forgedHash}
+      WHERE "partition" = ${partition}`;
+
+    expect(await audit.verifyAuditChain(client, t.id)).toEqual({
       valid: false,
       brokenAt: 'checkpoint:1',
     });

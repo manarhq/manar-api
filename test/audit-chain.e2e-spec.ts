@@ -24,6 +24,7 @@ import {
 } from '../src/audit/audit.service';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
+import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
 import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { computeEventHash } from '../src/audit/audit-hash';
@@ -510,6 +511,14 @@ describe('Audit chain (e2e)', () => {
         adapter: new PrismaPg({ connectionString: url.toString() }),
       });
       try {
+        // Old, unsealed history fails closed until the first SEAL, which the
+        // worker writes within a second of the upgrade.
+        expect(
+          await auditService.verifyAuditChain(client, 'legacy-tenant'),
+        ).toEqual({ valid: false, brokenAt: 'unsealed:0' });
+        await new AuditCheckpointService(
+          new CheckpointSigner(new OpenBaoKvClient(fakeConfigService())),
+        ).createCheckpoint(client, 'legacy-tenant');
         expect(
           await auditService.verifyAuditChain(client, 'legacy-tenant'),
         ).toEqual({
