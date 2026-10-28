@@ -64,6 +64,22 @@ describe('AuditBatcher', () => {
     await expect(next).resolves.toBe(3);
   });
 
+  it('rejects only the items whose result is an Error; the rest resolve', async () => {
+    const flush = vi.fn((_k: string, items: number[]) =>
+      Promise.resolve(
+        items.map((n) => (n === 2 ? new Error('poison') : n * 10)),
+      ),
+    );
+    const batcher = new AuditBatcher<number, number>(flush);
+    const results = [1, 2, 3].map((n) => batcher.enqueue('t1', n));
+    for (const p of results) void p.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(5);
+
+    await expect(results[0]).resolves.toBe(10);
+    await expect(results[1]).rejects.toThrow('poison');
+    await expect(results[2]).resolves.toBe(30);
+  });
+
   it('rejects the batch when flush returns the wrong number of results', async () => {
     const flush = vi.fn(() => Promise.resolve([1]));
     const batcher = new AuditBatcher(flush);

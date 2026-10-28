@@ -438,6 +438,59 @@ describe('AuditService.record (partitioned, group commit)', () => {
     await service.onModuleDestroy();
   });
 
+  it('a poison event fails alone: its batch-mates still commit', async () => {
+    const fake = fakeWriteTx();
+    const service = makeService();
+    // Postgres refuses the whole insert when any row is bad (here: data with
+    // U+0000, which jsonb rejects); a lone retry of each row isolates it.
+    const client = {
+      $transaction: (fn: (tx: unknown) => Promise<unknown>) => {
+        const tx = fake.tx as {
+          auditEvent: {
+            createManyAndReturn: (a: { data: { data: unknown }[] }) => unknown;
+          };
+        };
+        const real = tx.auditEvent.createManyAndReturn;
+        return fn({
+          ...tx,
+          auditEvent: {
+            createManyAndReturn: (args: { data: { data: unknown }[] }) =>
+              args.data.some((r) => JSON.stringify(r.data).includes('\\u0000'))
+                ? Promise.reject(
+                    new Error('unsupported Unicode escape sequence'),
+                  )
+                : real(args),
+          },
+        });
+      },
+    } as unknown as TenantPrismaClient;
+    const record = (data: unknown) =>
+      service.record(client, 'tenant-1', {
+        eventType: 'authorization.allowed',
+        actor: { type: 'agent', id: 'a1' },
+        data,
+      });
+
+    const results = await Promise.allSettled([
+      record({ n: 1 }),
+      record({ text: 'bad\u0000' }),
+      record({ n: 3 }),
+    ]);
+
+    expect(results.map((r) => r.status)).toEqual([
+      'fulfilled',
+      'rejected',
+      'fulfilled',
+    ]);
+    expect(fake.inserted).toHaveLength(2);
+    const [first, , third] = results as PromiseFulfilledResult<{
+      eventHash: string;
+      previousHash: string | null;
+    }>[];
+    expect(third!.value.previousHash).toBe(first!.value.eventHash);
+    await service.onModuleDestroy();
+  });
+
   it('publishes each committed event to Kafka with its partition position', async () => {
     const publish = vi.fn(() => Promise.resolve());
     const service = new AuditService({

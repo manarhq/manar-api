@@ -148,9 +148,37 @@ export class AuditService implements OnModuleDestroy {
     };
   }
 
-  /** One transaction per batch. Every item in a batch shares its tenant, so its client. */
-  private flushBatch(items: PendingAuditEvent[]): Promise<AuditEvent[]> {
-    return items[0]!.client.$transaction((tx) => this.append(tx, items));
+  /**
+   * One transaction per batch. Every item in a batch shares its tenant, so its
+   * client. If the batch fails, each item is retried in its own transaction,
+   * so one event Postgres refuses (say, `data` with U+0000) fails only its own
+   * caller and cannot drop its batch-mates' records.
+   */
+  private async flushBatch(
+    items: PendingAuditEvent[],
+  ): Promise<(AuditEvent | Error)[]> {
+    const client = items[0]!.client;
+    try {
+      return await client.$transaction((tx) => this.append(tx, items));
+    } catch (error) {
+      if (items.length === 1) throw error;
+      const results: (AuditEvent | Error)[] = [];
+      for (const item of items) {
+        try {
+          const [event] = await client.$transaction((tx) =>
+            this.append(tx, [item]),
+          );
+          results.push(event!);
+        } catch (itemError) {
+          results.push(
+            itemError instanceof Error
+              ? itemError
+              : new Error(String(itemError)),
+          );
+        }
+      }
+      return results;
+    }
   }
 
   /**

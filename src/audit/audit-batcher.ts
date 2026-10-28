@@ -7,7 +7,8 @@
  * Each `enqueue` promise settles only when its batch's `flush` settles, so a
  * caller that awaits it still knows its event is committed before acting
  * (record-before-execution, ADR-003). A failed flush rejects every item in
- * that batch and nothing else.
+ * that batch and nothing else; a flush may instead return an `Error` in an
+ * item's slot to reject just that item.
  */
 interface Pending<TIn, TOut> {
   item: TIn;
@@ -28,7 +29,10 @@ export class AuditBatcher<TIn, TOut> {
   private closed = false;
 
   constructor(
-    private readonly flush: (key: string, items: TIn[]) => Promise<TOut[]>,
+    private readonly flush: (
+      key: string,
+      items: TIn[],
+    ) => Promise<(TOut | Error)[]>,
     opts: { maxWaitMs?: number; maxBatch?: number } = {},
   ) {
     this.maxWaitMs = opts.maxWaitMs ?? 5;
@@ -94,7 +98,11 @@ export class AuditBatcher<TIn, TOut> {
             `audit flush returned ${results.length} results for ${batch.length} items`,
           );
         }
-        batch.forEach((p, i) => p.resolve(results[i] as TOut));
+        batch.forEach((p, i) => {
+          const result = results[i];
+          if (result instanceof Error) p.reject(result);
+          else p.resolve(result as TOut);
+        });
       } catch (error) {
         batch.forEach((p) => p.reject(error));
       } finally {

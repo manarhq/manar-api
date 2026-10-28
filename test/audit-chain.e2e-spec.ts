@@ -445,6 +445,40 @@ describe('Audit chain (e2e)', () => {
     await manager2.onModuleDestroy();
   }, 90_000);
 
+  it('an event Postgres refuses (U+0000 in data) fails alone; its batch-mates commit', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('poison'),
+      name: 'Audit Poison Event Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const client = await manager.getClient(tenant.id);
+    const record = (data: unknown) =>
+      auditService.record(client, tenant.id, {
+        eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+        actor: { type: 'agent', id: 'agent-poison' },
+        data,
+      });
+
+    const results = await Promise.allSettled([
+      record({ n: 1 }),
+      record({ text: 'bad\u0000' }),
+      record({ n: 3 }),
+    ]);
+
+    expect(results.map((r) => r.status)).toEqual([
+      'fulfilled',
+      'rejected',
+      'fulfilled',
+    ]);
+    expect(await client.auditEvent.count()).toBe(2);
+    expect(await auditService.verifyAuditChain(client)).toEqual({
+      valid: true,
+    });
+  }, 60_000);
+
   it('tampering a middle event in one partition reports that event', async () => {
     const tenant = await manager.provisionTenant({
       slug: uniqueSlug('tamper-partition'),
