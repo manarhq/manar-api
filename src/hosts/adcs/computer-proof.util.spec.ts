@@ -14,6 +14,8 @@ const base = {
   tenantSlug: 'acme',
   machineId: 'pc01',
   csrKeyFingerprint: 'a'.repeat(64),
+  os: 'Windows 11',
+  keyType: 'SOFTWARE' as const,
   timestamp: new Date().toISOString(),
 };
 
@@ -38,6 +40,8 @@ describe('computer proof', () => {
     const sig = signProof(key, base);
     for (const changed of [
       { machineId: 'pc02' },
+      { os: 'Windows 95' },
+      { keyType: 'TPM' as const },
       { tenantSlug: 'evil' },
       { csrKeyFingerprint: 'b'.repeat(64) },
       { timestamp: new Date(Date.now() - 3_600_000).toISOString() },

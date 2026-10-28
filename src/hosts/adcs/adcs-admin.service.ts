@@ -30,6 +30,8 @@ export interface AdcsSettingsInput {
   baseDn?: string | null;
   bindDn?: string | null;
   serverCaPem?: string | null;
+  /** Template OIDs accepted for key-less enrolment; empty accepts none. */
+  allowedTemplateOids?: string[];
   /** Write-only. Goes to OpenBao KV; never stored in Postgres, never returned. */
   bindPassword?: string;
 }
@@ -200,6 +202,7 @@ export class AdcsAdminService {
           baseDn: input.baseDn ?? null,
           bindDn: input.bindDn ?? null,
           serverCaPem: input.serverCaPem ?? null,
+          allowedTemplateOids: input.allowedTemplateOids ?? [],
         };
         const row = await tx.adcsSettings.upsert({
           where: { id: 'default' },

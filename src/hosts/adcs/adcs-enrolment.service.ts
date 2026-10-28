@@ -20,6 +20,7 @@ import {
   validateChain,
 } from './cert-chain.util';
 import { verifyProof, spkiFingerprint } from './computer-proof.util';
+import { templateOidOf } from './cert-template.util';
 import { checkRevocation, fetchCrlHttp } from './crl.util';
 
 /** The computer certificate was not accepted. One generic 401 to the caller; `reason` goes to the log. */
@@ -108,6 +109,8 @@ export class AdcsEnrolmentService {
           tenantSlug: tenant.slug,
           machineId: input.machineId,
           csrKeyFingerprint: keyFingerprint,
+          os: input.os,
+          keyType: input.keyType,
           timestamp: input.timestamp,
         },
         input.signature,
@@ -131,6 +134,19 @@ export class AdcsEnrolmentService {
       );
     }
 
+    // Only machine templates the tenant listed: any other Client Authentication
+    // certificate with a DNS name (a user or service template, say) is not a machine.
+    const settings = await client.adcsSettings.findUnique({
+      where: { id: 'default' },
+    });
+    if (!settings) {
+      throw new AdcsCertificateRejectedError('AD CS enrolment not configured');
+    }
+    const template = templateOidOf(leaf);
+    if (!template || !settings.allowedTemplateOids.includes(template)) {
+      throw new AdcsCertificateRejectedError('template not allowed');
+    }
+
     // The CRL URL comes from the presented certificate; it is fetched only
     // now, after the certificate chained to this tenant's CA.
     const revocation = await checkRevocation(leaf, chain[1]!, this.fetchCrl);
@@ -148,13 +164,6 @@ export class AdcsEnrolmentService {
     const ou = await this.directory.resolve(client, tenant.id, dnsName);
     const adDn = ou.state === 'resolved' ? ou.dn : null;
     const hostGroupId = ou.state === 'resolved' ? ou.hostGroupId : null;
-
-    const settings = await client.adcsSettings.findUnique({
-      where: { id: 'default' },
-    });
-    if (!settings) {
-      throw new AdcsCertificateRejectedError('AD CS enrolment not configured');
-    }
 
     const redeemed = input.tpmChallengeId
       ? await this.tpm.redeem(

@@ -67,6 +67,8 @@ const FIN = 'OU=Finance,DC=corp,DC=example';
 const LAP = 'OU=Laptops,OU=Finance,DC=corp,DC=example';
 const SALES = 'OU=Sales,DC=corp,DC=example';
 const day = 86_400_000;
+const TEMPLATE = '1.3.6.1.4.1.311.21.8.1.2.3';
+const USER_TEMPLATE = '1.3.6.1.4.1.311.21.8.9.9.9';
 
 async function nodePrivate(keys: CryptoKeyPair) {
   return createPrivateKey({
@@ -227,9 +229,10 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       t.id,
       admin,
       opts.noAd
-        ? { defaultHostGroupId: def.id }
+        ? { defaultHostGroupId: def.id, allowedTemplateOids: [TEMPLATE] }
         : {
             defaultHostGroupId: def.id,
+            allowedTemplateOids: [TEMPLATE],
             ldapsUrl: opts.ldapsUrl ?? ldaps.url,
             baseDn: 'DC=corp,DC=example',
             bindDn: 'CN=svc-manar,DC=corp,DC=example',
@@ -269,6 +272,7 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
     return makeLeaf(issuer, {
       dns,
       crlUrl: CRL_URL,
+      template: TEMPLATE,
       serial: randomUUID().replace(/-/g, '').slice(0, 12),
       ...o,
     });
@@ -310,6 +314,8 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
         tenantSlug: slug,
         machineId,
         csrKeyFingerprint: fp,
+        os: 'Windows 11',
+        keyType: 'SOFTWARE',
         timestamp,
       }),
       tpmChallengeId: o.tpmChallengeId,
@@ -434,6 +440,50 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       expect(await t.client.host.count()).toBe(before);
     }, 90_000);
 
+    it('accepts only certificates from a listed template; an empty list accepts none', async () => {
+      const t = await fresh(noAd);
+      crls.set(CRL_URL, await makeCrl(customerCa, []));
+      const before = await t.client.host.count();
+      // a Client Authentication certificate from a user/service template
+      expect(
+        await rejected(
+          enrol(
+            t,
+            await computerCert('pc-tpl.corp.example', {
+              template: USER_TEMPLATE,
+            }),
+          ),
+        ),
+      ).toBe('template not allowed');
+      // no template extension at all
+      expect(
+        await rejected(
+          enrol(
+            t,
+            await computerCert('pc-tpl.corp.example', { template: undefined }),
+          ),
+        ),
+      ).toBe('template not allowed');
+      const settings = {
+        defaultHostGroupId: t.def.id,
+        allowedTemplateOids: [] as string[],
+      };
+      await adcsAdmin.putSettings(t.client, t.id, admin, settings);
+      try {
+        expect(
+          await rejected(enrol(t, await computerCert('pc-tpl.corp.example'))),
+        ).toBe('template not allowed');
+      } finally {
+        await adcsAdmin.putSettings(t.client, t.id, admin, {
+          ...settings,
+          allowedTemplateOids: [TEMPLATE],
+        });
+      }
+      expect(await t.client.host.count()).toBe(before);
+      const ok = await enrol(t, await computerCert('pc-tpl.corp.example'));
+      expect(ok.status).toBe('PENDING');
+    }, 60_000);
+
     it('refuses a revoked certificate', async () => {
       const t = await fresh(ad);
       const before = await t.client.host.count();
@@ -545,6 +595,7 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       entry.dn = `CN=PC-MOVE,${FIN}`;
       await adcsAdmin.putSettings(t.client, t.id, admin, {
         defaultHostGroupId: t.def.id,
+        allowedTemplateOids: [TEMPLATE],
         ldapsUrl: 'ldaps://localhost:1',
         baseDn: 'DC=corp,DC=example',
         bindDn: 'CN=svc-manar,DC=corp,DC=example',
@@ -602,6 +653,7 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       const t = await fresh(ad);
       const base = {
         defaultHostGroupId: t.def.id,
+        allowedTemplateOids: [TEMPLATE],
         baseDn: 'DC=corp,DC=example',
         bindDn: 'CN=svc-manar,DC=corp,DC=example',
         serverCaPem: ldapsCa.pem,
@@ -687,6 +739,7 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       await expect(
         adcsAdmin.putSettings(t.client, t.id, admin, {
           defaultHostGroupId: t.def.id,
+          allowedTemplateOids: [TEMPLATE],
           ldapsUrl: 'ldap://dc.corp.example',
           baseDn: 'DC=corp',
           bindDn: 'CN=x',
@@ -810,6 +863,8 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
         where: { id: r.hostId },
       });
       expect(host.tpmVerified).toBe(false);
+      // the installer's TPM claim is not kept
+      expect(host.keyType).toBe('SOFTWARE');
     }, 60_000);
 
     it('refuses an EK certificate that does not chain to a configured root', async () => {

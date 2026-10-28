@@ -50,8 +50,8 @@ hostname pattern, or with no condition at all, is refused with `400` on create a
 as it would be after the change is checked). Rules stored before this guard that break it are not
 deleted: they are skipped when a host registers, and the console can show them as inactive.
 
-`requireTpm` means **attested** TPM (see TPM attestation). `keyType` stays what the installer
-reports and is never trusted for approval.
+`requireTpm` means **attested** TPM (see TPM attestation). A host's `keyType` is stored as `TPM` only
+when attestation passed; otherwise `SOFTWARE`, whatever the installer reported.
 
 **Caller address.** Install-key ranges and rule ranges use the caller's address only when
 `MANAR_TRUSTED_PROXY_CIDRS` names the proxies in front of the API (or is `none` for an API exposed
@@ -80,16 +80,26 @@ on the next revocation for that host.
 
 - **Proof, not mTLS.** The agent listener trusts only the Manar CA, and registration is the step
   before a host has a Manar certificate. So the certificate's key signs
-  `manar-adcs-register-v1\n<tenantSlug>\n<machineId>\n<SHA-256 of the CSR's SPKI hex>\n<ISO time>`
+  `manar-adcs-register-v2\n<tenantSlug>\n<machineId>\n<SHA-256 of the CSR's SPKI hex>\n<os>\n<keyType>\n<ISO time>`
   (RSA PKCS#1 v1.5 or ECDSA, SHA-256; time within 5 minutes).
 - **Trust.** The chain must lead to a CA certificate the tenant stored (`/adcs/trusted-cas`), with
   every certificate in its validity window, issuers that are CAs with `keyCertSign`, path length
   respected, no critical extension this validator does not evaluate, intermediates that restrict
   EKU allowing Client Authentication, and the computer certificate carrying EKU Client
   Authentication. The tenant comes from `tenantSlug`, but only that tenant's CAs count.
+- **Algorithms.** Chain certificates and the proof key: RSA 2048 bits or more, or EC P-256 / P-384;
+  chain signatures RSA (PKCS#1 v1.5 or PSS) or ECDSA with SHA-256, SHA-384 or SHA-512 only.
+- **Template allow-list (required tenant setting).** `PUT /adcs/settings` takes
+  `allowedTemplateOids`: the AD CS certificate template OIDs (extension `1.3.6.1.4.1.311.21.7`) that
+  count as machine certificates. **An empty list accepts no certificate**, so key-less enrolment is off
+  until the tenant lists its computer template(s). Any other Client Authentication certificate that
+  merely carries a DNS name (a user or service template) is refused.
 - **Revocation.** CRL from the certificate's HTTP distribution points, fetched only after the chain
   is accepted, through the SSRF guard (no redirects, 5 s, 5 MB streamed with a cap; a private PKI
-  host must be listed in `SSRF_ALLOWED_HOSTS`). A revoked certificate is refused. CRL missing,
+  host must be listed in `SSRF_ALLOWED_HOSTS`). When the leaf or the base CRL names a Freshest CRL
+  (AD CS: weekly base plus daily delta) the delta is fetched the same way and must verify (same
+  issuer and signature, current, built on a base CRL number no newer than the base held); its entries
+  are added, and a delta that cannot be checked is unknown. A revoked certificate is refused. CRL missing,
   unreachable, stale or badly signed = unknown: the host registers `PENDING` and no rule approves
   it. OCSP and LDAP distribution points are not used.
 - **Identity.** The certificate's DNS name (lower-cased) is the host's identity: unique per tenant,
@@ -98,7 +108,8 @@ on the next revocation for that host.
   becomes a pending rekey for an admin.
 - **Group from AD.** manar-api reads the computer's `distinguishedName` from the customer's AD over
   **LDAPS only** (server certificate and name verified against the configured CA, TLS 1.2+, a
-  read-only account), looking up `dNSHostName` with exactly one match. `/adcs/ou-rules` maps an OU
+  read-only account), looking up `dNSHostName` with exactly one match among enabled computer accounts (accounts with
+  `userAccountControl` bit 2 set are excluded). `/adcs/ou-rules` maps an OU
   (DN suffix, longest match wins) to a host group. Unreachable AD, no match, an ambiguous match or
   an unmapped OU: the host goes to the tenant's default group, `PENDING`, never auto-approved.
   Auto-approval for these hosts needs a verified certificate (`good` revocation) **and** a mapped OU.

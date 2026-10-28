@@ -20,14 +20,18 @@ export function proofMessage(input: {
   tenantSlug: string;
   machineId: string;
   csrKeyFingerprint: string;
+  os: string;
+  keyType: 'TPM' | 'SOFTWARE';
   timestamp: string;
 }): Buffer {
   return Buffer.from(
     [
-      'manar-adcs-register-v1',
+      'manar-adcs-register-v2',
       input.tenantSlug,
       input.machineId,
       input.csrKeyFingerprint,
+      input.os,
+      input.keyType,
       input.timestamp,
     ].join('\n'),
     'utf8',

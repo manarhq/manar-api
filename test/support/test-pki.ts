@@ -79,6 +79,8 @@ export async function makeLeaf(
     serial?: string;
     crlUrl?: string;
     freshestCrlUrl?: string;
+    /** AD CS certificate template OID (extension 1.3.6.1.4.1.311.21.7). */
+    template?: string;
     keys?: CryptoKeyPair;
     extra?: x509.Extension[];
   } = {},
@@ -101,6 +103,15 @@ export async function makeLeaf(
   if (eku) extensions.push(new x509.ExtendedKeyUsageExtension(eku));
   if (opts.crlUrl) {
     extensions.push(new x509.CRLDistributionPointsExtension([opts.crlUrl]));
+  }
+  if (opts.template) {
+    extensions.push(
+      new x509.Extension(
+        '1.3.6.1.4.1.311.21.7',
+        false,
+        new Uint8Array(templateExt(opts.template)),
+      ),
+    );
   }
   if (opts.freshestCrlUrl) {
     extensions.push(
@@ -215,4 +226,19 @@ export async function newKeys(): Promise<CryptoKeyPair> {
     'sign',
     'verify',
   ])) as CryptoKeyPair;
+}
+
+/** DER `SEQUENCE { OID }` for the certificate template extension. */
+function templateExt(oid: string): Uint8Array {
+  const n = oid.split('.').map(Number);
+  const body: number[] = [n[0]! * 40 + n[1]!];
+  for (const v of n.slice(2)) {
+    const chunk = [v & 0x7f];
+    for (let r = Math.floor(v / 128); r > 0; r = Math.floor(r / 128)) {
+      chunk.unshift((r & 0x7f) | 0x80);
+    }
+    body.push(...chunk);
+  }
+  const oidDer = [0x06, body.length, ...body];
+  return new Uint8Array([0x30, oidDer.length, ...oidDer]);
 }

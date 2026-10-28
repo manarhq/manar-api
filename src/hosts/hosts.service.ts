@@ -164,7 +164,8 @@ export class HostsService {
     const { client, tenant, keyFingerprint, identifier } = ctx;
     const input = ctx;
     const adcs = ctx.method === 'ADCS';
-    const keyType = ctx.verified.tpm ? 'TPM' : ctx.keyType;
+    // Stored as SOFTWARE unless TPM attestation passed; the installer's claim is not kept.
+    const keyType = ctx.verified.tpm ? 'TPM' : 'SOFTWARE';
 
     const { host, publish, rekeyPending } = await client.$transaction(
       async (tx) => {

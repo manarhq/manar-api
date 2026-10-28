@@ -69,6 +69,16 @@ export const AdcsSettingsSchema = z
     baseDn: z.string().max(500).nullable().optional(),
     bindDn: z.string().max(500).nullable().optional(),
     serverCaPem: pem.nullable().optional(),
+    /** Required for key-less enrolment: empty accepts no certificate. */
+    allowedTemplateOids: z
+      .array(
+        z
+          .string()
+          .regex(/^[0-9]+(\.[0-9]+)+$/)
+          .max(200),
+      )
+      .max(50)
+      .default([]),
     bindPassword: z.string().min(1).max(500).optional(),
   })
   .strict();
