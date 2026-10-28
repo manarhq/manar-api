@@ -466,8 +466,9 @@ export class EvidenceExportService {
     const events = Array.isArray(bundle.events) ? bundle.events : [];
     const withProof = events.filter((e) => e.proof);
     for (const event of events.filter((e) => !e.proof)) {
-      if (tenantClient && (await this.isSealed(tenantClient, event.id))) {
-        return { valid: false, reason: 'proof_missing' };
+      const missing = await this.judgeMissingProof(event, tenantClient);
+      if (missing !== 'not_sealed_yet') {
+        return { valid: false, reason: missing };
       }
     }
     if (withProof.length === 0) {
@@ -492,15 +493,35 @@ export class EvidenceExportService {
     };
   }
 
-  private async isSealed(
-    tenantClient: TenantPrismaClient,
-    eventId: string,
-  ): Promise<boolean> {
+  /**
+   * A missing proof is acceptable only when the event is in the tenant's log
+   * with the same hash and no checkpoint covers it yet (it was exported in
+   * the second before its SEAL). Anything that can't be established is
+   * unverifiable, never valid.
+   */
+  private async judgeMissingProof(
+    event: EvidenceBundleContent['events'][number],
+    tenantClient: TenantPrismaClient | undefined,
+  ): Promise<
+    'not_sealed_yet' | 'proof_missing' | 'proof_invalid' | 'proof_unverifiable'
+  > {
+    if (!tenantClient) return 'proof_unverifiable';
+    const stored = await tenantClient.auditEvent.findUnique({
+      where: { id: event.id },
+      select: { eventHash: true },
+    });
+    if (!stored) return 'proof_unverifiable'; // pruned, or never existed
+    if (stored.eventHash !== event.eventHash || !eventHashHolds(event)) {
+      return 'proof_invalid';
+    }
     try {
-      await this.proofs.proveEvent(tenantClient, eventId);
-      return true;
-    } catch {
-      return false; // not sealed yet, or pruned since export
+      await this.proofs.proveEvent(tenantClient, event.id);
+      return 'proof_missing'; // a checkpoint covers it: the proof was removed
+    } catch (error) {
+      if (error instanceof AuditEventNotCheckpointedError) {
+        return 'not_sealed_yet';
+      }
+      throw error;
     }
   }
 }
@@ -508,6 +529,26 @@ export class EvidenceExportService {
 export type EvidenceVerifyResult =
   | { valid: true; proofsVerified: number; proofsMissing: number }
   | { valid: false; reason: string };
+
+function eventHashHolds(
+  event: EvidenceBundleContent['events'][number],
+): boolean {
+  try {
+    return (
+      computeEventHash({
+        id: event.id,
+        eventType: event.eventType,
+        correlationId: event.correlationId,
+        actor: event.actor,
+        timestamp: event.timestamp,
+        data: event.data,
+        previousHash: event.previousHash,
+      }) === event.eventHash
+    );
+  } catch {
+    return false;
+  }
+}
 
 function proofHolds(
   event: EvidenceBundleContent['events'][number],
@@ -518,16 +559,7 @@ function proofHolds(
   try {
     // The leaf must be this event's hash recomputed from its own fields,
     // not just the eventHash the bundle claims.
-    const recomputed = computeEventHash({
-      id: event.id,
-      eventType: event.eventType,
-      correlationId: event.correlationId,
-      actor: event.actor,
-      timestamp: event.timestamp,
-      data: event.data,
-      previousHash: event.previousHash,
-    });
-    if (recomputed !== event.eventHash) return false;
+    if (!eventHashHolds(event)) return false;
     const range = cp.roots.find(
       (r) =>
         r.partition === event.partition &&

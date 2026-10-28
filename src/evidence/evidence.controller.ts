@@ -80,7 +80,7 @@ export class EvidenceController {
   @ApiResponse({
     status: 200,
     description:
-      '{ valid: true, proofsVerified: number, proofsMissing: number } | { valid: false, reason: string }',
+      "{ valid: true, proofsVerified: number, proofsMissing: number } | { valid: false, reason: string }. A missing proof is accepted only for an event of the caller's own tenant that no checkpoint covers yet; otherwise reason is proof_missing or proof_unverifiable.",
   })
   @ApiResponse({ status: 400, type: ErrorResponseDto })
   async verify(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {

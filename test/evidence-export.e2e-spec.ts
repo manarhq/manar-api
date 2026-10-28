@@ -379,5 +379,28 @@ describe('Evidence export (e2e)', () => {
     expect(
       await service.verify(stripped, strippedSig.signature, client),
     ).toMatchObject({ valid: false, reason: 'proof_missing' });
+
+    // Without the bundle's own tenant database, a missing proof can't be
+    // judged: unverifiable, never valid.
+    expect(await service.verify(stripped, strippedSig.signature)).toMatchObject(
+      { valid: false, reason: 'proof_unverifiable' },
+    );
+
+    // An event the tenant's log doesn't hold, with no proof: unverifiable.
+    const invented = {
+      ...exported.bundle,
+      events: [
+        ...exported.bundle.events,
+        { ...exported.bundle.events[0]!, id: randomUUID(), proof: null },
+      ],
+    };
+    const inventedSig = await signEvidenceBundle(
+      invented,
+      exported.exportId,
+      SIGNING_SECRET,
+    );
+    expect(
+      await service.verify(invented, inventedSig.signature, client),
+    ).toMatchObject({ valid: false, reason: 'proof_unverifiable' });
   });
 });
