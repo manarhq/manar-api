@@ -349,6 +349,21 @@ describe('Hosts (e2e)', () => {
         (await t.client.host.findUniqueOrThrow({ where: { id: first.hostId } }))
           .pendingKeyFingerprint,
       ).toBe(pending);
+      // Both attempts are on record, the second marked as conflicting.
+      const requested = await t.client.auditEvent.findMany({
+        where: { eventType: 'host.rekey_requested' },
+        orderBy: { timestamp: 'asc' },
+      });
+      expect(requested).toHaveLength(2);
+      expect(
+        requested.map(
+          (e) =>
+            (e.data as { conflictsWithPending: boolean }).conflictsWithPending,
+        ),
+      ).toEqual([false, true]);
+      expect(
+        (requested[0]!.data as { keyFingerprint: string }).keyFingerprint,
+      ).toBe(pending);
 
       await admins.decide(t.client, t.id, admin, first.hostId, 'revoke');
       const revoked = await t.client.host.findUniqueOrThrow({

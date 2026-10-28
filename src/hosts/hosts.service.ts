@@ -105,20 +105,16 @@ export class HostsService {
         ) {
           // One pending rekey at a time: a second one never replaces it, so
           // an admin approves exactly the key they looked at.
-          if (existing.pendingKeyFingerprint) {
-            return {
-              host: existing,
-              publish: () => undefined,
-              rekeyPending: true,
-            };
+          const conflictsWithPending = existing.pendingKeyFingerprint !== null;
+          if (!conflictsWithPending) {
+            await tx.host.update({
+              where: { id: existing.id },
+              data: {
+                pendingKeyFingerprint: keyFingerprint,
+                pendingHostGroupId: key.hostGroupId,
+              },
+            });
           }
-          await tx.host.update({
-            where: { id: existing.id },
-            data: {
-              pendingKeyFingerprint: keyFingerprint,
-              pendingHostGroupId: key.hostGroupId,
-            },
-          });
           const requested = await this.audit.recordInTransaction(
             tx,
             tenant.id,
@@ -128,9 +124,12 @@ export class HostsService {
               data: {
                 hostId: existing.id,
                 installKeyId: key.id,
+                keyFingerprint,
                 keyChanged: existing.keyFingerprint !== keyFingerprint,
                 toHostGroupId: key.hostGroupId,
                 ip: input.ip,
+                // One rekey waits at a time; a later one is recorded, never applied.
+                conflictsWithPending,
               },
             },
           );

@@ -31,7 +31,7 @@ Body: `installKey`, `csr`, `machineId` (`[A-Za-z0-9._-]{1,128}`), `hostname`, `o
    - **known machine, different key or another group's key**: nothing about the machine
      changes; the request is recorded as a pending rekey (`host.rekey_requested`) and the call
      returns `409 host_rekey_pending` with no certificate. Only one rekey waits at a time; a
-     second one does not replace it;
+     later one does not replace it but is recorded too, marked `conflictsWithPending`;
    - **REVOKED or REJECTED**: `403`, no certificate.
 5. A host certificate is issued from the OpenBao CA. If the host was revoked, rejected or rekeyed
    while the CA was signing, the new certificate is revoked at once and the call is refused.
