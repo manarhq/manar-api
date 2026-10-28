@@ -2110,3 +2110,137 @@ model EdgeEventBatch {
   @@index([createdAt])
   @@map("edge_event_batches")
 }
+
+// ---------------------------------------------------------------------------
+// Hosts (R2 F2a, docs/hosts.md): machines between the tenant and its agents.
+// ---------------------------------------------------------------------------
+
+enum OrgUnitSource {
+  MANUAL
+  ENTRA
+  AD
+}
+
+/// A department or sub-department: a tree inside the tenant. Synced from
+/// AD/Entra in F2b; managed by hand until then.
+model OrgUnit {
+  id         String        @id @default(uuid())
+  name       String
+  parentId   String?
+  parent     OrgUnit?      @relation("OrgUnitTree", fields: [parentId], references: [id])
+  children   OrgUnit[]     @relation("OrgUnitTree")
+  /// The directory's own id (Entra group id, AD OU objectGUID) when synced.
+  externalId String?       @unique
+  source     OrgUnitSource @default(MANUAL)
+  hostGroups HostGroup[]
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  @@index([parentId])
+  @@map("org_units")
+}
+
+/// Hosts that share policy defaults and rollout settings (e.g. "Dev workstations").
+model HostGroup {
+  id            String             @id @default(uuid())
+  name          String             @unique
+  orgUnitId     String?
+  orgUnit       OrgUnit?           @relation(fields: [orgUnitId], references: [id])
+  hosts         Host[]
+  installKeys   InstallKey[]
+  approvalRules HostApprovalRule[]
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@map("host_groups")
+}
+
+/// A registration-only secret scoped to one host group. Stored as SHA-256 of
+/// the raw key, which is shown once. Grants no identity and no access.
+model InstallKey {
+  id           String    @id @default(uuid())
+  hostGroupId  String
+  hostGroup    HostGroup @relation(fields: [hostGroupId], references: [id])
+  keyHash      String    @unique
+  label        String
+  /// Empty means any address.
+  allowedCidrs String[]
+  maxUses      Int?
+  uses         Int       @default(0)
+  expiresAt    DateTime?
+  revokedAt    DateTime?
+  createdBy    String
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([hostGroupId])
+  @@map("install_keys")
+}
+
+enum HostStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REVOKED
+}
+
+enum HostKeyType {
+  TPM
+  SOFTWARE
+}
+
+/// One machine. Re-registration with the same `machineId` in the same group
+/// merges into this row (VDI golden images register on every boot).
+model Host {
+  id               String            @id @default(uuid())
+  hostGroupId      String
+  hostGroup        HostGroup         @relation(fields: [hostGroupId], references: [id])
+  machineId        String
+  hostname         String
+  os               String
+  keyType          HostKeyType
+  status           HostStatus        @default(PENDING)
+  approvedBy       String?
+  approvedAt       DateTime?
+  lastSeenAt       DateTime?
+  registeredFromIp String
+  certificates     HostCertificate[]
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@unique([hostGroupId, machineId])
+  @@index([status])
+  @@map("hosts")
+}
+
+model HostCertificate {
+  id           String    @id @default(uuid())
+  hostId       String
+  host         Host      @relation(fields: [hostId], references: [id])
+  serialNumber String    @unique
+  notBefore    DateTime
+  notAfter     DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([hostId])
+  @@map("host_certificates")
+}
+
+/// Auto-approves a newly registered host when every set condition matches.
+model HostApprovalRule {
+  id              String     @id @default(uuid())
+  /// Null: applies to every group.
+  hostGroupId     String?
+  hostGroup       HostGroup? @relation(fields: [hostGroupId], references: [id])
+  /// Glob over the hostname (`*` and `?`), case-insensitive.
+  hostnamePattern String?
+  /// Empty means any address.
+  cidrs           String[]
+  requireTpm      Boolean    @default(false)
+  enabled         Boolean    @default(true)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@map("host_approval_rules")
+}
