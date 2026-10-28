@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type {
   Host,
   HostStatus,
+  Prisma,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
@@ -23,6 +24,9 @@ export class HostTransitionError extends Error {}
 export class OrgUnitCycleError extends Error {}
 
 export type HostDecision = 'approve' | 'reject' | 'revoke';
+
+/** No real org tree is deeper; a longer walk means a cycle or corruption. */
+const MAX_ORG_DEPTH = 64;
 
 const ALLOWED: Record<HostDecision, { from: HostStatus[]; to: HostStatus }> = {
   approve: { from: ['PENDING', 'REJECTED'], to: 'APPROVED' },
@@ -76,6 +80,7 @@ export class HostsAdminService {
     actor: AuditActor,
     hostId: string,
     decision: HostDecision,
+    opts: { keyFingerprint?: string } = {},
   ): Promise<Host> {
     const rule = ALLOWED[decision];
     const { host, publish, rekeyed } = await client.$transaction(async (tx) => {
@@ -85,6 +90,15 @@ export class HostsAdminService {
       // decided first: approve binds the new key/group, reject drops it.
       if (current.pendingKeyFingerprint && decision !== 'revoke') {
         const approve = decision === 'approve';
+        if (
+          approve &&
+          ((current.status !== 'PENDING' && current.status !== 'APPROVED') ||
+            opts.keyFingerprint !== current.pendingKeyFingerprint)
+        ) {
+          throw new HostTransitionError(
+            'approving a rekey needs the host PENDING or APPROVED and the exact pending keyFingerprint',
+          );
+        }
         const updated = await tx.host.update({
           where: { id: hostId },
           data: {
@@ -129,6 +143,10 @@ export class HostsAdminService {
         where: { id: hostId },
         data: {
           status: rule.to,
+          // Revoking or rejecting also drops any rekey waiting for approval.
+          ...(decision !== 'approve'
+            ? { pendingKeyFingerprint: null, pendingHostGroupId: null }
+            : {}),
           ...(decision === 'approve'
             ? { approvedBy: actor.id, approvedAt: new Date() }
             : {}),
@@ -149,54 +167,142 @@ export class HostsAdminService {
     return host;
   }
 
+  /** Runs `change` and records `eventType` with its result in one transaction. */
+  private async audited<T>(
+    client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
+    eventType: string,
+    change: (
+      tx: Prisma.TransactionClient,
+    ) => Promise<{ result: T; data: unknown }>,
+  ): Promise<T> {
+    const { result, publish } = await client.$transaction(async (tx) => {
+      const { result: r, data } = await change(tx);
+      const done = await this.audit.recordInTransaction(tx, tenantId, {
+        eventType: eventType as never,
+        actor,
+        data,
+      });
+      return { result: r, publish: done };
+    });
+    publish();
+    return result;
+  }
+
   createHostGroup(
     client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
     input: { name: string; orgUnitId?: string | null },
   ) {
-    return client.hostGroup.create({
-      data: { name: input.name, orgUnitId: input.orgUnitId ?? null },
-    });
+    return this.audited(
+      client,
+      tenantId,
+      actor,
+      AUDIT_EVENT_TYPES.HOST_GROUP_CHANGED,
+      async (tx) => {
+        const group = await tx.hostGroup.create({
+          data: { name: input.name, orgUnitId: input.orgUnitId ?? null },
+        });
+        return {
+          result: group,
+          data: { hostGroupId: group.id, before: null, after: group },
+        };
+      },
+    );
   }
 
   updateHostGroup(
     client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
     id: string,
     input: { name?: string; orgUnitId?: string | null },
   ) {
-    return client.hostGroup.update({ where: { id }, data: input });
+    return this.audited(
+      client,
+      tenantId,
+      actor,
+      AUDIT_EVENT_TYPES.HOST_GROUP_CHANGED,
+      async (tx) => {
+        const before = await tx.hostGroup.findUnique({ where: { id } });
+        const group = await tx.hostGroup.update({ where: { id }, data: input });
+        return {
+          result: group,
+          data: { hostGroupId: id, before, after: group },
+        };
+      },
+    );
   }
 
   createOrgUnit(
     client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
     input: { name: string; parentId?: string | null },
   ) {
-    return client.orgUnit.create({
-      data: { name: input.name, parentId: input.parentId ?? null },
-    });
+    return this.audited(
+      client,
+      tenantId,
+      actor,
+      AUDIT_EVENT_TYPES.ORG_UNIT_CHANGED,
+      async (tx) => {
+        const unit = await tx.orgUnit.create({
+          data: { name: input.name, parentId: input.parentId ?? null },
+        });
+        return {
+          result: unit,
+          data: { orgUnitId: unit.id, before: null, after: unit },
+        };
+      },
+    );
   }
 
-  /** Refuses a parent that is the unit itself or one of its descendants. */
+  /**
+   * Refuses a parent that is the unit itself or one of its descendants. The
+   * walk up is bounded (a visited set and a depth cap) and runs in the same
+   * serializable transaction as the move, so two concurrent moves can't
+   * build a cycle between them. Audited.
+   */
   async updateOrgUnit(
     client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
     id: string,
     input: { name?: string; parentId?: string | null },
   ) {
-    if (input.parentId) {
-      for (
-        let at: string | null = input.parentId;
-        at !== null;
-        at =
-          (await client.orgUnit.findUnique({ where: { id: at } }))?.parentId ??
-          null
-      ) {
-        if (at === id) throw new OrgUnitCycleError(id);
-      }
-    }
-    return client.orgUnit.update({ where: { id }, data: input });
+    const { unit, publish } = await client.$transaction(
+      async (tx) => {
+        const visited = new Set<string>();
+        for (let at = input.parentId ?? null; at !== null;) {
+          if (at === id || visited.has(at) || visited.size >= MAX_ORG_DEPTH) {
+            throw new OrgUnitCycleError(id);
+          }
+          visited.add(at);
+          at =
+            (await tx.orgUnit.findUnique({ where: { id: at } }))?.parentId ??
+            null;
+        }
+        const before = await tx.orgUnit.findUnique({ where: { id } });
+        const updated = await tx.orgUnit.update({ where: { id }, data: input });
+        const done = await this.audit.recordInTransaction(tx, tenantId, {
+          eventType: AUDIT_EVENT_TYPES.ORG_UNIT_CHANGED,
+          actor,
+          data: { orgUnitId: id, before, after: updated },
+        });
+        return { unit: updated, publish: done };
+      },
+      { isolationLevel: 'Serializable' },
+    );
+    publish();
+    return unit;
   }
 
   createApprovalRule(
     client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
     input: {
       hostGroupId?: string | null;
       hostnamePattern?: string | null;
@@ -206,19 +312,33 @@ export class HostsAdminService {
     },
   ) {
     assertCidrs(input.cidrs);
-    return client.hostApprovalRule.create({
-      data: {
-        hostGroupId: input.hostGroupId ?? null,
-        hostnamePattern: input.hostnamePattern ?? null,
-        cidrs: input.cidrs ?? [],
-        requireTpm: input.requireTpm ?? false,
-        enabled: input.enabled ?? true,
+    return this.audited(
+      client,
+      tenantId,
+      actor,
+      AUDIT_EVENT_TYPES.HOST_APPROVAL_RULE_CHANGED,
+      async (tx) => {
+        const rule = await tx.hostApprovalRule.create({
+          data: {
+            hostGroupId: input.hostGroupId ?? null,
+            hostnamePattern: input.hostnamePattern ?? null,
+            cidrs: input.cidrs ?? [],
+            requireTpm: input.requireTpm ?? false,
+            enabled: input.enabled ?? true,
+          },
+        });
+        return {
+          result: rule,
+          data: { ruleId: rule.id, before: null, after: rule },
+        };
       },
-    });
+    );
   }
 
   updateApprovalRule(
     client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
     id: string,
     input: {
       hostnamePattern?: string | null;
@@ -228,7 +348,20 @@ export class HostsAdminService {
     },
   ) {
     assertCidrs(input.cidrs);
-    return client.hostApprovalRule.update({ where: { id }, data: input });
+    return this.audited(
+      client,
+      tenantId,
+      actor,
+      AUDIT_EVENT_TYPES.HOST_APPROVAL_RULE_CHANGED,
+      async (tx) => {
+        const before = await tx.hostApprovalRule.findUnique({ where: { id } });
+        const rule = await tx.hostApprovalRule.update({
+          where: { id },
+          data: input,
+        });
+        return { result: rule, data: { ruleId: id, before, after: rule } };
+      },
+    );
   }
 }
 

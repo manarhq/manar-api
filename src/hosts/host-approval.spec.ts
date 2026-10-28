@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { matchApprovalRule, type ApprovalRuleLike } from './host-approval';
+import {
+  globMatches,
+  matchApprovalRule,
+  type ApprovalRuleLike,
+} from './host-approval';
 
 const rule = (r: Partial<ApprovalRuleLike>): ApprovalRuleLike => ({
   id: r.id ?? 'r',
@@ -78,5 +82,13 @@ describe('matchApprovalRule', () => {
     const loose = rule({ id: 'loose', cidrs: ['10.4.0.0/16'] });
     expect(matchApprovalRule([strict], host)).toBeNull();
     expect(matchApprovalRule([strict, loose], host)?.id).toBe('loose');
+  });
+
+  it('matches adversarial globs in linear time', () => {
+    const name = 'a'.repeat(5000) + 'b';
+    const started = Date.now();
+    expect(globMatches('*a*a*a*c', name)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(globMatches('*a*b', name)).toBe(true);
   });
 });

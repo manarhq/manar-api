@@ -149,6 +149,28 @@ export class CertificateAuthorityService {
     };
   }
 
+  /** Hosts: revokes one certificate (locally first, then OpenBao). */
+  async revokeHostCertificateSerial(
+    tenantClient: TenantPrismaClient,
+    serialNumber: string,
+  ): Promise<void> {
+    await tenantClient.hostCertificate.updateMany({
+      where: { serialNumber, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    try {
+      await this.openBao.revoke(toColonSeparatedHex(serialNumber));
+      await tenantClient.hostCertificate.updateMany({
+        where: { serialNumber },
+        data: { caRevokedAt: new Date() },
+      });
+    } catch (error) {
+      this.logger.error(
+        `OpenBao revoke of host certificate ${serialNumber} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   /**
    * Hosts: marks every certificate of `hostId` revoked locally (enforced at
    * once), then asks OpenBao; OpenBao failures are logged, not thrown.

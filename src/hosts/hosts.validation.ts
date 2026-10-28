@@ -44,7 +44,15 @@ export const UpdateOrgUnitSchema = OrgUnitSchema.partial();
 export const ApprovalRuleSchema = z
   .object({
     hostGroupId: uuid.nullable().optional(),
-    hostnamePattern: z.string().trim().min(1).max(255).nullable().optional(),
+    /** Hostname characters plus `*`/`?`, at most 3 `*` (docs/hosts.md). */
+    hostnamePattern: z
+      .string()
+      .regex(/^[A-Za-z0-9.*?_-]{1,255}$/)
+      .refine((p) => (p.match(/\*/g) ?? []).length <= 3, {
+        message: 'at most 3 * wildcards',
+      })
+      .nullable()
+      .optional(),
     cidrs: z.array(z.string().max(64)).max(100).optional(),
     requireTpm: z.boolean().optional(),
     enabled: z.boolean().optional(),
@@ -53,3 +61,13 @@ export const ApprovalRuleSchema = z
 export const UpdateApprovalRuleSchema = ApprovalRuleSchema.omit({
   hostGroupId: true,
 }).partial();
+
+/** Approving a pending rekey names the exact key it binds. */
+export const DecideHostSchema = z
+  .object({
+    keyFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+  })
+  .strict();

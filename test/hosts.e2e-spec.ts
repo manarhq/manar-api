@@ -20,7 +20,10 @@ import {
   HostRekeyPendingError,
   HostsService,
 } from '../src/hosts/hosts.service';
-import { HostsAdminService } from '../src/hosts/hosts-admin.service';
+import {
+  HostsAdminService,
+  HostTransitionError,
+} from '../src/hosts/hosts-admin.service';
 import { generateAgentCsr } from '@manar/sdk-node';
 import { fakeConfigService } from './support/audit-test-config';
 
@@ -310,7 +313,13 @@ describe('Hosts (e2e)', () => {
       ).toBe(1);
 
       // An admin approves the rekey: old certificates go, the new key may register.
-      await admins.decide(t.client, t.id, admin, first.hostId, 'approve');
+      // Approval names the exact key it binds.
+      await expect(
+        admins.decide(t.client, t.id, admin, first.hostId, 'approve'),
+      ).rejects.toBeInstanceOf(HostTransitionError);
+      await admins.decide(t.client, t.id, admin, first.hostId, 'approve', {
+        keyFingerprint: host.pendingKeyFingerprint!,
+      });
       expect(
         await t.client.hostCertificate.count({
           where: { hostId: first.hostId, revokedAt: null },
@@ -318,6 +327,86 @@ describe('Hosts (e2e)', () => {
       ).toBe(0);
       const again = await attempt();
       expect(again).toMatchObject({ hostId: first.hostId, status: 'APPROVED' });
+    }, 60_000);
+
+    it('a second rekey cannot replace a pending one; revoking clears it', async () => {
+      const t = await tenant('rekey2');
+      const { raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+      const first = await register(t, raw, 'laptop-8');
+      await expect(register(t, raw, 'laptop-8')).rejects.toBeInstanceOf(
+        HostRekeyPendingError,
+      );
+      const pending = (
+        await t.client.host.findUniqueOrThrow({ where: { id: first.hostId } })
+      ).pendingKeyFingerprint;
+      await expect(register(t, raw, 'laptop-8')).rejects.toBeInstanceOf(
+        HostRekeyPendingError,
+      );
+      expect(
+        (await t.client.host.findUniqueOrThrow({ where: { id: first.hostId } }))
+          .pendingKeyFingerprint,
+      ).toBe(pending);
+
+      await admins.decide(t.client, t.id, admin, first.hostId, 'revoke');
+      const revoked = await t.client.host.findUniqueOrThrow({
+        where: { id: first.hostId },
+      });
+      expect(revoked.pendingKeyFingerprint).toBeNull();
+      await expect(
+        admins.decide(t.client, t.id, admin, first.hostId, 'approve', {
+          keyFingerprint: pending!,
+        }),
+      ).rejects.toBeInstanceOf(HostTransitionError);
+    }, 60_000);
+
+    it('a certificate issued while the host was being revoked is revoked at once', async () => {
+      const t = await tenant('race');
+      const { raw } = await keys.create(t.client, t, admin, {
+        hostGroupId: t.group.id,
+        label: 'dev',
+      });
+      const first = await register(t, raw, 'racer');
+      // A CA that lets an admin revoke the host in the middle of issuance.
+      const racingCa = new (class extends CertificateAuthorityService {
+        override async issueHostCertificate(
+          ...args: Parameters<
+            CertificateAuthorityService['issueHostCertificate']
+          >
+        ) {
+          await t.client.host.update({
+            where: { id: first.hostId },
+            data: { status: 'REVOKED' },
+          });
+          return super.issueHostCertificate(...args);
+        }
+      })(new OpenBaoPkiClient(fakeConfigService()));
+      const racingHosts = new HostsService(
+        control,
+        manager,
+        keys,
+        audit,
+        racingCa,
+      );
+
+      await expect(
+        racingHosts.register({
+          installKey: raw,
+          csr: first.csr,
+          machineId: 'racer',
+          hostname: 'RACER',
+          os: 'Linux',
+          keyType: 'TPM',
+          ip: '10.0.0.7',
+        }),
+      ).rejects.toBeInstanceOf(HostRefusedError);
+      expect(
+        await t.client.hostCertificate.count({
+          where: { hostId: first.hostId, revokedAt: null },
+        }),
+      ).toBe(1); // only the first registration's
     }, 60_000);
 
     it('a key from another group cannot move a known machine by itself', async () => {

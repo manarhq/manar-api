@@ -46,6 +46,7 @@ import {
 } from './install-keys.service';
 import {
   ApprovalRuleSchema,
+  DecideHostSchema,
   CreateInstallKeySchema,
   HostGroupSchema,
   OrgUnitSchema,
@@ -120,7 +121,8 @@ export class HostsController {
   @RequireRole(...WRITE)
   @ApiOperation({
     summary: 'Approve, reject or revoke a host',
-    description: 'Revoking also revokes its certificates. Audited.',
+    description:
+      "Revoking also revokes its certificates. A pending rekey is approved only with body { keyFingerprint } equal to the host's pendingKeyFingerprint. Audited.",
   })
   @ApiResponse({ status: 201, description: 'The updated host.' })
   @ApiResponse({ status: 404, type: ErrorResponseDto })
@@ -129,10 +131,12 @@ export class HostsController {
     @CurrentAuth() auth: AuthContext,
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('decision') decision: HostDecision,
+    @Body() body: unknown,
   ) {
+    const opts = parseBodyOrThrow(DecideHostSchema, body ?? {});
     const client = await this.tenants.getClient(auth.tenant.id);
     return this.admin
-      .decide(client, auth.tenant.id, actorOf(auth), id, decision)
+      .decide(client, auth.tenant.id, actorOf(auth), id, decision, opts)
       .catch(http);
   }
 }
@@ -220,6 +224,8 @@ export class HostOrganisationController {
     const client = await this.tenants.getClient(auth.tenant.id);
     return this.admin.createHostGroup(
       client,
+      auth.tenant.id,
+      actorOf(auth),
       parseBodyOrThrow(HostGroupSchema, body),
     );
   }
@@ -235,6 +241,8 @@ export class HostOrganisationController {
     const client = await this.tenants.getClient(auth.tenant.id);
     return this.admin.updateHostGroup(
       client,
+      auth.tenant.id,
+      actorOf(auth),
       id,
       parseBodyOrThrow(UpdateHostGroupSchema, body),
     );
@@ -255,6 +263,8 @@ export class HostOrganisationController {
     const client = await this.tenants.getClient(auth.tenant.id);
     return this.admin.createOrgUnit(
       client,
+      auth.tenant.id,
+      actorOf(auth),
       parseBodyOrThrow(OrgUnitSchema, body),
     );
   }
@@ -269,7 +279,13 @@ export class HostOrganisationController {
   ) {
     const client = await this.tenants.getClient(auth.tenant.id);
     return this.admin
-      .updateOrgUnit(client, id, parseBodyOrThrow(UpdateOrgUnitSchema, body))
+      .updateOrgUnit(
+        client,
+        auth.tenant.id,
+        actorOf(auth),
+        id,
+        parseBodyOrThrow(UpdateOrgUnitSchema, body),
+      )
       .catch(http);
   }
 
@@ -290,6 +306,8 @@ export class HostOrganisationController {
       .then(() =>
         this.admin.createApprovalRule(
           client,
+          auth.tenant.id,
+          actorOf(auth),
           parseBodyOrThrow(ApprovalRuleSchema, body),
         ),
       )
@@ -309,6 +327,8 @@ export class HostOrganisationController {
       .then(() =>
         this.admin.updateApprovalRule(
           client,
+          auth.tenant.id,
+          actorOf(auth),
           id,
           parseBodyOrThrow(UpdateApprovalRuleSchema, body),
         ),

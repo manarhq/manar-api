@@ -103,6 +103,15 @@ export class HostsService {
           (existing.keyFingerprint !== keyFingerprint ||
             existing.hostGroupId !== key.hostGroupId)
         ) {
+          // One pending rekey at a time: a second one never replaces it, so
+          // an admin approves exactly the key they looked at.
+          if (existing.pendingKeyFingerprint) {
+            return {
+              host: existing,
+              publish: () => undefined,
+              rekeyPending: true,
+            };
+          }
           await tx.host.update({
             where: { id: existing.id },
             data: {
@@ -203,6 +212,18 @@ export class HostsService {
       { id: host.id, identifier },
       input.csr,
     );
+    // The host may have been revoked, rejected or rekeyed while the CA was
+    // signing: a certificate that no longer matches is revoked at once.
+    const now = await client.host.findUnique({ where: { id: host.id } });
+    if (
+      !now ||
+      now.status === 'REVOKED' ||
+      now.status === 'REJECTED' ||
+      now.keyFingerprint !== keyFingerprint
+    ) {
+      await this.ca.revokeHostCertificateSerial(client, issued.serialNumber);
+      throw new HostRefusedError(`host ${host.id} changed during registration`);
+    }
     return {
       hostId: host.id,
       status: host.status,
