@@ -481,6 +481,40 @@ describe('Audit proofs (e2e)', () => {
       });
     }, 60_000);
 
+    it('a watermark SEAL whose stored heads were edited is not trusted', async () => {
+      const t = await tenantWithEvents('wmark', 4);
+      await markedCheckpoints.createCheckpoint(t.client, t.id);
+      expect(await markedAudit.verifyAuditChain(t.client, t.id)).toEqual({
+        valid: true,
+      });
+      const newer = [];
+      for (let i = 0; i < 3; i += 1) {
+        newer.push(
+          await markedAudit.record(t.client, t.id, {
+            eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+            actor: { type: 'agent', id: 'agent-0' },
+            data: { i },
+          }),
+        );
+      }
+      await t.client
+        .$executeRaw`UPDATE "audit_events" SET "data" = '{"x":2}'::jsonb WHERE "id" = ${newer[0]!.id}`;
+      // Point the watermark SEAL's heads at the current tail, so an
+      // incremental run would start past the edited event.
+      const tail = newer[2]!;
+      await t.client.$executeRaw`
+        UPDATE "audit_checkpoints"
+        SET "partitionHeads" = jsonb_build_array(jsonb_build_object(
+          'partition', ${tail.partition}::int, 'seq', ${String(tail.partitionSeq)}::text, 'eventHash', ${tail.eventHash}::text))
+        WHERE "seq" = 1`;
+
+      expect(
+        await markedAudit.verifyAuditChain(t.client, t.id, {
+          incremental: true,
+        }),
+      ).toEqual({ valid: false, brokenAt: 'checkpoint:1' });
+    }, 60_000);
+
     it('incremental verification starts at the watermark and still checks everything after it', async () => {
       const t = await tenantWithEvents('incremental', 8);
       await markedCheckpoints.createCheckpoint(t.client, t.id);

@@ -14,6 +14,7 @@ import { TenantDatabaseManager } from '../src/database/tenant-database-manager.s
 import { AuditService } from '../src/audit/audit.service';
 import { AuditCheckpointService } from '../src/audit/checkpoint/audit-checkpoint.service';
 import { AuditRetentionService } from '../src/audit/retention/audit-retention.service';
+import { ControlSealMarkStore } from '../src/audit/checkpoint/seal-mark.store';
 import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
@@ -523,6 +524,65 @@ describe('Audit retention (e2e)', () => {
       ).toEqual({ valid: true });
     } finally {
       AuditCheckpointService.MAX_RANGE = before;
+    }
+  }, 60_000);
+
+  it('checks the events it is about to prune even when incremental verification skips them', async () => {
+    const tenant = await manager.provisionTenant({
+      slug: uniqueSlug('prefix'),
+      name: 'Retention Prefix Tenant',
+    });
+    provisioned.push({
+      tenantId: tenant.id,
+      databaseName: tenant.databaseBinding!.databaseName,
+    });
+    const tenantClient = await manager.getClient(tenant.id);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(
+      new Date(Date.now() - (DEFAULT_AUDIT_RETENTION_WINDOW_MS + 86_400_000)),
+    );
+    const old = [];
+    for (let i = 0; i < 4; i += 1) {
+      old.push(
+        await auditService.record(tenantClient, tenant.id, {
+          eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+          actor: { type: 'agent', id: 'ret-prefix' },
+          data: { i },
+        }),
+      );
+    }
+    vi.useRealTimers();
+    const signer = new CheckpointSigner(
+      new OpenBaoKvClient(fakeConfigService()),
+    );
+    const marks = new ControlSealMarkStore(control);
+    const markedAudit = new AuditService(kafkaPublisher, signer, marks);
+    const checkpoints = new AuditCheckpointService(signer, marks);
+    await checkpoints.createCheckpoint(tenantClient, tenant.id);
+    // A full run moves the watermark past the old events...
+    expect(await markedAudit.verifyAuditChain(tenantClient, tenant.id)).toEqual(
+      { valid: true },
+    );
+    // ...then one of them is edited. Incremental runs no longer look at it.
+    await tenantClient.$executeRaw`UPDATE "audit_events" SET "data" = '{"x":3}'::jsonb WHERE "id" = ${old[1]!.id}`;
+
+    try {
+      await expect(
+        new AuditRetentionService(
+          markedAudit,
+          signer,
+          checkpoints,
+        ).pruneTenantAuditEvents(tenantClient, {
+          tenantId: tenant.id,
+          retentionWindowMs: DEFAULT_AUDIT_RETENTION_WINDOW_MS,
+        }),
+      ).rejects.toThrow(/does not verify/);
+      expect(await tenantClient.auditEvent.count()).toBe(4);
+    } finally {
+      await markedAudit.onModuleDestroy();
+      await control.auditSealMark.deleteMany({
+        where: { tenantId: tenant.id },
+      });
     }
   }, 60_000);
 

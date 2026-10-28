@@ -120,6 +120,19 @@ export class AuditRetentionService {
       };
     }
 
+    // Incremental verification does not re-walk what it verified before; the
+    // events about to be deleted (and signed for) are re-checked here.
+    const prefix = await this.auditService.verifyPrunable(
+      tenantClient,
+      input.tenantId,
+      ranges.map((r) => ({ partition: r.partition, upTo: r.cutoffSeq })),
+    );
+    if (!prefix.valid) {
+      throw new Error(
+        `Audit log for tenant "${input.tenantId}" does not verify (broken at ${prefix.brokenAt}); not pruning`,
+      );
+    }
+
     const anchors: {
       partition: number;
       anchorHash: string;

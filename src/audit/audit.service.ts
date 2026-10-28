@@ -446,14 +446,34 @@ export class AuditService implements OnModuleDestroy {
       const atWatermark = await tenantClient.auditCheckpoint.findUnique({
         where: { seq: mark.verified.seq },
       });
-      if (!atWatermark || atWatermark.checkpointHash !== mark.verified.hash) {
+      // Trust the watermark row only if its content still hashes to the
+      // hash the control database recorded, under a valid tenant signature;
+      // the heads come from the control database.
+      const watermarkKey = await this.lookupKey(tenantId);
+      if (
+        !atWatermark ||
+        !watermarkKey ||
+        checkpointHashOf({
+          seq: atWatermark.seq,
+          createdAt: atWatermark.createdAt,
+          partitionHeads:
+            atWatermark.partitionHeads as unknown as PartitionHead[],
+          roots: atWatermark.roots as unknown as PartitionRoot[],
+          previousCheckpointHash: atWatermark.previousCheckpointHash,
+        }) !== mark.verified.hash ||
+        !verifyCheckpointSignature(
+          mark.verified.hash,
+          atWatermark.signature,
+          watermarkKey.publicKeyPem,
+        )
+      ) {
         return { valid: false, brokenAt: `checkpoint:${mark.verified.seq}` };
       }
       start = {
         seq: atWatermark.seq,
-        hash: atWatermark.checkpointHash,
+        hash: mark.verified.hash,
         createdAt: atWatermark.createdAt,
-        heads: atWatermark.partitionHeads as unknown as PartitionHead[],
+        heads: mark.verified.heads,
       };
     }
     const startHeads = new Map(
@@ -649,6 +669,107 @@ export class AuditService implements OnModuleDestroy {
       hash: last.hash,
       heads: last.heads,
     });
+    return { valid: true };
+  }
+
+  /**
+   * Re-checks the events retention is about to delete (each partition up to
+   * `upTo`), which an incremental run does not re-walk: every event's hash,
+   * its link to the previous one, and every SEAL range wholly inside the
+   * prefix against that SEAL's signed root. Cost is proportional to what is
+   * pruned, not to the whole log.
+   */
+  async verifyPrunable(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    ranges: { partition: number; upTo: number }[],
+  ): Promise<VerifyAuditChainResult> {
+    const anchorsByPartition = await this.verifiedAnchors(
+      tenantClient,
+      tenantId,
+    );
+    const key = await this.lookupKey(tenantId);
+    for (const { partition, upTo } of ranges) {
+      const anchors = anchorsByPartition.get(partition) ?? new Set<string>();
+      const hashes = new Map<number, string>();
+      let expected: string | null | undefined;
+      let lastSeq: number | null = null;
+      for (;;) {
+        const events = await this.fetchAuditEventBatch(
+          tenantClient,
+          partition,
+          lastSeq,
+          upTo,
+        );
+        if (events.length === 0) break;
+        for (const event of events) {
+          const linked =
+            expected === undefined
+              ? event.previousHash === null || anchors.has(event.previousHash)
+              : event.previousHash === expected;
+          const recomputed = computeEventHash({
+            id: event.id,
+            eventType: event.eventType,
+            correlationId: event.correlationId,
+            actor: event.actor,
+            timestamp: event.timestamp.toISOString(),
+            data: event.data,
+            previousHash: event.previousHash,
+          });
+          if (!linked || recomputed !== event.eventHash) {
+            return { valid: false, brokenAt: event.id };
+          }
+          expected = event.eventHash;
+          hashes.set(event.partitionSeq, event.eventHash);
+        }
+        lastSeq = events[events.length - 1]!.partitionSeq;
+        if (events.length < AuditService.VERIFY_CHAIN_BATCH_SIZE) break;
+      }
+      const sealedRanges = await tenantClient.auditCheckpointRange.findMany({
+        where: { partition, toSeq: { lte: upTo } },
+        orderBy: { fromSeq: 'asc' },
+      });
+      for (const range of sealedRanges) {
+        const leaves: string[] = [];
+        for (let seq = range.fromSeq; seq <= range.toSeq; seq += 1) {
+          const h = hashes.get(seq);
+          if (h === undefined) break; // pruned earlier: nothing to compare
+          leaves.push(h);
+        }
+        if (leaves.length !== range.toSeq - range.fromSeq + 1) continue;
+        const cp = await tenantClient.auditCheckpoint.findUnique({
+          where: { seq: range.checkpointSeq },
+        });
+        const signedRoot = (
+          (cp?.roots ?? []) as unknown as PartitionRoot[]
+        ).find(
+          (r) =>
+            r.partition === partition && Number(r.fromSeq) === range.fromSeq,
+        )?.root;
+        if (
+          !cp ||
+          !key ||
+          !verifyCheckpointSignature(
+            cp.checkpointHash,
+            cp.signature,
+            key.publicKeyPem,
+          ) ||
+          checkpointHashOf({
+            seq: cp.seq,
+            createdAt: cp.createdAt,
+            partitionHeads: cp.partitionHeads as unknown as PartitionHead[],
+            roots: cp.roots as unknown as PartitionRoot[],
+            previousCheckpointHash: cp.previousCheckpointHash,
+          }) !== cp.checkpointHash ||
+          signedRoot !== merkleRoot(leaves)
+        ) {
+          return {
+            valid: false,
+            brokenAt: `checkpoint:${range.checkpointSeq}`,
+          };
+        }
+      }
+    }
     return { valid: true };
   }
 
