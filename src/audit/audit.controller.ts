@@ -35,7 +35,10 @@ import {
   AuditEventNotFoundError,
   AuditProofService,
 } from './checkpoint/audit-proof.service';
-import { CheckpointSigner } from './checkpoint/checkpoint-signer';
+import {
+  CheckpointSigner,
+  NoCheckpointKeyError,
+} from './checkpoint/checkpoint-signer';
 import {
   AuditEventProofDto,
   AuditSearchResponseDto,
@@ -294,9 +297,24 @@ export class AuditController {
       "The Ed25519 public key that signs this tenant's audit checkpoints (SEALs). Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER.",
   })
   @ApiResponse({ status: 200, type: CheckpointPublicKeyDto })
+  @ApiResponse({
+    status: 404,
+    type: ErrorResponseDto,
+    description: 'No checkpoint written yet for this tenant.',
+  })
   @ApiResponse({ status: 401, type: ErrorResponseDto })
   @ApiResponse({ status: 403, type: ErrorResponseDto })
   async publicKey(@CurrentAuth() auth: AuthContext) {
-    return this.checkpointSigner.publicKey(auth.tenant.id);
+    try {
+      return await this.checkpointSigner.publicKey(auth.tenant.id);
+    } catch (error) {
+      if (error instanceof NoCheckpointKeyError) {
+        throw new NotFoundException({
+          code: error.code,
+          message: error.message,
+        });
+      }
+      throw error;
+    }
   }
 }

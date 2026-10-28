@@ -16,6 +16,7 @@ import {
   type CheckpointKeyLookup,
   type CheckpointPublicKey,
   checkpointHashOf,
+  NoCheckpointKeyError,
   verifyCheckpointSignature,
 } from '../audit/checkpoint/checkpoint-format';
 import { computeEventHash } from '../audit/audit-hash';
@@ -73,7 +74,7 @@ export interface EvidenceBundleContent {
     proof: AuditEventProof | null;
   }[];
   /** The tenant's SEAL signing key, for offline checks of every `proof`. */
-  checkpointPublicKey: CheckpointPublicKey;
+  checkpointPublicKey: CheckpointPublicKey | null;
   /**
    * Directly-relevant context pulled from the *real* tables the retrofitted
    * decision points already write to (Section 49: "don't duplicate data
@@ -328,7 +329,12 @@ export class EvidenceExportService {
             }),
         })),
       ),
-      checkpointPublicKey: await this.checkpointKeys.publicKey(tenantId),
+      checkpointPublicKey: await this.checkpointKeys
+        .publicKey(tenantId)
+        .catch((error: unknown) => {
+          if (error instanceof NoCheckpointKeyError) return null; // nothing sealed yet
+          throw error;
+        }),
       context: {
         agents: agents.map((agent) => ({
           id: agent.id,
@@ -477,8 +483,13 @@ export class EvidenceExportService {
     if (typeof bundle.tenantId !== 'string') {
       return { valid: false, reason: 'proof_invalid' };
     }
-    const key = await this.checkpointKeys.publicKey(bundle.tenantId);
-    if (bundle.checkpointPublicKey?.publicKeyPem !== key.publicKeyPem) {
+    const key = await this.checkpointKeys
+      .publicKey(bundle.tenantId)
+      .catch((error: unknown) => {
+        if (error instanceof NoCheckpointKeyError) return null;
+        throw error;
+      });
+    if (!key || bundle.checkpointPublicKey?.publicKeyPem !== key.publicKeyPem) {
       return { valid: false, reason: 'proof_invalid' };
     }
     for (const event of withProof) {

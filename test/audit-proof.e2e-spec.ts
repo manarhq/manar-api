@@ -11,7 +11,10 @@ import {
   AuditProofService,
 } from '../src/audit/checkpoint/audit-proof.service';
 import { anchorDigestOf } from '../src/audit/checkpoint/checkpoint-format';
-import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
+import {
+  CheckpointSigner,
+  NoCheckpointKeyError,
+} from '../src/audit/checkpoint/checkpoint-signer';
 import { KafkaPublisherService } from '../src/audit/kafka-publisher.service';
 import { computeEventHash } from '../src/audit/audit-hash';
 import { partitionFor } from '../src/audit/audit-partition';
@@ -286,6 +289,16 @@ describe('Audit proofs (e2e)', () => {
     expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
       valid: false,
       brokenAt: `audit_partition_state:${p}`,
+    });
+  }, 60_000);
+
+  it('looking up the key of a never-sealed tenant neither creates it nor breaks verification', async () => {
+    const t = await tenantWithEvents('lookup', 4);
+    await expect(signer.publicKey(t.id)).rejects.toBeInstanceOf(
+      NoCheckpointKeyError,
+    );
+    expect(await audit.verifyAuditChain(t.client, t.id)).toEqual({
+      valid: true,
     });
   }, 60_000);
 

@@ -20,6 +20,7 @@ import {
   type CheckpointKeyLookup,
   type CheckpointPublicKey,
   checkpointHashOf,
+  NoCheckpointKeyError,
   type PartitionHead,
   type PartitionRoot,
   verifyCheckpointSignature,
@@ -576,6 +577,18 @@ export class AuditService implements OnModuleDestroy {
     return { valid: true };
   }
 
+  /** The tenant's SEAL key, or `null` when it has none (nothing verifies then). */
+  private async lookupKey(
+    tenantId: string,
+  ): Promise<CheckpointPublicKey | null> {
+    try {
+      return await this.checkpointKeys.publicKey(tenantId);
+    } catch (error) {
+      if (error instanceof NoCheckpointKeyError) return null;
+      throw error;
+    }
+  }
+
   /**
    * Retention anchors that may excuse pruned history, by partition: those
    * signed with the tenant key over `anchorDigestOf`, plus unsigned anchors
@@ -592,17 +605,19 @@ export class AuditService implements OnModuleDestroy {
     for (const anchor of anchors) {
       let accepted = anchor.signature === null && anchor.partition === 0;
       if (anchor.signature !== null) {
-        key ??= await this.checkpointKeys.publicKey(tenantId);
-        accepted = verifyCheckpointSignature(
-          anchorDigestOf({
-            tenantId: anchor.tenantId,
-            partition: anchor.partition,
-            anchorHash: anchor.anchorHash,
-            eventsPrunedCount: anchor.eventsPrunedCount,
-          }),
-          anchor.signature,
-          key.publicKeyPem,
-        );
+        key ??= await this.lookupKey(tenantId);
+        accepted =
+          key !== null &&
+          verifyCheckpointSignature(
+            anchorDigestOf({
+              tenantId: anchor.tenantId,
+              partition: anchor.partition,
+              anchorHash: anchor.anchorHash,
+              eventsPrunedCount: anchor.eventsPrunedCount,
+            }),
+            anchor.signature,
+            key.publicKeyPem,
+          );
       }
       if (!accepted) continue;
       const set = byPartition.get(anchor.partition) ?? new Set<string>();
@@ -662,8 +677,9 @@ export class AuditService implements OnModuleDestroy {
           roots,
           previousCheckpointHash: cp.previousCheckpointHash,
         });
-        key ??= await this.checkpointKeys.publicKey(tenantId);
+        key ??= await this.lookupKey(tenantId);
         if (
+          key === null ||
           recomputed !== cp.checkpointHash ||
           cp.keyId !== key.keyId ||
           !verifyCheckpointSignature(

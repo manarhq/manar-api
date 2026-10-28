@@ -10,10 +10,12 @@ import {
   type CheckpointKeyLookup,
   type CheckpointPublicKey,
   keyIdOf,
+  NoCheckpointKeyError,
   verifyCheckpointSignature,
 } from './checkpoint-format';
 
 export type { CheckpointPublicKey };
+export { NoCheckpointKeyError };
 
 interface TenantSigningKey extends CheckpointPublicKey {
   privateKey: KeyObject;
@@ -43,7 +45,7 @@ export class CheckpointSigner implements CheckpointKeyLookup {
     if (!DIGEST.test(checkpointHashHex)) {
       throw new Error('checkpoint hash is not a sha256 hex digest');
     }
-    const key = await this.keyFor(tenantId);
+    const key = await this.keyFor(tenantId, true);
     return sign(
       null,
       Buffer.from(checkpointHashHex, 'hex'),
@@ -61,7 +63,10 @@ export class CheckpointSigner implements CheckpointKeyLookup {
   }
 
   async publicKey(tenantId: string): Promise<CheckpointPublicKey> {
-    const { keyId, algorithm, publicKeyPem } = await this.keyFor(tenantId);
+    const { keyId, algorithm, publicKeyPem } = await this.keyFor(
+      tenantId,
+      false,
+    );
     return { keyId, algorithm, publicKeyPem };
   }
 
@@ -77,10 +82,10 @@ export class CheckpointSigner implements CheckpointKeyLookup {
     );
   }
 
-  private keyFor(tenantId: string): Promise<TenantSigningKey> {
+  private keyFor(tenantId: string, create: boolean): Promise<TenantSigningKey> {
     let pending = this.keys.get(tenantId);
     if (!pending) {
-      pending = this.load(tenantId);
+      pending = this.load(tenantId, create);
       // A failed load (OpenBao down) is retried on the next call, not cached.
       pending.catch(() => this.keys.delete(tenantId));
       this.keys.set(tenantId, pending);
@@ -88,9 +93,17 @@ export class CheckpointSigner implements CheckpointKeyLookup {
     return pending;
   }
 
-  private async load(tenantId: string): Promise<TenantSigningKey> {
+  private async load(
+    tenantId: string,
+    create: boolean,
+  ): Promise<TenantSigningKey> {
     const path = CheckpointSigner.keyPath(tenantId);
     let secret = await this.kv.readSecretIfPresent(path);
+    if (secret === null && !create) {
+      throw new NoCheckpointKeyError(
+        `tenant ${tenantId} has no checkpoint key yet`,
+      );
+    }
     if (secret === null) {
       const pair = generateKeyPairSync('ed25519');
       try {

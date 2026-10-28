@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { OpenBaoKvClient } from '../../openbao/openbao-kv.client';
-import { CheckpointSigner } from './checkpoint-signer';
+import { CheckpointSigner, NoCheckpointKeyError } from './checkpoint-signer';
 
 /** In-memory KV v2 with check-and-set: `writeSecretIfAbsent` fails when the path exists. */
 function fakeKv() {
@@ -42,6 +42,7 @@ describe('CheckpointSigner', () => {
   it('fails verification for a changed hash, a changed signature, or another key', async () => {
     const signer = new CheckpointSigner(fakeKv().kv);
     const signature = await signer.sign('t1', hash('a'));
+    await signer.sign('t2', hash('x'));
     const own = (await signer.publicKey('t1')).publicKeyPem;
     const other = (await signer.publicKey('t2')).publicKeyPem;
 
@@ -57,6 +58,8 @@ describe('CheckpointSigner', () => {
 
   it('gives each tenant its own key, with a stable 16-hex keyId', async () => {
     const signer = new CheckpointSigner(fakeKv().kv);
+    await signer.sign('t1', hash('a'));
+    await signer.sign('t2', hash('a'));
     const a1 = await signer.publicKey('t1');
     const a2 = await signer.publicKey('t1');
     const b = await signer.publicKey('t2');
@@ -68,6 +71,7 @@ describe('CheckpointSigner', () => {
 
   it('reuses a key already in OpenBao and never overwrites it', async () => {
     const { kv, raw } = fakeKv();
+    await new CheckpointSigner(kv).sign('t1', hash('a'));
     const first = await new CheckpointSigner(kv).publicKey('t1');
     raw.writeSecretIfAbsent.mockClear();
 
@@ -82,11 +86,12 @@ describe('CheckpointSigner', () => {
 
   it('two replicas creating the first key at once end up with the same key', async () => {
     const { kv } = fakeKv();
-    const [a, b] = await Promise.all([
-      new CheckpointSigner(kv).publicKey('t1'),
-      new CheckpointSigner(kv).publicKey('t1'),
-    ]);
-    expect(a.keyId).toBe(b.keyId);
+    const a = new CheckpointSigner(kv);
+    const b = new CheckpointSigner(kv);
+    await Promise.all([a.sign('t1', hash('a')), b.sign('t1', hash('b'))]);
+    expect((await a.publicKey('t1')).keyId).toBe(
+      (await b.publicKey('t1')).keyId,
+    );
   });
 
   it('does not create a key when OpenBao cannot be read', async () => {
@@ -95,17 +100,26 @@ describe('CheckpointSigner', () => {
       new Error('connection refused'),
     );
 
-    await expect(new CheckpointSigner(kv).publicKey('t1')).rejects.toThrow(
-      'connection refused',
-    );
+    await expect(
+      new CheckpointSigner(kv).sign('t1', hash('a')),
+    ).rejects.toThrow('connection refused');
     expect(raw.writeSecretIfAbsent).not.toHaveBeenCalled();
   });
 
   it('hasKey is false before the first SEAL key exists and true after', async () => {
     const { kv } = fakeKv();
     expect(await new CheckpointSigner(kv).hasKey('t1')).toBe(false);
-    await new CheckpointSigner(kv).publicKey('t1');
+    await new CheckpointSigner(kv).sign('t1', hash('a'));
     expect(await new CheckpointSigner(kv).hasKey('t1')).toBe(true);
     expect(await new CheckpointSigner(kv).hasKey('t2')).toBe(false);
+  });
+
+  it('looking up a key never creates it', async () => {
+    const { kv, raw } = fakeKv();
+    await expect(
+      new CheckpointSigner(kv).publicKey('t1'),
+    ).rejects.toBeInstanceOf(NoCheckpointKeyError);
+    expect(raw.writeSecretIfAbsent).not.toHaveBeenCalled();
+    expect(await new CheckpointSigner(kv).hasKey('t1')).toBe(false);
   });
 });

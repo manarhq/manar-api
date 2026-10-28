@@ -27,9 +27,18 @@ export interface CheckpointPublicKey {
   publicKeyPem: string;
 }
 
+/** The tenant has no SEAL key yet: nothing has been sealed. */
+export class NoCheckpointKeyError extends Error {
+  readonly code = 'no_checkpoint_key';
+}
+
 /** Looks up a tenant's SEAL public key (provided by `CheckpointSigner`). */
 export interface CheckpointKeyLookup {
-  /** Creates the key on first use. */
+  /**
+   * Read-only: throws `NoCheckpointKeyError` when the tenant has no key.
+   * Only signing creates a key, so a lookup can never make an unsealed
+   * tenant look like one whose SEALs were deleted.
+   */
   publicKey(tenantId: string): Promise<CheckpointPublicKey>;
   /**
    * Whether the tenant's key exists yet (it is created by the first SEAL).
