@@ -365,8 +365,8 @@ describe('Audit retention (e2e)', () => {
         ?.eventsPrunedCount,
     ).toBe(5);
 
-    const chainState = await tenantClient.auditChainState.findUnique({
-      where: { id: 'singleton' },
+    const chainState = await tenantClient.auditPartitionState.findUnique({
+      where: { partition: retentionEvent!.partition },
     });
     expect(chainState?.latestEventId).toBe(result.retentionEventId);
 

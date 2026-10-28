@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { computeEventHash } from './audit-hash';
+import { partitionFor } from './audit-partition';
 import { AuditService } from './audit.service';
 import type { KafkaPublisherService } from './kafka-publisher.service';
 
@@ -37,6 +38,8 @@ interface StoredEvent {
   data: unknown;
   previousHash: string | null;
   eventHash: string;
+  partition: number;
+  partitionSeq: bigint;
   createdAt: Date;
 }
 
@@ -74,6 +77,8 @@ function buildChain(length: number): StoredEvent[] {
       data: content.data,
       previousHash,
       eventHash,
+      partition: 0,
+      partitionSeq: BigInt(index + 1),
       createdAt: new Date(content.timestamp),
     });
     previousHash = eventHash;
@@ -90,6 +95,11 @@ interface FakeClientOptions {
   hasChainState?: boolean;
 }
 
+/**
+ * Implements the same per-partition keyset contract Prisma does
+ * (`where: { partition, partitionSeq: { gt } }`, ordered by `partitionSeq`,
+ * `take`), and records each page's size.
+ */
 function fakeTenantClient(options: FakeClientOptions): {
   client: TenantPrismaClient;
   pageSizes: number[];
@@ -100,12 +110,17 @@ function fakeTenantClient(options: FakeClientOptions): {
   const client = {
     auditEvent: {
       findMany: (args: {
-        where?: { sequence?: { gt?: number } };
+        where: { partition: number; partitionSeq?: { gt?: bigint } };
         take?: number;
       }) => {
-        const after = args.where?.sequence?.gt;
+        const after = args.where.partitionSeq?.gt;
         const page = events
-          .filter((event) => after === undefined || event.sequence > after)
+          .filter(
+            (event) =>
+              event.partition === args.where.partition &&
+              (after === undefined || event.partitionSeq > after),
+          )
+          .sort((a, b) => (a.partitionSeq < b.partitionSeq ? -1 : 1))
           .slice(0, args.take);
         pageSizes.push(page.length);
         return Promise.resolve(page);
@@ -114,21 +129,26 @@ function fakeTenantClient(options: FakeClientOptions): {
     auditChainAnchor: {
       findMany: () =>
         Promise.resolve(
-          (options.anchorHashes ?? []).map((anchorHash) => ({ anchorHash })),
+          (options.anchorHashes ?? []).map((anchorHash) => ({
+            anchorHash,
+            partition: 0,
+          })),
         ),
     },
-    auditChainState: {
-      findUnique: () =>
+    auditPartitionState: {
+      findMany: () =>
         Promise.resolve(
           options.hasChainState === false
-            ? null
-            : {
-                id: AuditService.SINGLETON_ID,
-                latestEventHash:
-                  options.latestEventHash === undefined
-                    ? (events[events.length - 1]?.eventHash ?? null)
-                    : options.latestEventHash,
-              },
+            ? []
+            : [
+                {
+                  partition: 0,
+                  latestEventHash:
+                    options.latestEventHash === undefined
+                      ? (events[events.length - 1]?.eventHash ?? null)
+                      : options.latestEventHash,
+                },
+              ],
         ),
     },
   } as unknown as TenantPrismaClient;
@@ -247,7 +267,7 @@ describe('AuditService.verifyAuditChain', () => {
     });
   });
 
-  it('still checks the chain tail against AuditChainState after the last batch', async () => {
+  it("still checks the chain tail against its partition's AuditPartitionState after the last batch", async () => {
     const events = buildChain(CHAIN_LENGTH);
     const { client } = fakeTenantClient({
       events,
@@ -256,7 +276,7 @@ describe('AuditService.verifyAuditChain', () => {
 
     await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
       valid: false,
-      brokenAt: 'audit_chain_state',
+      brokenAt: 'audit_partition_state:0',
     });
   });
 
@@ -269,6 +289,176 @@ describe('AuditService.verifyAuditChain', () => {
     await expect(makeService().verifyAuditChain(client)).resolves.toEqual({
       valid: true,
     });
-    expect(pageSizes).toEqual([0]);
+    // One empty page per partition, never a second page for any of them.
+    expect(pageSizes).toEqual(new Array(64).fill(0));
+  });
+});
+
+/** An agent id that `partitionFor` puts in partition `target`. */
+function agentInPartition(target: number): string {
+  for (let i = 0; ; i += 1) {
+    const id = `agent-${i}`;
+    if (partitionFor({ type: 'agent', id }, null) === target) return id;
+  }
+}
+
+interface FakeTx {
+  tx: unknown;
+  lockedPartitions: number[][];
+  inserted: Record<string, unknown>[];
+}
+
+/** A transaction client that keeps partition state in memory, like the real tables would. */
+function fakeWriteTx(): FakeTx {
+  const state = new Map<number, { hash: string | null; seq: bigint }>();
+  const lockedPartitions: number[][] = [];
+  const inserted: Record<string, unknown>[] = [];
+  let sequence = 0;
+  const tx = {
+    auditPartitionState: {
+      createMany: ({ data }: { data: { partition: number }[] }) => {
+        for (const { partition } of data) {
+          if (!state.has(partition))
+            state.set(partition, { hash: null, seq: 0n });
+        }
+        return Promise.resolve({ count: data.length });
+      },
+    },
+    $queryRaw: (_strings: TemplateStringsArray, ...values: unknown[]) => {
+      const partitions = values[0] as number[];
+      lockedPartitions.push([...partitions]);
+      return Promise.resolve(
+        partitions.map((partition) => ({
+          partition,
+          latestEventHash: state.get(partition)!.hash,
+          latestSeq: state.get(partition)!.seq,
+        })),
+      );
+    },
+    auditEvent: {
+      createManyAndReturn: ({ data }: { data: Record<string, unknown>[] }) => {
+        const rows: Record<string, unknown>[] = data.map((row) => ({
+          ...row,
+          sequence: (sequence += 1),
+          createdAt: new Date(),
+        }));
+        inserted.push(...rows);
+        for (const row of rows) {
+          state.set(row.partition as number, {
+            hash: row.eventHash as string,
+            seq: row.partitionSeq as bigint,
+          });
+        }
+        return Promise.resolve(rows);
+      },
+    },
+    $executeRaw: () => Promise.resolve(1),
+  };
+  return { tx, lockedPartitions, inserted };
+}
+
+function writeClient(fake: FakeTx, fail?: Error): TenantPrismaClient {
+  return {
+    $transaction: (fn: (tx: unknown) => Promise<unknown>) =>
+      fail ? Promise.reject(fail) : fn(fake.tx),
+  } as unknown as TenantPrismaClient;
+}
+
+describe('AuditService.record (partitioned, group commit)', () => {
+  it("chains each agent's events within its own partition, in order", async () => {
+    const fake = fakeWriteTx();
+    const service = makeService();
+    const client = writeClient(fake);
+    const agent = agentInPartition(5);
+
+    const events = await Promise.all(
+      [1, 2, 3].map((n) =>
+        service.record(client, 'tenant-1', {
+          eventType: 'authorization.allowed',
+          actor: { type: 'agent', id: agent },
+          data: { n },
+        }),
+      ),
+    );
+
+    expect(events.map((e) => e.partition)).toEqual([5, 5, 5]);
+    expect(events.map((e) => e.partitionSeq)).toEqual([1n, 2n, 3n]);
+    expect(events[0]!.previousHash).toBeNull();
+    expect(events[1]!.previousHash).toBe(events[0]!.eventHash);
+    expect(events[2]!.previousHash).toBe(events[1]!.eventHash);
+    expect(events[2]!.eventHash).toBe(
+      computeEventHash({
+        id: events[2]!.id,
+        eventType: 'authorization.allowed',
+        correlationId: events[2]!.correlationId,
+        actor: { type: 'agent', id: agent },
+        timestamp: events[2]!.timestamp.toISOString(),
+        data: { n: 3 },
+        previousHash: events[1]!.eventHash,
+      }),
+    );
+    await service.onModuleDestroy();
+  });
+
+  it('locks the partitions a batch touches in ascending order', async () => {
+    const fake = fakeWriteTx();
+    const service = makeService();
+    const client = writeClient(fake);
+
+    await Promise.all(
+      [9, 3, 9].map((p) =>
+        service.record(client, 'tenant-1', {
+          eventType: 'authorization.allowed',
+          actor: { type: 'agent', id: agentInPartition(p) },
+          data: {},
+        }),
+      ),
+    );
+
+    expect(fake.lockedPartitions).toEqual([[3, 9]]);
+    await service.onModuleDestroy();
+  });
+
+  it('rejects every caller of a failed batch, and recordSafely returns undefined', async () => {
+    const fake = fakeWriteTx();
+    const service = makeService();
+    const client = writeClient(fake, new Error('disk full'));
+    const input = {
+      eventType: 'authorization.allowed' as const,
+      actor: { type: 'agent' as const, id: 'a1' },
+      data: {},
+    };
+
+    const strict = service.record(client, 'tenant-1', input);
+    const safe = service.recordSafely(client, 'tenant-1', input);
+
+    await expect(strict).rejects.toThrow('disk full');
+    await expect(safe).resolves.toBeUndefined();
+    expect(fake.inserted).toHaveLength(0);
+    await service.onModuleDestroy();
+  });
+
+  it('publishes each committed event to Kafka with its partition position', async () => {
+    const publish = vi.fn(() => Promise.resolve());
+    const service = new AuditService({
+      publish,
+    } as unknown as KafkaPublisherService);
+    const fake = fakeWriteTx();
+
+    const event = await service.record(writeClient(fake), 'tenant-1', {
+      eventType: 'authorization.allowed',
+      actor: { type: 'agent', id: agentInPartition(2) },
+      data: {},
+    });
+
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: event.id,
+        tenantId: 'tenant-1',
+        partition: 2,
+        partitionSeq: '1',
+      }),
+    );
+    await service.onModuleDestroy();
   });
 });

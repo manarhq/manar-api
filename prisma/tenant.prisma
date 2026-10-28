@@ -1240,7 +1240,7 @@ model AuthorizationGrant {
 }
 
 /// Phase 9a (Tamper-Evident Audit Chain & Kafka Event Backbone). One
-/// immutable, hash-chained record of a single security-relevant decision or
+/// append-only, hash-chained record of a single security-relevant decision or
 /// action anywhere in the product (Section 46 — enough `data` to
 /// reconstruct *why* a decision occurred, not just its outcome). **Append-
 /// only**: there is no update/delete endpoint or code path for this model
@@ -1248,10 +1248,10 @@ model AuthorizationGrant {
 /// its own dedicated, auditable workflow — never ad hoc code). Every write
 /// goes exclusively through `AuditService.record` (`src/audit/audit.service.ts`),
 /// which computes `eventHash` from the canonicalized event content plus the
-/// chain's current `previousHash` (see `src/audit/canonical-json.ts`) inside
-/// the same transaction that advances `AuditChainState` — see that model's
-/// doc comment for how a fork in the chain is prevented across concurrent
-/// callers/replicas.
+/// event's partition's current `previousHash` (see `src/audit/canonical-json.ts`)
+/// inside the same transaction that advances that `AuditPartitionState` row —
+/// see that model's doc comment for how a fork is prevented across concurrent
+/// callers/replicas. Each tenant's log is 64 chains (`src/audit/audit-partition.ts`).
 ///
 /// `sequence` is a plain autoincrement purely for cheap, reliable "walk the
 /// chain in the order it was actually written" ordering (`verifyAuditChain`
@@ -1299,9 +1299,9 @@ model AuditEvent {
   /// actual stored row).
   data Json
 
-  /// This tenant's previous `AuditEvent.eventHash` at the moment this event
-  /// was appended — `null` only for the very first event in a tenant's
-  /// chain. Forms the hash chain together with `eventHash` below; see
+  /// The previous `AuditEvent.eventHash` **in the same partition** at the
+  /// moment this event was appended — `null` only for the first event of a
+  /// partition. Forms the hash chain together with `eventHash` below; see
   /// `src/audit/canonical-json.ts` and `AuditService.verifyAuditChain`.
   previousHash String?
 
@@ -1313,8 +1313,18 @@ model AuditEvent {
   /// silently break without ever touching this file).
   eventHash String
 
+  /// Which of the tenant's 64 hash chains this event is in
+  /// (`partitionFor` in `src/audit/audit-partition.ts`). Events from before
+  /// partitioning are all partition 0, in their original order.
+  partition Int @default(0)
+
+  /// 1-based position within `partition`. Dense and strictly increasing per
+  /// partition, so a checkpoint (`AuditCheckpoint.roots`) can name a range.
+  partitionSeq BigInt
+
   createdAt DateTime @default(now())
 
+  @@unique([partition, partitionSeq])
   @@index([eventType])
   @@index([correlationId])
   /// Release 2026-11-11: `AuditService.verifyAuditChain` walks the chain in
@@ -1326,42 +1336,62 @@ model AuditEvent {
   @@map("audit_events")
 }
 
-/// Singleton bookkeeping row (Section 46/47) so appending the next
-/// `AuditEvent` never requires scanning the whole table for its tail. Fixed,
-/// known `id` (`"singleton"` — `AuditService.SINGLETON_ID`) rather than a
-/// `WHERE`-unique-constraint-on-a-boolean trick, since a tenant database
-/// only ever has exactly one chain (Phase 2's per-tenant database isolation
-/// already gives this row tenant scoping for free — see
-/// docs/tenant-isolation.md).
+/// One bookkeeping row per audit partition (0–63), so appending the next
+/// `AuditEvent` never scans the table for its partition's tail. Replaces the
+/// single `AuditChainState` row, whose `SELECT ... FOR UPDATE` serialised
+/// every audit write in the tenant.
 ///
-/// `AuditService.record` reads this row with `SELECT ... FOR UPDATE` inside
-/// the same transaction that inserts the new `AuditEvent` and updates this
-/// row — a real Postgres row-level lock, not an in-memory mutex, so two
-/// concurrent `record` calls (even across separate API replicas, which an
-/// in-memory mutex could never coordinate) are serialized by Postgres
-/// itself: the second caller's `FOR UPDATE` blocks until the first
-/// transaction commits, so it always reads the first call's freshly-written
-/// `latestEventHash` as its own `previousHash` — the chain can never fork.
-model AuditChainState {
-  /// Always `"singleton"` — see model doc comment.
-  id String @id
+/// `AuditService` writes in batches (group commit): one transaction locks the
+/// rows of exactly the partitions the batch touches, **in ascending partition
+/// order** (so two replicas flushing overlapping batches can never deadlock),
+/// appends the batch's events and advances these rows. A real Postgres row
+/// lock, so concurrent replicas still cannot fork a partition's chain.
+model AuditPartitionState {
+  partition Int @id
 
-  /// `AuditEvent.id`/`AuditEvent.eventHash` of the most recently appended
-  /// event — both `null` only before this tenant's very first `AuditEvent`
-  /// has ever been recorded.
   latestEventId   String?
   latestEventHash String?
 
-  /// Total events ever recorded — redundant with `AuditEvent`'s row count,
-  /// kept here anyway so a caller never has to `COUNT(*)` the append-only
-  /// table just to answer "how many audit events exist" (a query
-  /// `AuditService.record` already has to touch this row for the lock,
-  /// per the model's own doc comment).
+  /// `partitionSeq` of the latest event (0 before the first).
+  latestSeq BigInt @default(0)
+
   eventCount Int @default(0)
 
   updatedAt DateTime @updatedAt
 
-  @@map("audit_chain_state")
+  @@map("audit_partition_state")
+}
+
+/// A SEAL: the signed, per-second summary of everything appended since the
+/// previous one (`src/audit/checkpoint/`). For each partition that advanced,
+/// `roots` holds the RFC 6962 Merkle root of the events in
+/// `(previous head, new head]`; `partitionHeads` holds every partition's tail.
+/// Checkpoints form their own chain through `previousCheckpointHash`, and
+/// each is Ed25519-signed with the tenant's own key (OpenBao KV). An event's
+/// inclusion proof is ~log2(n) hashes up to one of these roots.
+model AuditCheckpoint {
+  seq BigInt @id
+
+  createdAt DateTime
+
+  /// `{ partition, seq, eventHash }[]` for every partition with events.
+  partitionHeads Json
+
+  /// `{ partition, fromSeq, toSeq, root }[]`, only partitions that advanced.
+  roots Json
+
+  previousCheckpointHash String?
+
+  /// `sha256(canonicalize({ seq, createdAt, partitionHeads, roots, previousCheckpointHash }))`.
+  checkpointHash String @unique
+
+  /// Base64 Ed25519 signature over the 32 bytes of `checkpointHash`.
+  signature String
+
+  /// First 16 hex chars of SHA-256 over the signing key's SPKI DER.
+  keyId String
+
+  @@map("audit_checkpoints")
 }
 
 /// Phase 9b (Retention, Section 48). Written exclusively by
@@ -1381,7 +1411,7 @@ model AuditChainState {
 ///
 /// `tenantId` is carried explicitly even though this is already a
 /// per-tenant-isolated database (Phase 2 — see docs/tenant-isolation.md,
-/// same structural scoping `AuditEvent`/`AuditChainState` get for free) —
+/// same structural scoping `AuditEvent`/`AuditPartitionState` get for free) —
 /// kept for the same defense-in-depth/self-describing-row reason a handful
 /// of other models in this schema (e.g. `RoleBinding.grantedBy`) carry
 /// free-text provenance beyond what a foreign key alone would establish.
@@ -1402,6 +1432,10 @@ model AuditChainAnchor {
   /// `AuditEvent`'s own `data`) so an operator can inspect retention
   /// history without walking the audit chain itself.
   eventsPrunedCount Int
+
+  /// The audit partition this anchor continues (retention prunes each
+  /// partition's head separately). 0 for anchors from before partitioning.
+  partition Int @default(0)
 
   createdAt DateTime @default(now())
 

@@ -111,12 +111,12 @@ export class PlatformOpsService {
 
   private async verify(db: TenantPrismaClient) {
     const result = await this.audit.verifyAuditChain(db);
-    const state = await db.auditChainState.findUnique({
-      where: { id: 'singleton' },
+    const states = await db.auditPartitionState.aggregate({
+      _sum: { eventCount: true },
     });
     return {
       valid: result.valid,
-      eventCount: state?.eventCount ?? 0,
+      eventCount: states._sum.eventCount ?? 0,
       brokenAt: result.valid ? null : (result.brokenAt ?? null),
       verifiedAt: new Date().toISOString(),
     };
