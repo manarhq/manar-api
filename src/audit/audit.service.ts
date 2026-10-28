@@ -157,6 +157,28 @@ export class AuditService implements OnModuleDestroy {
     return () => this.publishAfterCommit(event!, tenantId, input);
   }
 
+  /**
+   * Several events inside the caller's transaction, appended in one call so
+   * their partitions are locked once, in ascending order. A loop of
+   * `recordInTransaction` would lock them in event order and could deadlock
+   * against a concurrent batch.
+   */
+  async recordManyInTransaction(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    inputs: RecordAuditEventInput[],
+  ): Promise<() => void> {
+    if (inputs.length === 0) return () => undefined;
+    const events = await this.append(
+      tx,
+      inputs.map((input) => this.pending(undefined, input)),
+    );
+    return () =>
+      events.forEach((event, i) =>
+        this.publishAfterCommit(event, tenantId, inputs[i]!),
+      );
+  }
+
   private pending(
     client: TenantPrismaClient | undefined,
     input: RecordAuditEventInput,

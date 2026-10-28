@@ -465,6 +465,32 @@ describe('AuditService.record (partitioned, group commit)', () => {
     await service.onModuleDestroy();
   });
 
+  it('recordManyInTransaction locks every touched partition once, ascending, inside the caller transaction', async () => {
+    const fake = fakeWriteTx();
+    const publish = vi.fn(() => Promise.resolve());
+    const service = new AuditService(
+      { publish } as unknown as KafkaPublisherService,
+      noKeys,
+    );
+    const inputs = [9, 3, 9, 5].map((p) => ({
+      eventType: 'authorization.allowed' as const,
+      actor: { type: 'agent' as const, id: agentInPartition(p) },
+      data: {},
+    }));
+
+    const publishAll = await service.recordManyInTransaction(
+      fake.tx as never,
+      'tenant-1',
+      inputs,
+    );
+
+    expect(fake.lockedPartitions).toEqual([[3, 5, 9]]);
+    expect(fake.inserted).toHaveLength(4);
+    publishAll();
+    expect(publish).toHaveBeenCalledTimes(4);
+    await service.onModuleDestroy();
+  });
+
   it('a poison event fails alone: its batch-mates still commit', async () => {
     const fake = fakeWriteTx();
     const service = makeService();

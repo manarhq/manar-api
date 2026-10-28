@@ -40,7 +40,6 @@ export class AuditBatcher<TIn, TOut> {
   }
 
   enqueue(key: string, item: TIn): Promise<TOut> {
-    if (this.closed) return Promise.reject(new Error('audit batcher closed'));
     const state = this.stateFor(key);
     return new Promise<TOut>((resolve, reject) => {
       state.queue.push({ item, resolve, reject });
@@ -48,7 +47,10 @@ export class AuditBatcher<TIn, TOut> {
     });
   }
 
-  /** Flushes everything still queued, then refuses new items. */
+  /**
+   * Flushes everything still queued. Items arriving afterwards (requests
+   * still in flight during shutdown) are flushed at once, never refused.
+   */
   async close(): Promise<void> {
     this.closed = true;
     for (;;) {
@@ -71,7 +73,7 @@ export class AuditBatcher<TIn, TOut> {
 
   private schedule(key: string, state: KeyState<TIn, TOut>): void {
     if (state.inFlight) return; // the running flush reschedules when it ends
-    if (state.queue.length >= this.maxBatch) {
+    if (state.queue.length >= this.maxBatch || this.closed) {
       void this.run(key, state);
     } else if (state.timer === null && state.queue.length > 0) {
       state.timer = setTimeout(() => void this.run(key, state), this.maxWaitMs);

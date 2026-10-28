@@ -90,16 +90,19 @@ describe('AuditBatcher', () => {
     for (const p of results) await expect(p).rejects.toThrow(/results/);
   });
 
-  it('close() flushes what is pending, then refuses new items', async () => {
+  it('close() flushes what is pending; later items still commit, without waiting', async () => {
     const flush = echo();
     const batcher = new AuditBatcher(flush);
     const pending = batcher.enqueue('t1', 4);
 
     await batcher.close();
     await expect(pending).resolves.toBe(40);
-    await expect(batcher.enqueue('t1', 5)).rejects.toThrow(
-      'audit batcher closed',
-    );
+
+    // A request still in flight during shutdown must not lose its audit
+    // record: after close, items flush at once instead of being refused.
+    const late = batcher.enqueue('t1', 5);
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(late).resolves.toBe(50);
   });
 
   it('runs one flush per key at a time; items arriving meanwhile go in the next batch', async () => {
