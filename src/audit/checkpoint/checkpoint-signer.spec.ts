@@ -122,4 +122,16 @@ describe('CheckpointSigner', () => {
     expect(raw.writeSecretIfAbsent).not.toHaveBeenCalled();
     expect(await new CheckpointSigner(kv).hasKey('t1')).toBe(false);
   });
+
+  it('a lookup racing the first signature does not make signing fail', async () => {
+    const { kv } = fakeKv();
+    const signer = new CheckpointSigner(kv);
+    const [lookup, signature] = await Promise.allSettled([
+      signer.publicKey('t1'),
+      signer.sign('t1', hash('a')),
+    ]);
+    expect(signature.status).toBe('fulfilled');
+    expect(lookup.status).toBe('rejected');
+    expect(await signer.hasKey('t1')).toBe(true);
+  });
 });

@@ -33,7 +33,8 @@ const DIGEST = /^[0-9a-f]{64}$/;
  */
 @Injectable()
 export class CheckpointSigner implements CheckpointKeyLookup {
-  private readonly keys = new Map<string, Promise<TenantSigningKey>>();
+  private readonly keys = new Map<string, TenantSigningKey>();
+  private readonly creating = new Map<string, Promise<TenantSigningKey>>();
 
   constructor(private readonly kv: OpenBaoKvClient) {}
 
@@ -82,15 +83,32 @@ export class CheckpointSigner implements CheckpointKeyLookup {
     );
   }
 
-  private keyFor(tenantId: string, create: boolean): Promise<TenantSigningKey> {
-    let pending = this.keys.get(tenantId);
-    if (!pending) {
-      pending = this.load(tenantId, create);
-      // A failed load (OpenBao down) is retried on the next call, not cached.
-      pending.catch(() => this.keys.delete(tenantId));
-      this.keys.set(tenantId, pending);
+  /**
+   * Only successfully loaded keys are cached. A read-only lookup never
+   * shares its in-flight promise with a signer, so a lookup racing the
+   * first SEAL can't make that SEAL's signing fail.
+   */
+  private async keyFor(
+    tenantId: string,
+    create: boolean,
+  ): Promise<TenantSigningKey> {
+    const cached = this.keys.get(tenantId);
+    if (cached) return cached;
+    if (create) {
+      let pending = this.creating.get(tenantId);
+      if (!pending) {
+        pending = this.load(tenantId, true).finally(() =>
+          this.creating.delete(tenantId),
+        );
+        this.creating.set(tenantId, pending);
+      }
+      const key = await pending;
+      this.keys.set(tenantId, key);
+      return key;
     }
-    return pending;
+    const key = await this.load(tenantId, false);
+    this.keys.set(tenantId, key);
+    return key;
   }
 
   private async load(
