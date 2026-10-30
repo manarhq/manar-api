@@ -41,6 +41,8 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_BINDING_VIOLATED: 'tool.invocation.approval_binding_violated',
 
   POLICY_PUBLISHED: 'policy.published',
+  /** Features track: the workspace's start mode (policy preset) was switched; data holds from, to and the new version. */
+  START_MODE_CHANGED: 'start_mode.changed',
 
   /** Phase 9b (Retention, Section 48) — written by `AuditRetentionWorkflow`'s Activity; see `src/audit/retention/`. */
   AUDIT_RETENTION_EXECUTED: 'audit.retention_executed',

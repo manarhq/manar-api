@@ -39,6 +39,7 @@ import { LicensingModule } from './licensing/licensing.module';
 import { UsersModule } from './users/users.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
+import { WorkspaceModule } from './workspace/workspace.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { IncidentsModule } from './incidents/incidents.module';
@@ -91,6 +92,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     UsersModule,
     WorkspacesModule,
     TenantSettingsModule,
+    WorkspaceModule,
     // Phase 15a: Data Classification, Compliance Mapping & Incidents.
     ComplianceModule,
     IncidentsModule,
