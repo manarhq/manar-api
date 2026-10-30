@@ -22,6 +22,7 @@ import { EdgeModule } from '../edge/edge.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
 import { HostCoverageModule } from '../host-coverage/host-coverage.module';
 import { HostMtlsModule } from '../host-mtls/host-mtls.module';
+import { HostApprovalsMtlsModule } from '../approvals/host-approvals-mtls.module';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
 /**
@@ -68,6 +69,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     AgentMtlsGuardModule,
     HostMtlsModule,
     HostCoverageModule,
+    HostApprovalsMtlsModule,
     AgentsModule,
     AuthorizationModule,
     TasksModule,

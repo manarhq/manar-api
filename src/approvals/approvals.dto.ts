@@ -2,8 +2,18 @@ import { ApiProperty } from '@nestjs/swagger';
 
 /** Mirrors `DecideApprovalRequestSchema`. */
 export class DecideApprovalRequestDto {
-  @ApiProperty({ enum: ['APPROVE', 'DENY'] })
-  decision!: 'APPROVE' | 'DENY';
+  @ApiProperty({
+    enum: ['approve_once', 'approve_8h', 'deny', 'APPROVE', 'DENY'],
+    description:
+      '`approve_8h` also creates an allow grant for this exact tool, action and resource on this agent for 8 hours. `APPROVE` and `DENY` are the older spellings of approve_once and deny.',
+  })
+  decision!: 'approve_once' | 'approve_8h' | 'deny' | 'APPROVE' | 'DENY';
+
+  @ApiProperty({
+    required: false,
+    description: 'Return a pre-filled policy rule (Approve + make rule).',
+  })
+  makeRule?: boolean;
 
   @ApiProperty({ required: false, maxLength: 1000 })
   reason?: string;
@@ -41,6 +51,22 @@ export class DecideApprovalResponseDto {
       'The decision that actually took effect. Absent only when `status` is EXPIRED.',
   })
   decision?: 'APPROVE' | 'DENY';
+
+  @ApiProperty({
+    required: false,
+    format: 'uuid',
+    description: 'Set when an 8-hour allow grant was created.',
+  })
+  grantId?: string;
+
+  @ApiProperty({
+    required: false,
+    nullable: true,
+    description:
+      'A policy rule for the rule editor, pre-filled from this request. Present when `makeRule` was true and the request was approved.',
+    type: Object,
+  })
+  ruleDraft?: Record<string, unknown> | null;
 }
 
 /** One row of `GET /approvals`'s paginated list — see `ApprovalRequestService.listApprovalRequests`. */

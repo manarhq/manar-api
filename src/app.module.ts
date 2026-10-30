@@ -20,6 +20,7 @@ import { TasksHttpModule } from './tasks/tasks-http.module';
 import { PolicyHttpModule } from './policy/policy-http.module';
 import { TemporalModule } from './temporal/temporal.module';
 import { ApprovalsHttpModule } from './approvals/approvals-http.module';
+import { PushHttpModule } from './push/push-http.module';
 import { AuditModule } from './audit/audit.module';
 import { AuditHttpModule } from './audit/audit-http.module';
 import { AuditIndexerModule } from './audit/opensearch/audit-indexer.module';
@@ -69,6 +70,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     PolicyHttpModule,
     TemporalModule,
     ApprovalsHttpModule,
+    PushHttpModule,
     AuditHttpModule,
     AuditIndexerModule,
     LiveEventsHttpModule,

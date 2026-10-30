@@ -39,6 +39,7 @@ import {
   DevicesConfigSchema,
   devicesConfigIssues,
 } from '../devices/devices.config';
+import { PushConfigSchema, pushConfigIssues } from '../push/push.config';
 import { EdgeConfigSchema, edgeConfigIssues } from '../edge/edge.config';
 
 /**
@@ -93,6 +94,7 @@ export const AppConfigSchema = z
   .extend(EdgeConfigSchema.shape)
   .extend(BillingConfigSchema.shape)
   .extend(DevicesConfigSchema.shape)
+  .extend(PushConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {
@@ -104,6 +106,7 @@ export const AppConfigSchema = z
       ...trustedProxyIssues(c),
       ...devicesConfigIssues(c),
       ...edgeConfigIssues(c),
+      ...pushConfigIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });
   });
