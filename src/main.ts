@@ -30,7 +30,8 @@ async function bootstrap(): Promise<void> {
     AppModule,
     // MANAR_TRUSTED_PROXY_CIDRS: request.ip is the real caller behind cloudflared and Traefik.
     new FastifyAdapter(httpAdapterOptions(bootstrapConfig)),
-    { bufferLogs: true },
+    // rawBody: the Stripe webhook verifies its signature over the exact bytes.
+    { bufferLogs: true, rawBody: true },
   );
   app.useLogger(app.get(WINSTON_MODULE_NEST_PROVIDER));
 

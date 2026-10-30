@@ -116,24 +116,27 @@ export class AgentsController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    // Plan cap: live agents other than cloud agents (those have their own cap).
-    await this.entitlements.assertWithin(
+    // Plan cap: live agents other than cloud agents (those have their own cap). Count, check
+    // and create are one locked step so parallel requests cannot exceed it.
+    const agent = await this.entitlements.withinLimit(
       auth.tenant.id,
       'agents',
-      await tenantClient.agent.count({
-        where: {
-          status: { in: ['PENDING_ENROLLMENT', 'ACTIVE'] },
-          cloudBinding: null,
-        },
-      }),
+      tenantClient,
+      (tx) =>
+        tx.agent.count({
+          where: {
+            status: { in: ['PENDING_ENROLLMENT', 'ACTIVE'] },
+            cloudBinding: null,
+          },
+        }),
+      (tx) =>
+        this.agentsService.createAgent(tx, {
+          slug: input.slug,
+          displayName: input.displayName,
+          tenantSlug: auth.tenant.slug,
+          createdBy: auth.user.id,
+        }),
     );
-
-    const agent = await this.agentsService.createAgent(tenantClient, {
-      slug: input.slug,
-      displayName: input.displayName,
-      tenantSlug: auth.tenant.slug,
-      createdBy: auth.user.id,
-    });
 
     return {
       id: agent.id,

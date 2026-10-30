@@ -6,6 +6,7 @@ import { TasksModule } from '../tasks/tasks.module';
 import { PolicyModule } from '../policy/policy.module';
 import { RiskModule } from '../risk/risk.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
+import { BillingWorkerModule } from '../billing/billing.module';
 import { AuditModule } from '../audit/audit.module';
 import { AuditRetentionModule } from '../audit/retention/audit-retention.module';
 import { AuditCheckpointScheduler } from '../audit/checkpoint/audit-checkpoint.scheduler';
@@ -53,6 +54,8 @@ import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.
     ApprovalsModule,
     AuditRetentionModule,
     WebhooksModule,
+    // Company billing: daily user and extra-device quantities on Stripe.
+    BillingWorkerModule,
   ],
   providers: [
     // SEALs: signed audit checkpoints every second (docs/audit-chain.md).

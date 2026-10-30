@@ -97,7 +97,10 @@ export class AgentsService {
     private readonly edgePeers?: EdgePeerService,
   ) {}
 
-  async createAgent(tenantClient: TenantPrismaClient, input: CreateAgentInput) {
+  async createAgent(
+    tenantClient: Pick<TenantPrismaClient, 'agent'>,
+    input: CreateAgentInput,
+  ) {
     const identifier = buildAgentIdentifier(input.tenantSlug, input.slug);
     return tenantClient.agent.create({
       data: {

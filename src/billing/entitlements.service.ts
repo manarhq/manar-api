@@ -7,6 +7,10 @@ import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { LicenseService } from '../licensing/license.service';
+import type {
+  Prisma,
+  PrismaClient as TenantPrismaClient,
+} from '../generated/tenant-client/client';
 import { PlanLimitError } from './plan-limit.error';
 import {
   ENTERPRISE_ONLY_FEATURES,
@@ -88,7 +92,31 @@ export class EntitlementsService {
     limit: LimitName,
     current: number,
   ): Promise<void> {
-    const e = await this.get(tenantId);
+    this.check(await this.get(tenantId), limit, current);
+  }
+
+  /**
+   * Count, check and create as one step: parallel requests cannot all pass the check and then
+   * overshoot the cap. Runs in one tenant-DB transaction holding an advisory lock per limit (the
+   * tenant has its own database, so the lock is per tenant). Use this wherever something is
+   * created under a cap; `assertWithin` is for read-only checks.
+   */
+  async withinLimit<T>(
+    tenantId: string,
+    limit: LimitName,
+    tenantClient: TenantPrismaClient,
+    count: (tx: Prisma.TransactionClient) => Promise<number>,
+    create: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    const entitlement = await this.get(tenantId);
+    return tenantClient.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`plan-limit:${limit}`}))`;
+      this.check(entitlement, limit, await count(tx));
+      return create(tx);
+    });
+  }
+
+  private check(e: Entitlement, limit: LimitName, current: number): void {
     const max = e.status === 'read_only' ? 0 : e.limits[limit];
     if (max === null || current < max) return;
     throw new PlanLimitError(limit, current, max, this.upgradeUrl());

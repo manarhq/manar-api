@@ -148,4 +148,53 @@ describe('EntitlementsService', () => {
     const days = (Date.now() - floor!.getTime()) / 86_400_000;
     expect(days).toBeCloseTo(30, 1);
   });
+
+  it('withinLimit: N+1 parallel creates against a cap of N let exactly N through', async () => {
+    const { svc } = make(); // free: 3 devices
+    const rows: number[] = [];
+    // Stand-in for Postgres: pg_advisory_xact_lock queues transactions, released at commit.
+    let tail: Promise<void> = Promise.resolve();
+    const client = {
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+        let release!: () => void;
+        const mine = new Promise<void>((r) => (release = r));
+        const prev = tail;
+        tail = mine;
+        const tx = {
+          $executeRaw: async (strings: TemplateStringsArray) => {
+            expect(strings.join('?')).toContain('pg_advisory_xact_lock');
+            await prev;
+          },
+        };
+        try {
+          return await fn(tx);
+        } finally {
+          release();
+        }
+      },
+    };
+    const attempt = (n: number) =>
+      svc.withinLimit(
+        't1',
+        'devices',
+        client as never,
+        async () => {
+          await new Promise((r) => setTimeout(r, 5)); // widen the race window
+          return rows.length;
+        },
+        async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          rows.push(n);
+          return n;
+        },
+      );
+    const results = await Promise.allSettled([0, 1, 2, 3].map(attempt));
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(3);
+    const failed = results.filter((r) => r.status === 'rejected');
+    expect(failed).toHaveLength(1);
+    expect((failed[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      PlanLimitError,
+    );
+    expect(rows).toHaveLength(3);
+  });
 });
