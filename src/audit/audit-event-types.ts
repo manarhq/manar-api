@@ -165,6 +165,15 @@ export const AUDIT_EVENT_TYPES = {
   TOOL_UNPROTECTED: 'tool.unprotected',
   /** A non-Claude tool's action was decided through `POST /host/v1/authorize`. */
   HOST_ACTION_DECIDED: 'host.action_decided',
+
+  /** Secrets (spec 4.5): a device reported a secret file opened by an AI tool (masked path, no content). */
+  SECRET_TOUCHED: 'secret.touched',
+  /** A secret was moved into the device's vault and the device verified it (kind and ref, never the secret). */
+  SECRET_VAULT_STORED: 'secret.vault.stored',
+  SECRET_VAULT_RESTORED: 'secret.vault.restored',
+  /** A program was let have a vaulted secret (the decision and its scope are in the data). */
+  SECRET_VAULT_RELEASED: 'secret.vault.released',
+  SECRET_VAULT_DENIED: 'secret.vault.denied',
 } as const;
 
 export type AuditEventType =

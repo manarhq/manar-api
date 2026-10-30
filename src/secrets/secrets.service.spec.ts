@@ -1,0 +1,209 @@
+import { describe, expect, it, vi } from 'vitest';
+import { SecretAlertBus } from './secret-alert-bus';
+import { SecretsConflictError, SecretsService } from './secrets.service';
+import { HostEventsBatchSchema, maskHome } from './secrets.validation';
+
+const ev = (o: Record<string, unknown> = {}) => ({
+  type: 'secret.touched' as const,
+  toolId: 'host.cursor',
+  process: 'node',
+  pathClass: 'aws' as const,
+  maskedPath: '/home/alice/.aws/credentials',
+  blocked: true,
+  at: new Date(Date.now() + 3_600_000),
+  ...o,
+});
+
+function setup() {
+  const created: Array<Array<Record<string, unknown>>> = [];
+  const client = {
+    secretEvent: {
+      createMany: vi.fn(
+        ({ data }: { data: Array<Record<string, unknown>> }) => {
+          created.push(data);
+          return Promise.resolve({ count: data.length });
+        },
+      ),
+    },
+  };
+  const audit = { recordSafely: vi.fn().mockResolvedValue(undefined) };
+  const bus = new SecretAlertBus();
+  const alerts: unknown[] = [];
+  bus.subscribe((a) => alerts.push(a));
+  const service = new SecretsService(audit as never, bus);
+  return { client, audit, service, created, alerts };
+}
+
+describe('maskHome', () => {
+  it('replaces the user name in any home prefix', () => {
+    expect(maskHome('/home/alice/.ssh/id')).toBe('~/.ssh/id');
+    expect(maskHome('C:\\Users\\Bob\\.aws\\credentials')).toBe(
+      '~\\.aws\\credentials',
+    );
+    expect(maskHome('/Users/z/.kube/config')).toBe('~/.kube/config');
+    expect(maskHome('~/.aws/credentials')).toBe('~/.aws/credentials');
+    expect(maskHome('/srv/app/.env')).toBe('/srv/app/.env');
+  });
+});
+
+describe('HostEventsBatchSchema', () => {
+  const ok = {
+    events: [
+      {
+        type: 'secret.touched',
+        toolId: 'host.cursor',
+        at: '2026-11-01T10:00:00Z',
+      },
+    ],
+  };
+  it('accepts a valid batch', () => {
+    expect(HostEventsBatchSchema.safeParse(ok).success).toBe(true);
+  });
+  it.each([
+    [
+      'unknown type',
+      { events: [{ type: 'secret.deleted', at: '2026-11-01T10:00:00Z' }] },
+    ],
+    [
+      'unknown field',
+      {
+        events: [
+          { type: 'secret.touched', at: '2026-11-01T10:00:00Z', token: 'x' },
+        ],
+      },
+    ],
+    [
+      'bad tool id',
+      {
+        events: [
+          {
+            type: 'secret.touched',
+            toolId: '../x',
+            at: '2026-11-01T10:00:00Z',
+          },
+        ],
+      },
+    ],
+    [
+      'control characters',
+      {
+        events: [
+          {
+            type: 'secret.touched',
+            process: 'a\nb',
+            at: '2026-11-01T10:00:00Z',
+          },
+        ],
+      },
+    ],
+    ['empty batch', { events: [] }],
+    ['101 events', { events: Array.from({ length: 101 }, () => ok.events[0]) }],
+  ])('rejects %s', (_n, body) => {
+    expect(HostEventsBatchSchema.safeParse(body).success).toBe(false);
+  });
+});
+
+describe('SecretsService.ingest', () => {
+  it('masks the path again, clamps a future time, audits and alerts', async () => {
+    const { client, audit, service, created, alerts } = setup();
+    await service.ingest(client as never, 't1', 'h1', [ev()]);
+    expect(created[0]![0]).toMatchObject({
+      hostId: 'h1',
+      maskedPath: '~/.aws/credentials',
+    });
+    expect((created[0]![0]!.at as Date).getTime()).toBeLessThan(
+      Date.now() + 6 * 60_000,
+    );
+    expect(audit.recordSafely).toHaveBeenCalledWith(
+      client,
+      't1',
+      expect.objectContaining({
+        eventType: 'secret.touched',
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        data: expect.objectContaining({
+          hostId: 'h1',
+          maskedPath: '~/.aws/credentials',
+        }),
+      }),
+    );
+    expect(alerts).toEqual([
+      expect.objectContaining({
+        tenantId: 't1',
+        hostId: 'h1',
+        toolId: 'host.cursor',
+        blocked: true,
+      }),
+    ]);
+  });
+
+  it('stores watcher status without auditing or alerting, and a failing subscriber is harmless', async () => {
+    const { client, audit, service, alerts } = setup();
+    await service.ingest(client as never, 't1', 'h1', [
+      ev({ type: 'secret.watch.unavailable', toolId: undefined }),
+    ]);
+    expect(audit.recordSafely).not.toHaveBeenCalled();
+    expect(alerts).toHaveLength(0);
+  });
+});
+
+describe('SecretsService.decideAccess', () => {
+  it('refuses a request that was already decided', async () => {
+    const audit = { recordSafely: vi.fn() };
+    const client = {
+      secretVaultAccess: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'a',
+          hostId: 'h',
+          kind: 'aws',
+          ref: 'default',
+          program: 'aws',
+        }),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      },
+    };
+    const s = new SecretsService(audit as never, new SecretAlertBus());
+    await expect(
+      s.decideAccess(
+        client as never,
+        't',
+        { type: 'human', id: 'u' },
+        'a',
+        'ALLOW_ONCE',
+      ),
+    ).rejects.toBeInstanceOf(SecretsConflictError);
+    expect(audit.recordSafely).not.toHaveBeenCalled();
+  });
+});
+
+describe('SecretsService vault state', () => {
+  const row = (state: string) => ({ id: 'v', state });
+  it('only a REQUESTED entry can become STORED; a failed restore keeps it STORED', async () => {
+    const update = vi.fn().mockResolvedValue({});
+    const find = vi.fn();
+    const client = { secretVault: { findUnique: find, update } };
+    const s = new SecretsService(
+      { recordSafely: vi.fn() } as never,
+      new SecretAlertBus(),
+    );
+    find.mockResolvedValue(row('STORED'));
+    await expect(
+      s.report(client as never, 't', 'h', 'aws', 'p', 'STORED'),
+    ).rejects.toBeInstanceOf(SecretsConflictError);
+    find.mockResolvedValue(row('RESTORE_REQUESTED'));
+    expect(
+      await s.report(
+        client as never,
+        't',
+        'h',
+        'aws',
+        'p',
+        'FAILED',
+        'disk full',
+      ),
+    ).toEqual({ state: 'STORED' });
+    find.mockResolvedValue(row('REQUESTED'));
+    expect(
+      await s.report(client as never, 't', 'h', 'aws', 'p', 'FAILED'),
+    ).toEqual({ state: 'FAILED' });
+  });
+});

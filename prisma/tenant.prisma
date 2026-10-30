@@ -2458,3 +2458,70 @@ model HostApproval {
   @@index([hostId, status, expiresAt])
   @@map("host_approvals")
 }
+
+/// One thing the secrets watcher or vault reported from a device (POST /host/v1/events). The
+/// path is stored with the home directory already masked; no secret content is ever stored.
+model SecretEvent {
+  id         String   @id @default(uuid())
+  hostId     String
+  /// secret.touched | secret.vault.released | secret.vault.denied | secret.vault.stored
+  /// | secret.watch.available | secret.watch.unavailable
+  type       String
+  toolId     String?
+  process    String?
+  pathClass  String?
+  maskedPath String?
+  blocked    Boolean  @default(false)
+  /// When the device saw it.
+  at         DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([hostId, at])
+  @@index([toolId, at])
+  @@index([type, at])
+  @@map("secret_events")
+}
+
+/// A secret moved (or asked to be moved) into the device's vault. The console sets REQUESTED; the
+/// device reports STORED after it verified the read-back; RESTORE_REQUESTED comes from "Restore to file".
+model SecretVault {
+  id          String   @id @default(uuid())
+  hostId      String
+  /// aws | ssh
+  kind        String
+  /// AWS profile name or ssh key file name; never a key.
+  ref         String
+  /// REQUESTED | STORED | RESTORE_REQUESTED | RESTORED | FAILED
+  state       String   @default("REQUESTED")
+  requestedBy String
+  detail      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([hostId, kind, ref])
+  @@index([hostId, state])
+  @@map("secret_vault")
+}
+
+/// A program asking the device's vault for a secret; the person decides in the console until the
+/// WARDEN prompt takes this over.
+model SecretVaultAccess {
+  id          String    @id @default(uuid())
+  hostId      String
+  kind        String
+  ref         String
+  /// Executable name of the requesting program.
+  program     String
+  /// Full path of the binary (home directory masked) and the SHA-256 of the file the device read.
+  programPath String    @default("")
+  programSha  String    @default("")
+  /// PENDING | ALLOW_ONCE | ALLOW_8H | ALLOW_ALWAYS | DENY
+  status      String    @default("PENDING")
+  decidedBy   String?
+  decidedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([hostId, status])
+  @@index([status, createdAt])
+  @@map("secret_vault_access")
+}
