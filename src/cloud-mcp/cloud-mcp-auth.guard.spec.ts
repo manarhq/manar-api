@@ -713,10 +713,73 @@ describe('CloudMcpAuthGuard on the shared realm', () => {
     });
   });
 
-  it('names the tenant-prefixed scope in the challenge', async () => {
-    const { ctx, replyHeaders } = context(undefined);
-    await refusal(shared().guard.canActivate(ctx));
+  it('a bare 401 costs no tenant lookup and carries no scope hint (the metadata lists it)', async () => {
+    const s = shared();
+    const lookup = vi.spyOn(
+      (s.guard as unknown as { control: ControlPrismaService }).control.tenant,
+      'findUnique',
+    );
+    const { ctx, replyHeaders } = context(undefined, {
+      tenantSlug: 'random-xyz',
+      agentSlug: 'a',
+    });
+    await refusal(s.guard.canActivate(ctx));
+    expect(lookup).not.toHaveBeenCalled();
+    expect(replyHeaders['WWW-Authenticate']).not.toContain('scope=');
+  });
+
+  it('a token for another issuer or garbage does no tenant lookup either; a shared token does, and names the scope', async () => {
+    const s = shared();
+    const lookup = vi.spyOn(
+      (s.guard as unknown as { control: ControlPrismaService }).control.tenant,
+      'findUnique',
+    );
+    await refusal(s.guard.canActivate(context('Bearer not-a-jwt').ctx));
+    await refusal(
+      s.guard.canActivate(
+        context(`Bearer ${await token({}, { issuer: 'https://evil.test/r' })}`)
+          .ctx,
+      ),
+    );
+    expect(lookup).not.toHaveBeenCalled();
+    const { ctx, replyHeaders } = context(
+      `Bearer ${await sharedToken({ manar_tenant: 't-globex' })}`,
+    );
+    await refusal(s.guard.canActivate(ctx));
+    expect(lookup).toHaveBeenCalledTimes(1);
     expect(replyHeaders['WWW-Authenticate']).toContain(`scope="${T_SCOPE}"`);
+  });
+
+  it('unknown slugs are cached apart from real tenants and never evict them', async () => {
+    const s = shared();
+    const g = s.guard as unknown as {
+      tenantBySlug(slug: string): Promise<unknown>;
+      tenantsBySlug: Map<string, unknown>;
+      unknownSlugs: Map<string, unknown>;
+    };
+    await g.tenantBySlug('acme');
+    for (let i = 0; i < 1_100; i++) await g.tenantBySlug(`nobody-${i}`);
+    expect(g.tenantsBySlug.has('acme')).toBe(true);
+    expect(g.unknownSlugs.size).toBeLessThanOrEqual(1_000);
+  });
+
+  it('an existing ChatGPT binding is refused while ChatGPT is off on the shared realm', async () => {
+    const chat = { platform: 'CHATGPT', oauthClientId: T_CLIENT };
+    const off = shared({ agent: sharedAgent(chat) });
+    const refused = await refusal(
+      off.guard.canActivate(context(`Bearer ${await sharedToken()}`).ctx),
+    );
+    expect([refused.status, refused.body.reason]).toEqual([
+      403,
+      'chatgpt_not_enabled',
+    ]);
+    const on = shared({
+      agent: sharedAgent(chat),
+      env: { MANAR_MCP_CHATGPT_ENABLED: 'true' },
+    });
+    await expect(
+      on.guard.canActivate(context(`Bearer ${await sharedToken()}`).ctx),
+    ).resolves.toBe(true);
   });
 
   it("a token for tenant B used on tenant A's MCP URL is 401, and nothing lands in A's audit", async () => {
@@ -807,6 +870,7 @@ describe('CloudMcpAuthGuard on the shared realm', () => {
   it('a self-registered client is never accepted before the tenant admin confirms it', async () => {
     const s = shared({
       agent: sharedAgent({ platform: 'CHATGPT', oauthClientId: null }),
+      env: { MANAR_MCP_CHATGPT_ENABLED: 'true' },
     });
     const { ctx } = context(
       `Bearer ${await sharedToken({ azp: 'dcr-attacker' })}`,

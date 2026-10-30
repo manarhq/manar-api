@@ -33,6 +33,8 @@ function setup(
     env?: Record<string, unknown>;
     /** Cap check: rejects like `EntitlementsService.withinLimit` over the cap. */
     overCap?: boolean;
+    entitlement?: { status: string; cloudAgents: number | null };
+    catalogFails?: boolean;
     foundClient?: Record<string, unknown>;
     binding?: Record<string, unknown>;
   } = {},
@@ -124,10 +126,18 @@ function setup(
     kc as unknown as KeycloakAdminClient,
     tasks as unknown as TasksService,
     {
-      resolveTaskPack: () => Promise.resolve(null),
+      resolveTaskPack: () =>
+        options.catalogFails
+          ? Promise.reject(new Error('catalog down'))
+          : Promise.resolve(null),
     } as unknown as CatalogService,
     { recordSafely: () => Promise.resolve() } as unknown as AuditService,
     {
+      get: () =>
+        Promise.resolve({
+          status: options.entitlement?.status ?? 'active',
+          limits: { cloudAgents: options.entitlement?.cloudAgents ?? null },
+        }),
       withinLimit: (
         _tenant: string,
         _limit: string,
@@ -164,7 +174,8 @@ describe('CloudAgentsService.connect', () => {
       ['acme', 'client-scopes/scope-id'],
       ['acme', 'roles-by-id/role-id'],
     ]);
-    expect(state().agent?.status).toBe('PENDING_ENROLLMENT');
+    // The failed row is revoked, which frees the plan slot.
+    expect(state().agent?.status).toBe('REVOKED');
     expect(state().binding).toBeNull();
 
     const result = await service.connect(AUTH, input);
@@ -352,5 +363,42 @@ describe('CloudAgentsService.proposeDcrClient on the shared realm', () => {
     await expect(
       service.proposeDcrClient('t-acme', 'agent-1', 'dcr-1'),
     ).resolves.toBe('refused');
+  });
+});
+
+describe('failed connects and lapsed workspaces', () => {
+  it('a failure before Keycloak (catalog) also revokes the row, so the slot is free', async () => {
+    const { service, kc, state } = setup({ catalogFails: true });
+    await expect(service.connect(AUTH, input)).rejects.toThrow();
+    expect(state().agent?.status).toBe('REVOKED');
+    expect(kc.createRealmRole).not.toHaveBeenCalled();
+  });
+
+  it('disconnect works for an agent that never got a binding', async () => {
+    const { service, state } = setup({ catalogFails: true });
+    await expect(service.connect(AUTH, input)).rejects.toThrow();
+    // Re-open it half way (as a crash would leave it) and disconnect.
+    await expect(
+      service.disconnect(AUTH, 'agent-1', 'cleanup'),
+    ).resolves.toEqual({ agentId: 'agent-1', status: 'REVOKED' });
+    expect(state().agent?.status).toBe('REVOKED');
+  });
+
+  it('a read-only (lapsed) workspace runs no cloud agent even with an unlimited cap', async () => {
+    const { service } = setup({
+      entitlement: { status: 'read_only', cloudAgents: null },
+    });
+    await expect(
+      service.isPaused('t-acme', {} as never, 'agent-1'),
+    ).resolves.toBe(true);
+  });
+
+  it('an unlimited active workspace pauses nothing', async () => {
+    const { service } = setup({
+      entitlement: { status: 'active', cloudAgents: null },
+    });
+    await expect(
+      service.isPaused('t-acme', {} as never, 'agent-1'),
+    ).resolves.toBe(false);
   });
 });

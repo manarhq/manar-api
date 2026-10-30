@@ -133,8 +133,13 @@ export class CloudMcpAuthGuard implements CanActivate {
     { tenant: SlugTenant | null; until: number }
   >();
 
+  private readonly unknownSlugs = new Map<
+    string,
+    { tenant: SlugTenant | null; until: number }
+  >();
+
   private async tenantBySlug(slug: string): Promise<SlugTenant | null> {
-    const hit = this.tenantsBySlug.get(slug);
+    const hit = this.tenantsBySlug.get(slug) ?? this.unknownSlugs.get(slug);
     if (hit && hit.until > Date.now()) return hit.tenant;
     const row = await failClosed('control-db', () =>
       this.control.tenant.findUnique({ where: { slug } }),
@@ -146,11 +151,10 @@ export class CloudMcpAuthGuard implements CanActivate {
           keycloakIssuerUrl: row.keycloakIssuerUrl,
         }
       : null;
-    if (this.tenantsBySlug.size > 10_000) this.tenantsBySlug.clear();
-    this.tenantsBySlug.set(slug, {
-      tenant,
-      until: Date.now() + TENANT_CACHE_MS,
-    });
+    // Misses (random slugs) live in their own small map so they cannot evict real tenants.
+    const cache = tenant ? this.tenantsBySlug : this.unknownSlugs;
+    if (cache.size > (tenant ? 10_000 : 1_000)) cache.clear();
+    cache.set(slug, { tenant, until: Date.now() + TENANT_CACHE_MS });
     return tenant;
   }
 
@@ -168,18 +172,16 @@ export class CloudMcpAuthGuard implements CanActivate {
 
     const resource = cloudMcpResourceUrl(host, tenantSlug, agentSlug);
     // Shared realm (a shared issuer is configured and the tenant has no realm of its own): the
-    // scope name carries the tenant id, and the tenant comes from the token's tenant claim.
-    const sharedTenant = settings.sharedIssuer
-      ? await this.tenantBySlug(tenantSlug)
-      : null;
-    const sharedTenantId = sharedTenant?.keycloakIssuerUrl
-      ? undefined
-      : sharedTenant?.id;
-    const scope = cloudMcpScope(agentSlug, sharedTenantId);
+    // scope name carries the tenant id. Looking the tenant up costs a database query, so it
+    // happens only for a decodable token claiming the shared issuer, after the failure budget
+    // check. Until then the challenge omits the scope hint (the metadata lists it).
+    let sharedTenant: SlugTenant | null = null;
+    let scope = cloudMcpScope(agentSlug);
+    let scopeHint: string | null = settings.sharedIssuer ? null : scope;
     const challenge = (error?: string) =>
       [
         `Bearer resource_metadata="${cloudMcpMetadataUrl(host, tenantSlug, agentSlug)}"`,
-        `scope="${scope}"`,
+        ...(scopeHint ? [`scope="${scopeHint}"`] : []),
         ...(error ? [`error="${error}"`] : []),
       ].join(', ');
 
@@ -240,6 +242,16 @@ export class CloudMcpAuthGuard implements CanActivate {
       // Not a JWT: cheap to refuse, so it counts for this caller only.
       return refuse({ status: 401, reason: 'malformed_token' }, {}, false);
     }
+    if (settings.sharedIssuer && unverified.iss === settings.sharedIssuer) {
+      sharedTenant = await this.tenantBySlug(tenantSlug);
+      if (sharedTenant && !sharedTenant.keycloakIssuerUrl) {
+        scope = cloudMcpScope(agentSlug, sharedTenant.id);
+        scopeHint = scope;
+      }
+    }
+    const sharedTenantId = sharedTenant?.keycloakIssuerUrl
+      ? undefined
+      : sharedTenant?.id;
     const outcome = await this.check(
       token,
       unverified,
@@ -430,6 +442,14 @@ export class CloudMcpAuthGuard implements CanActivate {
       return forbidden('unknown_agent');
     }
     if (agent.status !== 'ACTIVE') return forbidden('agent_not_active');
+    // ChatGPT on the shared realm is off: existing bindings are refused too, not just new ones.
+    if (
+      isShared &&
+      binding.platform === 'CHATGPT' &&
+      !cloudMcpSettings(this.config).chatGptOnSharedRealm
+    ) {
+      return forbidden('chatgpt_not_enabled');
+    }
     // Over the plan cap after a downgrade: paused, not deleted.
     const paused = await failClosed('entitlements', () =>
       this.cloudAgents.isPaused(known.tenantId, tenantClient, agent.id),

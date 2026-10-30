@@ -41,11 +41,25 @@ import {
 type TenantClient = Awaited<ReturnType<TenantDatabaseManager['getClient']>>;
 type Platform = 'COPILOT_STUDIO' | 'CHATGPT';
 
-/** Cloud agents that count against the plan cap (a connect that failed part way still holds its slot). */
-const liveCloudAgents = {
-  kind: 'CLOUD',
-  status: { in: ['PENDING_ENROLLMENT', 'ACTIVE'] },
-} satisfies Prisma.AgentWhereInput;
+const CONNECT_IN_FLIGHT_MS = 10 * 60_000;
+
+/**
+ * Cloud agents that count against the plan cap: the active ones, plus a connect still in flight
+ * (a pending row younger than ten minutes, so parallel connects cannot overshoot). A connect that
+ * failed is REVOKED, and one that died with the process stops counting after ten minutes.
+ */
+function liveCloudAgents(): Prisma.AgentWhereInput {
+  return {
+    kind: 'CLOUD',
+    OR: [
+      { status: 'ACTIVE' },
+      {
+        status: 'PENDING_ENROLLMENT',
+        createdAt: { gt: new Date(Date.now() - CONNECT_IN_FLIGHT_MS) },
+      },
+    ],
+  };
+}
 
 const SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const HttpsUrl = z
@@ -205,7 +219,8 @@ export class CloudAgentsService {
     // A connection that failed part way is resumed under the same slug.
     const resume =
       existing?.kind === 'CLOUD' &&
-      existing.status === 'PENDING_ENROLLMENT' &&
+      (existing.status === 'PENDING_ENROLLMENT' ||
+        existing.status === 'REVOKED') &&
       !existing.cloudBinding;
     if (existing && !resume) {
       throw new ConflictException(`An agent with slug "${input.slug}" exists`);
@@ -224,37 +239,60 @@ export class CloudAgentsService {
       );
     }
 
-    // Plan cap: count, check and create are one locked step. A resumed connect already counts.
-    const agent =
-      existing ??
-      (await this.entitlements.withinLimit(
-        auth.tenant.id,
-        'cloudAgents',
-        tenantClient,
-        (tx) => tx.agent.count({ where: liveCloudAgents }),
-        (tx) =>
-          tx.agent.create({
-            data: {
-              slug: input.slug,
-              identifier: buildAgentIdentifier(auth.tenant.slug, input.slug),
-              displayName: input.displayName,
-              createdBy: auth.user.id,
-              kind: 'CLOUD',
-            },
-          }),
-      ));
-    const packId = await catalogGate(() =>
-      this.catalog.resolveTaskPack(auth.tenant.id, agent.id, input.task.packId),
+    // Plan cap: count, check and create (or re-open a failed one) are one locked step.
+    const agent = await this.entitlements.withinLimit(
+      auth.tenant.id,
+      'cloudAgents',
+      tenantClient,
+      (tx) =>
+        tx.agent.count({
+          where: {
+            ...liveCloudAgents(),
+            ...(existing ? { id: { not: existing.id } } : {}),
+          },
+        }),
+      (tx) =>
+        existing
+          ? tx.agent.update({
+              where: { id: existing.id },
+              data: {
+                status: 'PENDING_ENROLLMENT',
+                displayName: input.displayName,
+              },
+            })
+          : tx.agent.create({
+              data: {
+                slug: input.slug,
+                identifier: buildAgentIdentifier(auth.tenant.slug, input.slug),
+                displayName: input.displayName,
+                createdBy: auth.user.id,
+                kind: 'CLOUD',
+              },
+            }),
     );
 
     const mcpUrl = cloudMcpResourceUrl(host, auth.tenant.slug, input.slug);
     const dcrHosts = cloudMcpSettings(this.config).dcrTrustedHosts;
     const ids: KeycloakIds = {};
     // Each undo is pushed only after its creation succeeded.
-    const undo: Array<() => Promise<unknown>> = [];
+    // The agent row is revoked last, so a failed connect frees its slot.
+    const undo: Array<() => Promise<unknown>> = [
+      () =>
+        tenantClient.agent.update({
+          where: { id: agent.id },
+          data: { status: 'REVOKED' },
+        }),
+    ];
     let clientSecret: string | null = null;
     let taskId: string;
     try {
+      const packId = await catalogGate(() =>
+        this.catalog.resolveTaskPack(
+          auth.tenant.id,
+          agent.id,
+          input.task.packId,
+        ),
+      );
       const roleName = names.role;
       if (roleName) {
         await kc.createRealmRole(realm, roleName);
@@ -423,7 +461,10 @@ export class CloudAgentsService {
     tenantClient: TenantClient,
     agentId: string,
   ): Promise<boolean> {
-    const max = (await this.entitlements.get(tenantId)).limits.cloudAgents;
+    const e = await this.entitlements.get(tenantId);
+    // A lapsed workspace (read-only) runs nothing, whatever the plan's cap says.
+    if (e.status === 'read_only') return true;
+    const max = e.limits.cloudAgents;
     if (max === null) return false;
     const running = await tenantClient.agent.findMany({
       where: { kind: 'CLOUD', status: 'ACTIVE' },
@@ -438,8 +479,9 @@ export class CloudAgentsService {
   async list(auth: AuthContext) {
     const tenantClient = await this.tenants.getClient(auth.tenant.id);
     const realm = await this.realmOf(auth.tenant.id).catch(() => null);
-    const max = (await this.entitlements.get(auth.tenant.id)).limits
-      .cloudAgents;
+    const e = await this.entitlements.get(auth.tenant.id);
+    const readOnly = e.status === 'read_only';
+    const max = e.limits.cloudAgents;
     const agents = await tenantClient.agent.findMany({
       where: { kind: 'CLOUD', status: { not: 'REVOKED' } },
       include: { cloudBinding: true },
@@ -454,7 +496,8 @@ export class CloudAgentsService {
         cloudMcpSettings(this.config).chatGptOnSharedRealm,
       items: agents.map((a) => {
         const counted = a.status === 'ACTIVE';
-        const paused = counted && max !== null && running++ >= max;
+        const paused =
+          counted && (readOnly || (max !== null && running++ >= max));
         return {
           id: a.id,
           slug: a.slug,
@@ -698,6 +741,21 @@ export class CloudAgentsService {
    * closes when no ChatGPT agent is left). Refused from the first step; repeatable.
    */
   async disconnect(auth: AuthContext, agentId: string, reason: string) {
+    const tc = await this.tenants.getClient(auth.tenant.id);
+    const half = await tc.agent.findUnique({
+      where: { id: agentId },
+      include: { cloudBinding: true },
+    });
+    if (half?.kind === 'CLOUD' && !half.cloudBinding) {
+      // A connect that never finished: nothing in Keycloak is recorded, just free the slot.
+      if (half.status !== 'REVOKED') {
+        await tc.agent.update({
+          where: { id: agentId },
+          data: { status: 'REVOKED' },
+        });
+      }
+      return { agentId, status: 'REVOKED' };
+    }
     const { realm } = await this.realmOf(auth.tenant.id);
     const { tenantClient, binding } = await this.bindingOf(auth, agentId);
     const agent = await tenantClient.agent.findUniqueOrThrow({
