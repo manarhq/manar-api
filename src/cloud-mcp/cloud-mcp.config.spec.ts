@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { CloudMcpConfigSchema, cloudMcpConfigIssues } from './cloud-mcp.config';
+import {
+  CloudMcpConfigSchema,
+  cloudMcpClientId,
+  cloudMcpConfigIssues,
+  cloudMcpScope,
+} from './cloud-mcp.config';
 
 describe('CloudMcpConfigSchema', () => {
   it('is off with nothing set and with the chart defaults', () => {
@@ -34,5 +39,16 @@ describe('CloudMcpConfigSchema', () => {
     expect(ok('https://chatgpt.com')).toBe(false);
     expect(ok('chatgpt.com:443')).toBe(false);
     expect(ok('localhost')).toBe(false);
+  });
+
+  it('names tenant-prefixed scope and client on the shared realm only', () => {
+    expect(cloudMcpScope('a')).toBe('manar-mcp-a');
+    expect(cloudMcpScope('a', 't1')).toBe('manar-mcp-t1-a');
+    expect(cloudMcpClientId('a')).toBe('manar-cloud-a');
+    expect(cloudMcpClientId('a', 't1')).toBe('manar-cloud-t1-a');
+    expect(
+      CloudMcpConfigSchema.parse({ MANAR_MCP_SHARED_ISSUER: '' })
+        .MANAR_MCP_SHARED_ISSUER,
+    ).toBeUndefined();
   });
 });

@@ -7,6 +7,8 @@ import type { AppConfig } from '../config/env.validation';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import type { KeycloakAdminClient } from '../keycloak/keycloak-admin.client';
+import { PlanLimitError } from '../billing/plan-limit.error';
+import type { EntitlementsService } from '../billing/entitlements.service';
 import type { CatalogService } from '../platform/catalog.service';
 import type { TasksService } from '../tasks/tasks.service';
 import {
@@ -26,6 +28,13 @@ function setup(
     failClientOnce?: boolean;
     taken?: boolean;
     roleConflict?: boolean;
+    /** The tenant has no realm of its own: it is on the shared realm. */
+    shared?: boolean;
+    env?: Record<string, unknown>;
+    /** Cap check: rejects like `EntitlementsService.withinLimit` over the cap. */
+    overCap?: boolean;
+    foundClient?: Record<string, unknown>;
+    binding?: Record<string, unknown>;
   } = {},
 ) {
   let agent: Record<string, unknown> | null = null;
@@ -44,6 +53,8 @@ function setup(
       },
     },
     cloudAgentBinding: {
+      findUnique: () => Promise.resolve(options.binding ?? null),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       create: ({ data }: { data: Record<string, unknown> }) => {
         binding = data;
         return Promise.resolve(data);
@@ -55,7 +66,9 @@ function setup(
   const kc = {
     findClient: vi
       .fn()
-      .mockResolvedValue(options.taken ? { id: 'x' } : undefined),
+      .mockResolvedValue(
+        options.foundClient ?? (options.taken ? { id: 'x' } : undefined),
+      ),
     findClientScopeId: vi.fn().mockResolvedValue(undefined),
     realmRoleExists: vi.fn().mockResolvedValue(false),
     identityProviderExists: vi.fn().mockResolvedValue(true),
@@ -82,17 +95,27 @@ function setup(
   };
   const config = {
     get: (key: string) =>
-      ({ MANAR_MCP_ENABLED: 'true', MANAR_MCP_HOST: 'mcp.manar.test' })[key],
+      ({
+        MANAR_MCP_ENABLED: 'true',
+        MANAR_MCP_HOST: 'mcp.manar.test',
+        ...options.env,
+      })[key],
   } as unknown as ConfigService<AppConfig, true>;
   const service = new CloudAgentsService(
     config,
     {
+      $transaction: (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ $queryRaw: () => Promise.resolve([]) }),
       tenant: {
         findUnique: () =>
-          Promise.resolve({
-            keycloakRealm: 'acme',
-            keycloakIssuerUrl: 'https://id/realms/acme',
-          }),
+          Promise.resolve(
+            options.shared
+              ? { keycloakRealm: null, keycloakIssuerUrl: null }
+              : {
+                  keycloakRealm: 'acme',
+                  keycloakIssuerUrl: 'https://id/realms/acme',
+                },
+          ),
       },
     } as unknown as ControlPrismaService,
     {
@@ -104,6 +127,20 @@ function setup(
       resolveTaskPack: () => Promise.resolve(null),
     } as unknown as CatalogService,
     { recordSafely: () => Promise.resolve() } as unknown as AuditService,
+    {
+      withinLimit: (
+        _tenant: string,
+        _limit: string,
+        _client: unknown,
+        _count: unknown,
+        create: (tx: unknown) => Promise<unknown>,
+      ) =>
+        options.overCap
+          ? Promise.reject(
+              new PlanLimitError('cloudAgents', 1, 1, 'https://up/grade'),
+            )
+          : create(tenantClient),
+    } as unknown as EntitlementsService,
   );
   return { service, kc, tasks, state: () => ({ agent, binding }) };
 }
@@ -168,5 +205,152 @@ describe('CloudAgentsService.connect', () => {
     await expect(service.connect(AUTH, input)).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+});
+
+describe('CloudAgentsService on the shared realm', () => {
+  const SHARED = {
+    MANAR_MCP_SHARED_ISSUER: 'https://auth.manar.test/realms/manar',
+  };
+
+  it('prefixes the scope and client with the tenant id, stamps the tenant, and makes no realm role', async () => {
+    const { service, kc, state } = setup({ shared: true, env: SHARED });
+    const result = await service.connect(AUTH, input);
+    expect(kc.createRealmRole).not.toHaveBeenCalled();
+    expect(kc.createAgentClientScope).toHaveBeenCalledWith(
+      'manar',
+      'manar-mcp-t-acme-copilot-1',
+      'https://mcp.manar.test/mcp/acme/copilot-1',
+      null,
+      't-acme',
+    );
+    expect(kc.createMcpClient).toHaveBeenCalledWith(
+      'manar',
+      'manar-cloud-t-acme-copilot-1',
+      'scope-id',
+      [],
+    );
+    expect(result).toMatchObject({
+      clientId: 'manar-cloud-t-acme-copilot-1',
+      role: null,
+      authorizationServer: 'https://auth.manar.test/realms/manar',
+    });
+    expect(state().binding).toMatchObject({
+      oauthScope: 'manar-mcp-t-acme-copilot-1',
+    });
+  });
+
+  it('refuses without a configured shared issuer (fail closed)', async () => {
+    const { service, kc } = setup({ shared: true });
+    await expect(service.connect(AUTH, input)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(kc.createAgentClientScope).not.toHaveBeenCalled();
+  });
+
+  it('keeps ChatGPT off until it is enabled, and Entra groups never apply', async () => {
+    const off = setup({ shared: true, env: SHARED });
+    await expect(
+      off.service.connect(AUTH, { ...input, platform: 'CHATGPT' }),
+    ).rejects.toMatchObject({ response: { reason: 'chatgpt_not_enabled' } });
+    await expect(
+      off.service.connect(AUTH, {
+        ...input,
+        entraGroupId: '6f1c5f0e-1111-4222-8333-944455556666',
+      }),
+    ).rejects.toThrow(/shared realm/);
+    expect(off.kc.updateDcrPolicy).not.toHaveBeenCalled();
+    const on = setup({
+      shared: true,
+      env: { ...SHARED, MANAR_MCP_CHATGPT_ENABLED: 'true' },
+    });
+    await expect(
+      on.service.connect(AUTH, { ...input, platform: 'CHATGPT' }),
+    ).resolves.toHaveProperty('registrationUrl');
+  });
+
+  it('never configures identity providers on the shared realm', async () => {
+    const { service } = setup({ shared: true, env: SHARED });
+    await expect(
+      service.configureEntra(AUTH, {
+        directoryId: '6f1c5f0e-1111-4222-8333-944455556666',
+        clientId: '6f1c5f0e-1111-4222-8333-944455556667',
+        clientSecret: 'x',
+      }),
+    ).rejects.toThrow(/shared realm/);
+  });
+});
+
+describe('CloudAgentsService plan cap', () => {
+  it('over the cap creates nothing: no agent row, nothing in Keycloak', async () => {
+    const { service, kc, state } = setup({ overCap: true });
+    await expect(service.connect(AUTH, input)).rejects.toBeInstanceOf(
+      PlanLimitError,
+    );
+    expect(state().agent).toBeNull();
+    expect(kc.createRealmRole).not.toHaveBeenCalled();
+  });
+});
+
+describe('CloudAgentsService.proposeDcrClient on the shared realm', () => {
+  const SCOPE = 'manar-mcp-t-acme-chat';
+  const now = Date.now();
+  const binding = {
+    platform: 'CHATGPT',
+    oauthClientId: null,
+    pendingClientId: null,
+    oauthScope: SCOPE,
+    createdAt: new Date(now - 60_000),
+  };
+  const client = (scopes: string[]) => ({
+    id: 'uuid-1',
+    clientId: 'dcr-1',
+    enabled: true,
+    publicClient: false,
+    redirectUris: ['https://chatgpt.com/connector/oauth/abc'],
+    defaultClientScopes: [],
+    optionalClientScopes: scopes,
+    attributes: { 'client.secret.creation.time': String(now / 1000) },
+  });
+  const env = {
+    MANAR_MCP_SHARED_ISSUER: 'https://auth.manar.test/realms/manar',
+    MANAR_MCP_CHATGPT_ENABLED: 'true',
+    KEYCLOAK_CLIENT_ID: 'manar-api',
+  };
+
+  it('proposes a client that carries exactly this agent scope', async () => {
+    const { service } = setup({
+      shared: true,
+      env,
+      binding,
+      foundClient: client([SCOPE]),
+    });
+    await expect(
+      service.proposeDcrClient('t-acme', 'agent-1', 'dcr-1'),
+    ).resolves.toBe('pending');
+  });
+
+  it("refuses a client that also carries another tenant's agent scope", async () => {
+    const { service } = setup({
+      shared: true,
+      env,
+      binding,
+      foundClient: client([SCOPE, 'manar-mcp-t-globex-chat']),
+    });
+    await expect(
+      service.proposeDcrClient('t-acme', 'agent-1', 'dcr-1'),
+    ).resolves.toBe('refused');
+  });
+
+  it("refuses a client that does not carry this agent's scope", async () => {
+    const { service } = setup({
+      shared: true,
+      env,
+      binding,
+      foundClient: client(['manar-mcp-t-globex-chat']),
+    });
+    await expect(
+      service.proposeDcrClient('t-acme', 'agent-1', 'dcr-1'),
+    ).resolves.toBe('refused');
   });
 });

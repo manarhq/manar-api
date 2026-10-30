@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -13,6 +14,7 @@ import type { AuditActor } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import type { AuthContext } from '../auth/auth-context';
 import type { AppConfig } from '../config/env.validation';
+import { EntitlementsService } from '../billing/entitlements.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import {
@@ -28,6 +30,7 @@ import { CreateTaskRequestSchema } from '../tasks/tasks.validation';
 import { TasksService } from '../tasks/tasks.service';
 import {
   PRE_REGISTERED_CLIENT_PREFIX,
+  cloudMcpClientId,
   cloudMcpMetadataUrl,
   cloudMcpResourceUrl,
   cloudMcpRole,
@@ -37,6 +40,12 @@ import {
 
 type TenantClient = Awaited<ReturnType<TenantDatabaseManager['getClient']>>;
 type Platform = 'COPILOT_STUDIO' | 'CHATGPT';
+
+/** Cloud agents that count against the plan cap (a connect that failed part way still holds its slot). */
+const liveCloudAgents = {
+  kind: 'CLOUD',
+  status: { in: ['PENDING_ENROLLMENT', 'ACTIVE'] },
+} satisfies Prisma.AgentWhereInput;
 
 const SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const HttpsUrl = z
@@ -83,17 +92,24 @@ export const DisconnectSchema = z.object({
   reason: z.string().min(1).max(500),
 });
 
-/** Keycloak names of one cloud agent; all derived from its slug. */
-function keycloakNames(slug: string, platform: Platform) {
+/**
+ * Keycloak names of one cloud agent, derived from its slug. On the shared realm (`tenantId` set)
+ * they carry the tenant id and there is no realm role: Manar's Membership says who may use it.
+ */
+function keycloakNames(slug: string, platform: Platform, tenantId?: string) {
   return {
-    scope: cloudMcpScope(slug),
-    role: cloudMcpRole(slug),
+    scope: cloudMcpScope(slug, tenantId),
+    role: tenantId ? null : cloudMcpRole(slug),
     mapper: cloudMcpRole(slug),
     clientId:
-      platform === 'COPILOT_STUDIO'
-        ? `${PRE_REGISTERED_CLIENT_PREFIX}${slug}`
-        : null,
+      platform === 'COPILOT_STUDIO' ? cloudMcpClientId(slug, tenantId) : null,
   };
+}
+
+/** Realm name of an issuer URL `https://host/realms/<realm>`. */
+function realmOfIssuer(issuer: string): string | null {
+  const m = /\/realms\/([^/]+)\/?$/.exec(issuer);
+  return m?.[1] ? decodeURIComponent(m[1]) : null;
 }
 
 /** Ids of the realm objects a connect created; disconnect deletes these and nothing else. */
@@ -150,6 +166,7 @@ export class CloudAgentsService {
     private readonly tasks: TasksService,
     private readonly catalog: CatalogService,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   async connect(
@@ -157,10 +174,29 @@ export class CloudAgentsService {
     input: z.infer<typeof ConnectCloudAgentSchema>,
   ) {
     const host = this.mcpHost();
-    const { realm, issuer } = await this.realmOf(auth.tenant.id);
+    const { realm, issuer, shared } = await this.realmOf(auth.tenant.id);
     const tenantClient = await this.tenants.getClient(auth.tenant.id);
-    const names = keycloakNames(input.slug, input.platform);
+    const names = keycloakNames(
+      input.slug,
+      input.platform,
+      shared ? auth.tenant.id : undefined,
+    );
     const kc = this.keycloak;
+    if (shared && input.entraGroupId) {
+      throw new BadRequestException(
+        'Entra groups apply to a workspace with its own realm; on the shared realm membership decides who may use an agent',
+      );
+    }
+    if (
+      shared &&
+      input.platform === 'CHATGPT' &&
+      !cloudMcpSettings(this.config).chatGptOnSharedRealm
+    ) {
+      throw new BadRequestException({
+        statusCode: 400,
+        reason: 'chatgpt_not_enabled',
+      });
+    }
 
     const existing = await tenantClient.agent.findUnique({
       where: { slug: input.slug },
@@ -188,17 +224,25 @@ export class CloudAgentsService {
       );
     }
 
+    // Plan cap: count, check and create are one locked step. A resumed connect already counts.
     const agent =
       existing ??
-      (await tenantClient.agent.create({
-        data: {
-          slug: input.slug,
-          identifier: buildAgentIdentifier(auth.tenant.slug, input.slug),
-          displayName: input.displayName,
-          createdBy: auth.user.id,
-          kind: 'CLOUD',
-        },
-      }));
+      (await this.entitlements.withinLimit(
+        auth.tenant.id,
+        'cloudAgents',
+        tenantClient,
+        (tx) => tx.agent.count({ where: liveCloudAgents }),
+        (tx) =>
+          tx.agent.create({
+            data: {
+              slug: input.slug,
+              identifier: buildAgentIdentifier(auth.tenant.slug, input.slug),
+              displayName: input.displayName,
+              createdBy: auth.user.id,
+              kind: 'CLOUD',
+            },
+          }),
+      ));
     const packId = await catalogGate(() =>
       this.catalog.resolveTaskPack(auth.tenant.id, agent.id, input.task.packId),
     );
@@ -211,20 +255,26 @@ export class CloudAgentsService {
     let clientSecret: string | null = null;
     let taskId: string;
     try {
-      await kc.createRealmRole(realm, names.role);
-      undo.push(async () =>
-        kc.deleteById(
-          realm,
-          `roles-by-id/${ids.roleId ?? (await kc.realmRoleId(realm, names.role))}`,
-        ),
-      );
-      ids.roleId = await kc.realmRoleId(realm, names.role);
-      ids.scopeId = await kc.createAgentClientScope(
-        realm,
-        names.scope,
-        mcpUrl,
-        names.role,
-      );
+      const roleName = names.role;
+      if (roleName) {
+        await kc.createRealmRole(realm, roleName);
+        undo.push(async () =>
+          kc.deleteById(
+            realm,
+            `roles-by-id/${ids.roleId ?? (await kc.realmRoleId(realm, roleName))}`,
+          ),
+        );
+        ids.roleId = await kc.realmRoleId(realm, roleName);
+      }
+      ids.scopeId = shared
+        ? await kc.createAgentClientScope(
+            realm,
+            names.scope,
+            mcpUrl,
+            null,
+            auth.tenant.id,
+          )
+        : await kc.createAgentClientScope(realm, names.scope, mcpUrl, roleName);
       undo.push(() => kc.deleteById(realm, `client-scopes/${ids.scopeId}`));
       if (names.clientId) {
         const created = await kc.createMcpClient(
@@ -250,7 +300,7 @@ export class CloudAgentsService {
           ),
         );
       }
-      if (input.entraGroupId) {
+      if (input.entraGroupId && names.role) {
         ids.mapperId = await kc.addGroupRoleMapper(
           realm,
           ENTRA_IDP_ALIAS,
@@ -363,6 +413,65 @@ export class CloudAgentsService {
     };
   }
 
+  /**
+   * Cloud agents over the plan cap are paused, not deleted: the oldest `cloudAgents` active ones
+   * run, the rest are paused. Derived on every call (no stored flag), so a downgrade pauses at
+   * once and a raised cap or a disconnected agent resumes them with nothing to clean up.
+   */
+  async isPaused(
+    tenantId: string,
+    tenantClient: TenantClient,
+    agentId: string,
+  ): Promise<boolean> {
+    const max = (await this.entitlements.get(tenantId)).limits.cloudAgents;
+    if (max === null) return false;
+    const running = await tenantClient.agent.findMany({
+      where: { kind: 'CLOUD', status: 'ACTIVE' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: max,
+      select: { id: true },
+    });
+    return !running.some((a) => a.id === agentId);
+  }
+
+  /** The tenant's cloud agents for the console, with the paused flag and the plan cap. */
+  async list(auth: AuthContext) {
+    const tenantClient = await this.tenants.getClient(auth.tenant.id);
+    const realm = await this.realmOf(auth.tenant.id).catch(() => null);
+    const max = (await this.entitlements.get(auth.tenant.id)).limits
+      .cloudAgents;
+    const agents = await tenantClient.agent.findMany({
+      where: { kind: 'CLOUD', status: { not: 'REVOKED' } },
+      include: { cloudBinding: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const host = cloudMcpSettings(this.config).host;
+    let running = 0;
+    return {
+      limit: { max, used: agents.length },
+      chatGptAvailable:
+        realm?.shared !== true ||
+        cloudMcpSettings(this.config).chatGptOnSharedRealm,
+      items: agents.map((a) => {
+        const counted = a.status === 'ACTIVE';
+        const paused = counted && max !== null && running++ >= max;
+        return {
+          id: a.id,
+          slug: a.slug,
+          displayName: a.displayName,
+          status: a.status,
+          paused,
+          platform: a.cloudBinding?.platform ?? null,
+          mcpUrl: host
+            ? cloudMcpResourceUrl(host, auth.tenant.slug, a.slug)
+            : null,
+          pendingClientId: a.cloudBinding?.pendingClientId ?? null,
+          oauthClientId: a.cloudBinding?.oauthClientId ?? null,
+        };
+      }),
+    };
+  }
+
   /** The binding as an admin sees it, including a self-registered client waiting for confirmation. */
   async describe(auth: AuthContext, agentId: string) {
     const { binding } = await this.bindingOf(auth, agentId);
@@ -449,9 +558,16 @@ export class CloudAgentsService {
     }
     const cacheKey = `${tenantId}:${agentId}:${clientId}`;
     if ((this.refusedClients.get(cacheKey) ?? 0) > Date.now()) return 'refused';
-    const { realm } = await this.realmOf(tenantId);
+    const { realm, shared } = await this.realmOf(tenantId);
     const client = await this.keycloak.findClient(realm, clientId);
-    if (!client || !this.isEligibleDcrClient(client, binding.createdAt)) {
+    if (
+      !client ||
+      !this.isEligibleDcrClient(
+        client,
+        binding.createdAt,
+        shared ? binding.oauthScope : null,
+      )
+    ) {
       if (this.refusedClients.size > 10_000) this.refusedClients.clear();
       this.refusedClients.set(cacheKey, Date.now() + 60_000);
       return 'refused';
@@ -645,7 +761,13 @@ export class CloudAgentsService {
     auth: AuthContext,
     input: z.infer<typeof EntraIdpSchema>,
   ) {
-    const { realm, issuer } = await this.realmOf(auth.tenant.id);
+    const { realm, issuer, shared } = await this.realmOf(auth.tenant.id);
+    if (shared) {
+      // The shared realm's identity providers are Manar's, never a workspace's.
+      throw new ForbiddenException(
+        'Identity providers are not configurable on the shared realm',
+      );
+    }
     const authority = `https://login.microsoftonline.com/${input.directoryId}`;
     try {
       await this.keycloak.upsertOidcIdentityProvider(realm, ENTRA_IDP_ALIAS, {
@@ -684,6 +806,8 @@ export class CloudAgentsService {
   private isEligibleDcrClient(
     client: KeycloakClientRepresentation,
     connectedAt: Date,
+    /** Shared realm: the client must carry this agent's scope and no other agent's. */
+    exclusiveScope: string | null,
   ): boolean {
     const hosts = cloudMcpSettings(this.config).dcrTrustedHosts;
     const onTrustedHost = (uri: string) => {
@@ -695,7 +819,18 @@ export class CloudAgentsService {
       }
     };
     const at = registeredAt(client);
+    const scopes = [
+      ...(client.defaultClientScopes ?? []),
+      ...(client.optionalClientScopes ?? []),
+    ];
+    const tenantScoped =
+      exclusiveScope === null ||
+      (scopes.includes(exclusiveScope) &&
+        scopes
+          .filter((sc) => sc.startsWith('manar-mcp-'))
+          .every((sc) => sc === exclusiveScope));
     return (
+      tenantScoped &&
       client.enabled !== false &&
       client.publicClient !== true &&
       client.clientId !==
@@ -763,7 +898,8 @@ export class CloudAgentsService {
           undefined) ||
       (await this.keycloak.findClientScopeId(realm, names.scope)) !==
         undefined ||
-      (await this.keycloak.realmRoleExists(realm, names.role))
+      (names.role !== null &&
+        (await this.keycloak.realmRoleExists(realm, names.role)))
     );
   }
 
@@ -778,14 +914,27 @@ export class CloudAgentsService {
     return host;
   }
 
+  /**
+   * The realm a tenant's cloud agents live in: its own (customer-hosted, legacy) or, when it has
+   * none, the shared hosted realm from `MANAR_MCP_SHARED_ISSUER`. Neither: 409.
+   */
   private async realmOf(tenantId: string) {
     const tenant = await this.control.tenant.findUnique({
       where: { id: tenantId },
     });
-    if (!tenant?.keycloakRealm || !tenant.keycloakIssuerUrl) {
+    if (tenant?.keycloakRealm && tenant.keycloakIssuerUrl) {
+      return {
+        realm: tenant.keycloakRealm,
+        issuer: tenant.keycloakIssuerUrl,
+        shared: false,
+      };
+    }
+    const issuer = cloudMcpSettings(this.config).sharedIssuer;
+    const realm = issuer ? realmOfIssuer(issuer) : null;
+    if (!tenant || !issuer || !realm) {
       throw new ConflictException('This tenant has no Keycloak realm');
     }
-    return { realm: tenant.keycloakRealm, issuer: tenant.keycloakIssuerUrl };
+    return { realm, issuer, shared: true };
   }
 
   private async bindingOf(auth: AuthContext, agentId: string) {

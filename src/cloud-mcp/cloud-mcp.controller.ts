@@ -38,6 +38,12 @@ const SLUG = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const METADATA_PER_ADDRESS = 120;
 const ISSUER_CACHE_MS = 60_000;
 
+interface ResourceRealm {
+  issuer: string;
+  /** Set when the tenant is on the shared realm: its scope names carry the tenant id. */
+  sharedTenantId?: string;
+}
+
 /**
  * The public MCP endpoint for cloud agents (docs/cloud-agents.md), on the
  * HTTP app and meant for the `MANAR_MCP_HOST` ingress: RFC 9728 protected
@@ -60,23 +66,31 @@ export class CloudMcpController {
   // metadata can outlive the suspension by that long (tokens are still refused by the guard).
   private readonly issuers = new Map<
     string,
-    { issuer: string | null; until: number }
+    { found: ResourceRealm | null; until: number }
   >();
 
-  private async issuerOf(tenantSlug: string): Promise<string | null> {
+  /** The authorization server for a tenant, and the tenant id when it is the shared realm. */
+  private async issuerOf(tenantSlug: string): Promise<ResourceRealm | null> {
     const cached = this.issuers.get(tenantSlug);
-    if (cached && cached.until > Date.now()) return cached.issuer;
+    if (cached && cached.until > Date.now()) return cached.found;
     const tenant = await failClosed('control-db', () =>
       this.control.tenant.findUnique({ where: { slug: tenantSlug } }),
     );
-    const issuer =
-      tenant?.status === 'ACTIVE' ? (tenant.keycloakIssuerUrl ?? null) : null;
+    const shared = cloudMcpSettings(this.config).sharedIssuer;
+    const found: ResourceRealm | null =
+      tenant?.status !== 'ACTIVE'
+        ? null
+        : tenant.keycloakIssuerUrl
+          ? { issuer: tenant.keycloakIssuerUrl }
+          : shared
+            ? { issuer: shared, sharedTenantId: tenant.id }
+            : null;
     if (this.issuers.size > 10_000) this.issuers.clear();
     this.issuers.set(tenantSlug, {
-      issuer,
+      found,
       until: Date.now() + ISSUER_CACHE_MS,
     });
-    return issuer;
+    return found;
   }
 
   /**
@@ -109,12 +123,12 @@ export class CloudMcpController {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
-    const issuer = await this.issuerOf(tenantSlug);
-    if (!issuer) throw new NotFoundException();
+    const realm = await this.issuerOf(tenantSlug);
+    if (!realm) throw new NotFoundException();
     return {
       resource: cloudMcpResourceUrl(host, tenantSlug, agentSlug),
-      authorization_servers: [issuer],
-      scopes_supported: [cloudMcpScope(agentSlug)],
+      authorization_servers: [realm.issuer],
+      scopes_supported: [cloudMcpScope(agentSlug, realm.sharedTenantId)],
       bearer_methods_supported: ['header'],
       resource_name: 'Manar governed tools',
     };

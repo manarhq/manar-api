@@ -241,3 +241,23 @@ usually takes, so the second path is the normal one.
   clients are refused.
 - A ChatGPT registration that asks for `openid` or other scopes is refused by Keycloak's policy;
   whether ChatGPT asks only for the scopes in the metadata is not verified.
+
+## Shared realm (hosted workspaces)
+
+A tenant with no realm of its own connects its cloud agents on the shared realm
+(`MANAR_MCP_SHARED_ISSUER`). Differences from a per-tenant realm:
+
+- Client and scope names carry the tenant id (`manar-mcp-<tenantId>-<slug>`,
+  `manar-cloud-<tenantId>-<slug>`). The scope stamps the token with `manar_tenant`.
+- No realm role and no Entra group. The guard requires the `manar_tenant` claim to equal the
+  tenant of the path slug and of the binding, the exact audience, `azp` equal to the binding's
+  client, and an ACTIVE Membership (owner, security admin, AI governance manager or developer)
+  read on every call. Removing the membership revokes at once.
+- ChatGPT (dynamic client registration) is off (`MANAR_MCP_CHATGPT_ENABLED`) until its security
+  review. When on: the realm-wide Trusted Hosts policy lists only `MANAR_MCP_DCR_TRUSTED_HOSTS`, a
+  registered client is unusable until a tenant admin confirms it, and it is only proposed from a
+  member's token when it carries exactly this agent's scope and no other agent's.
+- Plan cap: `cloudAgents` (Free 1, Pro 5). Agents over the cap after a downgrade are paused
+  (403 `agent_paused`, `paused: true` in `GET /cloud-agents`), never deleted. The oldest agents run;
+  they resume on their own when the cap rises or an agent is disconnected.
+- Listing clients to delete a disconnected ChatGPT agent's clients scans up to 5000 clients.
