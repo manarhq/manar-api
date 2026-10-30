@@ -30,7 +30,8 @@ export const NOT_AVAILABLE_MESSAGE =
 
 const URL_OK = /^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._/-]*)?$/;
 const CODE_OK = /^[A-HJKMNP-Z2-9]{10}$/;
-const SLUG_OK = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// Same rule as manar-edge: no trailing '-'.
+const SLUG_OK = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const VERSION_OK = /^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/;
 const SHA_OK = /^[0-9a-f]{64}$/;
 
@@ -74,8 +75,12 @@ try {
   $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
   if ($arch -ne 'AMD64') { throw "Manar supports 64-bit Intel/AMD Windows for now (this computer is $arch)." }
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  $tmp = Join-Path ([IO.Path]::GetTempPath()) ('manar-' + [guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $tmp | Out-Null
+  # A fresh folder only SYSTEM and Administrators can touch: nothing else can swap the file between
+  # the checksum and the elevated run (a folder in %TEMP% would be writable by the user's other programs).
+  $tmp = Join-Path $env:ProgramData ('manar-setup-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+  & icacls.exe $tmp /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Could not lock the download folder, so nothing was installed.' }
   $exe = Join-Path $tmp 'manar-edge.exe'
   Write-Host 'Downloading Manar ${v.version}...'
   Invoke-WebRequest -UseBasicParsing -Uri '${v.base}/${v.version}/manar-edge-windows-amd64.exe' -OutFile $exe

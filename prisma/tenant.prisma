@@ -2226,6 +2226,9 @@ model Host {
   /// Keycloak subject of the person whose install key enrolled this machine; null for hosts
   /// enrolled before this column existed and for key-less (ADCS) enrolment.
   ownerSubject     String?
+  /// The install key that enrolled (or last re-enrolled) it: the first-run screen matches the
+  /// device it waits for by this, never by time.
+  installKeyId     String?
   certificates     HostCertificate[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt

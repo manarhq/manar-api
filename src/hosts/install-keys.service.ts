@@ -3,6 +3,9 @@ import type {
   InstallKey,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
+
+/** A tenant client or an open transaction on one. */
+type KeyDb = Pick<TenantPrismaClient, 'installKey' | '$queryRaw'>;
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES, type AuditActor } from '../audit/audit-event-types';
 import {
@@ -114,10 +117,7 @@ export class InstallKeysService {
     return result?.key ?? null;
   }
 
-  private async find(
-    client: TenantPrismaClient,
-    raw: string,
-  ): Promise<InstallKey | null> {
+  private async find(client: KeyDb, raw: string): Promise<InstallKey | null> {
     return client.installKey.findFirst({
       where: {
         keyHash: { in: [hashInstallKey(raw), legacyHashInstallKey(raw)] },
@@ -130,11 +130,7 @@ export class InstallKeysService {
    * WITHOUT using it. Registration checks everything that can refuse a machine first and only
    * then consumes, so a refused install does not burn the one-hour code.
    */
-  async peek(
-    client: TenantPrismaClient,
-    raw: string,
-    ip: string,
-  ): Promise<InstallKey> {
+  async peek(client: KeyDb, raw: string, ip: string): Promise<InstallKey> {
     const key = await this.find(client, raw);
     if (
       !key ||
@@ -153,11 +149,7 @@ export class InstallKeysService {
    * revocation are checked by the one conditional UPDATE that takes the
    * use, so concurrent registrations can never exceed `maxUses`.
    */
-  async consume(
-    client: TenantPrismaClient,
-    raw: string,
-    ip: string,
-  ): Promise<InstallKey> {
+  async consume(client: KeyDb, raw: string, ip: string): Promise<InstallKey> {
     const key = await this.find(client, raw);
     if (!key || !ipAllowed(ip, key.allowedCidrs)) {
       this.logger.warn(

@@ -61,6 +61,8 @@ export class DevicesService {
       DEVICES_DEFAULTS.MANAR_CONSOLE_URL;
     return {
       code,
+      /** The first-run screen matches the device it waits for by this id. */
+      installKeyId: key.id,
       expiresAt: expiresAt.toISOString(),
       ...oneLiners(base, code),
     };

@@ -189,6 +189,32 @@ export class HostsAdminService {
   }
 
   /**
+   * "Remove device": revokes the host's certificates, then deletes its record, so the machine
+   * can be installed again from scratch (a REJECTED or REVOKED machineId is otherwise refused
+   * for good). Audited in the same transaction as the delete.
+   */
+  async remove(
+    client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
+    hostId: string,
+  ): Promise<void> {
+    const host = await client.host.findUnique({ where: { id: hostId } });
+    if (!host) throw new HostNotFoundError(hostId);
+    await this.ca.revokeHostCertificates(client, hostId);
+    const publish = await client.$transaction(async (tx) => {
+      await tx.hostCertificate.deleteMany({ where: { hostId } });
+      await tx.host.delete({ where: { id: hostId } });
+      return this.audit.recordInTransaction(tx, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.HOST_REMOVED,
+        actor,
+        data: { hostId, machineId: host.machineId, from: host.status },
+      });
+    });
+    publish();
+  }
+
+  /**
    * Writes only if the host is still in the state the decision was made
    * from: a concurrent decision that committed first (a revoke, say) is
    * never overwritten; this one fails instead.

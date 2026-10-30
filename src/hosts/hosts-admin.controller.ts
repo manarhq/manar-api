@@ -3,6 +3,7 @@ import {
   Body,
   ConflictException,
   Controller,
+  Delete,
   Get,
   NotFoundException,
   Param,
@@ -123,6 +124,26 @@ export class HostsController {
       limit: parseLimit(limit),
       cursor: parseCursor(cursor),
     });
+  }
+
+  @Delete(':id')
+  @RequireRole(...WRITE)
+  @ApiOperation({
+    summary: 'Remove a device',
+    description:
+      'Revokes its certificates and deletes the record, so the machine can be installed again. Audited.',
+  })
+  @ApiResponse({ status: 200, description: '{ removed: true }' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async remove(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    const client = await this.tenants.getClient(auth.tenant.id);
+    await this.admin
+      .remove(client, auth.tenant.id, actorOf(auth), id)
+      .catch(http);
+    return { removed: true };
   }
 
   @Post(':id/approve')

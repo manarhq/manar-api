@@ -37,6 +37,23 @@ describe('install scripts', () => {
     expect(s).toContain('Administrator');
   });
 
+  it('PowerShell downloads into a folder locked to SYSTEM and Administrators, not %TEMP%', () => {
+    const s = renderPowerShell(params);
+    expect(s).not.toContain('GetTempPath');
+    expect(s).toContain("Join-Path $env:ProgramData ('manar-setup-'");
+    expect(s).toContain('/inheritance:r');
+    expect(s).toContain('*S-1-5-18:(OI)(CI)F');
+    expect(s).toContain('*S-1-5-32-544:(OI)(CI)F');
+    expect(s.indexOf('icacls')).toBeLessThan(s.indexOf('Invoke-WebRequest'));
+    expect(s.indexOf('Get-FileHash')).toBeLessThan(s.indexOf('install --code'));
+  });
+
+  it('a tenant slug ending in a dash is refused, as the installer would', () => {
+    expect(() => renderSh({ ...params, tenantSlug: 'me-' })).toThrow(
+      ScriptUnavailableError,
+    );
+  });
+
   it('sh checks the checksum per architecture before it runs the binary', () => {
     const s = renderSh(params);
     expect(s).toContain(`sum='${SHA_AMD}'`);

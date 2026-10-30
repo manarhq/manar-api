@@ -149,6 +149,8 @@ export const AUDIT_EVENT_TYPES = {
   HOST_TPM_VERIFIED: 'host.tpm_verified',
   /** A tenant's plan changed (Stripe, trial start or end). Data: from, to, source. */
   BILLING_PLAN_CHANGED: 'billing.plan.changed',
+  /** The owner removed a device (console "Remove device"): its record and certificates are gone, so it can be installed again. */
+  HOST_REMOVED: 'host.removed',
 } as const;
 
 export type AuditEventType =

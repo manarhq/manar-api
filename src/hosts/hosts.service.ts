@@ -65,6 +65,8 @@ export interface CompleteRegistrationInput {
   installKeyId: string | null;
   /** Keycloak subject of whoever created the install key; null when unknown. */
   ownerSubject?: string | null;
+  /** The install-key secret to use once, in the registration transaction, after the refusal and cap checks. */
+  consumeSecret?: string;
   /** False: the host is PENDING whatever the rules say (doubt about identity). */
   autoApprove: boolean;
   verified: VerifiedFacts;
@@ -141,17 +143,18 @@ export class HostsService {
 
     const client = await this.tenants.getClient(tenant.id);
     const secret = code ?? input.installKey;
+    // Look at the key without using it: everything that can refuse this machine (a revoked or
+    // rejected record, the device cap) is checked first, inside the registration transaction,
+    // and only then is the one use taken, so a refused install does not burn the code.
     let key;
     try {
-      key = await this.keys.consume(client, secret, input.ip);
+      key = await this.keys.peek(client, secret, input.ip);
     } catch (error) {
-      // A spent, revoked or expired key leaves nothing behind that could resolve again.
       if (code && error instanceof InstallKeyInvalidError) {
         await this.codes.deleteByCode(code);
       }
       throw error;
     }
-    if (code) await this.codes.deleteByCode(code); // used: one registration per code
     const redeemed = input.tpmChallengeId
       ? await this.tpm.redeem(
           client,
@@ -160,7 +163,7 @@ export class HostsService {
           keyFingerprint,
         )
       : null;
-    return this.completeRegistration({
+    const result = await this.completeRegistration({
       tenant: { id: tenant.id, slug },
       client,
       identifier,
@@ -175,12 +178,21 @@ export class HostsService {
       hostGroupId: key.hostGroupId,
       defaultHostGroupId: key.hostGroupId,
       installKeyId: key.id,
+      consumeSecret: secret,
       ownerSubject: await this.ownerSubjectOf(client, key.createdBy),
       autoApprove: true,
       verified: { adcs: false, adDn: null, tpm: redeemed !== null },
       tpmEkFingerprint: redeemed?.ekFingerprint ?? null,
       adcs: null,
+    }).catch(async (error: unknown) => {
+      // A spent, revoked or expired key leaves nothing behind that could resolve again.
+      if (code && error instanceof InstallKeyInvalidError) {
+        await this.codes.deleteByCode(code);
+      }
+      throw error;
     });
+    if (code) await this.codes.deleteByCode(code); // used: one registration per code
+    return result;
   }
 
   private async ownerSubjectOf(
@@ -206,8 +218,8 @@ export class HostsService {
     // Stored as SOFTWARE unless TPM attestation passed; the installer's claim is not kept.
     const keyType = ctx.verified.tpm ? 'TPM' : 'SOFTWARE';
 
-    const { host, publish, rekeyPending } = await client.$transaction(
-      async (tx) => {
+    const { host, publish, rekeyPending, reenrolled } =
+      await client.$transaction(async (tx) => {
         const existing = await tx.host.findUnique({
           where: { machineId: input.machineId },
         });
@@ -245,8 +257,36 @@ export class HostsService {
         const targetGroupId = followsOu
           ? (ctx.hostGroupId ?? existing.hostGroupId)
           : (ctx.hostGroupId ?? ctx.defaultHostGroupId);
+        // The owner of this machine record re-installing (same person, same machine): replace the
+        // key, wait for approval again, and retire the old key's certificates. Anyone else showing
+        // a different key or group is a pending rekey for an admin.
+        const reenrol =
+          !!existing &&
+          ctx.method === 'INSTALL_KEY' &&
+          !!ctx.ownerSubject &&
+          existing.ownerSubject === ctx.ownerSubject &&
+          (existing.keyFingerprint !== keyFingerprint ||
+            existing.hostGroupId !== targetGroupId);
+        // A new device counts against the plan, under a lock held until this transaction ends,
+        // so N+1 parallel registrations cannot all pass. A known machine is not a new device.
+        // This and the refusals above run BEFORE the install key is used.
+        if (!existing) {
+          await this.entitlements.assertWithinLocked(
+            tx,
+            tenant.id,
+            'devices',
+            () =>
+              tx.host.count({
+                where: { status: { in: ['PENDING', 'APPROVED'] } },
+              }),
+          );
+        }
+        if (ctx.consumeSecret) {
+          await this.keys.consume(tx, ctx.consumeSecret, input.ip);
+        }
         if (
           existing &&
+          !reenrol &&
           (existing.keyFingerprint !== keyFingerprint ||
             // A host enrolled another way has no certificate identity: an
             // admin decides whether this certificate may take it over.
@@ -283,7 +323,12 @@ export class HostsService {
               },
             },
           );
-          return { host: existing, publish: requested, rekeyPending: true };
+          return {
+            host: existing,
+            publish: requested,
+            rekeyPending: true,
+            reenrolled: false,
+          };
         }
         const rule =
           existing || !ctx.autoApprove
@@ -317,19 +362,6 @@ export class HostsService {
           : {};
         const moved =
           existing !== null && existing.hostGroupId !== targetGroupId;
-        // A new device counts against the plan, under a lock held until this transaction ends,
-        // so N+1 parallel registrations cannot all pass. A known machine is not a new device.
-        if (!existing) {
-          await this.entitlements.assertWithinLocked(
-            tx,
-            tenant.id,
-            'devices',
-            () =>
-              tx.host.count({
-                where: { status: { in: ['PENDING', 'APPROVED'] } },
-              }),
-          );
-        }
         const saved = existing
           ? await tx.host.update({
               where: { id: existing.id },
@@ -340,6 +372,19 @@ export class HostsService {
                 registeredFromIp: input.ip,
                 lastSeenAt: new Date(),
                 hostGroupId: targetGroupId,
+                installKeyId: ctx.installKeyId,
+                ...(reenrol
+                  ? {
+                      keyFingerprint,
+                      status: 'PENDING' as const,
+                      approvedBy: null,
+                      approvedAt: null,
+                      pendingKeyFingerprint: null,
+                      pendingHostGroupId: null,
+                      tpmVerified: false,
+                      tpmEkFingerprint: null,
+                    }
+                  : {}),
                 ...(followsOu ? adFacts : {}),
                 ...tpmFacts,
               },
@@ -355,6 +400,7 @@ export class HostsService {
                 registeredFromIp: input.ip,
                 lastSeenAt: new Date(),
                 ownerSubject: ctx.ownerSubject ?? null,
+                installKeyId: ctx.installKeyId,
                 ...adFacts,
                 ...tpmFacts,
                 ...(rule
@@ -375,6 +421,7 @@ export class HostsService {
             installKeyId: ctx.installKeyId,
             enrolmentMethod: ctx.method,
             merged: existing !== null,
+            reenrolled: reenrol,
             status: saved.status,
             approvalRuleId: rule?.id ?? null,
             keyType: saved.keyType,
@@ -413,11 +460,16 @@ export class HostsService {
               groupMoved();
             },
             rekeyPending: false,
+            reenrolled: reenrol,
           };
         }
-        return { host: saved, publish: done, rekeyPending: false };
-      },
-    );
+        return {
+          host: saved,
+          publish: done,
+          rekeyPending: false,
+          reenrolled: reenrol,
+        };
+      });
     publish();
     if (rekeyPending) {
       throw new HostRekeyPendingError(
@@ -425,6 +477,8 @@ export class HostsService {
       );
     }
 
+    // A re-install replaced the key: the old key's certificates stop now.
+    if (reenrolled) await this.ca.revokeHostCertificates(client, host.id);
     const issued = await this.ca.issueHostCertificate(
       client,
       { id: host.id, identifier },
