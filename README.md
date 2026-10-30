@@ -1,112 +1,85 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# manar-api
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+The Manar control plane (NestJS on Fastify, TypeScript).
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Where it fits in Manar
 
-## Description
+Manar is a control plane that governs AI agents and AI tools: who an agent is, what it may do,
+who approves risky actions, and a tamper-evident record of what happened. This repository is the
+thick-bordered box of the picture below; the other parts live in their own repositories under
+[github.com/manarhq](https://github.com/manarhq).
 
-`manar-api` is the control-plane service for **Manar**, a security product
-that governs autonomous AI agents: tenancy, human auth, agent identity
-(mTLS), task delegation/authorization (OpenFGA), policy/risk evaluation,
-a tool gateway with a credential broker, a Temporal-backed approval
-engine, a tamper-evident audit chain, five-scope kill switches, and an
-AI advisory pipeline. See `docs/` for the design/implementation notes for
-each subsystem.
-
-**Want to see it work end to end?** `docs/demo.md` is the full, exact
-walkthrough — seed a demo tenant, run the scripted SOC agent scenario
-(prompt-injection resistance, human-approved endpoint isolation, a kill
-switch, audit verification, evidence export), and the automated acceptance
-test (`test/complete-demo.e2e-spec.ts`) that proves it all.
-
-Built on the [NestJS](https://github.com/nestjs/nest) framework.
-
-## Project setup
-
-```bash
-$ pnpm install
+```mermaid
+flowchart LR
+  subgraph You["Your side"]
+    H["Person using the console"]
+    A["AI agents and AI tools"]
+  end
+  H --> W["manar-web<br/>console"]
+  W --> P["manar-api<br/>control plane"]
+  A -- "mTLS" --> P
+  E["manar-edge<br/>network path"] -. "limits what an agent can reach" .-> A
+  E --> P
+  G["manar-agents<br/>governed agents"] -- "mTLS" --> P
+  P -- "gRPC, advisory only" --> I["manar-ai"]
+  L["manar-landing"] --> T["manar-site<br/>site backend"]
+  style P stroke-width:4px
 ```
 
-## Compile and run the project
+## What it does
+
+`manar-api` is where Manar's decisions are made. It provides:
+
+- **Tenancy and human sign-in**: a control database plus one database per tenant; people sign in
+  through Keycloak (OIDC).
+- **Agent identity**: agents enrol with a one-time token and a CSR and receive an X.509
+  certificate from an OpenBao-held CA. After enrolment they talk to the mTLS listener on `:3443`
+  (`/agent/v1/*`).
+- **Authorization**: task delegation and fine-grained checks through OpenFGA, with a
+  deterministic policy and risk evaluation that fails closed.
+- **Tool gateway and credential broker**: agents never hold the credentials of the tools they
+  use; Manar executes the action and records the result.
+- **Approvals**: a Temporal-backed human approval engine for risky actions.
+- **Audit**: a hash-chained, tamper-evident audit log with evidence export and verification.
+- **Kill switches** at five scopes, and an advisory pipeline that calls
+  [manar-ai](https://github.com/manarhq/manar-ai) over gRPC. manar-ai is never on the
+  authorization decision path.
+
+Each subsystem has a design note in [docs/](docs/). The decisions behind the architecture are in
+[docs/adr/](docs/adr/).
+
+## Quickstart (developers)
+
+Needs Node 24, pnpm 11 and Docker.
 
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+pnpm install
+cp .env.example .env                       # placeholders only; fill in what your setup needs
+pnpm infra:up                              # PostgreSQL, Keycloak, OpenBao, OpenFGA, Temporal, Kafka, Redis, OpenSearch
+pnpm infra:openbao-init                    # once per fresh OpenBao volume
+pnpm db:migrate:control && pnpm manar tenants:migrate
+pnpm start:dev                             # HTTP :3000, agent mTLS :3443
 ```
 
-## Run tests
+Tests:
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+pnpm lint && pnpm typecheck
+pnpm test          # unit tests
+pnpm test:e2e      # needs the stack above
 ```
 
-## Deployment
+`docs/demo.md` walks through a scripted SOC agent scenario end to end (seed a tenant, run the
+agent, approve an action, use a kill switch, verify the audit chain) and the automated
+acceptance test `test/complete-demo.e2e-spec.ts` runs the same scenario.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+Do not use the Compose defaults (dev tokens, local passwords) outside a development machine.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Licence and links
 
-```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
-```
+Licensed under the [Apache License 2.0](LICENSE). Copyright 2026 Fixio; see [NOTICE](NOTICE).
+Contributions need a DCO sign-off: [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities
+privately: [SECURITY.md](SECURITY.md). The Manar name and logo are trademarks of Fixio:
+[TRADEMARK.md](TRADEMARK.md). Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Product site: <https://manar.vax.sh>
