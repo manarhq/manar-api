@@ -2230,6 +2230,7 @@ model Host {
   /// device it waits for by this, never by time.
   installKeyId     String?
   certificates     HostCertificate[]
+  tools            HostTool[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
@@ -2239,6 +2240,30 @@ model Host {
   @@index([hostGroupId])
   @@index([status])
   @@map("hosts")
+}
+
+/// One AI tool found on one device (launch spec 4.5), reported by the device on
+/// `POST /host/v1/inventory`. `desiredProtection` is the owner's choice from the console; the
+/// device reads it from `GET /host/v1/config` and reports back what it did.
+model HostTool {
+  id                String   @id @default(uuid())
+  hostId            String
+  host              Host     @relation(fields: [hostId], references: [id])
+  /// Catalogue id (`host.cursor`) or `other:<slug>` for an unknown tool.
+  toolId            String
+  name              String
+  version           String?
+  path              String?
+  protected         Boolean  @default(false)
+  /// `hook`, `mcp`, `gateway` or `none`.
+  protectMode       String   @default("none")
+  desiredProtection Boolean  @default(true)
+  firstSeenAt       DateTime @default(now())
+  lastSeenAt        DateTime @default(now())
+
+  @@unique([hostId, toolId])
+  @@index([toolId])
+  @@map("host_tools")
 }
 
 model HostCertificate {
