@@ -2223,6 +2223,9 @@ model Host {
   /// The host key passed TPM credential activation (bound to `keyFingerprint`).
   tpmVerified      Boolean           @default(false)
   tpmEkFingerprint String?
+  /// Keycloak subject of the person whose install key enrolled this machine; null for hosts
+  /// enrolled before this column existed and for key-less (ADCS) enrolment.
+  ownerSubject     String?
   certificates     HostCertificate[]
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt

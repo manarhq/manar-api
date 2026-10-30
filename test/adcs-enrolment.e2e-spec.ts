@@ -1,3 +1,4 @@
+import { EntitlementsService } from '../src/entitlements/entitlements.service';
 import 'reflect-metadata';
 import 'dotenv/config';
 import {
@@ -139,6 +140,7 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       audit,
       ca,
       tpm,
+      new EntitlementsService(),
     );
     const directory = new AdcsDirectoryService(new LdapsAdDirectory(), kv);
     adcsAdmin = new AdcsAdminService(audit, kv, directory);

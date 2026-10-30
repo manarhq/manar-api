@@ -11,6 +11,7 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { matchApprovalRule, type VerifiedFacts } from './host-approval';
+import { EntitlementsService } from '../entitlements/entitlements.service';
 import { TpmAttestationService } from './tpm/tpm-attestation.service';
 import { tenantSlugOf } from './install-key.util';
 import {
@@ -60,6 +61,8 @@ export interface CompleteRegistrationInput {
   /** Used when `hostGroupId` is null (a new ADCS host whose OU is unknown). */
   defaultHostGroupId: string;
   installKeyId: string | null;
+  /** Keycloak subject of whoever created the install key; null when unknown. */
+  ownerSubject?: string | null;
   /** False: the host is PENDING whatever the rules say (doubt about identity). */
   autoApprove: boolean;
   verified: VerifiedFacts;
@@ -102,6 +105,7 @@ export class HostsService {
     private readonly audit: AuditService,
     private readonly ca: CertificateAuthorityService,
     private readonly tpm: TpmAttestationService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   async register(input: RegisterHostInput): Promise<RegisterHostResult> {
@@ -145,11 +149,20 @@ export class HostsService {
       hostGroupId: key.hostGroupId,
       defaultHostGroupId: key.hostGroupId,
       installKeyId: key.id,
+      ownerSubject: await this.ownerSubjectOf(client, key.createdBy),
       autoApprove: true,
       verified: { adcs: false, adDn: null, tpm: redeemed !== null },
       tpmEkFingerprint: redeemed?.ekFingerprint ?? null,
       adcs: null,
     });
+  }
+
+  private async ownerSubjectOf(
+    client: TenantPrismaClient,
+    userId: string,
+  ): Promise<string | null> {
+    const user = await client.userProfile.findUnique({ where: { id: userId } });
+    return user?.keycloakSubject ?? null;
   }
 
   /**
@@ -278,6 +291,19 @@ export class HostsService {
           : {};
         const moved =
           existing !== null && existing.hostGroupId !== targetGroupId;
+        // A new device counts against the plan, under a lock held until this transaction ends,
+        // so N+1 parallel registrations cannot all pass. A known machine is not a new device.
+        if (!existing) {
+          await this.entitlements.assertWithinLocked(
+            tx,
+            tenant.id,
+            'devices',
+            () =>
+              tx.host.count({
+                where: { status: { in: ['PENDING', 'APPROVED'] } },
+              }),
+          );
+        }
         const saved = existing
           ? await tx.host.update({
               where: { id: existing.id },
@@ -302,6 +328,7 @@ export class HostsService {
                 keyFingerprint,
                 registeredFromIp: input.ip,
                 lastSeenAt: new Date(),
+                ownerSubject: ctx.ownerSubject ?? null,
                 ...adFacts,
                 ...tpmFacts,
                 ...(rule

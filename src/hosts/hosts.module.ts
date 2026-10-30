@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AgentsModule } from '../agents/agents.module';
+import { EntitlementsModule } from '../entitlements/entitlements.module';
 import { AdDirectory, LdapsAdDirectory } from './adcs/ad-directory.client';
 import { AdcsAdminService } from './adcs/adcs-admin.service';
 import { AdcsDirectoryService } from './adcs/adcs-directory.service';
@@ -11,7 +12,7 @@ import { TpmAttestationService } from './tpm/tpm-attestation.service';
 
 /** Hosts (docs/hosts.md): services only; HTTP controllers are in `HostsHttpModule`. */
 @Module({
-  imports: [AgentsModule],
+  imports: [AgentsModule, EntitlementsModule],
   providers: [
     HostsService,
     InstallKeysService,

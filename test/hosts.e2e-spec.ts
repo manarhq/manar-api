@@ -1,4 +1,8 @@
 import 'dotenv/config';
+import {
+  EntitlementsService,
+  PlanLimitError,
+} from '../src/entitlements/entitlements.service';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient as TenantPrismaClient } from '../src/generated/tenant-client/client';
 import { randomUUID } from 'node:crypto';
@@ -67,6 +71,7 @@ describe('Hosts (e2e)', () => {
       audit,
       ca,
       new TpmAttestationService(control, manager, audit),
+      new EntitlementsService(),
     );
     admins = new HostsAdminService(audit, ca);
   }, 60_000);
@@ -414,6 +419,7 @@ describe('Hosts (e2e)', () => {
         audit,
         racingCa,
         new TpmAttestationService(control, manager, audit),
+        new EntitlementsService(),
       );
 
       await expect(
@@ -604,6 +610,45 @@ describe('Hosts (e2e)', () => {
         }),
       ).rejects.toThrow(/Subject Alternative Name/);
       expect(await t.client.host.count()).toBe(0);
+    }, 60_000);
+  });
+  describe('device cap', () => {
+    it('lets exactly N of N+1 parallel registrations through (free plan: 3 devices)', async () => {
+      process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS = 'true';
+      try {
+        const t = await tenant('cap');
+        const attempts = await Promise.allSettled(
+          Array.from({ length: 4 }, async (_, i) => {
+            const { raw } = await keys.create(t.client, t, admin, {
+              hostGroupId: t.group.id,
+              label: `device ${i}`,
+              maxUses: 1,
+            });
+            const machineId = `cap-${i}`;
+            const { csrPem } = await generateAgentCsr(
+              `host://${t.slug}/${machineId}`,
+            );
+            return hosts.register({
+              installKey: raw,
+              csr: csrPem,
+              machineId,
+              hostname: `PC-${i}`,
+              os: 'linux',
+              keyType: 'SOFTWARE',
+              ip: '10.0.0.7',
+            });
+          }),
+        );
+        expect(attempts.filter((r) => r.status === 'fulfilled')).toHaveLength(
+          3,
+        );
+        const failed = attempts.filter((r) => r.status === 'rejected');
+        expect(failed).toHaveLength(1);
+        expect(failed[0]!.reason).toBeInstanceOf(PlanLimitError);
+        expect(await t.client.host.count()).toBe(3);
+      } finally {
+        delete process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS;
+      }
     }, 60_000);
   });
 });
