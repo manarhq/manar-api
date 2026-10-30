@@ -149,6 +149,7 @@ model Tenant {
   edgePeers        EdgePeer[]
   memberships      Membership[]
   entitlement      TenantEntitlement?
+  installCodes     InstallCode[]
 
   @@map("tenants")
 }
@@ -410,4 +411,22 @@ model StripeEvent {
   processedAt DateTime @default(now())
 
   @@map("stripe_events")
+}
+
+/// The short code of the "Add device" one-liner (`/i/<code>`) -> the tenant and the single-use
+/// install key it stands for, so the public route can find the tenant without a token. Valid for
+/// one hour; fetching the script does not use the key, registering does. The raw key is kept here
+/// until the code expires (same trust boundary as the other control-DB secrets, docs/hosts.md).
+model InstallCode {
+  id         String   @id @default(uuid())
+  /// 10 characters of an unambiguous alphabet, upper case.
+  code       String   @unique
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  installKey String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("install_codes")
 }
