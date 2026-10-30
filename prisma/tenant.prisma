@@ -207,10 +207,11 @@ model Agent {
   quarantine AgentQuarantine?
 
   /// How the agent authenticates (docs/cloud-agents.md).
-  kind         AgentKind          @default(WORKLOAD)
+  kind         AgentKind            @default(WORKLOAD)
   cloudBinding CloudAgentBinding?
   /// docs/edge.md: hostnames this agent may reach through the Manar edge proxy.
-  egressRules AgentEgressRule[]
+  egressRules  AgentEgressRule[]
+  allowGrants  ApprovalAllowGrant[]
 
   @@map("agents")
 }
@@ -280,7 +281,7 @@ model AgentGroupMembership {
   id String @id @default(uuid())
 
   agentId String
-  agent   Agent @relation(fields: [agentId], references: [id])
+  agent   Agent  @relation(fields: [agentId], references: [id])
 
   groupId String
   group   AgentGroup @relation(fields: [groupId], references: [id])
@@ -304,7 +305,7 @@ model AgentEnrollmentToken {
   id String @id @default(uuid())
 
   agentId String
-  agent   Agent @relation(fields: [agentId], references: [id])
+  agent   Agent  @relation(fields: [agentId], references: [id])
 
   tokenHash String    @unique
   expiresAt DateTime
@@ -329,7 +330,7 @@ model AgentCertificate {
   id String @id @default(uuid())
 
   agentId String
-  agent   Agent @relation(fields: [agentId], references: [id])
+  agent   Agent  @relation(fields: [agentId], references: [id])
 
   /// Canonical form: uppercase hex, no separators (see
   /// `certificate-authority.service.ts`'s serial-number normalization doc
@@ -455,14 +456,14 @@ model Task {
 
   status TaskStatus @default(ACTIVE)
 
-  startsAt       DateTime  @default(now())
+  startsAt       DateTime @default(now())
   expiresAt      DateTime
   maxExecutions  Int?
   /// Incremented atomically (a single conditional `UPDATE`, closing the
   /// same race `AgentEnrollmentToken`'s single-use claim closes — see
   /// `AgentsService.enroll`'s doc comment) on every ALLOW decision. Never
   /// decremented; there is no notion of "returning" a used execution.
-  executionCount Int       @default(0)
+  executionCount Int      @default(0)
 
   /// 0-100, conservative default. Not enforced by anything this phase (no
   /// risk scoring yet — Phase 6/8) — captured now so that phase doesn't
@@ -502,7 +503,7 @@ model TaskDelegation {
   id String @id @default(uuid())
 
   parentTaskId String
-  parentTask   Task @relation("DelegationParent", fields: [parentTaskId], references: [id])
+  parentTask   Task   @relation("DelegationParent", fields: [parentTaskId], references: [id])
 
   /// One parent may delegate to many children over time, but each child
   /// task has exactly one delegation record (it has exactly one
@@ -714,8 +715,8 @@ model Tool {
 
   createdAt DateTime @default(now())
 
-  actions      ToolAction[]
-  invocations  ToolInvocation[]
+  actions     ToolAction[]
+  invocations ToolInvocation[]
 
   /// Release 2026-11-11: the `AiSystem`s this tool has been declared to
   /// serve — see `AiSystemToolLink`.
@@ -794,12 +795,12 @@ model ToolAction {
   /// `RiskEngine`/policy-authoring signal (unlike Phase 6's deleted
   /// keyword heuristic, this is operator-declared truth, not guessed from
   /// the action's name).
-  mutating Boolean @default(false)
+  mutating        Boolean @default(false)
   /// Whether this action is hard/impossible to reverse (e.g.
   /// `isolate_host`, `delete_user`) -- a stronger signal than `mutating`
   /// alone; both feed `RiskEngine.score` independently (see that
   /// service's doc comment for the exact point values).
-  destructive Boolean @default(false)
+  destructive     Boolean @default(false)
   /// This action's own default stance on requiring human approval,
   /// independent of anything `PolicyEngine`/`RiskEngine` decide --
   /// carried in the schema for a future phase's policy-authoring
@@ -850,8 +851,8 @@ model ToolInvocation {
 
   status ToolInvocationStatus
 
-  startedAt   DateTime
-  completedAt DateTime?
+  startedAt    DateTime
+  completedAt  DateTime?
   /// Set only on `FAILURE` -- the adapter/broker's own error message
   /// (e.g. "HTTP 503", "tool disabled"), never a raw response body that
   /// might carry secret material.
@@ -904,7 +905,7 @@ enum DecisionStage {
 model Decision {
   id String @id @default(uuid())
 
-  outcome DecisionOutcome
+  outcome     DecisionOutcome
   /// The decisive reason first (`allowed`, `policy_denied`,
   /// `risk_ceiling_exceeded`, ...), then any deterministic risk reason codes.
   reasonCodes String[]
@@ -1016,7 +1017,7 @@ model ApprovalRequest {
   resource String
   /// The exact `params` submitted to `POST /agent/v1/tools/invoke` -- see
   /// model doc comment for why this must never be re-derived.
-  params Json
+  params   Json
 
   /// The `RiskEngine.finalRiskScore` (0-100) that was part of why this
   /// request required approval -- carried here (rather than only in
@@ -1065,7 +1066,7 @@ model ApprovalRequest {
   /// AI-derived codes carry the `ai_advisory_*` prefix, so a consumer can
   /// separate attribution without a second field -- see that type's own
   /// doc comment for why they are never blended into one anonymous list.
-  riskReasonCodes        Json  @default("[]")
+  riskReasonCodes        Json    @default("[]")
   /// The `Task.riskCeiling` in force when this request was raised -- what
   /// `riskScore` was actually compared against. Without it, a reader
   /// cannot tell whether 62 was over or under the line.
@@ -1082,7 +1083,7 @@ model ApprovalRequest {
   ///
   /// Null on rows written before this migration -- render as "not
   /// recorded", never as either value.
-  requiredReason         String?
+  requiredReason String?
 
   /// The published `PolicyVersion` whose rule produced this
   /// `APPROVAL_REQUIRED` decision -- null when the decision came purely
@@ -1100,7 +1101,7 @@ model ApprovalRequest {
   /// `status = EXPIRED`, and no `AuthorizationGrant` is ever issuable for
   /// this request again (see `APPROVAL_REQUEST_TTL_MS`,
   /// `src/approvals/approvals.config.ts` -- 30 minutes by default).
-  expiresAt DateTime
+  expiresAt   DateTime
 
   /// The `ApprovalWorkflow` run this request is bound to 1:1 -- what
   /// `POST /approvals/:id/decide` signals and what this row's own
@@ -1220,7 +1221,7 @@ model AuthorizationGrant {
   /// grant.
   riskScore Int
 
-  issuedAt DateTime @default(now())
+  issuedAt  DateTime @default(now())
   /// Short -- `APPROVAL_GRANT_TTL_MS` (`src/approvals/approvals.config.ts`,
   /// 5 minutes by default): an agent that doesn't retry
   /// `POST /agent/v1/tools/invoke` with this grant soon after `APPROVED`
@@ -1234,7 +1235,7 @@ model AuthorizationGrant {
   /// unconsumed (still usable, if unexpired).
   consumedAt DateTime?
   /// Unused this phase -- see model doc comment.
-  revokedAt DateTime?
+  revokedAt  DateTime?
 
   @@map("authorization_grants")
 }
@@ -1583,12 +1584,12 @@ model AgentQuarantine {
   agentId String @unique
   agent   Agent  @relation(fields: [agentId], references: [id])
 
-  active    Boolean
+  active        Boolean
   /// Short deterministic reason written by the detector that fired.
-  reason    String
-  detector  String?
+  reason        String
+  detector      String?
   /// Evidence references (decision ids, audit event ids). Ids only.
-  evidence  Json    @default("[]")
+  evidence      Json    @default("[]")
   /// Plain-English and Arabic explanation written by the watcher's model
   /// after the quarantine landed; set at most once per quarantine. Generated
   /// text, labelled as such wherever it is shown.
@@ -2085,9 +2086,9 @@ model AiSystemStateTransition {
 /// docs/edge.md: one hostname an agent may reach through the Manar edge egress proxy. Added and
 /// removed only by a person (tenant admin, JWT); projected into the platform's `EdgePeer.allowHosts`.
 model AgentEgressRule {
-  id      String @id @default(uuid())
+  id      String  @id @default(uuid())
   agentId String
-  agent   Agent  @relation(fields: [agentId], references: [id])
+  agent   Agent   @relation(fields: [agentId], references: [id])
   /// A lowercase DNS name, or `*.` + a DNS name (one label or more). No IPs, ports or paths.
   host    String
   reason  String?
@@ -2196,43 +2197,45 @@ enum HostKeyType {
 /// (VDI golden images register on every boot); a different key or a key
 /// from another group waits as a pending rekey for an admin (docs/hosts.md).
 model Host {
-  id               String            @id @default(uuid())
-  hostGroupId      String
-  hostGroup        HostGroup         @relation(fields: [hostGroupId], references: [id])
-  machineId        String
-  hostname         String
-  os               String
-  keyType          HostKeyType
-  status           HostStatus        @default(PENDING)
-  approvedBy       String?
-  approvedAt       DateTime?
-  lastSeenAt       DateTime?
-  registeredFromIp String
+  id                    String               @id @default(uuid())
+  hostGroupId           String
+  hostGroup             HostGroup            @relation(fields: [hostGroupId], references: [id])
+  machineId             String
+  hostname              String
+  os                    String
+  keyType               HostKeyType
+  status                HostStatus           @default(PENDING)
+  approvedBy            String?
+  approvedAt            DateTime?
+  lastSeenAt            DateTime?
+  registeredFromIp      String
   /// SHA-256 of the SubjectPublicKeyInfo the machine is bound to.
-  keyFingerprint   String
+  keyFingerprint        String
   /// A registration with a different key, or a key of another group, waits
   /// here for an admin; nothing about the bound machine changes meanwhile.
   pendingKeyFingerprint String?
   pendingHostGroupId    String?
   /// `INSTALL_KEY` or `ADCS` (computer certificate; the OU decides the group).
-  enrolmentMethod  String            @default("INSTALL_KEY")
+  enrolmentMethod       String               @default("INSTALL_KEY")
   /// ADCS hosts: the certificate's DNS name and the DN last read from AD.
-  adcsDnsName      String?
-  adDn             String?
-  adDnCheckedAt    DateTime?
+  adcsDnsName           String?
+  adDn                  String?
+  adDnCheckedAt         DateTime?
   /// The host key passed TPM credential activation (bound to `keyFingerprint`).
-  tpmVerified      Boolean           @default(false)
-  tpmEkFingerprint String?
+  tpmVerified           Boolean              @default(false)
+  tpmEkFingerprint      String?
   /// Keycloak subject of the person whose install key enrolled this machine; null for hosts
   /// enrolled before this column existed and for key-less (ADCS) enrolment.
-  ownerSubject     String?
+  ownerSubject          String?
   /// The install key that enrolled (or last re-enrolled) it: the first-run screen matches the
   /// device it waits for by this, never by time.
-  installKeyId     String?
-  certificates     HostCertificate[]
-  tools            HostTool[]
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+  installKeyId          String?
+  certificates          HostCertificate[]
+  tools                 HostTool[]
+  allowGrants           ApprovalAllowGrant[]
+  hostApprovals         HostApproval[]
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
 
   @@unique([machineId])
   /// One computer identity, one host (lower-cased certificate DNS name; nulls repeat).
@@ -2327,19 +2330,19 @@ model AdcsTrustedCa {
 
 /// One row per tenant (`id = 'default'`). The bind password is in OpenBao KV, never here.
 model AdcsSettings {
-  id                 String    @id @default("default")
+  id                  String    @id @default("default")
   /// Receives ADCS hosts whose OU is unmapped or unknown (they stay PENDING).
-  defaultHostGroupId String
-  defaultHostGroup   HostGroup @relation(fields: [defaultHostGroupId], references: [id])
-  ldapsUrl           String?
-  baseDn             String?
-  bindDn             String?
+  defaultHostGroupId  String
+  defaultHostGroup    HostGroup @relation(fields: [defaultHostGroupId], references: [id])
+  ldapsUrl            String?
+  baseDn              String?
+  bindDn              String?
   /// CA that signed the LDAPS server certificate (verification is mandatory).
-  serverCaPem        String?
+  serverCaPem         String?
   /// Certificate template OIDs (extension 1.3.6.1.4.1.311.21.7) accepted for key-less enrolment. Empty: none.
-  allowedTemplateOids String[] @default([])
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  allowedTemplateOids String[]  @default([])
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@map("adcs_settings")
 }
@@ -2391,4 +2394,67 @@ model TpmChallenge {
 
   @@index([expiresAt])
   @@map("tpm_challenges")
+}
+
+/// "Approve for 8 hours" (spec 4.6): a time-boxed allow for one exact tool, action and resource on
+/// one device (`hostId`) or one agent (`agentId`; exactly one is set, enforced by a CHECK). It only
+/// satisfies an approval requirement; a policy DENY, a kill switch, OpenFGA and task limits still
+/// apply. Lives in the tenant database, so it cannot cross tenants. `resource` is compared as an
+/// exact string; patterns come from "Approve + make rule", which is a policy.
+model ApprovalAllowGrant {
+  id         String    @id @default(uuid())
+  hostId     String?
+  host       Host?     @relation(fields: [hostId], references: [id])
+  agentId    String?
+  agent      Agent?    @relation(fields: [agentId], references: [id])
+  toolId     String
+  actionId   String
+  resource   String
+  /// Keycloak subject of the approver.
+  createdBy  String
+  /// The ApprovalRequest or HostApproval id this came from.
+  sourceId   String
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  useCount   Int       @default(0)
+  lastUsedAt DateTime?
+
+  @@index([hostId, toolId, actionId, expiresAt])
+  @@index([agentId, toolId, actionId, expiresAt])
+  @@map("approval_allow_grants")
+}
+
+enum HostApprovalStatus {
+  PENDING
+  APPROVED
+  DENIED
+  EXPIRED
+}
+
+/// An approval opened for a device by the host authorize path (a tool without a task or agent
+/// identity, such as Cursor through its hook). Decided from the device (WARDEN) or the console.
+model HostApproval {
+  id         String             @id @default(uuid())
+  hostId     String
+  host       Host               @relation(fields: [hostId], references: [id])
+  toolId     String
+  actionId   String
+  resource   String
+  /// Short text for the prompt, built by the caller; never file contents or prompts.
+  summary    String
+  /// High-risk actions are decided in the console only.
+  highRisk   Boolean            @default(false)
+  status     HostApprovalStatus @default(PENDING)
+  /// approve_once | approve_8h | deny
+  decision   String?
+  decidedBy  String?
+  /// device | console
+  decidedVia String?
+  decidedAt  DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime           @default(now())
+
+  @@index([hostId, status, expiresAt])
+  @@map("host_approvals")
 }
