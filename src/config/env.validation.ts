@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { BillingConfigSchema } from '../billing/billing.config';
 import { DatabaseConfigSchema } from '../database/database.config';
 import { AuthConfigSchema } from '../auth/auth.config';
 import { KeycloakConfigSchema } from '../keycloak/keycloak.config';
@@ -86,6 +87,7 @@ export const AppConfigSchema = z
   .extend(CloudMcpConfigSchema.shape)
   .extend(TrustedProxyConfigSchema.shape)
   .extend(EdgeConfigSchema.shape)
+  .extend(BillingConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {

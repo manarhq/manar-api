@@ -36,6 +36,7 @@ import {
   AgentTerminatedError,
   CloudAgentOperationError,
 } from './agents.errors';
+import { EntitlementsService } from '../billing/entitlements.service';
 import { AgentsService } from './agents.service';
 import {
   CreateAgentRequestSchema,
@@ -91,6 +92,7 @@ export class AgentsController {
   constructor(
     private readonly agentsService: AgentsService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   @Post()
@@ -113,6 +115,17 @@ export class AgentsController {
     const input = parseBodyOrThrow(CreateAgentRequestSchema, body);
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
+    );
+    // Plan cap: live agents other than cloud agents (those have their own cap).
+    await this.entitlements.assertWithin(
+      auth.tenant.id,
+      'agents',
+      await tenantClient.agent.count({
+        where: {
+          status: { in: ['PENDING_ENROLLMENT', 'ACTIVE'] },
+          cloudBinding: null,
+        },
+      }),
     );
 
     const agent = await this.agentsService.createAgent(tenantClient, {

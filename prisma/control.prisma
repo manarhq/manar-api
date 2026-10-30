@@ -99,23 +99,23 @@ enum SecretProvider {
 }
 
 model Tenant {
-  id     String @id @default(uuid())
-  slug   String @unique
-  name   String
+  id   String @id @default(uuid())
+  slug String @unique
+  name String
 
   status TenantStatus @default(PROVISIONING)
 
   /// Existing (pre-launch) tenants are organisations, so COMPANY is the default.
-  kind TenantKind @default(COMPANY)
+  kind              TenantKind @default(COMPANY)
   /// PERSONAL: the Keycloak `sub` that owns it (one per subject, partial unique index in the migration).
-  ownerSubject String?
+  ownerSubject      String?
   /// The issuer of `ownerSubject`: a `sub` is only unique within one issuer.
-  ownerIssuer String?
+  ownerIssuer       String?
   /// Provisioning retries: failed attempts so far, and when the queue may try again.
-  provisionAttempts Int       @default(0)
+  provisionAttempts Int        @default(0)
   nextProvisionAt   DateTime?
   /// COMPANY: the Entra tenant id (`tid`) it was created for (one per tid, partial unique index).
-  entraTenantId String?
+  entraTenantId     String?
 
   residency              TenantResidency @default(UAE)
   allowExternalAi        Boolean         @default(false)
@@ -148,6 +148,7 @@ model Tenant {
   catalog          TenantCatalog?
   edgePeers        EdgePeer[]
   memberships      Membership[]
+  entitlement      TenantEntitlement?
 
   @@map("tenants")
 }
@@ -160,7 +161,7 @@ model TenantDatabaseBinding {
   databaseName String @unique
 
   secretReferenceId String          @unique
-  secretReference    SecretReference @relation(fields: [secretReferenceId], references: [id])
+  secretReference   SecretReference @relation(fields: [secretReferenceId], references: [id])
 
   /// Reuses TenantStatus, scoped to database-provisioning progress rather
   /// than tenant lifecycle — the two are related but not always identical
@@ -169,8 +170,8 @@ model TenantDatabaseBinding {
   provisioningStatus TenantStatus @default(PROVISIONING)
 
   provisionedAt        DateTime?
-  lastMigratedAt        DateTime?
-  lastMigrationVersion  String?
+  lastMigratedAt       DateTime?
+  lastMigrationVersion String?
 
   /// Host/port/engine-version notes and similar deployment-topology
   /// metadata. Folded in here rather than a separate 1:1 model per
@@ -246,12 +247,12 @@ model PlatformKillSwitch {
 /// or a malformed row denies. No row means the tenant is unmanaged: every feature keeps its
 /// pre-catalog default (on), no pack is enabled, and the LLM proxy uses the deployment's model.
 model TenantCatalog {
-  tenantId  String @id
-  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId  String   @id
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   /// `{ assistant?, watcher?, packs?, llm_proxy? }` booleans; a missing key keeps the default.
-  features  Json   @default("{}")
+  features  Json     @default("{}")
   /// `{ id, version, enabled }[]`, one entry per pack staff have decided on.
-  packs     Json   @default("[]")
+  packs     Json     @default("[]")
   /// `{ provider, model, uaeResidency, monthlyTokenQuota }` or null for the deployment default.
   model     Json?
   /// The platform caller (manar-fleet client id) that last wrote the row.
@@ -273,32 +274,32 @@ enum EdgePeerState {
 /// Rows are never deleted while the tenant exists, so an address is never reused while a row
 /// holds it.
 model EdgePeer {
-  id         String        @id @default(uuid())
-  tenantId   String
-  tenant     Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  tenantSlug String
-  agentId    String
-  agentSlug  String
+  id           String        @id @default(uuid())
+  tenantId     String
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantSlug   String
+  agentId      String
+  agentSlug    String
   /// WireGuard public key (base64, 32 bytes). The private key never leaves the host.
-  publicKey  String        @unique
+  publicKey    String        @unique
   /// Overlay address, `a.b.c.d/32`.
-  address    String        @unique
-  state      EdgePeerState
+  address      String        @unique
+  state        EdgePeerState
   /// Why the peer is cut (the first stop condition found), null when active.
-  cutReason  String?
-  allowHosts String[]      @default([])
+  cutReason    String?
+  allowHosts   String[]      @default([])
   /// `EdgeState.version` when this row last changed.
-  version    Int
+  version      Int
   /// Refresh tickets: a refresher takes `refreshSeq + 1` before it reads the tenant database and
   /// writes only if no fresher read was applied (`appliedSeq`), so a stale read never overwrites a
   /// newer one.
-  refreshSeq   Int       @default(0)
-  appliedSeq   Int       @default(0)
+  refreshSeq   Int           @default(0)
+  appliedSeq   Int           @default(0)
   /// Expiry of the agent's newest unrevoked certificate as last read; the next recompute is
   /// scheduled at the earliest one.
   certNotAfter DateTime?
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
   @@unique([tenantId, agentId])
   @@index([version])
@@ -308,8 +309,8 @@ model EdgePeer {
 /// Singleton (`id = "singleton"`): the global, monotonic edge peer version. Every change to any peer
 /// takes this row's lock and bumps it in the same transaction, so versions commit in order.
 model EdgeState {
-  id      String @id
-  version Int    @default(0)
+  id                  String    @id
+  version             Int       @default(0)
   /// The replica holding this lease runs the periodic reconcile.
   reconcileLeaseUntil DateTime?
 
@@ -363,4 +364,50 @@ model Membership {
   @@index([tenantId, status])
   @@index([issuer, subject])
   @@map("memberships")
+}
+
+enum EntitlementPlan {
+  free
+  pro
+  company_trial
+  company
+  enterprise
+}
+
+enum EntitlementStatus {
+  active
+  past_due
+  /// Lapsed company trial or unpaid: reads and export only (EntitlementsService.get derives this
+  /// for an expired trial; Stripe events set it for non-payment).
+  read_only
+}
+
+/// Plan, limits source and Stripe ids per tenant (docs/billing.md). No row means the free plan.
+/// Limits are never stored: they come from the plan table in src/billing/plans.ts so a price
+/// change ships with code, not a data migration.
+model TenantEntitlement {
+  tenantId             String            @id
+  tenant               Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan                 EntitlementPlan   @default(free)
+  status               EntitlementStatus @default(active)
+  trialEndsAt          DateTime?
+  stripeCustomerId     String?           @unique
+  stripeSubscriptionId String?           @unique
+  /// `month` or `year` for Pro; null otherwise.
+  billingInterval      String?
+  /// Newest Stripe event applied; older subscription events are skipped.
+  lastStripeEventAt    DateTime?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  @@map("tenant_entitlements")
+}
+
+/// Stripe event ids already applied (webhook idempotency). Pruned by age, never read for anything else.
+model StripeEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now())
+
+  @@map("stripe_events")
 }

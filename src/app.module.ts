@@ -33,6 +33,7 @@ import { TenantsModule } from './tenants/tenants.module';
 import { PlatformModule } from './platform/platform.module';
 import { CatalogHttpModule } from './platform/catalog.module';
 import { FleetHeartbeatModule } from './fleet-heartbeat/fleet-heartbeat.module';
+import { BillingModule } from './billing/billing.module';
 import { LicensingModule } from './licensing/licensing.module';
 import { UsersModule } from './users/users.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
@@ -78,6 +79,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     CatalogHttpModule,
     FleetHeartbeatModule,
     LicensingModule,
+    BillingModule,
     // Phase 14: UsersService needs KeycloakAdminClient at runtime (role
     // grant/revoke keeps Keycloak's realm role mappings in sync -- see
     // KeycloakModule's own doc comment for why this module, previously
