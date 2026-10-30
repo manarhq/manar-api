@@ -123,6 +123,7 @@ export class HostToolsService {
         protectMode: eff.protectMode,
         changes: t.changes,
         lastSeenAt: now,
+        missing: false,
       };
       await client.hostTool.upsert({
         where: { hostId_toolId: { hostId: host.hostId, toolId: t.id } },
@@ -148,9 +149,11 @@ export class HostToolsService {
         });
       }
     }
-    // The report is the whole list: a tool that is gone is removed.
-    await client.hostTool.deleteMany({
+    // A tool missing from one scan is marked, not deleted: the owner's choice must survive a
+    // scan that missed it, and the tool shows again as soon as it is found.
+    await client.hostTool.updateMany({
       where: { hostId: host.hostId, toolId: { notIn: [...ids] } },
+      data: { missing: true, protected: false, protectMode: 'none' },
     });
     await client.host.update({
       where: { id: host.hostId },
@@ -190,7 +193,9 @@ export class HostToolsService {
     const client = await this.tenants.getClient(tenantId);
     const hosts = await client.host.findMany({
       where: { status: { in: ['PENDING', 'APPROVED'] } },
-      include: { tools: { orderBy: { name: 'asc' } } },
+      include: {
+        tools: { where: { missing: false }, orderBy: { name: 'asc' } },
+      },
       orderBy: { createdAt: 'desc' },
       take: 200,
     });

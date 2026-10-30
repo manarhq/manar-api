@@ -60,11 +60,17 @@ function toolsDb() {
             return Promise.resolve({});
           },
         ),
-        deleteMany: vi.fn(
-          ({ where }: { where: { toolId: { notIn: string[] } } }) => {
+        updateMany: vi.fn(
+          ({
+            where,
+            data,
+          }: {
+            where: { toolId: { notIn: string[] } };
+            data: Record<string, unknown>;
+          }) => {
             for (const [k, v] of rows)
               if (!where.toolId.notIn.includes(v.toolId as string))
-                rows.delete(k);
+                rows.set(k, { ...v, ...data });
             return Promise.resolve({});
           },
         ),
@@ -213,12 +219,45 @@ describe('HostToolsService', () => {
     ]);
     await svc.report(hostA, inv([cursor]));
     expect(types()).toHaveLength(3); // unchanged report: no new events
-    expect(a.rows.has('h-a|host.chatgpt-desktop')).toBe(false);
+    expect(a.rows.get('h-a|host.chatgpt-desktop')).toMatchObject({
+      missing: true,
+      protected: false,
+    });
     await svc.report(
       hostA,
       inv([{ ...cursor, protected: false, protectMode: 'none' }]),
     );
     expect(types().at(-1)).toBe('tool.unprotected');
+  });
+  it("keeps the owner's choice when a scan misses the tool, and shows it again when it returns", async () => {
+    const { svc, a } = toolsService();
+    const t = {
+      id: 'host.cursor',
+      name: 'Cursor',
+      protected: true,
+      protectMode: 'hook',
+    };
+    await svc.report(hostA, inv([t]));
+    await svc.setDesired('t-a', 'h-a', 'host.cursor', false, {
+      type: 'human',
+      id: 'u',
+    });
+    await svc.report(hostA, inv([])); // one scan that missed it
+    expect(a.rows.get('h-a|host.cursor')).toMatchObject({
+      missing: true,
+      desiredProtection: false,
+    });
+    expect(await svc.instructions(hostA)).toEqual({
+      unprotect: ['host.cursor'],
+    });
+    await svc.report(
+      hostA,
+      inv([{ ...t, protected: false, protectMode: 'none' }]),
+    );
+    expect(a.rows.get('h-a|host.cursor')).toMatchObject({
+      missing: false,
+      desiredProtection: false,
+    });
   });
   it('rejects unknown catalogue ids and duplicates', async () => {
     const { svc } = toolsService();

@@ -2248,7 +2248,7 @@ model Host {
 model HostTool {
   id                String   @id @default(uuid())
   hostId            String
-  host              Host     @relation(fields: [hostId], references: [id])
+  host              Host     @relation(fields: [hostId], references: [id], onDelete: Cascade)
   /// Catalogue id (`host.cursor`) or `other:<slug>` for an unknown tool.
   toolId            String
   name              String
@@ -2260,6 +2260,8 @@ model HostTool {
   desiredProtection Boolean  @default(true)
   /// What the device changed for this tool (files, backups), shown on the AI tools page.
   changes           String[] @default([])
+  /// Not in the latest scan (uninstalled, or missed once). Kept so the owner's choice survives.
+  missing           Boolean  @default(false)
   firstSeenAt       DateTime @default(now())
   lastSeenAt        DateTime @default(now())
 

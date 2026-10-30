@@ -11,6 +11,8 @@ import type { HostContext } from '../host-mtls/host-context';
 /** `POST /host/v1/authorize`: the `/agent/v1/authorize` body without a task (a device has none). */
 export const HostAuthorizeSchema = z.object({
   taskId: z.string().max(128).optional(),
+  /** Who called the device's local relay (`uid:1000`, `sid:S-1-5-21-...`), as the OS reported it. */
+  caller: z.string().max(128).optional(),
   toolId: z.string().min(1).max(128),
   actionId: z.string().min(1).max(128),
   resource: z.string().min(1).max(2048),
@@ -99,6 +101,7 @@ export class HostAuthorizeService {
         reason: result.reason ?? null,
         riskScore: result.riskScore ?? null,
         approvalId: result.approvalId ?? null,
+        caller: request.caller ?? null,
       },
     });
     if (!recorded && result.decision === 'ALLOW') {

@@ -14,6 +14,7 @@ CREATE TABLE "host_tools" (
     "protectMode" TEXT NOT NULL DEFAULT 'none',
     "desiredProtection" BOOLEAN NOT NULL DEFAULT true,
     "changes" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "missing" BOOLEAN NOT NULL DEFAULT false,
     "firstSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -27,4 +28,4 @@ CREATE INDEX "host_tools_toolId_idx" ON "host_tools"("toolId");
 CREATE UNIQUE INDEX "host_tools_hostId_toolId_key" ON "host_tools"("hostId", "toolId");
 
 -- AddForeignKey
-ALTER TABLE "host_tools" ADD CONSTRAINT "host_tools_hostId_fkey" FOREIGN KEY ("hostId") REFERENCES "hosts"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "host_tools" ADD CONSTRAINT "host_tools_hostId_fkey" FOREIGN KEY ("hostId") REFERENCES "hosts"("id") ON DELETE CASCADE ON UPDATE CASCADE;
