@@ -49,17 +49,3 @@ export class TenantOidcConfigResponseDto {
   })
   jwksUri!: string;
 }
-
-/**
- * `GET /tenants/:slug/oidc-client-secret`'s response — gated by
- * `BffServiceGuard`, never by a tenant JWT (there is none yet at this
- * point in the login flow). See `TenantsController`'s doc comment for the
- * full security design.
- */
-export class TenantOidcClientSecretResponseDto {
-  @ApiProperty({
-    description:
-      "The confidential client's secret, in plaintext. Only ever returned to a caller presenting the X-Manar-Bff-Token service credential — never to an arbitrary/unauthenticated caller.",
-  })
-  clientSecret!: string;
-}

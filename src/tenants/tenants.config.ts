@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 /**
  * Phase 11b Part 1 — config for the `GET /tenants/:slug/oidc-client-secret`
- * BFF-only endpoint (see `bff-service.guard.ts` and `tenants.controller.ts`'s
+ * BFF-only endpoint (see `tenants.controller.ts`'s
  * own doc comments for the full design rationale).
  *
  * `MANAR_BFF_SERVICE_TOKEN` is a **narrow, single-purpose** shared secret
@@ -22,6 +22,7 @@ import { z } from 'zod';
  * this point in the login flow — this endpoint is necessarily called
  * pre-login).
  */
+/** Unused since the client-secret endpoint was retired (spec 4.1); kept optional so existing deployments still start. */
 export const TenantsConfigSchema = z.object({
   /**
    * No production default — the `.env`/`.env.example` dev value is only
@@ -29,7 +30,7 @@ export const TenantsConfigSchema = z.object({
    * shared secrets (`PLATFORM_KILL_SWITCH_OPERATOR_TOKEN`,
    * `APPROVAL_GRANT_SIGNING_SECRET`).
    */
-  MANAR_BFF_SERVICE_TOKEN: z.string().min(16),
+  MANAR_BFF_SERVICE_TOKEN: z.string().min(16).optional(),
 });
 
 export type TenantsConfig = z.infer<typeof TenantsConfigSchema>;

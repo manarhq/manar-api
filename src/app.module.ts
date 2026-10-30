@@ -35,6 +35,7 @@ import { CatalogHttpModule } from './platform/catalog.module';
 import { FleetHeartbeatModule } from './fleet-heartbeat/fleet-heartbeat.module';
 import { LicensingModule } from './licensing/licensing.module';
 import { UsersModule } from './users/users.module';
+import { WorkspacesModule } from './workspaces/workspaces.module';
 import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
 import { ComplianceModule } from './compliance/compliance.module';
@@ -83,6 +84,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     // CLI-only, is now also part of the running HTTP app's module graph).
     KeycloakModule,
     UsersModule,
+    WorkspacesModule,
     TenantSettingsModule,
     // Phase 15a: Data Classification, Compliance Mapping & Incidents.
     ComplianceModule,

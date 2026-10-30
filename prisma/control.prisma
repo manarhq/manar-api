@@ -22,6 +22,9 @@ generator client {
 }
 
 enum TenantStatus {
+  /// Waiting in the provisioning queue (capacity headroom was low at sign-up). Treated like
+  /// PROVISIONING everywhere: not ACTIVE, so every guard refuses it.
+  QUEUED
   PROVISIONING
   ACTIVE
   SUSPENDED
@@ -33,6 +36,30 @@ enum TenantStatus {
 /// from day one even though only UAE is exercised in this phase, so later
 /// phases never need a destructive schema change to add residency
 /// awareness.
+enum TenantKind {
+  PERSONAL
+  COMPANY
+  SAMPLE
+}
+
+enum MembershipStatus {
+  ACTIVE
+  PENDING
+  REMOVED
+}
+
+/// Same eight names as `Role` in tenant.prisma and `ROLES` in src/auth/roles.ts.
+enum MembershipRole {
+  TENANT_OWNER
+  SECURITY_ADMIN
+  AI_GOVERNANCE_MANAGER
+  SOC_OPERATOR
+  APPROVER
+  AUDITOR
+  DEVELOPER
+  READ_ONLY
+}
+
 enum TenantResidency {
   UAE
   CUSTOM_REGION
@@ -76,6 +103,13 @@ model Tenant {
 
   status TenantStatus @default(PROVISIONING)
 
+  /// Existing (pre-launch) tenants are organisations, so COMPANY is the default.
+  kind TenantKind @default(COMPANY)
+  /// PERSONAL: the Keycloak `sub` that owns it (one per subject, partial unique index in the migration).
+  ownerSubject String?
+  /// COMPANY: the Entra tenant id (`tid`) it was created for (one per tid, partial unique index).
+  entraTenantId String?
+
   residency              TenantResidency @default(UAE)
   allowExternalAi        Boolean         @default(false)
   allowOutboundTelemetry Boolean         @default(false)
@@ -106,6 +140,7 @@ model Tenant {
   secretReferences SecretReference[]
   catalog          TenantCatalog?
   edgePeers        EdgePeer[]
+  memberships      Membership[]
 
   @@map("tenants")
 }
@@ -290,4 +325,31 @@ model AuditSealMark {
   updatedAt     DateTime @updatedAt
 
   @@map("audit_seal_marks")
+}
+
+/// Who may use which workspace, and as what (spec 4.1). The only source of roles: the token's
+/// `realm_access` is never read. `subject` is the Keycloak `sub`, never an email, so two sign-in
+/// methods with the same email are two separate subjects with separate memberships.
+model Membership {
+  id       String @id @default(uuid())
+  subject  String
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// The highest role held; `extraRoles` holds the rest (a user may hold several roles).
+  role       MembershipRole
+  extraRoles MembershipRole[] @default([])
+  status     MembershipStatus @default(PENDING)
+
+  /// Display hints copied from the token at request time. Never used for access decisions.
+  email       String?
+  displayName String?
+  grantedBy   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([subject, tenantId])
+  @@index([tenantId, status])
+  @@map("memberships")
 }

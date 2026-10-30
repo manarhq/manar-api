@@ -9,6 +9,7 @@ import { Client as PgClient } from 'pg';
 import { Prisma as ControlPrisma } from '../generated/control-client/client';
 import { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AppConfig } from '../config/env.validation';
+import { authSetting } from '../auth/auth.config';
 import { failClosed } from '../common/fail-closed/fail-closed';
 import { ControlPrismaService } from './control-prisma.service';
 import {
@@ -32,6 +33,17 @@ export interface ProvisionTenantInput {
   allowExternalAi?: boolean;
   allowOutboundTelemetry?: boolean;
   allowCloudStorage?: boolean;
+  /** Hosted workspaces (spec 4.1). Absent for the legacy `tenant:create` path (COMPANY). */
+  kind?: 'PERSONAL' | 'COMPANY' | 'SAMPLE';
+  ownerSubject?: string;
+  entraTenantId?: string;
+  /** Record the tenant as QUEUED and provision it later (`provisionQueued`). */
+  queued?: boolean;
+}
+
+export interface MigrateAllResult {
+  migrated: { tenantId: string; version: string }[];
+  failed: { tenantId: string; slug: string; error: string }[];
 }
 
 interface CachedClient {
@@ -210,6 +222,48 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       throw error;
     }
 
+    if (input.queued) {
+      return this.control.tenant.findUniqueOrThrow({
+        where: { id: created.tenant.id },
+        include: { databaseBinding: true },
+      });
+    }
+    return this.finishProvisioning(created, input.slug, baseUrl);
+  }
+
+  /**
+   * Provisions a tenant that was recorded QUEUED (capacity was low at sign-up). The claim is a
+   * compare-and-set on the status, so two workers never provision the same tenant. Returns null
+   * if someone else took it.
+   */
+  async provisionQueued(tenantId: string) {
+    const claimed = await this.control.tenant.updateMany({
+      where: { id: tenantId, status: 'QUEUED' },
+      data: { status: 'PROVISIONING' },
+    });
+    if (claimed.count === 0) return null;
+    const tenant = await this.control.tenant.findUniqueOrThrow({
+      where: { id: tenantId },
+      include: { databaseBinding: true },
+    });
+    const binding = tenant.databaseBinding;
+    if (!binding) throw new TenantNotFoundError(tenantId);
+    const baseUrl = await this.secretProvider.resolve({
+      provider: 'ENV',
+      reference: DEFAULT_TENANT_DB_SECRET_REFERENCE,
+    });
+    return this.finishProvisioning({ tenant, binding }, tenant.slug, baseUrl);
+  }
+
+  private async finishProvisioning(
+    created: {
+      tenant: { id: string };
+      binding: { id: string; databaseName: string };
+    },
+    slug: string,
+    baseUrl: string,
+  ) {
+    const databaseName = created.binding.databaseName;
     try {
       await this.createTenantDatabase(databaseName);
 
@@ -243,23 +297,26 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       });
     } catch (error) {
       this.logger.error(
-        `Provisioning failed for tenant "${input.slug}" after control-DB rows were created (tenantId=${created.tenant.id}); leaving status as PROVISIONING for manual inspection`,
+        `Provisioning failed for tenant "${slug}" after control-DB rows were created (tenantId=${created.tenant.id}); leaving status as PROVISIONING for manual inspection`,
         error instanceof Error ? error.stack : undefined,
       );
-      throw new TenantProvisioningError(input.slug, error);
+      throw new TenantProvisioningError(slug, error);
     }
   }
 
   /**
-   * Applies pending tenant migrations to every ACTIVE tenant database and
-   * records the version on its binding. Tenant migrations used to run only
-   * at provisioning, so an existing tenant never received a schema change
-   * after an upgrade (found in Phase 1: the demo tenant lacked
-   * `agent_certificates.caRevokedAt` and every enrollment 500'd). Run on
-   * every deploy, before the new API version takes traffic. Stops at the
-   * first failure, leaving the remaining tenants untouched for inspection.
+   * Applies pending tenant migrations to every ACTIVE tenant database and records the version on
+   * its binding. Run on every deploy, before the new API version takes traffic.
+   *
+   * Tenants run with bounded concurrency (`TENANT_MIGRATE_CONCURRENCY`) so thousands of small
+   * personal workspaces finish in reasonable time without opening thousands of connections. A
+   * failure does not stop the run: it is collected and reported, and the caller decides what a
+   * partial result means (the CLI exits non-zero). A tenant that failed keeps its old schema
+   * version and stays untouched for inspection.
    */
-  async migrateAllTenants(): Promise<{ tenantId: string; version: string }[]> {
+  async migrateAllTenants(
+    concurrency = authSetting(this.configService, 'TENANT_MIGRATE_CONCURRENCY'),
+  ): Promise<MigrateAllResult> {
     const tenants = await this.control.tenant.findMany({
       where: {
         status: 'ACTIVE',
@@ -269,24 +326,44 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       orderBy: { createdAt: 'asc' },
     });
 
-    const migrated: { tenantId: string; version: string }[] = [];
-    for (const tenant of tenants) {
-      const binding = tenant.databaseBinding;
-      if (!binding) continue;
-      const version = await this.runTenantMigrations(
-        await this.resolveTenantConnectionString(
-          binding.secretReference,
-          binding.databaseName,
-        ),
-      );
-      await this.control.tenantDatabaseBinding.update({
-        where: { id: binding.id },
-        data: { lastMigratedAt: new Date(), lastMigrationVersion: version },
-      });
-      this.logger.log(`Migrated tenant "${tenant.slug}" to ${version}`);
-      migrated.push({ tenantId: tenant.id, version });
-    }
-    return migrated;
+    const result: MigrateAllResult = { migrated: [], failed: [] };
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < tenants.length) {
+        const tenant = tenants[next++];
+        const binding = tenant?.databaseBinding;
+        if (!tenant || !binding) continue;
+        try {
+          const version = await this.runTenantMigrations(
+            await this.resolveTenantConnectionString(
+              binding.secretReference,
+              binding.databaseName,
+            ),
+          );
+          await this.control.tenantDatabaseBinding.update({
+            where: { id: binding.id },
+            data: { lastMigratedAt: new Date(), lastMigrationVersion: version },
+          });
+          this.logger.log(`Migrated tenant "${tenant.slug}" to ${version}`);
+          result.migrated.push({ tenantId: tenant.id, version });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.error(
+            `Migration failed for tenant "${tenant.slug}": ${message}`,
+          );
+          result.failed.push({
+            tenantId: tenant.id,
+            slug: tenant.slug,
+            error: message,
+          });
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, tenants.length) }, worker),
+    );
+    return result;
   }
 
   /**
@@ -469,7 +546,10 @@ export class TenantDatabaseManager implements OnModuleDestroy {
         data: {
           slug: input.slug,
           name: input.name,
-          status: 'PROVISIONING',
+          status: input.queued ? 'QUEUED' : 'PROVISIONING',
+          kind: input.kind ?? 'COMPANY',
+          ownerSubject: input.ownerSubject ?? null,
+          entraTenantId: input.entraTenantId ?? null,
           residency: input.residency ?? 'UAE',
           allowExternalAi: input.allowExternalAi ?? false,
           allowOutboundTelemetry: input.allowOutboundTelemetry ?? false,

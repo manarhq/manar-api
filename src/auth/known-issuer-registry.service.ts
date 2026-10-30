@@ -1,5 +1,13 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
+
+/** An issuer this API accepts human tokens from. `boundTenant` is set only for a legacy per-tenant realm. */
+export interface TrustedIssuer {
+  issuerUrl: string;
+  boundTenant?: { id: string; slug: string };
+}
 
 export interface KnownIssuer {
   tenantId: string;
@@ -19,7 +27,39 @@ export interface KnownIssuer {
  */
 @Injectable()
 export class KnownIssuerRegistry {
-  constructor(private readonly control: ControlPrismaService) {}
+  private readonly configured: Set<string>;
+
+  constructor(
+    private readonly control: ControlPrismaService,
+    configService: ConfigService<AppConfig, true>,
+  ) {
+    this.configured = new Set(
+      (configService.get('AUTH_ISSUERS', { infer: true }) ?? '')
+        .split(',')
+        .map((i) => i.trim().replace(/\/+$/, ''))
+        .filter(Boolean),
+    );
+  }
+
+  /**
+   * Human-token trust (JwtAuthGuard, throttler): an issuer from `AUTH_ISSUERS` (shared hosted
+   * realm, a customer-hosted install's realm) or a legacy per-tenant realm provisioned by this
+   * deployment. A configured issuer is never tenant-bound: its users reach a tenant only through
+   * a Membership. A legacy per-tenant realm is bound to its tenant whatever its status; the
+   * Membership lookup then fails closed for a tenant that is not ACTIVE.
+   */
+  async resolveTrusted(issuer: string): Promise<TrustedIssuer | null> {
+    const normalized = issuer.replace(/\/+$/, '');
+    if (this.configured.has(normalized)) return { issuerUrl: normalized };
+    const tenant = await this.control.tenant.findUnique({
+      where: { keycloakIssuerUrl: issuer },
+    });
+    if (!tenant?.keycloakIssuerUrl) return null;
+    return {
+      issuerUrl: tenant.keycloakIssuerUrl,
+      boundTenant: { id: tenant.id, slug: tenant.slug },
+    };
+  }
 
   /**
    * Returns the matching tenant's identity + its *server-recorded* issuer

@@ -4,7 +4,7 @@ import { TenantDatabaseManager } from '../../database/tenant-database-manager.se
 
 /**
  * `pnpm manar tenants:migrate`: applies pending tenant-schema migrations to
- * every ACTIVE tenant database. Part of every upgrade, after
+ * every ACTIVE tenant database (bounded concurrency, continues past a failed tenant and exits 1 if any failed). Part of every upgrade, after
  * `db:migrate:control:deploy` and before the new API version takes traffic.
  * Idempotent (`prisma migrate deploy`).
  */
@@ -20,8 +20,13 @@ export class TenantsMigrateCommand extends CommandRunner {
   }
 
   async run(): Promise<void> {
-    const migrated = await this.tenantDatabaseManager.migrateAllTenants();
+    const { migrated, failed } =
+      await this.tenantDatabaseManager.migrateAllTenants();
     this.logger.log(`Migrated ${migrated.length} tenant database(s)`);
-    process.exitCode = 0;
+    for (const f of failed) {
+      this.logger.error(`FAILED ${f.slug} (${f.tenantId}): ${f.error}`);
+    }
+    // Every tenant was attempted; a non-zero exit still stops the deploy from taking traffic.
+    process.exitCode = failed.length > 0 ? 1 : 0;
   }
 }
