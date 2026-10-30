@@ -90,13 +90,11 @@ export class SecretsHostController {
   async access(@CurrentHost() host: HostContext, @Body() body: unknown) {
     const b = parseBodyOrThrow(AccessRequestSchema, body);
     return this.secrets
-      .createAccess(
-        await this.client(host),
-        host.hostId,
-        b.kind,
-        b.ref,
-        b.program,
-      )
+      .createAccess(await this.client(host), host.hostId, b.kind, b.ref, {
+        name: b.program,
+        path: b.programPath,
+        sha: b.programSha,
+      })
       .catch(http);
   }
 

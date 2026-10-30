@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type { AuditActor } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
@@ -22,6 +22,7 @@ const WATCH_TYPES = ['secret.watch.available', 'secret.watch.unavailable'];
 const FUTURE_SLACK_MS = 5 * 60_000;
 const ACCESS_TTL_MS = 10 * 60_000;
 const MAX_PENDING_ACCESS_PER_HOST = 50;
+const EVENTS_PER_MINUTE = 600;
 const hostActor = (hostId: string): AuditActor => ({
   type: 'system',
   id: `host:${hostId}`,
@@ -40,10 +41,33 @@ export interface TimelineQuery {
 /** Watcher events, the vault and its access requests. Every query is on the caller's tenant client. */
 @Injectable()
 export class SecretsService {
+  /** Events accepted per device in the current minute. In memory per pod: a ceiling, not an exact count. */
+  private readonly windows = new Map<
+    string,
+    { start: number; count: number }
+  >();
+
   constructor(
     private readonly audit: AuditService,
     private readonly bus: SecretAlertBus,
   ) {}
+
+  private throttle(hostId: string, n: number): void {
+    const now = Date.now();
+    if (this.windows.size > 10_000) this.windows.clear();
+    let w = this.windows.get(hostId);
+    if (!w || now - w.start >= 60_000) {
+      w = { start: now, count: 0 };
+      this.windows.set(hostId, w);
+    }
+    if (w.count + n > EVENTS_PER_MINUTE) {
+      throw new HttpException(
+        'Too many events from this device',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    w.count += n;
+  }
 
   /** `POST /host/v1/events`: stores a validated batch, audits secret.* and raises alerts. */
   async ingest(
@@ -52,6 +76,7 @@ export class SecretsService {
     hostId: string,
     events: HostEvent[],
   ): Promise<{ accepted: number }> {
+    this.throttle(hostId, events.length);
     const now = Date.now();
     const rows = events.map((e) => ({
       hostId,
@@ -247,16 +272,24 @@ export class SecretsService {
     ) {
       throw new SecretsConflictError('This secret is already in the vault');
     }
-    return client.secretVault.upsert({
+    const row = await client.secretVault.upsert({
       where: { hostId_kind_ref: { hostId, kind, ref } },
       create: { hostId, kind, ref, requestedBy: actor.id },
       update: { state: 'REQUESTED', requestedBy: actor.id, detail: null },
     });
+    await this.audit.recordSafely(client, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.SECRET_VAULT_REQUESTED,
+      actor,
+      data: { hostId, kind, ref },
+    });
+    return row;
   }
 
   /** Console: "Restore to file". */
   async requestRestore(
     client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
     hostId: string,
     kind: string,
     ref: string,
@@ -268,10 +301,16 @@ export class SecretsService {
     if (!row || row.state !== 'STORED') {
       throw new SecretsConflictError('This secret is not in the vault');
     }
-    return client.secretVault.update({
+    const updated = await client.secretVault.update({
       where: { id: row.id },
       data: { state: 'RESTORE_REQUESTED' },
     });
+    await this.audit.recordSafely(client, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.SECRET_VAULT_RESTORE_REQUESTED,
+      actor,
+      data: { hostId, kind, ref },
+    });
+    return updated;
   }
 
   /** Device: what to do now. */
@@ -337,7 +376,7 @@ export class SecretsService {
     hostId: string,
     kind: string,
     ref: string,
-    program: string,
+    program: { name: string; path: string; sha: string },
   ) {
     const vault = await client.secretVault.findUnique({
       where: { hostId_kind_ref: { hostId, kind, ref } },
@@ -351,7 +390,8 @@ export class SecretsService {
         hostId,
         kind,
         ref,
-        program,
+        programSha: program.sha,
+        programPath: program.path,
         status: 'PENDING',
         createdAt: { gte: fresh },
       },
@@ -364,7 +404,14 @@ export class SecretsService {
       throw new SecretsConflictError('Too many open requests for this device');
     }
     const row = await client.secretVaultAccess.create({
-      data: { hostId, kind, ref, program },
+      data: {
+        hostId,
+        kind,
+        ref,
+        program: program.name,
+        programPath: program.path,
+        programSha: program.sha,
+      },
     });
     return { id: row.id, status: row.status };
   }
@@ -426,6 +473,8 @@ export class SecretsService {
         kind: row.kind,
         ref: row.ref,
         program: row.program,
+        programPath: row.programPath,
+        programSha: row.programSha,
         decision,
       },
     });

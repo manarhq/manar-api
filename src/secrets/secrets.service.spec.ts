@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SecretAlertBus } from './secret-alert-bus';
 import { SecretsConflictError, SecretsService } from './secrets.service';
-import { HostEventsBatchSchema, maskHome } from './secrets.validation';
+import {
+  AccessRequestSchema,
+  HostEventsBatchSchema,
+  maskHome,
+} from './secrets.validation';
 
 const ev = (o: Record<string, unknown> = {}) => ({
   type: 'secret.touched' as const,
@@ -205,5 +209,72 @@ describe('SecretsService vault state', () => {
     expect(
       await s.report(client as never, 't', 'h', 'aws', 'p', 'FAILED'),
     ).toEqual({ state: 'FAILED' });
+  });
+});
+
+describe('SecretsService rate limit and audit', () => {
+  it('refuses a device that sends more than 600 events a minute', async () => {
+    const { client, service } = setup();
+    const batch = Array.from({ length: 100 }, () => ev());
+    for (let i = 0; i < 6; i++)
+      await service.ingest(client as never, 't1', 'h1', batch);
+    await expect(
+      service.ingest(client as never, 't1', 'h1', [ev()]),
+    ).rejects.toMatchObject({ status: 429 });
+    // another device is not affected
+    await expect(
+      service.ingest(client as never, 't1', 'h2', [ev()]),
+    ).resolves.toEqual({ accepted: 1 });
+  });
+
+  it('audits who asked for a restore', async () => {
+    const audit = { recordSafely: vi.fn() };
+    const client = {
+      host: {
+        findUnique: vi.fn().mockResolvedValue({ id: 'h', status: 'APPROVED' }),
+      },
+      secretVault: {
+        findUnique: vi.fn().mockResolvedValue({ id: 'v', state: 'STORED' }),
+        update: vi
+          .fn()
+          .mockResolvedValue({ id: 'v', state: 'RESTORE_REQUESTED' }),
+      },
+    };
+    const s = new SecretsService(audit as never, new SecretAlertBus());
+    await s.requestRestore(
+      client as never,
+      't',
+      { type: 'human', id: 'u1' },
+      'h',
+      'aws',
+      'default',
+    );
+    expect(audit.recordSafely).toHaveBeenCalledWith(
+      client,
+      't',
+      expect.objectContaining({
+        eventType: 'secret.vault.restore_requested',
+        actor: { type: 'human', id: 'u1' },
+      }),
+    );
+  });
+});
+
+describe('AccessRequestSchema', () => {
+  const ok = {
+    kind: 'aws',
+    ref: 'default',
+    program: 'aws',
+    programPath: '/usr/bin/aws',
+    programSha: 'a'.repeat(64),
+  };
+  it('needs the path and a SHA-256 of the binary', () => {
+    expect(AccessRequestSchema.safeParse(ok).success).toBe(true);
+    expect(
+      AccessRequestSchema.safeParse({ ...ok, programSha: 'xyz' }).success,
+    ).toBe(false);
+    const { programPath, ...noPath } = ok;
+    void programPath;
+    expect(AccessRequestSchema.safeParse(noPath).success).toBe(false);
   });
 });

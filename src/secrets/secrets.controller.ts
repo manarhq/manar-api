@@ -185,7 +185,14 @@ export class SecretsController {
     const b = parseBodyOrThrow(VaultRequestSchema, body);
     const client = await this.tenants.getClient(auth.tenant.id);
     return this.secrets
-      .requestRestore(client, hostId, b.kind, b.ref)
+      .requestRestore(
+        client,
+        auth.tenant.id,
+        actorOf(auth),
+        hostId,
+        b.kind,
+        b.ref,
+      )
       .catch(http);
   }
 

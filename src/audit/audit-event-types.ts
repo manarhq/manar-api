@@ -169,6 +169,9 @@ export const AUDIT_EVENT_TYPES = {
   /** Secrets (spec 4.5): a device reported a secret file opened by an AI tool (masked path, no content). */
   SECRET_TOUCHED: 'secret.touched',
   /** A secret was moved into the device's vault and the device verified it (kind and ref, never the secret). */
+  /** A person asked a device to protect a secret in its vault, or to restore it to its file. */
+  SECRET_VAULT_REQUESTED: 'secret.vault.requested',
+  SECRET_VAULT_RESTORE_REQUESTED: 'secret.vault.restore_requested',
   SECRET_VAULT_STORED: 'secret.vault.stored',
   SECRET_VAULT_RESTORED: 'secret.vault.restored',
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
