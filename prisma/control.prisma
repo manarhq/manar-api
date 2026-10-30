@@ -351,5 +351,6 @@ model Membership {
 
   @@unique([subject, tenantId])
   @@index([tenantId, status])
+  @@index([subject])
   @@map("memberships")
 }

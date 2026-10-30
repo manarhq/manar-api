@@ -78,8 +78,12 @@ export class MembershipService {
         orderBy: { createdAt: 'asc' },
       }),
     );
-    // No selection: the personal workspace first, otherwise the oldest membership.
-    const m = rows.find((r) => r.tenant.kind === 'PERSONAL') ?? rows[0];
+    // No selection: the personal workspace first, otherwise the oldest membership. A SAMPLE
+    // workspace is never a default: it is reached only by choosing it.
+    const m = wanted
+      ? rows[0]
+      : (rows.find((r) => r.tenant.kind === 'PERSONAL') ??
+        rows.find((r) => r.tenant.kind !== 'SAMPLE'));
     if (!m) throw new ForbiddenException('Workspace not available');
     return {
       tenantId: m.tenantId,

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   OnModuleDestroy,
@@ -15,6 +16,7 @@ import {
   TenantProvisioningError,
   TenantSlugConflictError,
 } from '../database/tenant-database.errors';
+import type { SampleDirectory, WorkspaceProvisioning } from './workspace-ports';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 
 export interface CreateWorkspaceInput {
@@ -49,7 +51,7 @@ const SLUG_PREFIX: Record<WorkspaceKind, string> = {
  * Membership exists from the start so "Setting up your workspace" can follow it.
  */
 @Injectable()
-export class WorkspaceProvisioningService {
+export class WorkspaceProvisioningService implements WorkspaceProvisioning {
   private readonly logger = new Logger(WorkspaceProvisioningService.name);
   private draining = false;
   private lastWarnAt = 0;
@@ -74,8 +76,7 @@ export class WorkspaceProvisioningService {
         slug,
         name,
         kind: input.kind,
-        ownerSubject:
-          input.kind === 'PERSONAL' ? input.ownerSubject : undefined,
+        ownerSubject: input.kind === 'COMPANY' ? undefined : input.ownerSubject,
         entraTenantId:
           input.kind === 'COMPANY' ? input.entraTenantId : undefined,
         queued,
@@ -85,9 +86,9 @@ export class WorkspaceProvisioningService {
     } catch (error) {
       if (error instanceof TenantSlugConflictError) {
         // The slug is random, so a conflict is the one-per-owner / one-per-Entra-tenant index.
-        if (input.kind === 'PERSONAL') {
+        if (input.kind !== 'COMPANY') {
           const existing = await this.control.tenant.findFirst({
-            where: { kind: 'PERSONAL', ownerSubject: input.ownerSubject },
+            where: { kind: input.kind, ownerSubject: input.ownerSubject },
           });
           if (existing) {
             return {
@@ -133,6 +134,39 @@ export class WorkspaceProvisioningService {
       },
       update: {},
     });
+  }
+
+  /**
+   * Removes a SAMPLE workspace for good: marks it DELETED (every guard refuses it from then on),
+   * drops its database, then deletes its rows (memberships and the catalog cascade). Anything that
+   * is not a SAMPLE, or is still being provisioned, is refused.
+   */
+  async deleteWorkspace(tenantId: string): Promise<void> {
+    const tenant = await this.control.tenant.findUnique({
+      where: { id: tenantId },
+      include: { databaseBinding: true },
+    });
+    if (!tenant) return;
+    if (tenant.kind !== 'SAMPLE') {
+      throw new ForbiddenException('only_sample_workspaces_can_be_deleted');
+    }
+    if (tenant.status === 'PROVISIONING') {
+      throw new ConflictException('workspace_busy');
+    }
+    if (tenant.databaseBinding) {
+      if (tenant.status !== 'DELETED') {
+        await this.manager.deprovisionTenant(tenantId);
+      }
+      if (tenant.status !== 'QUEUED') {
+        await this.manager.dangerouslyDropTenantDatabase(tenantId);
+      }
+    }
+    await this.control.$transaction([
+      this.control.auditSealMark.deleteMany({ where: { tenantId } }),
+      this.control.secretReference.deleteMany({ where: { tenantId } }),
+      this.control.tenantDatabaseBinding.deleteMany({ where: { tenantId } }),
+      this.control.tenant.delete({ where: { id: tenantId } }),
+    ]);
   }
 
   /** True when a new sign-up must wait: a backlog exists, provisioning is saturated, or the database count is near its limit. */
@@ -227,5 +261,24 @@ export class WorkspaceQueueLoop implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     if (this.timer) clearInterval(this.timer);
+  }
+}
+
+/** Lookup of the SAMPLE workspace a user owns. Only the owner's own ACTIVE Membership counts. */
+@Injectable()
+export class SampleDirectoryService implements SampleDirectory {
+  constructor(private readonly control: ControlPrismaService) {}
+
+  async find(ownerSubject: string): Promise<string | null> {
+    const tenant = await this.control.tenant.findFirst({
+      where: {
+        kind: 'SAMPLE',
+        ownerSubject,
+        status: { not: 'DELETED' },
+        memberships: { some: { subject: ownerSubject, status: 'ACTIVE' } },
+      },
+      select: { id: true },
+    });
+    return tenant?.id ?? null;
   }
 }

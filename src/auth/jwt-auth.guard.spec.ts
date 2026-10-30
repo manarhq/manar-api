@@ -225,3 +225,15 @@ describe('JwtAuthGuard: tenant and roles come from Membership', () => {
     void run;
   });
 });
+
+describe('SAMPLE workspaces are never a default', () => {
+  it('without a selection a SAMPLE membership is not picked', async () => {
+    const { run } = setup([mem('s1', T('sample', 'SAMPLE'), 'TENANT_OWNER')], {
+      subject: 's1',
+    });
+    await expect(run()).rejects.toThrow(ForbiddenException);
+    expect(
+      (await run({ 'x-manar-workspace': 'sample' })).authContext?.workspaceKind,
+    ).toBe('SAMPLE');
+  });
+});

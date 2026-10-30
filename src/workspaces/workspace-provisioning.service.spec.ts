@@ -137,3 +137,69 @@ describe('WorkspaceProvisioningService', () => {
     expect(manager.provisionQueued).toHaveBeenCalled();
   });
 });
+
+describe('SAMPLE workspaces', () => {
+  it('creates a sample owned by that one subject', async () => {
+    const { svc, manager, upsert } = make({
+      total: 1,
+      inflight: 0,
+      backlog: 0,
+    });
+    await svc.createWorkspace({
+      ownerSubject: 'me',
+      kind: 'SAMPLE',
+      displayName: 'Sample',
+    });
+    expect(manager.provisionTenant).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'SAMPLE', ownerSubject: 'me' }),
+    );
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(upsert.mock.calls[0]![0].create.subject).toBe('me');
+  });
+
+  it('refuses to delete anything that is not a SAMPLE', async () => {
+    const { svc, control } = make({ total: 1, inflight: 0, backlog: 0 });
+    (control.tenant as any).findUnique = vi.fn().mockResolvedValue({
+      id: 'p',
+      kind: 'PERSONAL',
+      status: 'ACTIVE',
+      databaseBinding: {},
+    });
+    await expect(svc.deleteWorkspace('p')).rejects.toThrow(
+      'only_sample_workspaces_can_be_deleted',
+    );
+  });
+
+  it('deletes a sample: deprovision, drop the database, remove the rows', async () => {
+    const { svc, manager, control } = make({
+      total: 1,
+      inflight: 0,
+      backlog: 0,
+    });
+    const tx = vi.fn().mockResolvedValue([]);
+    (control as any).$transaction = tx;
+    for (const k of [
+      'auditSealMark',
+      'secretReference',
+      'tenantDatabaseBinding',
+    ])
+      (control as any)[k] = { deleteMany: vi.fn() };
+    (control.tenant as any).delete = vi.fn();
+    (control.tenant as any).findUnique = vi.fn().mockResolvedValue({
+      id: 's',
+      kind: 'SAMPLE',
+      status: 'ACTIVE',
+      databaseBinding: {},
+    });
+    Object.assign(manager, {
+      deprovisionTenant: vi.fn(),
+      dangerouslyDropTenantDatabase: vi.fn(),
+    });
+    await svc.deleteWorkspace('s');
+    expect((manager as any).deprovisionTenant).toHaveBeenCalledWith('s');
+    expect((manager as any).dangerouslyDropTenantDatabase).toHaveBeenCalledWith(
+      's',
+    );
+    expect(tx).toHaveBeenCalled();
+  });
+});
