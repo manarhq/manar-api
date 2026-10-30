@@ -67,6 +67,11 @@ export const START_MODE_PRESETS: Record<StartMode, PolicyContent> = {
   ask: {
     rules: [
       rule('Secrets wait for you', 'APPROVAL_REQUIRED', 'secret-file:*'),
+      rule(
+        'Paths that climb out of their folder wait for you',
+        'APPROVAL_REQUIRED',
+        'unsafe-path:*',
+      ),
       ...deletes('APPROVAL_REQUIRED'),
       ...forcePush('APPROVAL_REQUIRED'),
       ...downloads('APPROVAL_REQUIRED'),
@@ -76,6 +81,11 @@ export const START_MODE_PRESETS: Record<StartMode, PolicyContent> = {
   strict: {
     rules: [
       rule('Secrets are always blocked', 'DENY', 'secret-file:*'),
+      rule(
+        'Paths that climb out of their folder are blocked',
+        'DENY',
+        'unsafe-path:*',
+      ),
       ...deletes('APPROVAL_REQUIRED'),
       ...forcePush('APPROVAL_REQUIRED'),
       ...downloads('APPROVAL_REQUIRED'),

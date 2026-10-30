@@ -151,6 +151,16 @@ describe('presets through the policy engine', () => {
       expect(await decide('strict', 'read', r)).toBe('DENY');
     }
   });
+  it('traversal fails closed: Ask asks, Strict denies, Watch records', async () => {
+    expect(await decide('ask', 'read', '../../.ssh/id_rsa')).toBe(
+      'APPROVAL_REQUIRED',
+    );
+    expect(await decide('ask', 'read', '~/../victim/x')).toBe(
+      'APPROVAL_REQUIRED',
+    );
+    expect(await decide('strict', 'read', '../../x')).toBe('DENY');
+    expect(await decide('watch', 'read', '../../x')).toBe('ALLOW');
+  });
   it('Ask needs approval for secrets, deletes, force pushes and downloads, and allows the rest', async () => {
     expect(await decide('ask', 'read', '/home/sam/.aws/credentials')).toBe(
       'APPROVAL_REQUIRED',

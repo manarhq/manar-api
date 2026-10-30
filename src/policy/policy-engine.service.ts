@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { ToolRegistryService } from '../tools/tool-registry.service';
 import type { DataClassification } from '../common/data-classification';
-import { resourceAliases } from './resource-aliases';
+import { resourceAliases, resourceKindFor } from './resource-aliases';
 import {
   PolicyContentSchema,
   PolicyEffect,
@@ -191,8 +191,8 @@ function ruleMatches(
     rule.actionId === '*' || rule.actionId === request.actionId;
   const resourceMatches =
     resourcePatternMatches(rule.resourcePattern, request.resource) ||
-    resourceAliases(request.resource).some((alias) =>
-      resourcePatternMatches(rule.resourcePattern, alias),
+    resourceAliases(request.resource, resourceKindFor(request.actionId)).some(
+      (alias) => resourcePatternMatches(rule.resourcePattern, alias),
     );
   // Phase 15a (Section 53): absent means "match regardless of
   // classification" (identical to before this field existed); present
