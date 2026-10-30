@@ -31,3 +31,8 @@ export class ReportShareRowDto {
   @ApiProperty() createdAt!: Date;
   @ApiProperty({ nullable: true, type: Date }) revokedAt!: Date | null;
 }
+
+export class SampleWorkspaceDto {
+  @ApiProperty() tenantId!: string;
+  @ApiProperty({ enum: ['ACTIVE', 'QUEUED'] }) status!: string;
+}
