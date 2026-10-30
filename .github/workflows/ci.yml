@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   lint:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,7 +40,7 @@ jobs:
       - run: pnpm lint
 
   typecheck:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,7 +58,7 @@ jobs:
 
   # Shell test of the manar-fleet input checks: newline, comma, space and overlong values are rejected.
   fleet-inputs:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,7 +66,7 @@ jobs:
       - run: sh deploy/ci/validate-fleet-inputs.test.sh
 
   unit:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,7 +119,7 @@ jobs:
       OPENFGA_MODEL_FILE_PATH: src/authorization/model/manar.fga
       OPENFGA_VERSION: v1.18.3
       DEMO_TOOLS_API_KEY: manar-dev-demo-tools-key
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -218,7 +218,7 @@ jobs:
         run: .github/scripts/ci-deps-stop.sh e2e
 
   build:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -239,7 +239,7 @@ jobs:
   # HIGH/CRITICAL CVE fails before merge. Nothing is pushed; SBOMs are generated as a check.
   images:
     if: github.event_name == 'pull_request'
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -261,7 +261,7 @@ jobs:
             docker save "$img:ci-$GITHUB_RUN_ID" -o "$img.tar"
             docker run --rm -v "$PWD:$PWD" -w "$PWD" anchore/syft@sha256:7b980ab125ee77c58ef89622672e2176a6d82722d709362fa1bb6bc12d50e786 \
               "docker-archive:$img.tar" -o "cyclonedx-json=sbom-$img.json"
-            docker run --rm -v "$PWD:$PWD" -w "$PWD" aquasec/trivy:0.74.0 \
+            docker run --rm -v "$PWD:$PWD" -w "$PWD" aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
               image --input "$img.tar" --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed --no-progress || failed=1
           done
           [ -z "$failed" ]
@@ -273,7 +273,7 @@ jobs:
   # Secret scanning over the full git history, not just the diff. Fails on any finding not
   # allowlisted in .gitleaks.toml.
   gitleaks:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -286,7 +286,7 @@ jobs:
 
   # SAST. Fails only on ERROR-severity findings; lower tiers of the `auto` ruleset are too noisy to gate on.
   semgrep:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -299,19 +299,19 @@ jobs:
   # Dependencies plus Dockerfile and Helm misconfigurations; HIGH/CRITICAL fail. Secrets are
   # gitleaks' job here: the DLP specs carry synthetic credential-shaped fixtures.
   trivy-fs:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: >-
-          docker run --rm -v "$PWD:$PWD" -w "$PWD" aquasec/trivy:0.74.0
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
           fs --scanners vuln,misconfig --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed .
 
   # Renders every chart (none assume a live cluster), then kubeconform (schema validity, -strict
   # rejects unknown fields) and kube-linter (best-practice/security lint, default checks).
   k8s-manifests:
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
