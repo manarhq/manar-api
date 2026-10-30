@@ -74,6 +74,47 @@ describe('resourceAliases', () => {
       'f',
     ]);
   });
+  it('keeps traversal markers in commands', () => {
+    expect(resourceAliases('cat ../../etc/passwd', 'command')).toContain(
+      'unsafe-path:traversal',
+    );
+    expect(resourceAliases('cat ../../.ssh/id_rsa', 'command')).toEqual(
+      expect.arrayContaining(['unsafe-path:traversal', 'secret-file:id_rsa']),
+    );
+  });
+  it('fails closed on line continuations, control characters and odd quoting', () => {
+    expect(secret('cat ~/.ssh/id_\\\nrsa', 'command')).toBe(true); // continuation vanishes
+    expect(resourceAliases('cat a\nb', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat a\rb', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat "a\u0001b"', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases("cat 'unterminated", 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat <(echo x)', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+  });
+  it('fails closed on tilde forms the parser does not expand', () => {
+    for (const c of [
+      'cat ~root/.ssh/id_rsa',
+      'cd ~+',
+      'cd ~-',
+      'X=~/.aws/config',
+      'PATH=a:~/b',
+    ]) {
+      expect(resourceAliases(c, 'command')).toContain(
+        'unsafe-command:expansion',
+      );
+    }
+    expect(resourceAliases('cat ~/notes.txt', 'command')).toEqual([]);
+    expect(resourceAliases('cd ~', 'command')).toEqual([]);
+  });
   it('resolves Windows drive paths as rooted and flags clamped ..', () => {
     expect(resourceAliases('C:\\Users\\x\\..\\..\\..\\Windows')).toContain(
       'unsafe-path:traversal',

@@ -133,15 +133,20 @@ function pathAliases(raw: string, into: Set<string>): void {
 }
 
 /**
- * POSIX-shell words. Handles single and double quotes and backslash escapes; `;|&<>()` and
- * newlines end a word. `expands` is true when an unquoted `* ? [ ] { }`, or a `$` or backtick
- * outside single quotes, is present: the shell would substitute something we cannot see.
+ * POSIX-shell words. Handles single and double quotes and backslash escapes (a backslash-newline
+ * is a line continuation and vanishes); `;|&<>` and whitespace end a word. `expands` is true, and
+ * the caller must fail closed, whenever the shell could substitute something we cannot see or
+ * the text is not plain enough to trust: an unquoted `* ? [ ] { } ( )`, a `$` or backtick outside
+ * single quotes, a control character or newline, an unterminated quote, or a tilde that is not
+ * a plain `~/` or `~` at the start of a word. This list is closed: when a new bypass shows up,
+ * extend the fail-closed condition, never the parser.
  */
 export function shellWords(cmd: string): { words: string[]; expands: boolean } {
   const words: string[] = [];
   let cur = '';
   let has = false;
-  let expands = false;
+  // eslint-disable-next-line no-control-regex
+  let expands = /[\x00-\x08\x0a-\x1f\x7f]/.test(cmd);
   const end = () => {
     if (has) words.push(cur);
     cur = '';
@@ -152,6 +157,7 @@ export function shellWords(cmd: string): { words: string[]; expands: boolean } {
     if (c === "'") {
       has = true;
       const j = cmd.indexOf("'", i + 1);
+      if (j === -1) expands = true;
       const stop = j === -1 ? cmd.length : j;
       cur += cmd.slice(i + 1, stop);
       i = stop;
@@ -165,19 +171,33 @@ export function shellWords(cmd: string): { words: string[]; expands: boolean } {
           i + 1 < cmd.length &&
           '"\\$`\n'.includes(cmd[i + 1]!)
         ) {
-          cur += cmd[++i];
+          i++;
+          if (cmd[i] !== '\n') cur += cmd[i];
         } else {
           if (d === '$' || d === '`') expands = true;
           cur += d;
         }
       }
+      if (i >= cmd.length) expands = true;
     } else if (c === '\\') {
-      has = true;
-      if (i + 1 < cmd.length) cur += cmd[++i];
-    } else if (/\s|[;|&<>()]/.test(c)) {
+      if (i + 1 >= cmd.length) expands = true;
+      else if (cmd[i + 1] === '\n') i++;
+      else {
+        has = true;
+        cur += cmd[++i];
+      }
+    } else if (/\s|[;|&<>]/.test(c)) {
       end();
     } else {
-      if ('*?[]{}$`'.includes(c)) expands = true;
+      if ('*?[]{}()$`'.includes(c)) expands = true;
+      if (c === '~') {
+        const next = cmd[i + 1];
+        const atStart = !has;
+        const afterAssign = cur.endsWith('=') || cur.endsWith(':');
+        const plain =
+          next === undefined || next === '/' || /[\s;|&<>]/.test(next);
+        if (afterAssign || (atStart && !plain)) expands = true;
+      }
       has = true;
       cur += c;
     }
@@ -199,7 +219,10 @@ export function resourceAliases(
     for (const w of words) {
       const found = new Set<string>();
       pathAliases(w, found);
-      for (const a of found) if (a.startsWith('secret-file:')) out.add(a);
+      for (const a of found) {
+        if (a.startsWith('secret-file:') || a === 'unsafe-path:traversal')
+          out.add(a);
+      }
     }
   }
   return [...out];
