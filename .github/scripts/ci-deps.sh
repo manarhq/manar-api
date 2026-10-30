@@ -33,7 +33,11 @@ wait_tcp redis "$rd"
 until docker exec "$pfx-postgres" pg_isready -U manar >/dev/null 2>&1; do sleep 1; done
 [ "$mode" = unit ] && exit 0
 
-run --name "$pfx-keycloak" -p 127.0.0.1::8080 -p 127.0.0.1::9000 \
+# Host network on free ports: the brokering specs make Keycloak call its own second realm at the
+# same localhost:<port> address the tests use, which a bridged container cannot reach.
+kc=$(freeport); kcm=$(freeport)
+run --name "$pfx-keycloak" --network host -e KC_HTTP_PORT="$kc" -e KC_HTTP_MANAGEMENT_PORT="$kcm" \
+  -e KC_HTTP_HOST=127.0.0.1 \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin -e KC_HEALTH_ENABLED=true \
   quay.io/keycloak/keycloak:26.7.1@sha256:f1f1f01e472c8a78df40d8f2a49a925274eda4d3d80d5f6edbb5c880ee3c01c6 \
   start-dev
@@ -60,16 +64,14 @@ run --name "$pfx-opensearch" -p 127.0.0.1::9200 \
   opensearchproject/opensearch:3.8.0@sha256:fafe3fc3587088674669235575aa166228c48bdb940294a8cdbbc1da75236a40 \
   opensearch -Ediscovery.type=single-node -Epath.data=/tmp/opensearch-data
 
-kc=$(hostport "$pfx-keycloak" 8080)
-kcm=$(hostport "$pfx-keycloak" 9000)
 ob=$(hostport "$pfx-openbao" 8200)
 os=$(hostport "$pfx-opensearch" 9200)
-env_out KEYCLOAK_BASE_URL "http://localhost:$kc"
+env_out KEYCLOAK_BASE_URL "http://127.0.0.1:$kc"  # Keycloak binds IPv4 loopback only
 env_out OPENBAO_ADDR "http://localhost:$ob"
 env_out OPENSEARCH_NODE "http://localhost:$os"
 env_out KAFKA_BROKERS "localhost:$kp"
 # Keycloak start-dev takes several seconds; its management port serves /health/ready.
-timeout 120 bash -c "until curl -fs http://localhost:$kcm/health/ready | grep -q '\"status\": \"UP\"'; do sleep 1; done" \
+timeout 120 bash -c "until curl -fs http://127.0.0.1:$kcm/health/ready | grep -q '\"status\": \"UP\"'; do sleep 1; done" \
   || { docker logs "$pfx-keycloak" 2>&1 | tail -30; exit 1; }
 timeout 60 bash -c "until curl -fs http://localhost:$ob/v1/sys/health >/dev/null; do sleep 1; done"
 wait_tcp kafka "$kp"
