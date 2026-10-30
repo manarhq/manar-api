@@ -39,7 +39,6 @@ export interface EntitlementPatch {
   stripeCustomerId?: string;
   stripeSubscriptionId?: string | null;
   billingInterval?: string | null;
-  lastStripeEventAt?: Date;
 }
 
 const DAY_MS = 86_400_000;
@@ -78,7 +77,9 @@ export class EntitlementsService {
       plan: row.plan,
       status,
       ...base,
-      ...(row.trialEndsAt ? { trialEndsAt: row.trialEndsAt } : {}),
+      ...(row.plan === 'company_trial' && row.trialEndsAt
+        ? { trialEndsAt: row.trialEndsAt }
+        : {}),
     };
   }
 
@@ -138,8 +139,9 @@ export class EntitlementsService {
     const row = await this.control.tenantEntitlement.findUnique({
       where: { tenantId },
     });
-    if (row && row.plan !== 'free') return this.get(tenantId);
-    if (row?.trialEndsAt) return this.get(tenantId);
+    // One trial per workspace, ever: trialEndsAt is kept after the trial, a plan change or a cancel.
+    if (row && (row.plan !== 'free' || row.trialEndsAt))
+      return this.get(tenantId);
     return this.change(
       tenantId,
       {

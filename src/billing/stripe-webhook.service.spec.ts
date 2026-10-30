@@ -66,7 +66,8 @@ function make(rows: Record<string, Record<string, unknown>>) {
     { get: vi.fn() } as never,
   );
   let next: unknown = null;
-  const sub = vi.fn();
+  let live: unknown = null;
+  const sub = vi.fn(() => Promise.resolve(live));
   const gateway = {
     constructEvent: vi.fn(() => {
       if (next === 'bad') throw new Error('bad signature');
@@ -82,6 +83,12 @@ function make(rows: Record<string, Record<string, unknown>>) {
   );
   const send = (event: unknown) => {
     next = event;
+    const e = event as { type: string; data: { object: unknown } };
+    // Stripe returns the subscription's current state when asked, whatever event woke us.
+    if (e.type.startsWith('customer.subscription.'))
+      live = e.type.endsWith('deleted')
+        ? { ...(e.data.object as object), status: 'canceled' }
+        : e.data.object;
     return svc.handle(Buffer.from('{}'), 'sig');
   };
   return {
@@ -92,7 +99,7 @@ function make(rows: Record<string, Record<string, unknown>>) {
     audit,
     gateway,
     sub,
-    setBad: () => (next = 'bad'),
+    setLive: (v: unknown) => (live = v),
   };
 }
 
@@ -170,15 +177,16 @@ describe('StripeWebhookService', () => {
     expect(rows.t1!.plan).toBe('free');
     expect(rows.t2!.plan).toBe('free');
     expect(control.stripeEvent.create).not.toHaveBeenCalled();
-    // A customer we never created, claiming a tenant: also rejected.
-    await expect(
-      send(
+    // A customer we never created is ignored with a 200 (a 4xx would only make Stripe retry).
+    expect(
+      await send(
         subEvent('evt_3', {
           customer: 'cus_evil',
           metadata: { tenantId: 't1' },
         }),
       ),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).toEqual({ received: true });
+    expect(rows.t1!.plan).toBe('free');
   });
 
   it('cancellation downgrades to free and keeps nothing else', async () => {
@@ -201,19 +209,50 @@ describe('StripeWebhookService', () => {
     });
   });
 
-  it('payment failure marks past_due; payment restores active', async () => {
-    const { send, rows } = make(row());
+  const inv = (id: string, type: string) => ({
+    id,
+    type,
+    created: 1_800_000_100,
+    data: { object: { id: 'in_1', customer: 'cus_1' } },
+  });
+  const liveSub = (o: Record<string, unknown> = {}) => ({
+    id: 'sub_1',
+    customer: 'cus_1',
+    status: 'active',
+    items: { data: [{ price: { id: 'price_pm' } }] },
+    ...o,
+  });
+
+  it('invoice events derive status from the live subscription', async () => {
+    const { send, rows, setLive } = make(row());
     await send(subEvent('evt_8'));
-    const inv = (id: string, type: string) => ({
-      id,
-      type,
-      created: 1_800_000_100,
-      data: { object: { id: 'in_1', customer: 'cus_1' } },
-    });
+    setLive(liveSub({ status: 'past_due' }));
     await send(inv('evt_9', 'invoice.payment_failed'));
     expect(rows.t1!.status).toBe('past_due');
+    setLive(liveSub());
     await send(inv('evt_10', 'invoice.paid'));
     expect(rows.t1!.status).toBe('active');
+  });
+
+  it('a late payment_failed cannot overwrite a newer paid state', async () => {
+    const { send, rows, setLive } = make(row());
+    await send(subEvent('evt_8'));
+    setLive(liveSub()); // Stripe already says paid and active
+    await send(inv('evt_11', 'invoice.payment_failed'));
+    expect(rows.t1!.status).toBe('active');
+  });
+
+  it('an invoice event does not drop a later-delivered plan change', async () => {
+    const { send, rows } = make(row());
+    await send(subEvent('evt_8'));
+    await send(inv('evt_12', 'invoice.paid')); // newer timestamp than the update below
+    await send({
+      ...subEvent('evt_13', {
+        items: { data: [{ price: { id: 'price_py' } }] },
+      }),
+      created: 1_700_000_000,
+    });
+    expect(rows.t1).toMatchObject({ plan: 'pro', billingInterval: 'year' });
   });
 
   it('the Company price makes a company plan', async () => {
@@ -226,36 +265,93 @@ describe('StripeWebhookService', () => {
 });
 
 describe('CompanyQuantityService', () => {
-  it('sets the user and extra-device quantities, creating the device item when missing', async () => {
+  const PERIOD = 1_790_000_000;
+  function quantity(
+    items: { id: string; price: string; quantity: number }[],
+    billed: { users: number; extraDevices: number },
+  ) {
     const update = vi.fn(() => Promise.resolve());
     const create = vi.fn(() => Promise.resolve());
-    const retrieve = vi.fn(() =>
-      Promise.resolve({
-        items: {
-          data: [{ id: 'si_u', price: { id: 'price_cu' }, quantity: 1 }],
-        },
-      }),
-    );
+    const billable = vi.fn(() => Promise.resolve(billed));
     const svc = new CompanyQuantityService(
       {} as never,
-      {
-        billable: () => Promise.resolve({ users: 4, extraDevices: 2 }),
-      } as never,
+      { billable } as never,
       {
         price: (n: string) => PRICES[n],
         client: () => ({
-          subscriptions: { retrieve },
+          subscriptions: {
+            retrieve: () =>
+              Promise.resolve({
+                items: {
+                  data: items.map((i) => ({
+                    id: i.id,
+                    price: { id: i.price },
+                    quantity: i.quantity,
+                    current_period_start: PERIOD,
+                  })),
+                },
+              }),
+          },
           subscriptionItems: { update, create },
         }),
       } as never,
     );
-    await svc.syncTenant('t1', 'sub_1');
-    expect(update).toHaveBeenCalledWith(
-      'si_u',
-      expect.objectContaining({ quantity: 4 }),
+    return { svc, update, create, billable };
+  }
+
+  it('raises with prorations, creates the device item, and counts from the period start', async () => {
+    const { svc, update, create, billable } = quantity(
+      [{ id: 'si_u', price: 'price_cu', quantity: 1 }],
+      { users: 4, extraDevices: 2 },
     );
+    await svc.syncTenant('t1', 'sub_1');
+    expect(billable).toHaveBeenCalledWith('t1', new Date(PERIOD * 1000));
+    expect(update).toHaveBeenCalledWith('si_u', {
+      quantity: 4,
+      proration_behavior: 'create_prorations',
+    });
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({ price: 'price_ed', quantity: 2 }),
     );
+  });
+
+  it('applies decreases unprorated, at renewal', async () => {
+    const { svc, update } = quantity(
+      [
+        { id: 'si_u', price: 'price_cu', quantity: 5 },
+        { id: 'si_d', price: 'price_ed', quantity: 4 },
+      ],
+      { users: 3, extraDevices: 1 },
+    );
+    await svc.syncTenant('t1', 'sub_1');
+    expect(update).toHaveBeenCalledWith('si_u', {
+      quantity: 3,
+      proration_behavior: 'none',
+    });
+    expect(update).toHaveBeenCalledWith('si_d', {
+      quantity: 1,
+      proration_behavior: 'none',
+    });
+  });
+
+  it('a failing round is logged and does not crash the worker', async () => {
+    vi.useFakeTimers();
+    const findMany = vi.fn(() => Promise.reject(new Error('db down')));
+    const svc = new CompanyQuantityService(
+      { tenantEntitlement: { findMany } } as never,
+      {} as never,
+      { configured: true } as never,
+    );
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    svc.onModuleInit();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(findMany).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(24 * 3600 * 1000); // and it still runs the next day
+    expect(findMany).toHaveBeenCalledTimes(2);
+    expect(unhandled).not.toHaveBeenCalled();
+    process.off('unhandledRejection', unhandled);
+    svc.onModuleDestroy();
+    vi.useRealTimers();
   });
 });

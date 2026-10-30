@@ -197,4 +197,24 @@ describe('EntitlementsService', () => {
     );
     expect(rows).toHaveLength(3);
   });
+
+  it('a workspace that ever had a trial cannot start another, even after cancelling', async () => {
+    const { svc } = make();
+    await svc.startCompanyTrial('t1', { type: 'human', id: 'u' });
+    await svc.change(
+      't1',
+      { plan: 'company' },
+      { type: 'system', id: 's' },
+      'stripe',
+    );
+    await svc.change(
+      't1',
+      { plan: 'free' },
+      { type: 'system', id: 's' },
+      'stripe',
+    );
+    const again = await svc.startCompanyTrial('t1', { type: 'human', id: 'u' });
+    expect(again.plan).toBe('free');
+    expect(again.trialEndsAt).toBeUndefined();
+  });
 });

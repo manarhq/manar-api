@@ -32,13 +32,13 @@ export class BillableUsageService {
 
   async billable(
     tenantId: string,
-    now = new Date(),
+    since = monthStart(),
   ): Promise<{ users: number; extraDevices: number }> {
     const db = await this.tenants.getClient(tenantId);
     const [owners, signedIn] = await Promise.all([
       this.deviceOwners(tenantId),
       db.userProfile.findMany({
-        where: { lastSeenAt: { gte: monthStart(now) } },
+        where: { lastSeenAt: { gte: since } },
         select: { keycloakSubject: true },
       }),
     ]);

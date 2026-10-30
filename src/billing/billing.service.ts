@@ -67,6 +67,13 @@ export class BillingService {
       lines.push({ price, quantity: 1 });
     }
     const customer = await this.ensureCustomer(tenantId, email);
+    await this.refuseIfSubscribed(customer);
+    // Only one checkout can be live: expire any the customer left open in another tab.
+    for await (const open of stripe.checkout.sessions.list({
+      customer,
+      status: 'open',
+    }))
+      await stripe.checkout.sessions.expire(open.id);
     const base = this.entitlements.upgradeUrl();
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
@@ -85,6 +92,23 @@ export class BillingService {
       integration_identifier: `manar_billing_${LABEL_SUFFIX}`,
     });
     return { url: session.url };
+  }
+
+  /** 409 when the customer already has a live subscription in Stripe, even one our row has not seen yet. */
+  private async refuseIfSubscribed(customer: string) {
+    const subs = await this.stripe
+      .client()
+      .subscriptions.list({ customer, status: 'all', limit: 100 });
+    if (
+      subs.data.some((s) =>
+        ['active', 'trialing', 'past_due', 'incomplete'].includes(s.status),
+      )
+    )
+      throw new ConflictException({
+        statusCode: 409,
+        code: 'already_subscribed',
+        message: 'Use the billing portal to change an existing plan.',
+      });
   }
 
   async portal(tenantId: string) {

@@ -28,15 +28,19 @@ export class CompanyQuantityService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     if (!this.stripe.configured) return;
-    const tick = () => {
-      this.timer = setTimeout(() => {
-        void this.runAll().finally(tick);
-      }, CompanyQuantityService.INTERVAL_MS);
-    };
+    const run = () =>
+      this.runAll()
+        .catch((error: unknown) =>
+          this.logger.error(`Company quantity round failed: ${String(error)}`),
+        )
+        .finally(() => {
+          this.timer = setTimeout(
+            () => void run(),
+            CompanyQuantityService.INTERVAL_MS,
+          );
+        });
     // First pass a minute after start, so a deploy never waits a day for correct quantities.
-    this.timer = setTimeout(() => {
-      void this.runAll().finally(tick);
-    }, 60_000);
+    this.timer = setTimeout(() => void run(), 60_000);
   }
 
   onModuleDestroy(): void {
@@ -64,24 +68,28 @@ export class CompanyQuantityService implements OnModuleInit, OnModuleDestroy {
     const userPrice = this.stripe.price('COMPANY_USER');
     const devicePrice = this.stripe.price('EXTRA_DEVICE');
     if (!userPrice || !devicePrice) return;
-    const { users, extraDevices } = await this.usage.billable(tenantId);
     const stripe = this.stripe.client();
     const sub = await stripe.subscriptions.retrieve(subscriptionId);
     const userItem = sub.items.data.find((i) => i.price.id === userPrice);
     const deviceItem = sub.items.data.find((i) => i.price.id === devicePrice);
+    // Count over the billing period the subscription is in, not the calendar month.
+    const since = userItem
+      ? new Date(userItem.current_period_start * 1000)
+      : undefined;
+    const { users, extraDevices } = await this.usage.billable(tenantId, since);
     // A Company workspace always pays for at least one user.
     const wantUsers = Math.max(1, users);
-    if (userItem && userItem.quantity !== wantUsers)
-      await stripe.subscriptionItems.update(userItem.id, {
-        quantity: wantUsers,
-        proration_behavior: 'create_prorations',
-      });
+    // Mid-period only raises are charged (prorated); a decrease takes effect at renewal, unprorated.
+    const set = (itemId: string, have: number, want: number) =>
+      have === want
+        ? Promise.resolve()
+        : stripe.subscriptionItems.update(itemId, {
+            quantity: want,
+            proration_behavior: want > have ? 'create_prorations' : 'none',
+          });
+    if (userItem) await set(userItem.id, userItem.quantity ?? 0, wantUsers);
     if (deviceItem) {
-      if (deviceItem.quantity !== extraDevices)
-        await stripe.subscriptionItems.update(deviceItem.id, {
-          quantity: extraDevices,
-          proration_behavior: 'create_prorations',
-        });
+      await set(deviceItem.id, deviceItem.quantity ?? 0, extraDevices);
     } else if (extraDevices > 0) {
       await stripe.subscriptionItems.create({
         subscription: subscriptionId,

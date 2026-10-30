@@ -57,12 +57,17 @@ export class StripeWebhookService {
       : null;
     // The customer id we stored when we created it is the only thing that names the tenant.
     // Metadata is attacker-writable on any Stripe object; it may only agree with that.
+    if (!claimed) {
+      // Not a customer we created (or another product on this Stripe account): nothing to do.
+      // A 4xx here would only make Stripe retry and eventually disable the endpoint.
+      this.logger.warn(`Stripe event ${event.id}: unknown customer, ignored`);
+      return { received: true };
+    }
     const named = obj.metadata?.tenantId ?? obj.client_reference_id ?? null;
-    if (named && named !== claimed?.tenantId) {
+    if (named && named !== claimed.tenantId) {
       this.logger.warn(`Stripe event ${event.id}: tenant metadata mismatch`);
       throw new BadRequestException('tenant_mismatch');
     }
-    if (!claimed) return { received: true };
 
     try {
       await this.control.stripeEvent.create({
@@ -90,76 +95,43 @@ export class StripeWebhookService {
     tenantId: string,
     storedSubscription: string | null,
   ) {
-    const at = new Date(event.created * 1000);
+    // Events can arrive in any order, so none of them is trusted for state: the subscription is
+    // read live from Stripe and that state is applied. Replays and reordering converge.
+    let subscriptionId: string | null = null;
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object;
-        const subscriptionId = id(session.subscription);
-        if (session.mode !== 'subscription' || !subscriptionId) return;
-        const sub = await this.stripe
-          .client()
-          .subscriptions.retrieve(subscriptionId);
-        return this.applySubscription(
-          tenantId,
-          sub,
-          at,
-          false,
-          storedSubscription,
-        );
+        if (session.mode !== 'subscription') return;
+        subscriptionId = id(session.subscription);
+        break;
       }
       case 'customer.subscription.created':
       case 'customer.subscription.updated':
       case 'customer.subscription.deleted':
-        return this.applySubscription(
-          tenantId,
-          event.data.object,
-          at,
-          event.type.endsWith('deleted'),
-          storedSubscription,
-        );
-      case 'invoice.paid':
-        return this.setStatus(tenantId, 'active', at);
-      case 'invoice.payment_failed':
-        return this.setStatus(tenantId, 'past_due', at);
+        subscriptionId = event.data.object.id;
+        break;
+      default: // invoice.paid, invoice.payment_failed: re-derive from the subscription we track
+        subscriptionId = storedSubscription;
     }
-  }
-
-  private async setStatus(
-    tenantId: string,
-    status: 'active' | 'past_due',
-    at: Date,
-  ) {
-    const e = await this.entitlements.get(tenantId);
-    if (e.plan !== 'pro' && e.plan !== 'company') return;
-    await this.entitlements.change(
-      tenantId,
-      { status, lastStripeEventAt: at },
-      ACTOR,
-      'stripe',
-    );
+    if (!subscriptionId) return;
+    const sub = await this.stripe
+      .client()
+      .subscriptions.retrieve(subscriptionId);
+    await this.applySubscription(tenantId, sub, storedSubscription);
   }
 
   private async applySubscription(
     tenantId: string,
     sub: Stripe.Subscription,
-    at: Date,
-    deleted: boolean,
     storedSubscription: string | null,
   ) {
-    const row = await this.control.tenantEntitlement.findUnique({
-      where: { tenantId },
-    });
-    if (row?.lastStripeEventAt && at < row.lastStripeEventAt) return; // stale, out of order
-    // A late "deleted" for an old subscription must not cancel the one that replaced it.
-    if (
-      (deleted || ENDED.has(sub.status)) &&
-      storedSubscription &&
-      storedSubscription !== sub.id
-    )
-      return;
+    const ended = ENDED.has(sub.status);
+    // A late event about an old, ended subscription must not cancel the one that replaced it.
+    if (ended && storedSubscription && storedSubscription !== sub.id) return;
 
-    if (deleted || ENDED.has(sub.status)) {
-      // Devices stay enrolled and protected; the caps in assertWithin now refuse new ones.
+    if (ended) {
+      // Devices stay enrolled and protected; the caps now refuse new ones. trialEndsAt is kept
+      // so the one free trial cannot be repeated.
       await this.entitlements.change(
         tenantId,
         {
@@ -167,8 +139,6 @@ export class StripeWebhookService {
           status: 'active',
           stripeSubscriptionId: null,
           billingInterval: null,
-          trialEndsAt: null,
-          lastStripeEventAt: at,
         },
         ACTOR,
         'stripe',
@@ -181,14 +151,9 @@ export class StripeWebhookService {
     const patch: EntitlementPatch = {
       status: sub.status === 'past_due' ? 'past_due' : 'active',
       stripeSubscriptionId: sub.id,
-      lastStripeEventAt: at,
     };
     if (prices.includes(this.stripe.price('COMPANY_USER') ?? '-')) {
-      Object.assign(patch, {
-        plan: 'company',
-        billingInterval: null,
-        trialEndsAt: null,
-      });
+      Object.assign(patch, { plan: 'company', billingInterval: null });
     } else if (prices.includes(this.stripe.price('PRO_MONTHLY') ?? '-')) {
       Object.assign(patch, { plan: 'pro', billingInterval: 'month' });
     } else if (prices.includes(this.stripe.price('PRO_YEARLY') ?? '-')) {
