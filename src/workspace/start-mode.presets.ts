@@ -72,6 +72,11 @@ export const START_MODE_PRESETS: Record<StartMode, PolicyContent> = {
         'APPROVAL_REQUIRED',
         'unsafe-path:*',
       ),
+      rule(
+        'Commands the shell expands wait for you',
+        'APPROVAL_REQUIRED',
+        'unsafe-command:*',
+      ),
       ...deletes('APPROVAL_REQUIRED'),
       ...forcePush('APPROVAL_REQUIRED'),
       ...downloads('APPROVAL_REQUIRED'),
@@ -85,6 +90,11 @@ export const START_MODE_PRESETS: Record<StartMode, PolicyContent> = {
         'Paths that climb out of their folder are blocked',
         'DENY',
         'unsafe-path:*',
+      ),
+      rule(
+        'Commands the shell expands wait for you',
+        'APPROVAL_REQUIRED',
+        'unsafe-command:*',
       ),
       ...deletes('APPROVAL_REQUIRED'),
       ...forcePush('APPROVAL_REQUIRED'),

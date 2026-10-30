@@ -191,9 +191,10 @@ function ruleMatches(
     rule.actionId === '*' || rule.actionId === request.actionId;
   const resourceMatches =
     resourcePatternMatches(rule.resourcePattern, request.resource) ||
-    resourceAliases(request.resource, resourceKindFor(request.actionId)).some(
-      (alias) => resourcePatternMatches(rule.resourcePattern, alias),
-    );
+    resourceAliases(
+      request.resource,
+      resourceKindFor(request.toolId, request.actionId),
+    ).some((alias) => resourcePatternMatches(rule.resourcePattern, alias));
   // Phase 15a (Section 53): absent means "match regardless of
   // classification" (identical to before this field existed); present
   // means an exact match against the resolved ToolAction's classification,

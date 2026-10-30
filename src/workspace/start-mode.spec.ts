@@ -161,6 +161,28 @@ describe('presets through the policy engine', () => {
     expect(await decide('strict', 'read', '../../x')).toBe('DENY');
     expect(await decide('watch', 'read', '../../x')).toBe('ALLOW');
   });
+  it('commands the shell would expand wait in Ask and Strict', async () => {
+    for (const m of ['ask', 'strict'] as const) {
+      expect(await decide(m, 'bash', 'cat ~/.ssh/*')).not.toBe('ALLOW');
+      expect(await decide(m, 'bash', 'cat $(echo ~/.ssh/id_rsa)')).not.toBe(
+        'ALLOW',
+      );
+    }
+    expect(await decide('ask', 'bash', 'cat "/home/u/.aws/credentials"')).toBe(
+      'APPROVAL_REQUIRED',
+    );
+    expect(await decide('ask', 'bash', 'ls src')).toBe('ALLOW');
+  });
+  it('an unknown action on an unknown tool is read as a path (fail closed)', async () => {
+    expect(
+      await decide(
+        'strict',
+        'whatever',
+        '/home/u/.aws/credentials',
+        'unknown.tool',
+      ),
+    ).toBe('DENY');
+  });
   it('Ask needs approval for secrets, deletes, force pushes and downloads, and allows the rest', async () => {
     expect(await decide('ask', 'read', '/home/sam/.aws/credentials')).toBe(
       'APPROVAL_REQUIRED',
