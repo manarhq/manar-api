@@ -311,3 +311,21 @@ already boots both Nest apps in-process), and the real
 - Kill-switch-driven grant revocation (a dedicated later phase) — the
   `revokedAt` column exists, nothing sets it yet.
 - Slack/Teams/email/ServiceNow approval channels.
+
+## 8-hour grants, device approvals and push (launch, spec 4.6)
+
+- **Approve for 8 hours** (`decision: "approve_8h"` on `POST /approvals/:id/decide`, or on
+  `POST /host-approvals/:id/decide`): creates an `ApprovalAllowGrant` for one device or agent, one
+  tool, one action and one exact resource string, for 8 hours. `AuthorizationService` looks it up
+  after OpenFGA and before policy evaluation; it satisfies a policy approval requirement or the risk
+  ceiling and nothing else (a policy DENY, kill switches, OpenFGA and task limits still decide first).
+  Audit: `approval.grant.created`, `approval.grant.used`. The old `APPROVE | DENY` values still work.
+- **Approve + make rule**: `makeRule: true` returns `ruleDraft`, an ALLOW rule with the exact resource.
+- **Device approvals**: `HostApprovalsService.open()` is what the host authorize path calls when the
+  answer is "ask". WARDEN reads `GET /host/v1/approvals/pending` and answers with
+  `POST /host/v1/approvals/:id/decide`. Refused (403) when the host is not APPROVED, when its owner
+  has no approver role in this workspace, and for `highRisk` approvals (`high_risk_open_in_console`).
+- **Web Push**: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (ExternalSecret keys; all or
+  none). `GET /push/vapid-key`, `POST|DELETE /push/subscriptions`. A push goes to subscribed approvers
+  of the workspace when an approval opens; `PushService.notifySecretAlert` is for the secrets track.
+  Payloads carry no resource path, prompt or secret. 404 and 410 answers delete the subscription.
