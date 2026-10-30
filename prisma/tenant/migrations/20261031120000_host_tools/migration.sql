@@ -13,6 +13,7 @@ CREATE TABLE "host_tools" (
     "protected" BOOLEAN NOT NULL DEFAULT false,
     "protectMode" TEXT NOT NULL DEFAULT 'none',
     "desiredProtection" BOOLEAN NOT NULL DEFAULT true,
+    "changes" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "firstSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 

@@ -28,6 +28,7 @@ export const InventoryRequestSchema = z.object({
         path: z.string().max(512).nullish(),
         protected: z.boolean(),
         protectMode: z.enum(['hook', 'mcp', 'gateway', 'none']),
+        changes: z.array(z.string().max(400)).max(20).default([]),
       }),
     )
     .max(MAX_TOOLS),
@@ -120,6 +121,7 @@ export class HostToolsService {
         path: t.path ?? null,
         protected: eff.protected,
         protectMode: eff.protectMode,
+        changes: t.changes,
         lastSeenAt: now,
       };
       await client.hostTool.upsert({
@@ -212,6 +214,7 @@ export class HostToolsService {
             protected: t.protected,
             protectMode: t.protectMode,
             desiredProtection: t.desiredProtection,
+            changes: t.changes,
             supportedModes: hostTool(t.toolId)?.modes ?? [],
             enforcement: enforcementLabel(t.toolId, t, online),
           })),

@@ -2258,6 +2258,8 @@ model HostTool {
   /// `hook`, `mcp`, `gateway` or `none`.
   protectMode       String   @default("none")
   desiredProtection Boolean  @default(true)
+  /// What the device changed for this tool (files, backups), shown on the AI tools page.
+  changes           String[] @default([])
   firstSeenAt       DateTime @default(now())
   lastSeenAt        DateTime @default(now())
 
