@@ -20,18 +20,21 @@ export const TrustedProxyConfigSchema = z.object({
 });
 
 /**
- * The public MCP endpoint limits callers per address, so with it on the proxies must be named
- * (or `none` for an API exposed directly): an unset value would silently make every caller the
- * proxy pod.
+ * Per-address limits (the public MCP endpoint, the public `/i/<code>` install scripts) key on
+ * `request.ip`. Unset, that is the proxy pod, so every caller shares one bucket and the first
+ * 20 requests a minute lock everyone else out. In production the proxies must therefore be named
+ * (or `none` for an API exposed directly), whatever else is enabled.
  */
 export function trustedProxyIssues(config: {
   MANAR_TRUSTED_PROXY_CIDRS?: string;
   MANAR_MCP_ENABLED?: string;
+  NODE_ENV?: string;
 }): string[] {
-  return config.MANAR_MCP_ENABLED === 'true' &&
+  return (config.NODE_ENV === 'production' ||
+    config.MANAR_MCP_ENABLED === 'true') &&
     !config.MANAR_TRUSTED_PROXY_CIDRS?.trim()
     ? [
-        'MANAR_TRUSTED_PROXY_CIDRS: required when MANAR_MCP_ENABLED is true (the cloudflared and Traefik pod ranges, or "none" when the API is exposed directly)',
+        'MANAR_TRUSTED_PROXY_CIDRS: required in production and when MANAR_MCP_ENABLED is true (the cloudflared and Traefik pod ranges, or "none" when the API is exposed directly): public routes limit callers per address',
       ]
     : [];
 }

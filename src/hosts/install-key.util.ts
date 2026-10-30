@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
 
 /**
@@ -13,7 +13,21 @@ export function generateInstallKey(tenantSlug: string): string {
   return `mik_${tenantSlug}_${randomBytes(32).toString('base64url')}`;
 }
 
+/**
+ * How a key (or an "Add device" short code) is stored: HMAC-SHA256 under the server secret
+ * `MANAR_INSTALL_KEY_HMAC_SECRET`, so a copy of the database cannot be used to test guesses of a
+ * 49-bit short code offline. Unset (dev, tests, or before the secret is delivered) it is plain
+ * SHA-256, the format keys had before.
+ */
 export function hashInstallKey(raw: string): string {
+  const secret = process.env.MANAR_INSTALL_KEY_HMAC_SECRET;
+  return secret
+    ? createHmac('sha256', secret).update(raw, 'utf8').digest('hex')
+    : legacyHashInstallKey(raw);
+}
+
+/** Keys created before the secret existed are stored as plain SHA-256 and still resolve. */
+export function legacyHashInstallKey(raw: string): string {
   return createHash('sha256').update(raw, 'utf8').digest('hex');
 }
 

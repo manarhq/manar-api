@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   generateInstallKey,
   hashInstallKey,
   ipAllowed,
   isValidCidr,
+  legacyHashInstallKey,
   tenantSlugOf,
 } from './install-key.util';
 
@@ -64,5 +65,27 @@ describe('ipAllowed', () => {
     expect(isValidCidr('10.0.0.0/8')).toBe(true);
     expect(isValidCidr('2001:db8::/32')).toBe(true);
     expect(isValidCidr('10.0.0.0/33')).toBe(false);
+  });
+});
+
+describe('stored hash of a key or short code', () => {
+  const OLD = process.env.MANAR_INSTALL_KEY_HMAC_SECRET;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.MANAR_INSTALL_KEY_HMAC_SECRET;
+    else process.env.MANAR_INSTALL_KEY_HMAC_SECRET = OLD;
+  });
+
+  it('is plain SHA-256 without the secret, and an HMAC under it', () => {
+    delete process.env.MANAR_INSTALL_KEY_HMAC_SECRET;
+    const plain = hashInstallKey('ABCDEFGH23');
+    expect(plain).toBe(legacyHashInstallKey('ABCDEFGH23'));
+    process.env.MANAR_INSTALL_KEY_HMAC_SECRET = 'x'.repeat(32);
+    const a = hashInstallKey('ABCDEFGH23');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(plain);
+    process.env.MANAR_INSTALL_KEY_HMAC_SECRET = 'y'.repeat(32);
+    expect(hashInstallKey('ABCDEFGH23')).not.toBe(a);
+    // The old format stays computable, so keys made before the secret still resolve.
+    expect(legacyHashInstallKey('ABCDEFGH23')).toBe(plain);
   });
 });

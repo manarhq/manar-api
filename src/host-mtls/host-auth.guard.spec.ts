@@ -86,7 +86,7 @@ function world() {
   const control = {
     tenant: {
       findUnique: vi.fn(({ where }: { where: Record<string, string> }) =>
-        Promise.resolve(tenantsBySlug[where.slug] ?? null),
+        Promise.resolve(tenantsBySlug[where.slug ?? ""] ?? null),
       ),
     },
   };

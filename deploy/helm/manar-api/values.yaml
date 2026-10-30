@@ -230,7 +230,9 @@ config:
   MANAR_MCP_MAX_BODY_BYTES: '262144'
   # cloudflared and Traefik pod ranges (comma-separated CIDRs) so request.ip is the real caller
   # (Fastify trustProxy over X-Forwarded-For), or 'none' when exposed directly. Required (startup
-  # fails) when MANAR_MCP_ENABLED is 'true'.
+  # fails) in production and when MANAR_MCP_ENABLED is 'true': the public MCP endpoint and the public
+  # /i/<code> install scripts limit callers per address, and unset every caller is the proxy pod,
+  # so one shared bucket would lock everyone out. The infra repo sets the real ranges.
   MANAR_TRUSTED_PROXY_CIDRS: ''
   # Manar edge (docs/edge.md): off by default. When 'true', also set MANAR_EDGE_ENDPOINT
   # (<host>:51820), MANAR_EDGE_GATEWAY_PUBLIC_KEY, MANAR_AGENTS_HOST and the secret
@@ -266,6 +268,10 @@ secrets:
     KEYCLOAK_ADMIN_PASSWORD: ''
     OPENBAO_TOKEN: ''
     APPROVAL_GRANT_SIGNING_SECRET: ''
+    # REQUIRED in production, at least 32 characters: the HMAC secret install keys and the "Add
+    # device" short codes are stored under (src/hosts/install-key.util.ts). Deliver it by
+    # ExternalSecret (remote key manar/api/install-key-hmac) into this Secret; never commit a value.
+    MANAR_INSTALL_KEY_HMAC_SECRET: ''
     # REQUIRED — `MANAR_BFF_SERVICE_TOKEN` has no default and a `min(16)`
     # constraint (src/tenants/tenants.config.ts), so `validate()` rejects the
     # environment and the process exits before listening if it is missing.

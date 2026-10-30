@@ -35,7 +35,10 @@ import {
   CloudMcpConfigSchema,
   cloudMcpConfigIssues,
 } from '../cloud-mcp/cloud-mcp.config';
-import { DevicesConfigSchema } from '../devices/devices.config';
+import {
+  DevicesConfigSchema,
+  devicesConfigIssues,
+} from '../devices/devices.config';
 import { EdgeConfigSchema, edgeConfigIssues } from '../edge/edge.config';
 
 /**
@@ -99,6 +102,7 @@ export const AppConfigSchema = z
       ...redisConfigIssues(c),
       ...cloudMcpConfigIssues(c),
       ...trustedProxyIssues(c),
+      ...devicesConfigIssues(c),
       ...edgeConfigIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });

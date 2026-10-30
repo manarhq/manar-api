@@ -34,7 +34,24 @@ export const DevicesConfigSchema = z.object({
   MANAR_EDGE_SHA256_WINDOWS_AMD64: sha256,
   MANAR_EDGE_SHA256_LINUX_AMD64: sha256,
   MANAR_EDGE_SHA256_LINUX_ARM64: sha256,
+  /**
+   * Server secret for the HMAC that stores install keys and short codes (see hashInstallKey).
+   * Secret: delivered by ExternalSecret into the `secrets.name` Secret as
+   * MANAR_INSTALL_KEY_HMAC_SECRET. Required in production.
+   */
+  MANAR_INSTALL_KEY_HMAC_SECRET: optional.pipe(z.string().min(32).optional()),
 });
+
+export function devicesConfigIssues(c: {
+  NODE_ENV?: string;
+  MANAR_INSTALL_KEY_HMAC_SECRET?: string;
+}): string[] {
+  return c.NODE_ENV === 'production' && !c.MANAR_INSTALL_KEY_HMAC_SECRET
+    ? [
+        'MANAR_INSTALL_KEY_HMAC_SECRET: required in production (at least 32 characters, from the secret store)',
+      ]
+    : [];
+}
 
 export type DevicesConfig = z.infer<typeof DevicesConfigSchema>;
 

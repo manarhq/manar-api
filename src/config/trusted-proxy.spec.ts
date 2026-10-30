@@ -36,6 +36,29 @@ describe('trusted proxies', () => {
       }),
     ).toEqual([]);
     expect(trustedProxyIssues({ MANAR_MCP_ENABLED: 'false' })).toEqual([]);
+  });
+
+  it('production does not start without the proxies named, whatever else is on', () => {
+    expect(trustedProxyIssues({ NODE_ENV: 'production' })).toHaveLength(1);
+    expect(
+      trustedProxyIssues({
+        NODE_ENV: 'production',
+        MANAR_TRUSTED_PROXY_CIDRS: ' ',
+      }),
+    ).toHaveLength(1);
+    expect(
+      trustedProxyIssues({
+        NODE_ENV: 'production',
+        MANAR_TRUSTED_PROXY_CIDRS: '10.42.0.0/16',
+      }),
+    ).toEqual([]);
+    expect(trustedProxyIssues({ NODE_ENV: 'development' })).toEqual([]);
+    expect(
+      trustedProxyIssues({
+        NODE_ENV: 'production',
+        MANAR_TRUSTED_PROXY_CIDRS: 'none',
+      }),
+    ).toEqual([]);
     expect(httpAdapterOptions({ MANAR_TRUSTED_PROXY_CIDRS: 'none' })).toEqual(
       {},
     );

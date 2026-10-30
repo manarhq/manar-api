@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { normalizeInstallCode } from './install-code.util';
-import { hashInstallKey } from './install-key.util';
+import { hashInstallKey, legacyHashInstallKey } from './install-key.util';
 
 export interface ResolvedInstallCode {
   tenantId: string;
@@ -41,8 +41,10 @@ export class InstallCodesService {
     const code = normalizeInstallCode(raw);
     if (!code) return null;
     await this.purgeExpired();
-    const row = await this.control.installCode.findUnique({
-      where: { codeHash: hashInstallKey(code) },
+    const row = await this.control.installCode.findFirst({
+      where: {
+        codeHash: { in: [hashInstallKey(code), legacyHashInstallKey(code)] },
+      },
       include: { tenant: { select: { slug: true, status: true } } },
     });
     if (!row || row.tenant.status !== 'ACTIVE') return null;
@@ -56,7 +58,9 @@ export class InstallCodesService {
   /** The code was used (or its key is gone): it must not resolve again. */
   async deleteByCode(code: string): Promise<void> {
     await this.control.installCode.deleteMany({
-      where: { codeHash: hashInstallKey(code) },
+      where: {
+        codeHash: { in: [hashInstallKey(code), legacyHashInstallKey(code)] },
+      },
     });
   }
 
