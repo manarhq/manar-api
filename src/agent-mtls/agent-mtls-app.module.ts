@@ -20,6 +20,7 @@ import { AgentRateLimitModule } from '../rate-limit/agent-rate-limit.module';
 import { AgentRuntimeModule } from '../agent-runtime/agent-runtime.module';
 import { EdgeModule } from '../edge/edge.module';
 import { AgentWhoamiController } from './agent-whoami.controller';
+import { HostMtlsModule } from '../host-mtls/host-mtls.module';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
 
 /**
@@ -64,6 +65,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     KillSwitchesModule,
     AgentRateLimitModule,
     AgentMtlsGuardModule,
+    HostMtlsModule,
     AgentsModule,
     AuthorizationModule,
     TasksModule,
