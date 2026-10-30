@@ -215,8 +215,16 @@ export function resourceAliases(
     pathAliases(resource, out);
   } else if (kind === 'command') {
     const { words, expands } = shellWords(resource);
-    if (expands) out.add('unsafe-command:expansion');
-    for (const w of words) {
+    // Windows shells keep their backslashes, so the raw whitespace-split tokens are checked too.
+    const raw = resource
+      .split(/\s+/)
+      .map((w) => w.replace(/^["'`;|&<>(]+|["'`;|&<>)]+$/g, ''))
+      .filter(Boolean);
+    const winOdd = raw.some((w) => w.includes('\\') && !/^[a-z]:\\/i.test(w));
+    if (expands || winOdd || resource.includes('%')) {
+      out.add('unsafe-command:expansion');
+    }
+    for (const w of [...words, ...raw]) {
       const found = new Set<string>();
       pathAliases(w, found);
       for (const a of found) {

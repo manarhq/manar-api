@@ -115,6 +115,27 @@ describe('resourceAliases', () => {
     expect(resourceAliases('cat ~/notes.txt', 'command')).toEqual([]);
     expect(resourceAliases('cd ~', 'command')).toEqual([]);
   });
+  it('keeps Windows shell paths (backslashes) and fails closed on their expansions', () => {
+    expect(secret('type C:\\Users\\x\\.aws\\credentials', 'command')).toBe(
+      true,
+    );
+    const ps = resourceAliases(
+      'Get-Content $env:USERPROFILE\\.ssh\\id_ed25519',
+      'command',
+    );
+    expect(ps).toContain('secret-file:id_ed25519');
+    expect(ps).toContain('unsafe-command:expansion');
+    const cmd = resourceAliases(
+      'type %USERPROFILE%\\.aws\\credentials',
+      'command',
+    );
+    expect(cmd).toContain('secret-file:credentials');
+    expect(cmd).toContain('unsafe-command:expansion');
+    expect(resourceAliases('dir C:\\work\\shop', 'command')).toEqual([]);
+    expect(resourceAliases('dir sub\\dir', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+  });
   it('resolves Windows drive paths as rooted and flags clamped ..', () => {
     expect(resourceAliases('C:\\Users\\x\\..\\..\\..\\Windows')).toContain(
       'unsafe-path:traversal',
