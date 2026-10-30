@@ -192,17 +192,16 @@ jobs:
           timeout 60 bash -c "until $RUNNER_TEMP/temporal operator cluster health --address 127.0.0.1:$TEMPORAL_PORT >/dev/null 2>&1; do sleep 1; done"
       # manar-ai: ai-advisory.e2e-spec.ts runs its DLP scenarios against the real service (no
       # image is published), so run its gRPC server from source at a pinned commit, outside the
-      # checkout and with a clean env. The repo is private: MANAR_AI_READ_TOKEN (read-only,
-      # contents:read on manarhq/manar-ai) is needed; without it the service is not started and
-      # that spec fails.
+      # checkout and with a clean env. While manar-ai is private, MANAR_AI_READ_TOKEN (read-only,
+      # contents:read on manarhq/manar-ai) is needed; once it is public the anonymous download works.
       - name: manar-ai
         env:
           MANAR_AI_READ_TOKEN: ${{ secrets.MANAR_AI_READ_TOKEN }}
         run: |
           set -e
-          if [ -z "$MANAR_AI_READ_TOKEN" ]; then echo "::warning::MANAR_AI_READ_TOKEN is not set; manar-ai is not started"; exit 0; fi
+          auth=(); [ -z "$MANAR_AI_READ_TOKEN" ] || auth=(-H "Authorization: Bearer $MANAR_AI_READ_TOKEN")
           mkdir -p "$RUNNER_TEMP/manar-ai"
-          curl -fsSL -H "Authorization: Bearer $MANAR_AI_READ_TOKEN" -H "Accept: application/vnd.github+json" \
+          curl -fsSL "${auth[@]}" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/manarhq/manar-ai/tarball/$MANAR_AI_REF" \
             | tar xz -C "$RUNNER_TEMP/manar-ai" --strip-components=1
           uv sync --project "$RUNNER_TEMP/manar-ai" --locked --no-dev --quiet
@@ -238,7 +237,6 @@ jobs:
   # demo-soc-tools) on every PR, so a broken Dockerfile, a missing runtime file or a fixable
   # HIGH/CRITICAL CVE fails before merge. Nothing is pushed; SBOMs are generated as a check.
   images:
-    if: github.event_name == 'pull_request'
     runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -280,7 +278,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: >-
-          docker run --rm -v "$PWD:$PWD" -w "$PWD"
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:$PWD" -w "$PWD"
           ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
           git --log-opts="--all" -c .gitleaks.toml --exit-code 1 --redact -v .
 
