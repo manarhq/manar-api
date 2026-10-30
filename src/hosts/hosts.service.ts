@@ -13,6 +13,8 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { matchApprovalRule, type VerifiedFacts } from './host-approval';
 import { EntitlementsService } from '../entitlements/entitlements.service';
 import { TpmAttestationService } from './tpm/tpm-attestation.service';
+import { normalizeInstallCode } from './install-code.util';
+import { InstallCodesService } from './install-codes.service';
 import { tenantSlugOf } from './install-key.util';
 import {
   InstallKeyInvalidError,
@@ -106,12 +108,25 @@ export class HostsService {
     private readonly ca: CertificateAuthorityService,
     private readonly tpm: TpmAttestationService,
     private readonly entitlements: EntitlementsService,
+    private readonly codes: InstallCodesService,
   ) {}
 
   async register(input: RegisterHostInput): Promise<RegisterHostResult> {
-    const slug = tenantSlugOf(input.installKey);
-    if (!slug) throw new InstallKeyInvalidError();
-    const tenant = await this.control.tenant.findUnique({ where: { slug } });
+    // `installKey` is a `mik_<tenant>_...` key, or the short code of the "Add device" one-liner,
+    // which stands for a key whose secret it is: the control DB maps its hash to the tenant.
+    const code = normalizeInstallCode(input.installKey);
+    let slug: string | null;
+    let tenant;
+    if (code) {
+      const found = await this.codes.find(code);
+      if (!found) throw new InstallKeyInvalidError();
+      slug = found.tenantSlug;
+      tenant = await this.control.tenant.findUnique({ where: { slug } });
+    } else {
+      slug = tenantSlugOf(input.installKey);
+      if (!slug) throw new InstallKeyInvalidError();
+      tenant = await this.control.tenant.findUnique({ where: { slug } });
+    }
     if (!tenant || tenant.status !== 'ACTIVE')
       throw new InstallKeyInvalidError();
     const identifier = `host://${slug}/${input.machineId}`;
@@ -125,7 +140,18 @@ export class HostsService {
       .digest('hex');
 
     const client = await this.tenants.getClient(tenant.id);
-    const key = await this.keys.consume(client, input.installKey, input.ip);
+    const secret = code ?? input.installKey;
+    let key;
+    try {
+      key = await this.keys.consume(client, secret, input.ip);
+    } catch (error) {
+      // A spent, revoked or expired key leaves nothing behind that could resolve again.
+      if (code && error instanceof InstallKeyInvalidError) {
+        await this.codes.deleteByCode(code);
+      }
+      throw error;
+    }
+    if (code) await this.codes.deleteByCode(code); // used: one registration per code
     const redeemed = input.tpmChallengeId
       ? await this.tpm.redeem(
           client,

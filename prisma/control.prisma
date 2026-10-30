@@ -417,16 +417,25 @@ model StripeEvent {
 /// install key it stands for, so the public route can find the tenant without a token. Valid for
 /// one hour; fetching the script does not use the key, registering does. The raw key is kept here
 /// until the code expires (same trust boundary as the other control-DB secrets, docs/hosts.md).
+}
+
+/// The short code of the "Add device" one-liner (`/i/<code>`) -> the tenant and the install key it
+/// stands for, so the public routes can find the tenant without a token. The code itself is the
+/// install key's secret (the tenant-side key row is its SHA-256), so only the hash is kept here.
+/// Valid for one hour; the row is deleted when the code is used, when its key is revoked, and when
+/// it expires.
 model InstallCode {
-  id         String   @id @default(uuid())
-  /// 10 characters of an unambiguous alphabet, upper case.
-  code       String   @unique
-  tenantId   String
-  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  installKey String
-  expiresAt  DateTime
-  createdAt  DateTime @default(now())
+  id           String   @id @default(uuid())
+  /// SHA-256 (hex) of the upper-case 10-character code.
+  codeHash     String   @unique
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// `InstallKey.id` in the tenant database.
+  installKeyId String
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
 
   @@index([expiresAt])
+  @@index([installKeyId])
   @@map("install_codes")
 }

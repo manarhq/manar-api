@@ -3,8 +3,7 @@
  * the uninstall one-liners. Pure functions: every value that reaches a script is checked
  * against a strict pattern first, so no value can break out of its quotes.
  *
- * The scripts never contain a secret other than the single-use install key the URL's code
- * stands for. They verify the SHA-256 of the downloaded binary against a value templated in at
+ * The scripts contain only the single-use code the URL carries and the tenant's slug. They verify the SHA-256 of the downloaded binary against a value templated in at
  * serve time, and then hand over to `manar-edge install`, which enrols and installs the service.
  */
 export interface ScriptParams {
@@ -12,7 +11,9 @@ export interface ScriptParams {
   releaseBase: string;
   consoleUrl: string;
   hostUrl: string;
-  installKey: string;
+  /** The short code (the install key's secret) and the tenant slug it belongs to. */
+  code: string;
+  tenantSlug: string;
   sha256: {
     windowsAmd64?: string;
     linuxAmd64?: string;
@@ -28,7 +29,8 @@ export const NOT_AVAILABLE_MESSAGE =
   'The Manar installer is not available yet. Please try again in a few minutes.';
 
 const URL_OK = /^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._/-]*)?$/;
-const KEY_OK = /^mik_[a-z0-9][a-z0-9-]*_[A-Za-z0-9_-]{43}$/;
+const CODE_OK = /^[A-HJKMNP-Z2-9]{10}$/;
+const SLUG_OK = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const VERSION_OK = /^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/;
 const SHA_OK = /^[0-9a-f]{64}$/;
 
@@ -41,13 +43,15 @@ function validated(p: ScriptParams) {
   check(URL_OK.test(p.releaseBase), 'MANAR_EDGE_RELEASE_BASE');
   check(URL_OK.test(p.consoleUrl), 'MANAR_CONSOLE_URL');
   check(URL_OK.test(p.hostUrl), 'MANAR_HOST_URL');
-  check(KEY_OK.test(p.installKey), 'install key');
+  check(CODE_OK.test(p.code), 'install code');
+  check(SLUG_OK.test(p.tenantSlug), 'tenant slug');
   return {
     version: p.version!,
     base: p.releaseBase.replace(/\/$/, ''),
     api: p.consoleUrl.replace(/\/$/, ''),
     host: p.hostUrl.replace(/\/$/, ''),
-    key: p.installKey,
+    code: p.code,
+    slug: p.tenantSlug,
   };
 }
 
@@ -77,7 +81,7 @@ try {
   Invoke-WebRequest -UseBasicParsing -Uri '${v.base}/${v.version}/manar-edge-windows-amd64.exe' -OutFile $exe
   $got = (Get-FileHash -Algorithm SHA256 -Path $exe).Hash.ToLower()
   if ($got -ne '${sha}') { throw 'The download does not match its checksum, so it was not installed.' }
-  & $exe install --code '${v.key}' --api '${v.api}' --host-url '${v.host}'
+  & $exe install --code '${v.code}' --tenant '${v.slug}' --api '${v.api}' --host-url '${v.host}'
   if ($LASTEXITCODE -ne 0) { throw "The installer stopped (exit code $LASTEXITCODE)." }
 } catch {
   Write-Host ('Manar install failed: ' + $_.Exception.Message) -ForegroundColor Red
@@ -113,7 +117,7 @@ else fail "curl or wget is needed."; fi
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is needed."
 echo "$sum  $tmp/manar-edge" | sha256sum -c - >/dev/null 2>&1 || fail "the download does not match its checksum, so it was not installed."
 chmod 755 "$tmp/manar-edge"
-"$tmp/manar-edge" install --code '${v.key}' --api '${v.api}' --host-url '${v.host}' || fail "the installer stopped."
+"$tmp/manar-edge" install --code '${v.code}' --tenant '${v.slug}' --api '${v.api}' --host-url '${v.host}' || fail "the installer stopped."
 `;
 }
 

@@ -18,6 +18,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { PlanLimitError } from '../entitlements/entitlements.service';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import type { AuditActor } from '../audit/audit-event-types';
 import { CurrentAuth } from '../auth/auth-context';
@@ -40,6 +41,7 @@ import {
   UnverifiedRuleError,
   type HostDecision,
 } from './hosts-admin.service';
+import { InstallCodesService } from './install-codes.service';
 import {
   HostGroupNotFoundError,
   InstallKeysService,
@@ -72,6 +74,7 @@ function shown(key: InstallKey): Omit<InstallKey, 'keyHash'> {
 
 /** Maps the hosts domain errors onto HTTP. */
 function http(error: unknown): never {
+  if (error instanceof PlanLimitError) throw error.toHttp();
   if (
     error instanceof HostNotFoundError ||
     error instanceof HostGroupNotFoundError
@@ -191,6 +194,7 @@ export class InstallKeysController {
   constructor(
     private readonly tenants: TenantDatabaseManager,
     private readonly keys: InstallKeysService,
+    private readonly codes: InstallCodesService,
   ) {}
 
   @Get()
@@ -235,6 +239,8 @@ export class InstallKeysController {
       id,
     );
     if (!key) throw new NotFoundException('install key not found');
+    // A revoked key's short code must not resolve any more.
+    await this.codes.deleteByKeyId(id);
     return shown(key);
   }
 }

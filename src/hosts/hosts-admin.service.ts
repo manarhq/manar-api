@@ -6,6 +6,7 @@ import type {
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
+import { EntitlementsService } from '../entitlements/entitlements.service';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES, type AuditActor } from '../audit/audit-event-types';
 import {
@@ -56,6 +57,7 @@ export class HostsAdminService {
   constructor(
     private readonly audit: AuditService,
     private readonly ca: CertificateAuthorityService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   listHosts(
@@ -146,6 +148,19 @@ export class HostsAdminService {
       if (!rule.from.includes(current.status)) {
         throw new HostTransitionError(
           `cannot ${decision} a host that is ${current.status}`,
+        );
+      }
+      // REJECTED -> APPROVED adds a device back to the count (PENDING and APPROVED are the
+      // counted states), so it takes the same locked cap check as a new registration.
+      if (decision === 'approve' && current.status === 'REJECTED') {
+        await this.entitlements.assertWithinLocked(
+          tx,
+          tenantId,
+          'devices',
+          () =>
+            tx.host.count({
+              where: { status: { in: ['PENDING', 'APPROVED'] } },
+            }),
         );
       }
       const updated = await this.writeIfUnchanged(tx, current, {

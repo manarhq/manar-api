@@ -4,7 +4,8 @@ import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { AppConfig } from '../config/env.validation';
 import { DEVICES_DEFAULTS } from './devices.config';
-import { InstallCodesService } from './install-codes.service';
+import { InstallCodesService } from '../hosts/install-codes.service';
+import { normalizeInstallCode } from '../hosts/install-code.util';
 import {
   NOT_AVAILABLE_MESSAGE,
   NOT_VALID_MESSAGE,
@@ -60,7 +61,8 @@ export class InstallController {
         consoleUrl:
           get('MANAR_CONSOLE_URL') ?? DEVICES_DEFAULTS.MANAR_CONSOLE_URL,
         hostUrl: get('MANAR_HOST_URL') ?? DEVICES_DEFAULTS.MANAR_HOST_URL,
-        installKey: found.installKey,
+        code: normalizeInstallCode(code) ?? '',
+        tenantSlug: found.tenantSlug,
         sha256: {
           windowsAmd64: get('MANAR_EDGE_SHA256_WINDOWS_AMD64'),
           linuxAmd64: get('MANAR_EDGE_SHA256_LINUX_AMD64'),

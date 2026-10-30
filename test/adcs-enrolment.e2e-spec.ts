@@ -1,3 +1,4 @@
+import { InstallCodesService } from '../src/hosts/install-codes.service';
 import { EntitlementsService } from '../src/entitlements/entitlements.service';
 import 'reflect-metadata';
 import 'dotenv/config';
@@ -141,10 +142,11 @@ describe('AD CS enrolment, OU mapping, TPM attestation, rule guard (e2e)', () =>
       ca,
       tpm,
       new EntitlementsService(),
+      new InstallCodesService(control),
     );
     const directory = new AdcsDirectoryService(new LdapsAdDirectory(), kv);
     adcsAdmin = new AdcsAdminService(audit, kv, directory);
-    hostsAdmin = new HostsAdminService(audit, ca);
+    hostsAdmin = new HostsAdminService(audit, ca, new EntitlementsService());
     enrolment = new AdcsEnrolmentService(
       control,
       manager,

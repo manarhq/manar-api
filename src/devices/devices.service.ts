@@ -6,7 +6,8 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { EntitlementsService } from '../entitlements/entitlements.service';
 import { InstallKeysService } from '../hosts/install-keys.service';
 import { DEVICES_DEFAULTS } from './devices.config';
-import { InstallCodesService } from './install-codes.service';
+import { generateInstallCode } from '../hosts/install-code.util';
+import { InstallCodesService } from '../hosts/install-codes.service';
 import { oneLiners } from './install-scripts';
 
 export const INSTALL_CODE_TTL_MS = 3_600_000; // 1 hour
@@ -39,13 +40,22 @@ export class DevicesService {
       create: { name: DEFAULT_GROUP },
     });
     const expiresAt = new Date(Date.now() + INSTALL_CODE_TTL_MS);
-    const { raw } = await this.keys.create(
+    // The short code is the install key's secret: the tenant side stores its hash like any key,
+    // the control DB maps the same hash to the tenant, and nothing keeps the code itself.
+    const code = generateInstallCode();
+    const { key } = await this.keys.create(
       client,
       auth.tenant,
       { type: 'human', id: auth.user.id },
-      { hostGroupId: group.id, label: 'Add device', maxUses: 1, expiresAt },
+      {
+        hostGroupId: group.id,
+        label: 'Add device',
+        maxUses: 1,
+        expiresAt,
+        rawKey: code,
+      },
     );
-    const code = await this.codes.create(auth.tenant.id, raw, expiresAt);
+    await this.codes.create(auth.tenant.id, code, key.id, expiresAt);
     const base =
       this.config.get('MANAR_CONSOLE_URL', { infer: true }) ??
       DEVICES_DEFAULTS.MANAR_CONSOLE_URL;

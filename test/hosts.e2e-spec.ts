@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { generateInstallCode } from '../src/hosts/install-code.util';
+import { InstallCodesService } from '../src/hosts/install-codes.service';
 import {
   EntitlementsService,
   PlanLimitError,
@@ -72,8 +74,9 @@ describe('Hosts (e2e)', () => {
       ca,
       new TpmAttestationService(control, manager, audit),
       new EntitlementsService(),
+      new InstallCodesService(control),
     );
-    admins = new HostsAdminService(audit, ca);
+    admins = new HostsAdminService(audit, ca, new EntitlementsService());
   }, 60_000);
 
   afterAll(async () => {
@@ -420,6 +423,7 @@ describe('Hosts (e2e)', () => {
         racingCa,
         new TpmAttestationService(control, manager, audit),
         new EntitlementsService(),
+        new InstallCodesService(control),
       );
 
       await expect(
@@ -612,6 +616,89 @@ describe('Hosts (e2e)', () => {
       expect(await t.client.host.count()).toBe(0);
     }, 60_000);
   });
+  describe('Add device short code', () => {
+    it('registers with the code once, records the owner, and deletes the code row', async () => {
+      const t = await tenant('code');
+      const user = await t.client.userProfile.create({
+        data: {
+          keycloakSubject: 'sub-owner',
+          email: 'o@example.com',
+          displayName: 'O',
+        },
+      });
+      const code = generateInstallCode();
+      const { key } = await keys.create(
+        t.client,
+        t,
+        { type: 'human', id: user.id },
+        {
+          hostGroupId: t.group.id,
+          label: 'Add device',
+          maxUses: 1,
+          rawKey: code,
+        },
+      );
+      const installCodes = new InstallCodesService(control);
+      await installCodes.create(
+        t.id,
+        code,
+        key.id,
+        new Date(Date.now() + 3_600_000),
+      );
+      const { csrPem } = await generateAgentCsr(`host://${t.slug}/code-1`);
+      const body = {
+        installKey: code,
+        csr: csrPem,
+        machineId: 'code-1',
+        hostname: 'LAPTOP',
+        os: 'linux',
+        keyType: 'SOFTWARE' as const,
+        ip: '10.0.0.7',
+      };
+      const done = await hosts.register(body);
+      expect(done.status).toBe('PENDING');
+      const host = await t.client.host.findUniqueOrThrow({
+        where: { id: done.hostId },
+      });
+      expect(host.ownerSubject).toBe('sub-owner');
+      expect(await installCodes.find(code)).toBeNull();
+      await expect(hosts.register(body)).rejects.toBeInstanceOf(
+        InstallKeyInvalidError,
+      );
+    }, 60_000);
+
+    it("a code cannot register into another tenant: the CSR must carry the code's tenant", async () => {
+      const a = await tenant('code-a');
+      const b = await tenant('code-b');
+      const code = generateInstallCode();
+      const { key } = await keys.create(a.client, a, admin, {
+        hostGroupId: a.group.id,
+        label: 'x',
+        maxUses: 1,
+        rawKey: code,
+      });
+      await new InstallCodesService(control).create(
+        a.id,
+        code,
+        key.id,
+        new Date(Date.now() + 3_600_000),
+      );
+      const { csrPem } = await generateAgentCsr(`host://${b.slug}/m-1`);
+      await expect(
+        hosts.register({
+          installKey: code,
+          csr: csrPem,
+          machineId: 'm-1',
+          hostname: 'X',
+          os: 'linux',
+          keyType: 'SOFTWARE',
+          ip: '10.0.0.7',
+        }),
+      ).rejects.toThrow(/Subject Alternative Name/);
+      expect(await b.client.host.count()).toBe(0);
+    }, 60_000);
+  });
+
   describe('device cap', () => {
     it('lets exactly N of N+1 parallel registrations through (free plan: 3 devices)', async () => {
       process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS = 'true';

@@ -30,6 +30,8 @@ export interface CreateInstallKeyInput {
   allowedCidrs?: string[];
   maxUses?: number;
   expiresAt?: Date;
+  /** A caller-chosen secret (the "Add device" short code); default: a generated `mik_` key. */
+  rawKey?: string;
 }
 
 /**
@@ -51,7 +53,7 @@ export class InstallKeysService {
   ): Promise<{ key: InstallKey; raw: string }> {
     const bad = (input.allowedCidrs ?? []).filter((c) => !isValidCidr(c));
     if (bad.length > 0) throw new InvalidCidrError(bad.join(', '));
-    const raw = generateInstallKey(tenant.slug);
+    const raw = input.rawKey ?? generateInstallKey(tenant.slug);
     const [key, publish] = await client.$transaction(async (tx) => {
       const group = await tx.hostGroup.findUnique({
         where: { id: input.hostGroupId },
