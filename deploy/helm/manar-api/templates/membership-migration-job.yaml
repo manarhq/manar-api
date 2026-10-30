@@ -1,0 +1,100 @@
+{{- /*
+Role migration after the release is up (values.yaml `migration`): reads the roles users hold in
+each tenant's Keycloak realm now and creates missing Membership rows (idempotent, never
+overwrites). A POST hook on purpose: it needs Keycloak, which the pre-upgrade migration pod
+cannot reach, and it must never block a release. `--non-fatal` makes a failure a logged
+ERROR line with a count (exit 0). A no-op on hosted installs (no per-tenant realms).
+*/}}
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-members" (include "manar-api.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "manar-api.membershipJobLabels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 900
+  # A succeeded Job is deleted by the hook policy; a failed one stays a day for its logs.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "manar-api.membershipJobLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "manar-api.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: members
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "manar-api.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -ec
+            - |
+              node dist/cli.js memberships:migrate-from-realms --non-fatal
+          envFrom:
+            - configMapRef:
+                name: {{ include "manar-api.fullname" . }}-config
+            - secretRef:
+                name: {{ include "manar-api.secretName" . }}
+          env:
+            # Read-only root filesystem: anything that writes under HOME gets /tmp.
+            - name: HOME
+              value: /tmp
+            # No Prisma CLI update check to checkpoint.prisma.io (air-gapped clusters).
+            - name: CHECKPOINT_DISABLE
+              value: '1'
+            {{- if .Values.backingServiceTls.caSecretName }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/manar/backing-service-ca/{{ .Values.backingServiceTls.caKey }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.backingServiceTls.caSecretName }}
+            - name: backing-service-ca
+              mountPath: /etc/manar/backing-service-ca
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- with .Values.backingServiceTls.caSecretName }}
+        - name: backing-service-ca
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -107,7 +107,7 @@ export class TokenVerifierService {
       boundTenant: trusted.boundTenant,
       tid: str(payload.tid),
       oid: str(payload.oid),
-      wids: parseWids(payload.wids),
+      wids: entraAdminWids(payload),
       idp: str(payload.idp),
     };
   }
@@ -129,17 +129,25 @@ export function extractBearerToken(header: string | undefined): string | null {
 }
 
 /**
- * `wids` is a list in Entra's token but arrives from a Keycloak session note as one string
- * (`[a, b]` or `a b`); accept both shapes.
+ * Entra directory-role ids the caller held at their LAST Microsoft sign-in. Keycloak's Microsoft
+ * mappers (realm-manar.yaml, `oidc-role-idp-mapper`, FORCE) grant or remove exactly two realm roles
+ * from the `wids` claim on every sign-in; this reads only those two names from `realm_access`.
+ * No other role in the token is ever read, and company decisions additionally need `idp=microsoft`
+ * for the current session.
  */
-export function parseWids(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value.filter((w): w is string => typeof w === 'string' && w !== '');
-  }
-  if (typeof value === 'string') {
-    return value.split(/[\s,[\]"']+/).filter(Boolean);
-  }
-  return [];
+const ENTRA_ADMIN_ROLES: Record<string, string> = {
+  'entra-global-admin': '62e90394-69f5-4237-9190-012177145e10',
+  'entra-privileged-role-admin': 'e8611ab8-c189-46e8-94e1-60213ab1f814',
+};
+
+export function entraAdminWids(payload: JWTPayload): string[] {
+  const access = payload.realm_access as { roles?: unknown } | undefined;
+  const roles = Array.isArray(access?.roles) ? access.roles : [];
+  return roles.flatMap((r) =>
+    typeof r === 'string' && Object.hasOwn(ENTRA_ADMIN_ROLES, r)
+      ? [ENTRA_ADMIN_ROLES[r]!]
+      : [],
+  );
 }
 
 function str(v: unknown): string | undefined {

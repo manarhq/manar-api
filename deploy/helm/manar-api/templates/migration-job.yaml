@@ -46,9 +46,6 @@ spec:
             - |
               node node_modules/prisma/build/index.js migrate deploy --schema prisma/control.prisma --config prisma/control.config.ts
               node dist/cli.js tenants:migrate
-              # Idempotent: reads the roles users hold in each tenant realm now and creates missing
-              # Membership rows (never overwrites). A no-op on hosted installs (no per-tenant realms).
-              node dist/cli.js memberships:migrate-from-realms
           envFrom:
             - configMapRef:
                 name: {{ include "manar-api.fullname" . }}-config

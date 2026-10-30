@@ -218,6 +218,12 @@ describe('WorkspaceProvisioningService', () => {
     await svc.drainQueue();
     expect(manager.scheduleProvisionRetry).toHaveBeenCalledWith('stalled');
     const due = control.tenant.findMany.mock.calls[1]![0];
+    const stalledWhere = control.tenant.findMany.mock.calls[0]![0].where;
+    expect(stalledWhere.OR).toEqual([
+      { ownerIssuer: { not: null } },
+      { entraTenantId: { not: null } },
+    ]);
+    expect(stalledWhere.kind).toBeUndefined();
     expect(due.where.OR).toEqual([
       { nextProvisionAt: null },
       { nextProvisionAt: { lte: expect.any(Date) } },

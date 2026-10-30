@@ -211,7 +211,10 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
       where: {
         status: 'PROVISIONING',
         updatedAt: { lt: staleBefore() },
-        kind: { not: 'COMPANY' },
+        // Hosted tenants only: personal/sample have an owner issuer, hosted company workspaces an
+        // Entra tenant id. A legacy `tenant:create` tenant has neither and is left PROVISIONING for
+        // a person to inspect, as before.
+        OR: [{ ownerIssuer: { not: null } }, { entraTenantId: { not: null } }],
       },
       select: { id: true },
       take: 50,

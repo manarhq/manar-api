@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument -- fakes */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { KeycloakAdminClient } from '../../keycloak/keycloak-admin.client';
 import { MembershipsMigrateCommand } from './memberships.command';
 
 const ISSUER = 'https://auth.test/realms/acme';
@@ -59,7 +60,7 @@ describe('memberships:migrate-from-realms', () => {
       alice: ['AUDITOR', 'SECURITY_ADMIN'],
       bob: ['READ_ONLY'],
     });
-    await cmd.run();
+    await cmd.run([]);
     expect(keycloak.listRealmRoleMemberIds).toHaveBeenCalledWith(
       'acme',
       'AUDITOR',
@@ -81,14 +82,56 @@ describe('memberships:migrate-from-realms', () => {
 
   it('never overwrites an existing Membership (idempotent re-run)', async () => {
     const { cmd, created } = make({ alice: ['AUDITOR'] }, ['alice']);
-    await cmd.run();
+    await cmd.run([]);
     expect(created).toEqual([]);
   });
 
   it('fails the run when Keycloak cannot be read, with no fallback to old data', async () => {
     const { cmd, created } = make({ __fail: [] });
-    await cmd.run();
+    await cmd.run([]);
     expect(created).toEqual([]);
     expect(process.exitCode).toBe(1);
+  });
+
+  it('--non-fatal logs an ERROR with the count but exits 0 so a post-upgrade hook never blocks a release', async () => {
+    const { cmd } = make({ __fail: [] });
+    const error = vi
+      .spyOn((cmd as any).logger, 'error')
+      .mockImplementation(() => {});
+    await cmd.run([], { nonFatal: true });
+    expect(process.exitCode).toBe(0);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'ERROR memberships:migrate-from-realms tenantsFailed=1',
+      ),
+    );
+  });
+});
+
+describe('KeycloakAdminClient.listRealmRoleMemberIds', () => {
+  const client = (impl: () => Promise<unknown>) => {
+    const c = Object.create(KeycloakAdminClient.prototype);
+    c.adminRequest = vi.fn(impl);
+    return c as KeycloakAdminClient;
+  };
+
+  it('a role the realm does not have (404) means nobody holds it', async () => {
+    const c = client(() =>
+      Promise.reject(
+        new Error('Keycloak Admin API GET /x failed with HTTP 404: not found'),
+      ),
+    );
+    await expect(c.listRealmRoleMemberIds('r', 'AUDITOR')).resolves.toEqual([]);
+  });
+
+  it('any other failure is still an error', async () => {
+    const c = client(() =>
+      Promise.reject(
+        new Error('Keycloak Admin API GET /x failed with HTTP 500'),
+      ),
+    );
+    await expect(c.listRealmRoleMemberIds('r', 'AUDITOR')).rejects.toThrow(
+      'HTTP 500',
+    );
   });
 });

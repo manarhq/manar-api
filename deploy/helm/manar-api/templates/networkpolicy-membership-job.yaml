@@ -1,0 +1,32 @@
+{{- /*
+Egress for the post-upgrade role migration Job: DNS, PostgreSQL and Keycloak only, taken from the
+same networkPolicy.egress rules as the API. The release's NetworkPolicy exists by the time a
+post-install/post-upgrade hook runs.
+*/}}
+{{- if and .Values.networkPolicy.enabled .Values.migration.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-members" (include "manar-api.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "manar-api.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: membership-migration
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Egress
+  egress:
+    {{- range $name, $rule := .Values.networkPolicy.egress }}
+    {{- if and (has $name (list "dns" "postgres" "keycloak")) (ne (toString $rule.enabled) "false") }}
+    # {{ $name }}
+    - ports:
+        {{- toYaml .ports | nindent 8 }}
+      {{- with .to }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}

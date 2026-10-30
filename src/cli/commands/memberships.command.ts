@@ -31,7 +31,7 @@ export class MembershipsMigrateCommand extends CommandRunner {
     super();
   }
 
-  async run(): Promise<void> {
+  async run(_p: string[], o: { nonFatal?: boolean } = {}): Promise<void> {
     const tenants = await this.control.tenant.findMany({
       where: {
         status: 'ACTIVE',
@@ -91,7 +91,22 @@ export class MembershipsMigrateCommand extends CommandRunner {
     this.logger.log(
       `Memberships created=${created} skipped(existing)=${skipped} tenantsFailed=${failed}`,
     );
-    process.exitCode = failed > 0 ? 1 : 0;
+    if (failed > 0) {
+      // A post-upgrade job must not fail the release, but the failure has to be loud.
+      this.logger.error(
+        `ERROR memberships:migrate-from-realms tenantsFailed=${failed}: rerun it, users of those tenants have no Membership until then`,
+      );
+    }
+    process.exitCode = failed > 0 && !o.nonFatal ? 1 : 0;
+  }
+
+  @Option({
+    flags: '--non-fatal',
+    description:
+      'Log failures as ERROR with a count but exit 0 (post-upgrade hook)',
+  })
+  parseNonFatal(): boolean {
+    return true;
   }
 }
 

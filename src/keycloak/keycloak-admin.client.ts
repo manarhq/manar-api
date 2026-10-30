@@ -188,11 +188,19 @@ export class KeycloakAdminClient {
     const ids: string[] = [];
     const page = 200;
     for (let first = 0; ; first += page) {
-      const response = await this.adminRequest(
-        'GET',
-        `/admin/realms/${encodeURIComponent(realmName)}/roles/${encodeURIComponent(roleName)}/users?first=${first}&max=${page}`,
-      );
-      const users = response.body as { id: string }[];
+      let users: { id: string }[];
+      try {
+        const response = await this.adminRequest(
+          'GET',
+          `/admin/realms/${encodeURIComponent(realmName)}/roles/${encodeURIComponent(roleName)}/users?first=${first}&max=${page}`,
+        );
+        users = response.body as { id: string }[];
+      } catch (error) {
+        // A realm that never had this role (older installs): nobody holds it.
+        if (error instanceof Error && /with HTTP 404/.test(error.message))
+          return ids;
+        throw error;
+      }
       ids.push(...users.map((u) => u.id));
       if (users.length < page) return ids;
     }

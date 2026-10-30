@@ -6,7 +6,7 @@ import type { AppConfig } from '../config/env.validation';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { JwksCacheService } from './jwks-cache.service';
 import { KnownIssuerRegistry } from './known-issuer-registry.service';
-import { parseWids, TokenVerifierService } from './token-verifier.service';
+import { TokenVerifierService } from './token-verifier.service';
 
 /**
  * Token checks. Tokens are fabricated with `jose` and a fake JWKS resolver (a real Keycloak will
@@ -179,19 +179,10 @@ describe('TokenVerifierService', () => {
 });
 
 describe('Microsoft session claims', () => {
-  it('exposes idp from the user session and parses wids sent as a session-note string', async () => {
-    const id = await make().verify(
-      await sign({
-        ...claims(),
-        idp: 'microsoft',
-        wids: '[62e90394-69f5-4237-9190-012177145e10, e8611ab8-c189-46e8-94e1-60213ab1f814]',
-      }),
-    );
-    expect(id.idp).toBe('microsoft');
-    expect(id.wids).toEqual([
-      '62e90394-69f5-4237-9190-012177145e10',
-      'e8611ab8-c189-46e8-94e1-60213ab1f814',
-    ]);
+  it('exposes idp from the user session', async () => {
+    expect(
+      (await make().verify(await sign({ ...claims(), idp: 'microsoft' }))).idp,
+    ).toBe('microsoft');
   });
 
   it('a session without idp (email link) has none', async () => {
@@ -200,16 +191,34 @@ describe('Microsoft session claims', () => {
     expect((await make().verify(await sign(c))).idp).toBeUndefined();
   });
 
-  it.each([
-    [
-      ['a', 'b'],
-      ['a', 'b'],
-    ],
-    ['a b', ['a', 'b']],
-    ['["a","b"]', ['a', 'b']],
-    [undefined, []],
-    [42, []],
-  ])('parseWids(%j)', (input, expected) => {
-    expect(parseWids(input)).toEqual(expected);
+  it('derives the Entra admin ids only from the two Entra realm roles', async () => {
+    const id = await make().verify(
+      await sign({
+        ...claims(),
+        realm_access: {
+          roles: [
+            'entra-global-admin',
+            'TENANT_OWNER',
+            'entra-privileged-role-admin',
+            'wids',
+          ],
+        },
+      }),
+    );
+    expect(id.wids).toEqual([
+      '62e90394-69f5-4237-9190-012177145e10',
+      'e8611ab8-c189-46e8-94e1-60213ab1f814',
+    ]);
+  });
+
+  it('a raw wids claim or other roles grant nothing', async () => {
+    const id = await make().verify(
+      await sign({
+        ...claims(),
+        wids: ['62e90394-69f5-4237-9190-012177145e10'],
+        realm_access: { roles: ['SECURITY_ADMIN'] },
+      }),
+    );
+    expect(id.wids).toEqual([]);
   });
 });
