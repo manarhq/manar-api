@@ -365,6 +365,7 @@ model Membership {
   @@index([tenantId, status])
   @@index([issuer, subject])
   @@map("memberships")
+}
 
 /// Weekly AI report card (features track). One row per tenant and week, computed by the worker
 /// on Sunday night or on demand. Totals only: counts and a 7-day series, never names or content.
