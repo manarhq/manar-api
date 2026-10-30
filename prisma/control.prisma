@@ -365,6 +365,31 @@ model Membership {
   @@index([tenantId, status])
   @@index([issuer, subject])
   @@map("memberships")
+
+/// Weekly AI report card (features track). One row per tenant and week, computed by the worker
+/// on Sunday night or on demand. Totals only: counts and a 7-day series, never names or content.
+model WeeklyReportCard {
+  tenantId   String
+  weekEnd    DateTime
+  data       Json
+  computedAt DateTime @default(now())
+
+  @@id([tenantId, weekEnd])
+  @@map("weekly_report_cards")
+}
+
+/// A public, revocable share of a report card. `id` is 24 random bytes in base64url (192 bits).
+/// `totals` is the snapshot taken at share time; the public endpoint reads only this row.
+model ReportShare {
+  id        String    @id
+  tenantId  String
+  totals    Json
+  createdBy String
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  @@index([tenantId])
+  @@map("report_shares")
 }
 
 enum EntitlementPlan {

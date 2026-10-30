@@ -34,6 +34,9 @@ import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.
  * `AgentsHttpModule`/any controller-bearing module — this process never
  * serves HTTP traffic, only polls Temporal's task queue.
  */
+import { ReportCardService } from '../workspace/report-card.service';
+import { WeeklyReportJob } from '../workspace/weekly-report.job';
+
 @Module({
   imports: [
     AppConfigModule,
@@ -60,6 +63,9 @@ import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.
   providers: [
     // SEALs: signed audit checkpoints every second (docs/audit-chain.md).
     AuditCheckpointScheduler,
+    // Weekly AI report card, Sunday night (features track).
+    ReportCardService,
+    WeeklyReportJob,
     ApprovalActivitiesFactory,
     AuditRetentionActivitiesFactory,
     WebhookDeliveryActivitiesFactory,
