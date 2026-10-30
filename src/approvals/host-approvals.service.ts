@@ -1,5 +1,7 @@
 import {
   ConflictException,
+  ForbiddenException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -14,6 +16,10 @@ export type HostDecision = 'approve_once' | 'approve_8h' | 'deny';
 
 /** How long a device approval waits for a person. */
 export const HOST_APPROVAL_TTL_MS = 10 * 60 * 1000;
+
+/** A host that opens more approvals than this in the window is refused (a looping tool, or a flood). */
+export const HOST_APPROVALS_PER_WINDOW = 20;
+export const HOST_APPROVAL_WINDOW_MS = 10 * 60 * 1000;
 
 export interface OpenHostApprovalInput {
   hostId: string;
@@ -51,6 +57,27 @@ export class HostApprovalsService {
     input: OpenHostApprovalInput,
     now: Date = new Date(),
   ) {
+    // The same host asking again for the same thing while it is still pending is the same
+    // question: reuse it (no second prompt, no second push, no second audit event).
+    const existing = await client.hostApproval.findFirst({
+      where: {
+        hostId: input.hostId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        resource: input.resource,
+        status: 'PENDING',
+        expiresAt: { gt: now },
+      },
+    });
+    if (existing) return existing;
+    const recent = await client.hostApproval.count({
+      where: {
+        hostId: input.hostId,
+        createdAt: { gt: new Date(now.getTime() - HOST_APPROVAL_WINDOW_MS) },
+      },
+    });
+    if (recent >= HOST_APPROVALS_PER_WINDOW)
+      throw new HttpException('too many approvals opened by this device', 429);
     const row = await client.hostApproval.create({
       data: {
         hostId: input.hostId,
@@ -77,9 +104,30 @@ export class HostApprovalsService {
       title: 'WARDEN',
       body: `${input.toolName} is waiting for your decision`,
       url: '/approvals',
-      tag: `approval-${row.id}`,
+      // One tag per device: a burst of requests collapses into one notification.
+      tag: `approval-host-${input.hostId}`,
     });
     return row;
+  }
+
+  /**
+   * The secrets vault asks "may this program use this secret?". It is always a console decision
+   * (high risk), so a WARDEN prompt on the device only points at the console.
+   */
+  openSecretUse(
+    client: TenantPrismaClient,
+    tenantId: string,
+    input: { hostId: string; program: string; secretName: string },
+  ) {
+    return this.open(client, tenantId, {
+      hostId: input.hostId,
+      toolId: 'host.vault',
+      actionId: 'secret.use',
+      resource: input.secretName.slice(0, 512),
+      summary: `${input.program.slice(0, 80)} wants to use a secret`,
+      highRisk: true,
+      toolName: input.program.slice(0, 40),
+    });
   }
 
   listPending(
@@ -115,6 +163,10 @@ export class HostApprovalsService {
     input: DecideHostApprovalInput,
     now: Date = new Date(),
   ) {
+    // 8 hours is a standing permission: it is given in the console, in a browser session, never
+    // from a prompt on the device (a process on the device could answer that prompt).
+    if (input.via === 'device' && input.decision === 'approve_8h')
+      throw new ForbiddenException('eight_hours_in_console');
     const row = await this.get(client, input.approvalId, input.hostId);
     const result = await client.$transaction(async (tx) => {
       const won = await tx.hostApproval.updateMany({

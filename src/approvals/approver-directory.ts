@@ -1,3 +1,5 @@
+import { Injectable } from '@nestjs/common';
+import { ControlPrismaService } from '../database/control-prisma.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 
 /**
@@ -35,4 +37,57 @@ export async function canApprove(
     select: { id: true },
   });
   return hit !== null;
+}
+
+/**
+ * Who may approve in a workspace, read from the current state each time (never from role
+ * bindings that were synced at the person's last sign-in, which go stale when an approver is
+ * removed). When the identity track's `memberships` table exists it is authoritative: an ACTIVE
+ * membership of this tenant whose role or extra roles include an approver role. Only installs
+ * without that table fall back to the tenant's role bindings.
+ */
+@Injectable()
+export class ApproverDirectory {
+  private hasMemberships: boolean | null = null;
+
+  constructor(private readonly control: ControlPrismaService) {}
+
+  private async memberships(): Promise<boolean> {
+    if (this.hasMemberships) return true;
+    const r = await this.control.$queryRaw<
+      { t: string | null }[]
+    >`SELECT to_regclass('public.memberships')::text AS t`;
+    this.hasMemberships = r[0]?.t != null;
+    return this.hasMemberships;
+  }
+
+  async listSubjects(
+    tenantId: string,
+    tenantClient: Pick<TenantPrismaClient, 'roleBinding'>,
+  ): Promise<string[]> {
+    if (!(await this.memberships())) return listApproverSubjects(tenantClient);
+    const roles = [...APPROVER_ROLES];
+    const rows = await this.control.$queryRaw<{ subject: string }[]>`
+      SELECT DISTINCT "subject" FROM "memberships"
+      WHERE "tenantId" = ${tenantId} AND "status"::text = 'ACTIVE'
+        AND ("role"::text = ANY(${roles}) OR "extraRoles"::text[] && ${roles})`;
+    return rows.map((r) => r.subject);
+  }
+
+  /** Fail closed: no subject, or any lookup failure, is "no". */
+  async canApprove(
+    tenantId: string,
+    tenantClient: Pick<TenantPrismaClient, 'roleBinding'>,
+    subject: string | null | undefined,
+  ): Promise<boolean> {
+    if (!subject) return false;
+    try {
+      if (!(await this.memberships())) return canApprove(tenantClient, subject);
+      return (await this.listSubjects(tenantId, tenantClient)).includes(
+        subject,
+      );
+    } catch {
+      return false;
+    }
+  }
 }

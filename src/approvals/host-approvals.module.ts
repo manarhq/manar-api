@@ -14,6 +14,6 @@ import { HostApprovalsService } from './host-approvals.service';
     HostApprovalsService,
     { provide: HOST_APPROVAL_OPENER, useClass: HostApprovalOpenerService },
   ],
-  exports: [HostApprovalsService, HOST_APPROVAL_OPENER],
+  exports: [HostApprovalsService, HOST_APPROVAL_OPENER, PushModule],
 })
 export class HostApprovalsModule {}

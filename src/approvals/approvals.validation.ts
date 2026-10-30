@@ -31,3 +31,9 @@ export const DecideHostApprovalSchema = z.object({
   decision: z.enum(['approve_once', 'approve_8h', 'deny']),
   makeRule: z.boolean().optional(),
 });
+
+/** `POST /host/v1/approvals/vault`: which program asks for which secret (names only). */
+export const VaultRequestSchema = z.object({
+  program: z.string().min(1).max(200),
+  secret: z.string().min(1).max(512),
+});

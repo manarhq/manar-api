@@ -12,8 +12,11 @@ import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { HostAuthGuard } from '../host-mtls/host-auth.guard';
 import { CurrentHost, type HostContext } from '../host-mtls/host-context';
-import { canApprove } from './approver-directory';
-import { DecideHostApprovalSchema } from './approvals.validation';
+import { ApproverDirectory } from './approver-directory';
+import {
+  DecideHostApprovalSchema,
+  VaultRequestSchema,
+} from './approvals.validation';
 import { HostApprovalsService } from './host-approvals.service';
 
 /**
@@ -29,6 +32,7 @@ export class HostApprovalsController {
   constructor(
     private readonly approvals: HostApprovalsService,
     private readonly tenants: TenantDatabaseManager,
+    private readonly approvers: ApproverDirectory,
   ) {}
 
   @Get('pending')
@@ -37,7 +41,7 @@ export class HostApprovalsController {
       return { items: [], ownerMayApprove: false };
     const client = await this.tenants.getClient(host.tenantId);
     const [ownerMayApprove, rows] = await Promise.all([
-      canApprove(client, host.ownerSubject),
+      this.approvers.canApprove(host.tenantId, client, host.ownerSubject),
       this.approvals.listPending(client, host.hostId),
     ]);
     return {
@@ -55,6 +59,21 @@ export class HostApprovalsController {
         createdAt: r.createdAt,
       })),
     };
+  }
+
+  /** The secrets vault: a program asks to use a secret. Decided in the console only. */
+  @Post('vault')
+  async vault(@CurrentHost() host: HostContext, @Body() body: unknown) {
+    const input = parseBodyOrThrow(VaultRequestSchema, body);
+    if (host.status !== 'APPROVED')
+      throw new ForbiddenException('device_not_approved');
+    const client = await this.tenants.getClient(host.tenantId);
+    const row = await this.approvals.openSecretUse(client, host.tenantId, {
+      hostId: host.hostId,
+      program: input.program,
+      secretName: input.secret,
+    });
+    return { id: row.id, expiresAt: row.expiresAt };
   }
 
   /** The hook polls this for the answer. */
@@ -81,7 +100,13 @@ export class HostApprovalsController {
       throw new ForbiddenException('device_not_allowed_to_decide');
     }
     const client = await this.tenants.getClient(host.tenantId);
-    if (!(await canApprove(client, host.ownerSubject))) {
+    if (
+      !(await this.approvers.canApprove(
+        host.tenantId,
+        client,
+        host.ownerSubject,
+      ))
+    ) {
       throw new ForbiddenException('owner_is_not_an_approver');
     }
     const row = await this.approvals.get(client, id, host.hostId);

@@ -2,6 +2,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { HostApprovalsController } from './host-approvals.controller';
 import { HostApprovalsService } from './host-approvals.service';
+import { buildRuleDraft } from './rule-draft';
 import type { HostContext } from '../host-mtls/host-context';
 
 type Row = {
@@ -18,7 +19,11 @@ type Row = {
   createdAt: Date;
 };
 
-function world(opts: { approverSubjects: string[]; highRisk?: boolean }) {
+function world(opts: {
+  approverSubjects: string[];
+  highRisk?: boolean;
+  recent?: number;
+}) {
   const rows: Row[] = [
     {
       id: 'ap1',
@@ -62,6 +67,18 @@ function world(opts: { approverSubjects: string[]; highRisk?: boolean }) {
       },
       findUnique: ({ where }: { where: { id: string } }) =>
         Promise.resolve(rows.find((r) => r.id === where.id) ?? null),
+      findFirst: ({ where }: { where: Partial<Row> }) =>
+        Promise.resolve(
+          rows.find(
+            (r) =>
+              r.status === 'PENDING' &&
+              r.hostId === where.hostId &&
+              r.toolId === where.toolId &&
+              r.actionId === where.actionId &&
+              r.resource === where.resource,
+          ) ?? null,
+        ),
+      count: () => Promise.resolve(opts.recent ?? 0),
       findMany: ({ where }: { where: { hostId?: string } }) =>
         Promise.resolve(
           rows.filter(
@@ -95,9 +112,17 @@ function world(opts: { approverSubjects: string[]; highRisk?: boolean }) {
   const audit = { recordSafely: vi.fn().mockResolvedValue(undefined) };
   const push = { notifyApprovers: vi.fn().mockResolvedValue(0) };
   const service = new HostApprovalsService(audit as never, push as never);
-  const controller = new HostApprovalsController(service, {
-    getClient: () => Promise.resolve(client),
-  } as never);
+  const approvers = {
+    canApprove: (_t: string, _c: unknown, subject: string | null) =>
+      Promise.resolve(
+        subject !== null && opts.approverSubjects.includes(subject),
+      ),
+  };
+  const controller = new HostApprovalsController(
+    service,
+    { getClient: () => Promise.resolve(client) } as never,
+    approvers as never,
+  );
   return { controller, service, rows, grants, audit, push, client };
 }
 
@@ -109,6 +134,8 @@ const host = (over: Partial<HostContext> = {}): HostContext => ({
   status: 'APPROVED',
   ...over,
 });
+
+const make8h = () => world({ approverSubjects: ['owner'] });
 
 describe('device decisions (spec 4.6)', () => {
   it('lets the owner approve once and records who and where', async () => {
@@ -124,9 +151,23 @@ describe('device decisions (spec 4.6)', () => {
     });
   });
 
-  it('approve_8h creates a grant scoped to this host, tool, action and resource', async () => {
+  it('refuses approve_8h from the device: 8 hours is a console decision', async () => {
+    const w = make8h();
+    await expect(
+      w.controller.decide(host(), 'ap1', { decision: 'approve_8h' }),
+    ).rejects.toThrow('eight_hours_in_console');
+    expect(w.grants).toHaveLength(0);
+    expect(w.rows[0]!.status).toBe('PENDING');
+  });
+
+  it('approve_8h from the console creates a grant scoped to this host, tool, action and resource', async () => {
     const w = world({ approverSubjects: ['owner'] });
-    await w.controller.decide(host(), 'ap1', { decision: 'approve_8h' });
+    await w.service.decide(w.client as never, 't1', {
+      approvalId: 'ap1',
+      subject: 'owner',
+      decision: 'approve_8h',
+      via: 'console',
+    });
     expect(w.grants[0]).toMatchObject({
       hostId: 'h1',
       toolId: 'host.cursor',
@@ -243,5 +284,84 @@ describe('device decisions (spec 4.6)', () => {
       't1',
       expect.objectContaining({ kind: 'approval', url: '/approvals' }),
     );
+  });
+
+  it('reuses a pending approval for the same host, tool, action and resource', async () => {
+    const w = world({ approverSubjects: ['owner'] });
+    const again = await w.service.open(w.client as never, 't1', {
+      hostId: 'h1',
+      toolId: 'host.cursor',
+      actionId: 'file.read',
+      resource: '/u/.aws/credentials',
+      summary: 's',
+      highRisk: false,
+      toolName: 'Cursor',
+    });
+    expect(again.id).toBe('ap1');
+    expect(w.rows).toHaveLength(1);
+    expect(w.push.notifyApprovers).not.toHaveBeenCalled();
+  });
+
+  it('refuses to open more approvals than the per-device limit', async () => {
+    const w = world({ approverSubjects: ['owner'], recent: 20 });
+    await expect(
+      w.service.open(w.client as never, 't1', {
+        hostId: 'h1',
+        toolId: 'host.cursor',
+        actionId: 'shell',
+        resource: 'x',
+        summary: 's',
+        highRisk: false,
+        toolName: 'Cursor',
+      }),
+    ).rejects.toMatchObject({ status: 429 });
+  });
+
+  it('pushes with one stable tag per device', async () => {
+    const w = world({ approverSubjects: ['owner'] });
+    await w.service.open(w.client as never, 't1', {
+      hostId: 'h1',
+      toolId: 'host.cursor',
+      actionId: 'shell',
+      resource: 'x',
+      summary: 's',
+      highRisk: false,
+      toolName: 'Cursor',
+    });
+    expect(w.push.notifyApprovers).toHaveBeenCalledWith(
+      w.client,
+      't1',
+      expect.objectContaining({ tag: 'approval-host-h1' }),
+    );
+  });
+
+  it('a vault request is high risk, so the device can never decide it', async () => {
+    const w = world({ approverSubjects: ['owner'] });
+    const r = await w.controller.vault(host(), {
+      program: 'node',
+      secret: 'AWS_KEY',
+    });
+    const row = w.rows.find((x) => x.id === r.id)!;
+    expect(row).toMatchObject({
+      toolId: 'host.vault',
+      actionId: 'secret.use',
+      resource: 'AWS_KEY',
+      highRisk: true,
+    });
+    await expect(
+      w.controller.decide(host(), r.id, { decision: 'approve_once' }),
+    ).rejects.toThrow('high_risk_open_in_console');
+  });
+
+  it('make-rule never widens: no draft for a wildcard or prefix resource', () => {
+    expect(
+      buildRuleDraft({ toolId: 't', actionId: 'a', resource: '*' }),
+    ).toBeNull();
+    expect(
+      buildRuleDraft({ toolId: 't', actionId: 'a', resource: 'repo/x:*' }),
+    ).toBeNull();
+    expect(
+      buildRuleDraft({ toolId: 't', actionId: 'a', resource: 'repo/x' }),
+    ).not.toBeNull();
   });
 });

@@ -17,12 +17,13 @@ import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { PushService } from './push.service';
+import { isAllowedPushEndpoint } from './push-endpoint';
 
 const SubscribeSchema = z.object({
   endpoint: z
     .url()
     .max(2048)
-    .refine((u) => u.startsWith('https://'), 'https only'),
+    .refine(isAllowedPushEndpoint, 'not a browser push service'),
   keys: z.object({
     p256dh: z.string().min(1).max(256),
     auth: z.string().min(1).max(64),

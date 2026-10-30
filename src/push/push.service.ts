@@ -4,7 +4,8 @@ import webpush from 'web-push';
 import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
-import { listApproverSubjects } from '../approvals/approver-directory';
+import { ApproverDirectory } from '../approvals/approver-directory';
+import { isAllowedPushEndpoint } from './push-endpoint';
 
 /**
  * What a push carries. Never a resource path, a prompt or a secret: the push service sees only the
@@ -41,6 +42,7 @@ export class PushService {
 
   constructor(
     private readonly control: ControlPrismaService,
+    private readonly approvers: ApproverDirectory,
     config: ConfigService<AppConfig, true>,
     @Optional() @Inject(PUSH_SENDER) sender?: PushSender,
   ) {
@@ -66,6 +68,8 @@ export class PushService {
     sub: PushSubscriptionInput,
   ): Promise<void> {
     if (!this.enabled) throw new Error('push is not configured');
+    if (!isAllowedPushEndpoint(sub.endpoint))
+      throw new Error('not a browser push service');
     await this.control.pushSubscription.upsert({
       where: { endpoint: sub.endpoint },
       // The endpoint is a capability URL; re-subscribing from the same browser moves it to the
@@ -89,7 +93,10 @@ export class PushService {
   ): Promise<number> {
     if (!this.sender) return 0;
     try {
-      const subjects = await listApproverSubjects(tenantClient);
+      const subjects = await this.approvers.listSubjects(
+        tenantId,
+        tenantClient,
+      );
       if (subjects.length === 0) return 0;
       const subs = await this.control.pushSubscription.findMany({
         where: { tenantId, subject: { in: subjects } },
@@ -99,6 +106,13 @@ export class PushService {
       await Promise.all(
         subs.map(async (s) => {
           try {
+            // Re-checked on every send: a row written before the allow-list is never contacted.
+            if (!isAllowedPushEndpoint(s.endpoint)) {
+              await this.control.pushSubscription.deleteMany({
+                where: { id: s.id },
+              });
+              return;
+            }
             await this.sender!(
               {
                 endpoint: s.endpoint,

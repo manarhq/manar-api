@@ -13,7 +13,10 @@ export function buildRuleDraft(input: {
   PolicyRule,
   'riskWeight' | 'riskFloor' | 'resourceClassification'
 > | null {
+  // A trailing `*` is a prefix match in the policy engine and `*` is everything: a draft built
+  // from such a resource would widen what was approved, so there is no draft.
   if (input.resource.length === 0 || input.resource.length > 2048) return null;
+  if (input.resource.endsWith('*')) return null;
   return {
     name: `Allow ${input.toolId} ${input.actionId}`.slice(0, 200),
     toolId: input.toolId,

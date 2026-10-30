@@ -35,7 +35,12 @@ function setup(subs: Sub[], approverSubjects: string[], sender: PushSender) {
     },
   };
   const config = { get: () => 'x' };
-  const service = new PushService(control as never, config as never, sender);
+  const service = new PushService(
+    control as never,
+    { listSubjects: () => Promise.resolve(approverSubjects) } as never,
+    config as never,
+    sender,
+  );
   const tenantClient = {
     roleBinding: {
       findMany: () =>
@@ -49,7 +54,7 @@ function setup(subs: Sub[], approverSubjects: string[], sender: PushSender) {
 
 const sub = (id: string, subject: string, tenantId = 't1'): Sub => ({
   id,
-  endpoint: `https://push.example/${id}`,
+  endpoint: `https://fcm.googleapis.com/fcm/send/${id}`,
   p256dh: 'k',
   auth: 'a',
   tenantId,
@@ -77,7 +82,9 @@ describe('PushService', () => {
     );
     expect(await service.notifyApprovers(tenantClient, 't1', payload)).toBe(1);
     expect(sender).toHaveBeenCalledTimes(1);
-    expect(sender.mock.calls[0]![0].endpoint).toBe('https://push.example/a');
+    expect(sender.mock.calls[0]![0].endpoint).toBe(
+      'https://fcm.googleapis.com/fcm/send/a',
+    );
   });
 
   it('prunes subscriptions the push service reports gone (404, 410), keeps others', async () => {
@@ -107,8 +114,39 @@ describe('PushService', () => {
 
   it('sends nothing and never throws when push is not configured', async () => {
     const control = {} as never;
-    const service = new PushService(control, { get: () => undefined } as never);
+    const service = new PushService(
+      control,
+      {} as never,
+      { get: () => undefined } as never,
+    );
     expect(service.enabled).toBe(false);
     expect(await service.notifyApprovers({} as never, 't1', payload)).toBe(0);
+  });
+
+  it('never contacts a stored endpoint outside the push services, and deletes the row', async () => {
+    const sender = vi.fn<PushSender>().mockResolvedValue({});
+    const bad: Sub = {
+      ...sub('x', 'u'),
+      endpoint: 'http://169.254.169.254/latest',
+    };
+    const { service, tenantClient, deleted } = setup(
+      [bad, sub('ok', 'u')],
+      ['u'],
+      sender,
+    );
+    expect(await service.notifyApprovers(tenantClient, 't1', payload)).toBe(1);
+    expect(sender).toHaveBeenCalledTimes(1);
+    expect(deleted).toContain('x');
+  });
+
+  it('refuses to subscribe an endpoint that is not a push service', async () => {
+    const { service } = setup([], [], vi.fn<PushSender>());
+    await expect(
+      service.subscribe('u', 't1', {
+        endpoint: 'https://127.0.0.1/x',
+        p256dh: 'k',
+        auth: 'a',
+      }),
+    ).rejects.toThrow('not a browser push service');
   });
 });
