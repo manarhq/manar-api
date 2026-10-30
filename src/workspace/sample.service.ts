@@ -7,7 +7,7 @@ import {
   WORKSPACE_PROVISIONING,
   type SampleDirectory,
   type WorkspaceProvisioning,
-} from './workspace-provisioning.port';
+} from '../workspaces/workspace-ports';
 
 export interface SampleResult {
   tenantId: string;

@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/require-await -- fakes */
 import { describe, expect, it, vi } from 'vitest';
-import { ServiceUnavailableException } from '@nestjs/common';
 import type { AuditService } from '../audit/audit.service';
 import type { RecordAuditEventInput } from '../audit/audit.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
@@ -11,7 +10,6 @@ import {
   generateSampleData,
 } from './sample-data.generator';
 import { SampleService } from './sample.service';
-import { stubProvisioning } from './workspace-provisioning.port';
 
 /** A tenant client that records every create and hands back ids. */
 function recordingClient() {
@@ -146,15 +144,5 @@ describe('SampleService', () => {
     expect(s2.created).not.toHaveBeenCalled();
     await s2.svc.ensure('sub-1');
     expect(s2.a.calls).toHaveLength(1); // already has hosts after the first fill
-  });
-
-  it('answers 503 while the identity track is not bound', async () => {
-    await expect(
-      stubProvisioning.createWorkspace({
-        ownerSubject: 'x',
-        kind: 'SAMPLE',
-        displayName: 'Sample',
-      }),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 });
