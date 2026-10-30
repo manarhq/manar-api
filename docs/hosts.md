@@ -245,3 +245,15 @@ Every change is recorded in the same transaction as the change: `host.registered
 
 The console screens (F2c), the host mTLS listener that checks `HostCertificate.revokedAt` on each
 connection, OCSP, ECC EKs, and the manar-edge side of both enrolment paths.
+
+## Secrets (watcher and vault)
+
+Device side (mTLS, approved hosts only): `POST /host/v1/events` (batch of at most 100; types
+`secret.touched`, `secret.vault.*`, `secret.watch.available|unavailable`; paths are masked again on the
+server), `GET /host/v1/secrets/instructions`, `POST /host/v1/secrets/vault/report`,
+`POST /host/v1/secrets/access`, `GET /host/v1/secrets/access/:id`.
+Console: `GET /secrets/timeline`, `GET /secrets/overview`, `POST /secrets/vault/:hostId` and `/restore`
+(body `{ kind: 'aws'|'ssh', ref }`), `GET /secrets/access`, `POST /secrets/access/:id/decide`.
+`SecretAlertBus` (src/secrets/secret-alert-bus.ts) emits one alert per `secret.touched` for the
+approvals/notifications track. Device feature flags read from `/host/v1/config`: `secrets.block`
+(Linux deny, default off) and `secrets.vault.ssh` (ssh vault, default off).
