@@ -1,0 +1,94 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument -- fakes */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MembershipsMigrateCommand } from './memberships.command';
+
+const ISSUER = 'https://auth.test/realms/acme';
+
+function make(members: Record<string, string[]>, existing: string[] = []) {
+  const created: any[] = [];
+  const control = {
+    tenant: {
+      findMany: vi.fn().mockResolvedValue([
+        {
+          id: 't1',
+          slug: 'acme',
+          keycloakRealm: 'acme',
+          keycloakIssuerUrl: `${ISSUER}/`,
+        },
+      ]),
+    },
+    membership: {
+      findUnique: vi.fn(({ where }: any) =>
+        Promise.resolve(
+          existing.includes(where.issuer_subject_tenantId.subject)
+            ? { id: 'x' }
+            : null,
+        ),
+      ),
+      create: vi.fn(({ data }: any) => {
+        created.push(data);
+        return Promise.resolve(data);
+      }),
+    },
+  };
+  const keycloak = {
+    listRealmRoleMemberIds: vi.fn((_realm: string, role: string) => {
+      if (members.__fail) return Promise.reject(new Error('keycloak down'));
+      return Promise.resolve(
+        Object.entries(members)
+          .filter(([, roles]) => roles.includes(role))
+          .map(([sub]) => sub),
+      );
+    }),
+  };
+  return {
+    cmd: new MembershipsMigrateCommand(control as never, keycloak as never),
+    created,
+    control,
+    keycloak,
+  };
+}
+
+afterEach(() => {
+  process.exitCode = 0;
+});
+
+describe('memberships:migrate-from-realms', () => {
+  it('reads the roles users hold in Keycloak now and keeps every role of a multi-role user', async () => {
+    const { cmd, created, keycloak } = make({
+      alice: ['AUDITOR', 'SECURITY_ADMIN'],
+      bob: ['READ_ONLY'],
+    });
+    await cmd.run();
+    expect(keycloak.listRealmRoleMemberIds).toHaveBeenCalledWith(
+      'acme',
+      'AUDITOR',
+    );
+    const alice = created.find((c) => c.subject === 'alice');
+    expect(alice).toMatchObject({
+      issuer: ISSUER,
+      tenantId: 't1',
+      role: 'SECURITY_ADMIN',
+      extraRoles: ['AUDITOR'],
+      status: 'ACTIVE',
+    });
+    expect(created.find((c) => c.subject === 'bob')).toMatchObject({
+      role: 'READ_ONLY',
+      extraRoles: [],
+    });
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('never overwrites an existing Membership (idempotent re-run)', async () => {
+    const { cmd, created } = make({ alice: ['AUDITOR'] }, ['alice']);
+    await cmd.run();
+    expect(created).toEqual([]);
+  });
+
+  it('fails the run when Keycloak cannot be read, with no fallback to old data', async () => {
+    const { cmd, created } = make({ __fail: [] });
+    await cmd.run();
+    expect(created).toEqual([]);
+    expect(process.exitCode).toBe(1);
+  });
+});

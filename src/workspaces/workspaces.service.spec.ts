@@ -17,8 +17,10 @@ import {
 const id = (
   o: Partial<VerifiedIdentity> & { subject: string },
 ): VerifiedIdentity => ({
-  issuer: 'i',
+  issuer: 'iss-a',
   wids: [],
+  // A work-account identity comes from a Microsoft sign-in unless a test says otherwise.
+  idp: o.tid ? 'microsoft' : undefined,
   ...o,
 });
 
@@ -35,6 +37,7 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
             (t) =>
               (!where.kind || t.kind === where.kind) &&
               (!where.ownerSubject || t.ownerSubject === where.ownerSubject) &&
+              (!where.ownerIssuer || t.ownerIssuer === where.ownerIssuer) &&
               (!where.entraTenantId || t.entraTenantId === where.entraTenantId),
           ) ?? null,
         ),
@@ -44,8 +47,9 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
         Promise.resolve(
           memberships.find(
             (m) =>
-              m.subject === where.subject_tenantId.subject &&
-              m.tenantId === where.subject_tenantId.tenantId,
+              m.issuer === where.issuer_subject_tenantId.issuer &&
+              m.subject === where.issuer_subject_tenantId.subject &&
+              m.tenantId === where.issuer_subject_tenantId.tenantId,
           ) ?? null,
         ),
       create: ({ data }: any) => {
@@ -63,6 +67,7 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
           memberships
             .filter(
               (m) =>
+                m.issuer === where.issuer &&
                 m.subject === where.subject &&
                 where.status.in.includes(m.status),
             )
@@ -89,11 +94,13 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
       kind: input.kind,
       status: 'ACTIVE',
       ownerSubject: input.kind === 'PERSONAL' ? input.ownerSubject : null,
+      ownerIssuer: input.kind === 'PERSONAL' ? input.ownerIssuer : null,
       entraTenantId: input.entraTenantId ?? null,
     };
     tenants.push(tenant);
     memberships.push({
       id: `mo${tenants.length}`,
+      issuer: input.ownerIssuer,
       subject: input.ownerSubject,
       tenantId: tenant.id,
       status: 'ACTIVE',
@@ -212,9 +219,9 @@ describe('company workspaces (spec 7a)', () => {
     );
     expect(m.status).toBe('PENDING');
     // Listed workspaces show it as pending with no roles.
-    const company = (await svc.list('colleague')).find(
-      (w) => w.tenantId === tenantId,
-    );
+    const company = (
+      await svc.list({ issuer: 'iss-a', subject: 'colleague' })
+    ).find((w) => w.tenantId === tenantId);
     expect(company).toMatchObject({ membershipStatus: 'PENDING', roles: [] });
   });
 
@@ -268,5 +275,60 @@ describe('company workspaces (spec 7a)', () => {
     const { svc } = world();
     await svc.startCompanyTrial(admin, 'Acme');
     await expect(svc.requestToJoin(admin)).rejects.toThrow(ConflictException);
+  });
+});
+
+describe('issuer scoping and Microsoft-session requirement', () => {
+  it('the same sub from another issuer has its own personal workspace', async () => {
+    const { svc } = world();
+    const a = await svc.ensurePersonal(
+      id({ subject: 'same-sub', issuer: 'iss-a' }),
+    );
+    const b = await svc.ensurePersonal(
+      id({ subject: 'same-sub', issuer: 'iss-b' }),
+    );
+    expect(a.tenantId).not.toBe(b.tenantId);
+  });
+
+  it('a user of another issuer cannot see or request the company by guessing its tid', async () => {
+    const { svc, memberships } = world();
+    const { tenantId } = await svc.startCompanyTrial(
+      id({ subject: 'admin', tid: 'tid-acme', wids: [GLOBAL_ADMIN_WID] }),
+      'Acme',
+    );
+    const other = id({ subject: 'admin', issuer: 'iss-b', tid: 'tid-acme' });
+    expect(await svc.list({ issuer: 'iss-b', subject: 'admin' })).toEqual([]);
+    await svc.requestToJoin(other);
+    const mine = memberships.filter(
+      (m) => m.tenantId === tenantId && m.subject === 'admin',
+    );
+    expect(mine.map((m) => [m.issuer, m.status]).sort()).toEqual([
+      ['iss-a', 'ACTIVE'],
+      ['iss-b', 'PENDING'],
+    ]);
+  });
+
+  it('a stale tid/wids on a GitHub or email-link session decides nothing', async () => {
+    const { svc } = world();
+    const ex = id({
+      subject: 'ex-admin',
+      tid: 'tid-acme',
+      wids: [GLOBAL_ADMIN_WID],
+      idp: 'github',
+    });
+    await expect(svc.startCompanyTrial(ex, 'Acme')).rejects.toThrow(
+      'work_account_required',
+    );
+    await expect(svc.companyForMe(ex)).resolves.toEqual({
+      company: null,
+      canStartTrial: false,
+    });
+    await svc.startCompanyTrial(
+      id({ subject: 'admin', tid: 'tid-acme', wids: [GLOBAL_ADMIN_WID] }),
+      'Acme',
+    );
+    await expect(svc.requestToJoin(ex)).rejects.toThrow(ForbiddenException);
+    const noIdp = id({ subject: 'm', tid: 'tid-acme', idp: undefined });
+    await expect(svc.requestToJoin(noIdp)).rejects.toThrow(ForbiddenException);
   });
 });

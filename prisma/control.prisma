@@ -25,6 +25,8 @@ enum TenantStatus {
   /// Waiting in the provisioning queue (capacity headroom was low at sign-up). Treated like
   /// PROVISIONING everywhere: not ACTIVE, so every guard refuses it.
   QUEUED
+  /// Gave up after repeated provisioning failures; `workspaces:retry` puts it back in the queue.
+  FAILED
   PROVISIONING
   ACTIVE
   SUSPENDED
@@ -107,6 +109,11 @@ model Tenant {
   kind TenantKind @default(COMPANY)
   /// PERSONAL: the Keycloak `sub` that owns it (one per subject, partial unique index in the migration).
   ownerSubject String?
+  /// The issuer of `ownerSubject`: a `sub` is only unique within one issuer.
+  ownerIssuer String?
+  /// Provisioning retries: failed attempts so far, and when the queue may try again.
+  provisionAttempts Int       @default(0)
+  nextProvisionAt   DateTime?
   /// COMPANY: the Entra tenant id (`tid`) it was created for (one per tid, partial unique index).
   entraTenantId String?
 
@@ -332,6 +339,9 @@ model AuditSealMark {
 /// methods with the same email are two separate subjects with separate memberships.
 model Membership {
   id       String @id @default(uuid())
+  /// Issuer of the token `subject` came from. A `sub` is only unique within an issuer, so every
+  /// lookup filters on both.
+  issuer   String
   subject  String
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -349,8 +359,8 @@ model Membership {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([subject, tenantId])
+  @@unique([issuer, subject, tenantId])
   @@index([tenantId, status])
-  @@index([subject])
+  @@index([issuer, subject])
   @@map("memberships")
 }

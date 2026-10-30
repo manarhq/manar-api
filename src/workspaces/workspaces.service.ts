@@ -47,13 +47,19 @@ export interface JoinRequestSummary {
 
 /** A real organisation `tid`: present and not the consumer tenant. */
 export function organisationTid(identity: VerifiedIdentity): string | null {
+  // The claims must come from a Microsoft sign-in in THIS session: a GitHub or email-link session
+  // (or a user who unlinked Microsoft) carries no tid, and a stale one is never trusted.
+  if (identity.idp !== 'microsoft') return null;
   const tid = identity.tid?.toLowerCase();
   return tid && tid !== CONSUMER_TENANT_ID ? tid : null;
 }
 
 export function isEntraAdmin(identity: VerifiedIdentity): boolean {
-  return identity.wids.some(
-    (w) => w === GLOBAL_ADMIN_WID || w === PRIVILEGED_ROLE_ADMIN_WID,
+  return (
+    identity.idp === 'microsoft' &&
+    identity.wids.some(
+      (w) => w === GLOBAL_ADMIN_WID || w === PRIVILEGED_ROLE_ADMIN_WID,
+    )
   );
 }
 
@@ -71,10 +77,17 @@ export class WorkspacesService {
     private readonly config: ConfigService<AppConfig, true>,
   ) {}
 
-  async list(subject: string): Promise<WorkspaceSummary[]> {
+  async list(who: {
+    issuer: string;
+    subject: string;
+  }): Promise<WorkspaceSummary[]> {
     const rows = await failClosed('control-db', () =>
       this.control.membership.findMany({
-        where: { subject, status: { in: ['ACTIVE', 'PENDING'] } },
+        where: {
+          issuer: who.issuer,
+          subject: who.subject,
+          status: { in: ['ACTIVE', 'PENDING'] },
+        },
         include: { tenant: true },
         orderBy: { createdAt: 'asc' },
       }),
@@ -104,7 +117,11 @@ export class WorkspacesService {
     }
     const existing = await failClosed('control-db', () =>
       this.control.tenant.findFirst({
-        where: { kind: 'PERSONAL', ownerSubject: identity.subject },
+        where: {
+          kind: 'PERSONAL',
+          ownerIssuer: identity.issuer,
+          ownerSubject: identity.subject,
+        },
       }),
     );
     if (existing) {
@@ -114,6 +131,7 @@ export class WorkspacesService {
       };
     }
     return this.provisioning.createWorkspace({
+      ownerIssuer: identity.issuer,
       ownerSubject: identity.subject,
       kind: 'PERSONAL',
       displayName: 'Personal workspace',
@@ -124,12 +142,10 @@ export class WorkspacesService {
 
   /** The workspace the caller picked, if they hold an ACTIVE Membership for an ACTIVE tenant. */
   async assertSwitchable(
-    subject: string,
+    who: { issuer: string; subject: string },
     tenantId: string,
   ): Promise<WorkspaceSummary> {
-    const found = (await this.list(subject)).find(
-      (w) => w.tenantId === tenantId,
-    );
+    const found = (await this.list(who)).find((w) => w.tenantId === tenantId);
     if (
       !found ||
       found.membershipStatus !== 'ACTIVE' ||
@@ -157,7 +173,11 @@ export class WorkspacesService {
     }
     const membership = await this.control.membership.findUnique({
       where: {
-        subject_tenantId: { subject: identity.subject, tenantId: tenant.id },
+        issuer_subject_tenantId: {
+          issuer: identity.issuer,
+          subject: identity.subject,
+          tenantId: tenant.id,
+        },
       },
     });
     return {
@@ -184,6 +204,7 @@ export class WorkspacesService {
     if (!isEntraAdmin(identity))
       throw new ForbiddenException('entra_admin_required');
     return this.provisioning.createWorkspace({
+      ownerIssuer: identity.issuer,
       ownerSubject: identity.subject,
       kind: 'COMPANY',
       displayName,
@@ -205,7 +226,11 @@ export class WorkspacesService {
     if (!tenant) throw new NotFoundException('no_company_workspace');
     const existing = await this.control.membership.findUnique({
       where: {
-        subject_tenantId: { subject: identity.subject, tenantId: tenant.id },
+        issuer_subject_tenantId: {
+          issuer: identity.issuer,
+          subject: identity.subject,
+          tenantId: tenant.id,
+        },
       },
     });
     if (existing?.status === 'ACTIVE')
@@ -225,6 +250,7 @@ export class WorkspacesService {
     }
     await this.control.membership.create({
       data: {
+        issuer: identity.issuer,
         subject: identity.subject,
         tenantId: tenant.id,
         role: DEFAULT_MEMBER_ROLE,

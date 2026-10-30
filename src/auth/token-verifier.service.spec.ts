@@ -6,7 +6,7 @@ import type { AppConfig } from '../config/env.validation';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { JwksCacheService } from './jwks-cache.service';
 import { KnownIssuerRegistry } from './known-issuer-registry.service';
-import { TokenVerifierService } from './token-verifier.service';
+import { parseWids, TokenVerifierService } from './token-verifier.service';
 
 /**
  * Token checks. Tokens are fabricated with `jose` and a fake JWKS resolver (a real Keycloak will
@@ -175,5 +175,41 @@ describe('TokenVerifierService', () => {
 
   it('tryVerify returns null instead of throwing', async () => {
     await expect(make().tryVerify('not-a-jwt')).resolves.toBeNull();
+  });
+});
+
+describe('Microsoft session claims', () => {
+  it('exposes idp from the user session and parses wids sent as a session-note string', async () => {
+    const id = await make().verify(
+      await sign({
+        ...claims(),
+        idp: 'microsoft',
+        wids: '[62e90394-69f5-4237-9190-012177145e10, e8611ab8-c189-46e8-94e1-60213ab1f814]',
+      }),
+    );
+    expect(id.idp).toBe('microsoft');
+    expect(id.wids).toEqual([
+      '62e90394-69f5-4237-9190-012177145e10',
+      'e8611ab8-c189-46e8-94e1-60213ab1f814',
+    ]);
+  });
+
+  it('a session without idp (email link) has none', async () => {
+    const c = claims();
+    delete c.idp;
+    expect((await make().verify(await sign(c))).idp).toBeUndefined();
+  });
+
+  it.each([
+    [
+      ['a', 'b'],
+      ['a', 'b'],
+    ],
+    ['a b', ['a', 'b']],
+    ['["a","b"]', ['a', 'b']],
+    [undefined, []],
+    [42, []],
+  ])('parseWids(%j)', (input, expected) => {
+    expect(parseWids(input)).toEqual(expected);
   });
 });

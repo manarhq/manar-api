@@ -51,11 +51,12 @@ export class MembershipService {
   constructor(private readonly control: ControlPrismaService) {}
 
   async resolveActive(input: {
+    issuer: string;
     subject: string;
     requestedTenantId?: string;
     boundTenantId?: string;
   }): Promise<ResolvedWorkspace> {
-    const { subject, requestedTenantId, boundTenantId } = input;
+    const { issuer, subject, requestedTenantId, boundTenantId } = input;
     // A legacy per-tenant realm only ever reaches its own tenant.
     if (
       boundTenantId &&
@@ -69,6 +70,7 @@ export class MembershipService {
     const rows = await failClosed('control-db', () =>
       this.control.membership.findMany({
         where: {
+          issuer,
           subject,
           status: 'ACTIVE',
           ...(wanted ? { tenantId: wanted } : {}),
@@ -92,16 +94,5 @@ export class MembershipService {
       membershipId: m.id,
       roles: rolesOf(m),
     };
-  }
-
-  /** Workspaces (any membership status but REMOVED) for the switcher and the setup screen. */
-  listForSubject(subject: string) {
-    return failClosed('control-db', () =>
-      this.control.membership.findMany({
-        where: { subject, status: { in: ['ACTIVE', 'PENDING'] } },
-        include: { tenant: true },
-        orderBy: { createdAt: 'asc' },
-      }),
-    );
   }
 }

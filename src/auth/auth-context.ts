@@ -11,6 +11,8 @@ import type { WorkspaceKind } from './membership.service';
  * param, or request body (Section 23 of the master prompt).
  */
 export interface AuthContext {
+  /** Issuer of the token the caller signed in with (a `sub` is only unique within an issuer). */
+  issuer: string;
   tenant: {
     id: string;
     slug: string;

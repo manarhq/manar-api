@@ -22,7 +22,10 @@ import {
   MembershipsGrantCommand,
   MembershipsMigrateCommand,
 } from './commands/memberships.command';
-import { WorkspacesDrainCommand } from './commands/workspaces-drain.command';
+import {
+  WorkspacesDrainCommand,
+  WorkspacesRetryCommand,
+} from './commands/workspaces-drain.command';
 import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { LicenseVerifyCommand } from './commands/license-verify.command';
 
@@ -81,6 +84,7 @@ import { LicenseVerifyCommand } from './commands/license-verify.command';
     MembershipsMigrateCommand,
     MembershipsGrantCommand,
     WorkspacesDrainCommand,
+    WorkspacesRetryCommand,
     WorkspaceProvisioningService,
   ],
 })

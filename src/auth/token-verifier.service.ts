@@ -30,6 +30,11 @@ export interface VerifiedIdentity {
   tid?: string;
   oid?: string;
   wids: string[];
+  /**
+   * How the user signed in to Keycloak (`microsoft`, `github`), from the user session; absent for
+   * an email link. Company decisions need `microsoft` AND these claims from the same session.
+   */
+  idp?: string;
 }
 
 /**
@@ -102,9 +107,8 @@ export class TokenVerifierService {
       boundTenant: trusted.boundTenant,
       tid: str(payload.tid),
       oid: str(payload.oid),
-      wids: Array.isArray(payload.wids)
-        ? payload.wids.filter((w): w is string => typeof w === 'string')
-        : [],
+      wids: parseWids(payload.wids),
+      idp: str(payload.idp),
     };
   }
 
@@ -122,6 +126,20 @@ export function extractBearerToken(header: string | undefined): string | null {
   if (!header) return null;
   const match = /^Bearer\s+(.+)$/.exec(header);
   return match?.[1]?.trim() ? match[1].trim() : null;
+}
+
+/**
+ * `wids` is a list in Entra's token but arrives from a Keycloak session note as one string
+ * (`[a, b]` or `a b`); accept both shapes.
+ */
+export function parseWids(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((w): w is string => typeof w === 'string' && w !== '');
+  }
+  if (typeof value === 'string') {
+    return value.split(/[\s,[\]"']+/).filter(Boolean);
+  }
+  return [];
 }
 
 function str(v: unknown): string | undefined {

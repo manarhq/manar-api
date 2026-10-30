@@ -36,9 +36,40 @@ export interface ProvisionTenantInput {
   /** Hosted workspaces (spec 4.1). Absent for the legacy `tenant:create` path (COMPANY). */
   kind?: 'PERSONAL' | 'COMPANY' | 'SAMPLE';
   ownerSubject?: string;
+  ownerIssuer?: string;
   entraTenantId?: string;
   /** Record the tenant as QUEUED and provision it later (`provisionQueued`). */
   queued?: boolean;
+  /**
+   * Hosted workspaces: a failed database leg puts the tenant back in the queue with a back-off
+   * (and FAILED after `MAX_PROVISION_ATTEMPTS`) instead of leaving it PROVISIONING for ever.
+   */
+  retryOnFailure?: boolean;
+  /** Created with the tenant rows in ONE transaction, so a crash cannot leave an unreachable workspace. */
+  owner?: {
+    issuer: string;
+    subject: string;
+    role: 'TENANT_OWNER';
+    extraRoles: (
+      | 'SECURITY_ADMIN'
+      | 'AI_GOVERNANCE_MANAGER'
+      | 'SOC_OPERATOR'
+      | 'APPROVER'
+      | 'AUDITOR'
+      | 'DEVELOPER'
+      | 'READ_ONLY'
+    )[];
+    email?: string;
+    displayName?: string;
+  };
+}
+
+/** After this many failed attempts a hosted tenant is FAILED and waits for `workspaces:retry`. */
+export const MAX_PROVISION_ATTEMPTS = 5;
+
+/** Back-off before the next try: 30 s, 60 s, 2 min, ... capped at 30 min. */
+export function provisionBackoffMs(attempts: number): number {
+  return Math.min(30_000 * 2 ** Math.max(0, attempts - 1), 30 * 60_000);
 }
 
 export interface MigrateAllResult {
@@ -228,7 +259,42 @@ export class TenantDatabaseManager implements OnModuleDestroy {
         include: { databaseBinding: true },
       });
     }
-    return this.finishProvisioning(created, input.slug, baseUrl);
+    return this.finishProvisioning(
+      created,
+      input.slug,
+      baseUrl,
+      input.retryOnFailure ?? false,
+    );
+  }
+
+  /**
+   * Puts a tenant whose database leg failed (or stalled) back in the queue with a back-off, or
+   * FAILED once it has used up its attempts. Only acts on a tenant still PROVISIONING.
+   */
+  async scheduleProvisionRetry(tenantId: string): Promise<void> {
+    const t = await this.control.tenant.findUnique({
+      where: { id: tenantId },
+      select: { status: true, provisionAttempts: true },
+    });
+    if (t?.status !== 'PROVISIONING') return;
+    const attempts = t.provisionAttempts + 1;
+    await this.control.tenant.updateMany({
+      where: { id: tenantId, status: 'PROVISIONING' },
+      data:
+        attempts >= MAX_PROVISION_ATTEMPTS
+          ? {
+              status: 'FAILED',
+              provisionAttempts: attempts,
+              nextProvisionAt: null,
+            }
+          : {
+              status: 'QUEUED',
+              provisionAttempts: attempts,
+              nextProvisionAt: new Date(
+                Date.now() + provisionBackoffMs(attempts),
+              ),
+            },
+    });
   }
 
   /**
@@ -252,7 +318,12 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       provider: 'ENV',
       reference: DEFAULT_TENANT_DB_SECRET_REFERENCE,
     });
-    return this.finishProvisioning({ tenant, binding }, tenant.slug, baseUrl);
+    return this.finishProvisioning(
+      { tenant, binding },
+      tenant.slug,
+      baseUrl,
+      true,
+    );
   }
 
   private async finishProvisioning(
@@ -262,6 +333,7 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     },
     slug: string,
     baseUrl: string,
+    retryOnFailure: boolean,
   ) {
     const databaseName = created.binding.databaseName;
     try {
@@ -296,8 +368,13 @@ export class TenantDatabaseManager implements OnModuleDestroy {
         include: { databaseBinding: true },
       });
     } catch (error) {
+      if (retryOnFailure) {
+        await this.scheduleProvisionRetry(created.tenant.id);
+      }
       this.logger.error(
-        `Provisioning failed for tenant "${slug}" after control-DB rows were created (tenantId=${created.tenant.id}); leaving status as PROVISIONING for manual inspection`,
+        retryOnFailure
+          ? `Provisioning failed for tenant "${slug}" (tenantId=${created.tenant.id}); queued for retry`
+          : `Provisioning failed for tenant "${slug}" after control-DB rows were created (tenantId=${created.tenant.id}); leaving status as PROVISIONING for manual inspection`,
         error instanceof Error ? error.stack : undefined,
       );
       throw new TenantProvisioningError(slug, error);
@@ -549,6 +626,7 @@ export class TenantDatabaseManager implements OnModuleDestroy {
           status: input.queued ? 'QUEUED' : 'PROVISIONING',
           kind: input.kind ?? 'COMPANY',
           ownerSubject: input.ownerSubject ?? null,
+          ownerIssuer: input.ownerIssuer ?? null,
           entraTenantId: input.entraTenantId ?? null,
           residency: input.residency ?? 'UAE',
           allowExternalAi: input.allowExternalAi ?? false,
@@ -565,6 +643,22 @@ export class TenantDatabaseManager implements OnModuleDestroy {
           reference: DEFAULT_TENANT_DB_SECRET_REFERENCE,
         },
       });
+
+      if (input.owner) {
+        await tx.membership.create({
+          data: {
+            issuer: input.owner.issuer,
+            subject: input.owner.subject,
+            tenantId: tenant.id,
+            role: input.owner.role,
+            extraRoles: input.owner.extraRoles,
+            status: 'ACTIVE',
+            email: input.owner.email,
+            displayName: input.owner.displayName,
+            grantedBy: 'system:workspace-create',
+          },
+        });
+      }
 
       const binding = await tx.tenantDatabaseBinding.create({
         data: {
@@ -594,7 +688,14 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     try {
       // CREATE DATABASE cannot run inside a transaction block; a plain
       // single-statement query over a fresh connection runs outside one.
-      await admin.query(`CREATE DATABASE "${databaseName}"`);
+      // A retry finds the database a previous attempt already created.
+      const existing = await admin.query(
+        'SELECT 1 FROM pg_database WHERE datname = $1',
+        [databaseName],
+      );
+      if (existing.rowCount === 0) {
+        await admin.query(`CREATE DATABASE "${databaseName}"`);
+      }
     } finally {
       await admin.end();
     }

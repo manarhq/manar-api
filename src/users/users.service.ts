@@ -31,6 +31,8 @@ export interface UserSummary {
 
 export interface GrantRoleInput {
   tenantId: string;
+  /** Issuer of the caller (a workspace's members share its issuer). */
+  issuer: string;
   targetUserId: string;
   role: RoleName;
   /** The authenticated caller performing the grant — `AuthContext.user.id`. */
@@ -41,6 +43,7 @@ export interface GrantRoleInput {
 
 export interface RevokeRoleInput {
   tenantId: string;
+  issuer: string;
   targetUserId: string;
   role: RoleName;
   revokedByUserId: string;
@@ -104,9 +107,9 @@ export class UsersService {
     private readonly control: ControlPrismaService,
   ) {}
 
-  private membershipsFor(tenantId: string, subjects: string[]) {
+  private membershipsFor(tenantId: string, issuer: string, subjects: string[]) {
     return this.control.membership.findMany({
-      where: { tenantId, subject: { in: subjects } },
+      where: { tenantId, issuer, subject: { in: subjects } },
     });
   }
 
@@ -114,6 +117,7 @@ export class UsersService {
   async listUsers(
     tenantClient: TenantPrismaClient,
     tenantId: string,
+    issuer: string,
     input: ListUsersInput,
   ): Promise<CursorPage<UserSummary>> {
     const where = cursorWhereClause('createdAt', input.cursor) ?? {};
@@ -125,6 +129,7 @@ export class UsersService {
     const page = toCursorPage(rows, input.limit, (row) => row.createdAt);
     const memberships = await this.membershipsFor(
       tenantId,
+      issuer,
       page.items.map((r) => r.keycloakSubject),
     );
     const bySubject = new Map(memberships.map((m) => [m.subject, m]));
@@ -140,13 +145,14 @@ export class UsersService {
   async getUserOrThrow(
     tenantClient: TenantPrismaClient,
     tenantId: string,
+    issuer: string,
     userId: string,
   ): Promise<UserSummary> {
     const row = await tenantClient.userProfile.findUnique({
       where: { id: userId },
     });
     if (!row) throw new UserNotFoundError(userId);
-    const [membership] = await this.membershipsFor(tenantId, [
+    const [membership] = await this.membershipsFor(tenantId, issuer, [
       row.keycloakSubject,
     ]);
     return toUserSummary(row, membership);
@@ -169,7 +175,7 @@ export class UsersService {
     });
     if (!target) throw new UserNotFoundError(input.targetUserId);
 
-    const [existing] = await this.membershipsFor(input.tenantId, [
+    const [existing] = await this.membershipsFor(input.tenantId, input.issuer, [
       target.keycloakSubject,
     ]);
     const held = existing?.status === 'ACTIVE' ? rolesOf(existing) : [];
@@ -177,12 +183,14 @@ export class UsersService {
     if (!split) throw new UserNotFoundError(input.targetUserId);
     await this.control.membership.upsert({
       where: {
-        subject_tenantId: {
+        issuer_subject_tenantId: {
+          issuer: input.issuer,
           subject: target.keycloakSubject,
           tenantId: input.tenantId,
         },
       },
       create: {
+        issuer: input.issuer,
         subject: target.keycloakSubject,
         tenantId: input.tenantId,
         ...split,
@@ -202,6 +210,7 @@ export class UsersService {
     return this.getUserOrThrow(
       tenantClient,
       input.tenantId,
+      input.issuer,
       input.targetUserId,
     );
   }
@@ -226,7 +235,7 @@ export class UsersService {
     });
     if (!target) throw new UserNotFoundError(input.targetUserId);
 
-    const [existing] = await this.membershipsFor(input.tenantId, [
+    const [existing] = await this.membershipsFor(input.tenantId, input.issuer, [
       target.keycloakSubject,
     ]);
     if (existing?.status === 'ACTIVE') {
@@ -235,7 +244,8 @@ export class UsersService {
       );
       await this.control.membership.update({
         where: {
-          subject_tenantId: {
+          issuer_subject_tenantId: {
+            issuer: input.issuer,
             subject: target.keycloakSubject,
             tenantId: input.tenantId,
           },
@@ -258,6 +268,7 @@ export class UsersService {
     return this.getUserOrThrow(
       tenantClient,
       input.tenantId,
+      input.issuer,
       input.targetUserId,
     );
   }

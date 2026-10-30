@@ -3,27 +3,30 @@ import { Command, CommandRunner, Option } from 'nest-commander';
 import { rolesOf, splitRoles } from '../../auth/membership.service';
 import { isRoleName, ROLES, type RoleName } from '../../auth/roles';
 import { ControlPrismaService } from '../../database/control-prisma.service';
-import { TenantDatabaseManager } from '../../database/tenant-database-manager.service';
+import { KeycloakAdminClient } from '../../keycloak/keycloak-admin.client';
 
 /**
  * `pnpm manar memberships:migrate-from-realms`
  *
- * One-off, idempotent, run on upgrade (hosted staging, pilot installs): for every ACTIVE tenant,
- * turn the roles Manar mirrored from the tenant's Keycloak realm (`RoleBinding` rows, synced from
- * the token at each sign-in until this release) into `Membership` rows. A user with several roles
- * gets all of them. An existing Membership is never overwritten. Users who never signed in have no
- * mirror row and must be granted a role again (`memberships:grant`).
+ * One-off, idempotent, run on every upgrade (the Helm migration job runs it after
+ * `tenants:migrate`): for every ACTIVE tenant that has its own Keycloak realm, read the roles users
+ * hold in that realm NOW from the Keycloak admin API and write them as `Membership` rows (issuer =
+ * the realm). A user with several roles gets all of them. An existing Membership is never
+ * overwritten, so later edits in Manar stick. Not a snapshot of the last sign-in: a role removed in
+ * Keycloak yesterday is not migrated. Hosted workspaces have no realm and are skipped. If Keycloak
+ * cannot be read the tenant fails (exit 1); there is no fallback to old data.
  */
 @Command({
   name: 'memberships:migrate-from-realms',
-  description: "Turn each tenant's mirrored realm roles into Membership rows",
+  description:
+    "Turn each tenant realm's current role assignments into Membership rows",
 })
 export class MembershipsMigrateCommand extends CommandRunner {
   private readonly logger = new Logger(MembershipsMigrateCommand.name);
 
   constructor(
     private readonly control: ControlPrismaService,
-    private readonly tenants: TenantDatabaseManager,
+    private readonly keycloak: KeycloakAdminClient,
   ) {
     super();
   }
@@ -32,7 +35,8 @@ export class MembershipsMigrateCommand extends CommandRunner {
     const tenants = await this.control.tenant.findMany({
       where: {
         status: 'ACTIVE',
-        databaseBinding: { provisioningStatus: 'ACTIVE' },
+        keycloakRealm: { not: null },
+        keycloakIssuerUrl: { not: null },
       },
     });
     let created = 0;
@@ -40,23 +44,25 @@ export class MembershipsMigrateCommand extends CommandRunner {
     let failed = 0;
     for (const tenant of tenants) {
       try {
-        const client = await this.tenants.getClient(tenant.id);
-        const users = await client.userProfile.findMany({
-          include: { roleBindings: true },
-        });
-        for (const user of users) {
-          const split = splitRoles(
-            user.roleBindings
-              .map((b) => b.role)
-              .filter((r): r is RoleName => isRoleName(r)),
-          );
+        const rolesBySubject = new Map<string, RoleName[]>();
+        for (const role of ROLES) {
+          for (const subject of await this.keycloak.listRealmRoleMemberIds(
+            tenant.keycloakRealm!,
+            role,
+          )) {
+            rolesBySubject.set(subject, [
+              ...(rolesBySubject.get(subject) ?? []),
+              role,
+            ]);
+          }
+        }
+        const issuer = tenant.keycloakIssuerUrl!.replace(/\/+$/, '');
+        for (const [subject, roles] of rolesBySubject) {
+          const split = splitRoles(roles);
           if (!split) continue;
           const exists = await this.control.membership.findUnique({
             where: {
-              subject_tenantId: {
-                subject: user.keycloakSubject,
-                tenantId: tenant.id,
-              },
+              issuer_subject_tenantId: { issuer, subject, tenantId: tenant.id },
             },
           });
           if (exists) {
@@ -65,12 +71,11 @@ export class MembershipsMigrateCommand extends CommandRunner {
           }
           await this.control.membership.create({
             data: {
-              subject: user.keycloakSubject,
+              issuer,
+              subject,
               tenantId: tenant.id,
               ...split,
               status: 'ACTIVE',
-              email: user.email || null,
-              displayName: user.displayName,
               grantedBy: 'system:migrate-from-realms',
             },
           });
@@ -92,6 +97,7 @@ export class MembershipsMigrateCommand extends CommandRunner {
 
 interface GrantOptions {
   tenant: string;
+  issuer?: string;
   subject: string;
   roles: RoleName[];
 }
@@ -128,9 +134,27 @@ export class MembershipsGrantCommand extends CommandRunner {
       process.exitCode = 1;
       return;
     }
+    const issuer = (o.issuer ?? tenant.keycloakIssuerUrl ?? '').replace(
+      /\/+$/,
+      '',
+    );
+    if (!issuer) {
+      this.logger.error(
+        '--issuer is required: this tenant has no realm of its own',
+      );
+      process.exitCode = 1;
+      return;
+    }
     await this.control.membership.upsert({
-      where: { subject_tenantId: { subject: o.subject, tenantId: tenant.id } },
+      where: {
+        issuer_subject_tenantId: {
+          issuer,
+          subject: o.subject,
+          tenantId: tenant.id,
+        },
+      },
       create: {
+        issuer,
         subject: o.subject,
         tenantId: tenant.id,
         ...split,
@@ -150,6 +174,14 @@ export class MembershipsGrantCommand extends CommandRunner {
     required: true,
   })
   parseTenant(v: string): string {
+    return v;
+  }
+
+  @Option({
+    flags: '-i, --issuer <url>',
+    description: "Issuer of the subject (default: the tenant's own realm)",
+  })
+  parseIssuer(v: string): string {
     return v;
   }
 

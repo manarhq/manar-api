@@ -172,6 +172,7 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
       if (identity) {
         try {
           const workspace = await this.memberships.resolveActive({
+            issuer: identity.issuer,
             subject: identity.subject,
             requestedTenantId: requestedWorkspace(req.headers),
             boundTenantId: identity.boundTenant?.id,

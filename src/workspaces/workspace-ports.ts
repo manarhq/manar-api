@@ -7,6 +7,8 @@ export type TenantKind = 'PERSONAL' | 'COMPANY' | 'SAMPLE';
 
 export interface WorkspaceProvisioning {
   createWorkspace(input: {
+    /** Issuer of `ownerSubject` (`AuthContext.issuer`). Absent: the deployment's primary issuer. */
+    ownerIssuer?: string;
     ownerSubject: string;
     kind: TenantKind;
     displayName: string;
@@ -20,7 +22,7 @@ export interface WorkspaceProvisioning {
 
 export interface SampleDirectory {
   /** The SAMPLE workspace this user owns, if any. */
-  find(ownerSubject: string): Promise<string | null>;
+  find(ownerSubject: string, ownerIssuer?: string): Promise<string | null>;
 }
 
 export const WORKSPACE_PROVISIONING = Symbol('WORKSPACE_PROVISIONING');

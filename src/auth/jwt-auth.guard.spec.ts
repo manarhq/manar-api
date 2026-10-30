@@ -23,6 +23,7 @@ import type {
  */
 type M = {
   id: string;
+  issuer: string;
   subject: string;
   tenantId: string;
   role: string;
@@ -46,6 +47,7 @@ const mem = (
   n = 0,
 ): M => ({
   id: `m-${subject}-${tenant.id}`,
+  issuer: 'iss-a',
   subject,
   tenantId: tenant.id,
   role,
@@ -64,7 +66,9 @@ function setup(
       findMany: ({ where }: { where: any }) =>
         Promise.resolve(
           rows
-            .filter((r) => r.subject === where.subject)
+            .filter(
+              (r) => r.issuer === where.issuer && r.subject === where.subject,
+            )
             .filter(
               (r) =>
                 !where.status ||
@@ -88,7 +92,7 @@ function setup(
   const getClient = vi.fn().mockResolvedValue({ userProfile: { upsert } });
   const guard = new JwtAuthGuard(
     {
-      verify: () => Promise.resolve({ wids: [], issuer: 'i', ...identity }),
+      verify: () => Promise.resolve({ wids: [], issuer: 'iss-a', ...identity }),
     } as unknown as TokenVerifierService,
     new MembershipService(control),
     { getClient } as unknown as TenantDatabaseManager,
@@ -235,5 +239,25 @@ describe('SAMPLE workspaces are never a default', () => {
     expect(
       (await run({ 'x-manar-workspace': 'sample' })).authContext?.workspaceKind,
     ).toBe('SAMPLE');
+  });
+});
+
+describe('a sub is only unique within its issuer', () => {
+  it("the same sub from another issuer gets no access to the first issuer's workspace", async () => {
+    const rows = [mem('s1', T('co'), 'TENANT_OWNER')];
+    const { run, getClient } = setup(rows, {
+      subject: 's1',
+      issuer: 'iss-evil',
+    });
+    await expect(run({ 'x-manar-workspace': 'co' })).rejects.toThrow(
+      ForbiddenException,
+    );
+    await expect(run()).rejects.toThrow(ForbiddenException);
+    expect(getClient).not.toHaveBeenCalled();
+  });
+
+  it('the auth context carries the issuer', async () => {
+    const { run } = setup([mem('s1', T('co'), 'AUDITOR')], { subject: 's1' });
+    expect((await run()).authContext?.issuer).toBe('iss-a');
   });
 });

@@ -105,10 +105,15 @@ export class UsersController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    return this.usersService.listUsers(tenantClient, auth.tenant.id, {
-      limit: parseLimit(limit),
-      cursor: parseCursor(cursor),
-    });
+    return this.usersService.listUsers(
+      tenantClient,
+      auth.tenant.id,
+      auth.issuer,
+      {
+        limit: parseLimit(limit),
+        cursor: parseCursor(cursor),
+      },
+    );
   }
 
   @Get(':id')
@@ -129,7 +134,12 @@ export class UsersController {
       auth.tenant.id,
     );
     return mapUserErrors(() =>
-      this.usersService.getUserOrThrow(tenantClient, auth.tenant.id, id),
+      this.usersService.getUserOrThrow(
+        tenantClient,
+        auth.tenant.id,
+        auth.issuer,
+        id,
+      ),
     );
   }
 
@@ -172,6 +182,7 @@ export class UsersController {
     return mapUserErrors(() =>
       this.usersService.grantRole(tenantClient, {
         tenantId: auth.tenant.id,
+        issuer: auth.issuer,
         targetUserId: id,
         role: input.role,
         grantedByUserId: auth.user.id,
@@ -221,6 +232,7 @@ export class UsersController {
     return mapUserErrors(() =>
       this.usersService.revokeRole(tenantClient, {
         tenantId: auth.tenant.id,
+        issuer: auth.issuer,
         targetUserId: id,
         role,
         revokedByUserId: auth.user.id,

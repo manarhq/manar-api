@@ -20,6 +20,8 @@ import type { SampleDirectory, WorkspaceProvisioning } from './workspace-ports';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 
 export interface CreateWorkspaceInput {
+  /** Issuer of `ownerSubject`. Absent: the deployment's primary issuer (first of AUTH_ISSUERS). */
+  ownerIssuer?: string;
   ownerSubject: string;
   kind: WorkspaceKind;
   displayName: string;
@@ -29,6 +31,10 @@ export interface CreateWorkspaceInput {
   ownerEmail?: string;
   ownerDisplayName?: string;
 }
+
+/** A PROVISIONING attempt not touched for this long has lost its worker. */
+const STALL_MS = 10 * 60_000;
+const staleBefore = (): Date => new Date(Date.now() - STALL_MS);
 
 export interface CreateWorkspaceResult {
   tenantId: string;
@@ -69,26 +75,44 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     const slug = `${SLUG_PREFIX[input.kind]}-${randomBytes(8).toString('hex')}`;
     const name = input.displayName.trim().slice(0, 120) || 'Workspace';
 
-    let tenantId: string;
-    let status: 'ACTIVE' | 'QUEUED';
+    const issuer = this.issuerFor(input.ownerIssuer);
+    const roles = ownerRoles();
+
     try {
       const tenant = await this.manager.provisionTenant({
         slug,
         name,
         kind: input.kind,
         ownerSubject: input.kind === 'COMPANY' ? undefined : input.ownerSubject,
+        ownerIssuer: input.kind === 'COMPANY' ? undefined : issuer,
         entraTenantId:
           input.kind === 'COMPANY' ? input.entraTenantId : undefined,
         queued,
+        retryOnFailure: true,
+        // Same transaction as the tenant rows: no tenant without its owner.
+        owner: {
+          issuer,
+          subject: input.ownerSubject,
+          role: 'TENANT_OWNER',
+          extraRoles: roles.extraRoles.filter((r) => r !== 'TENANT_OWNER'),
+          email: input.ownerEmail,
+          displayName: input.ownerDisplayName,
+        },
       });
-      tenantId = tenant.id;
-      status = tenant.status === 'ACTIVE' ? 'ACTIVE' : 'QUEUED';
+      return {
+        tenantId: tenant.id,
+        status: tenant.status === 'ACTIVE' ? 'ACTIVE' : 'QUEUED',
+      };
     } catch (error) {
       if (error instanceof TenantSlugConflictError) {
         // The slug is random, so a conflict is the one-per-owner / one-per-Entra-tenant index.
         if (input.kind !== 'COMPANY') {
           const existing = await this.control.tenant.findFirst({
-            where: { kind: input.kind, ownerSubject: input.ownerSubject },
+            where: {
+              kind: input.kind,
+              ownerIssuer: issuer,
+              ownerSubject: input.ownerSubject,
+            },
           });
           if (existing) {
             return {
@@ -100,40 +124,25 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
         throw new ConflictException('workspace_exists');
       }
       if (error instanceof TenantProvisioningError) {
-        // Rows exist but the database leg failed: keep the owner attached so ops can retry.
-        await this.attachOwner(slug, input);
+        // The rows and the owner exist and the tenant is back in the queue: the user sees
+        // "Setting up your workspace" and the drain loop retries with a back-off.
+        this.logger.warn(`Workspace ${slug} will be retried from the queue`);
+        const row = await this.control.tenant.findUnique({ where: { slug } });
+        if (row) return { tenantId: row.id, status: 'QUEUED' };
       }
       throw error;
     }
-
-    await this.attachOwner(slug, input, tenantId);
-    return { tenantId, status };
   }
 
-  private async attachOwner(
-    slug: string,
-    input: CreateWorkspaceInput,
-    knownTenantId?: string,
-  ): Promise<void> {
-    const tenantId =
-      knownTenantId ??
-      (await this.control.tenant.findUnique({ where: { slug } }))?.id;
-    if (!tenantId) return;
-    const roles = ownerRoles();
-    await this.control.membership.upsert({
-      where: { subject_tenantId: { subject: input.ownerSubject, tenantId } },
-      create: {
-        subject: input.ownerSubject,
-        tenantId,
-        role: roles.role,
-        extraRoles: roles.extraRoles,
-        status: 'ACTIVE',
-        email: input.ownerEmail,
-        displayName: input.ownerDisplayName,
-        grantedBy: 'system:workspace-create',
-      },
-      update: {},
-    });
+  private issuerFor(explicit?: string): string {
+    const issuer =
+      explicit?.replace(/\/+$/, '') ??
+      (this.config.get('AUTH_ISSUERS', { infer: true }) ?? '')
+        .split(',')
+        .map((i) => i.trim().replace(/\/+$/, ''))
+        .find(Boolean);
+    if (!issuer) throw new ForbiddenException('issuer_required');
+    return issuer;
   }
 
   /**
@@ -150,7 +159,7 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     if (tenant.kind !== 'SAMPLE') {
       throw new ForbiddenException('only_sample_workspaces_can_be_deleted');
     }
-    if (tenant.status === 'PROVISIONING') {
+    if (tenant.status === 'PROVISIONING' && tenant.updatedAt > staleBefore()) {
       throw new ConflictException('workspace_busy');
     }
     if (tenant.databaseBinding) {
@@ -175,7 +184,9 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
       this.control.tenant.count({
         where: { status: { in: ['ACTIVE', 'PROVISIONING', 'QUEUED'] } },
       }),
-      this.control.tenant.count({ where: { status: 'PROVISIONING' } }),
+      this.control.tenant.count({
+        where: { status: 'PROVISIONING', updatedAt: { gt: staleBefore() } },
+      }),
       this.control.tenant.count({ where: { status: 'QUEUED' } }),
     ]);
     const max = authSetting(this.config, 'WORKSPACE_MAX_TENANTS');
@@ -194,6 +205,29 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     );
   }
 
+  /** A PROVISIONING tenant nobody has touched for STALL_MS lost its worker (crash, deploy): retry it. */
+  private async requeueStalled(): Promise<void> {
+    const stalled = await this.control.tenant.findMany({
+      where: {
+        status: 'PROVISIONING',
+        updatedAt: { lt: staleBefore() },
+        kind: { not: 'COMPANY' },
+      },
+      select: { id: true },
+      take: 50,
+    });
+    for (const { id } of stalled) await this.manager.scheduleProvisionRetry(id);
+  }
+
+  /** Puts FAILED workspaces (all, or one) back in the queue with a fresh attempt count. */
+  async retryFailed(tenantId?: string): Promise<number> {
+    const r = await this.control.tenant.updateMany({
+      where: { status: 'FAILED', ...(tenantId ? { id: tenantId } : {}) },
+      data: { status: 'QUEUED', provisionAttempts: 0, nextProvisionAt: null },
+    });
+    return r.count;
+  }
+
   /**
    * Provisions queued workspaces, oldest first, up to the free provisioning slots. Safe on every
    * replica at once: `provisionQueued` claims each tenant with a compare-and-set. Returns how many
@@ -204,14 +238,22 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     this.draining = true;
     let done = 0;
     try {
+      await this.requeueStalled();
+      // In flight = actually being worked on: a stalled or crashed attempt must not hold a slot.
       const inflight = await this.control.tenant.count({
-        where: { status: 'PROVISIONING' },
+        where: { status: 'PROVISIONING', updatedAt: { gt: staleBefore() } },
       });
       const slots =
         authSetting(this.config, 'WORKSPACE_PROVISION_CONCURRENCY') - inflight;
       if (slots <= 0) return 0;
       const queued = await this.control.tenant.findMany({
-        where: { status: 'QUEUED' },
+        where: {
+          status: 'QUEUED',
+          OR: [
+            { nextProvisionAt: null },
+            { nextProvisionAt: { lte: new Date() } },
+          ],
+        },
         orderBy: { createdAt: 'asc' },
         take: slots,
         select: { id: true },
@@ -267,15 +309,31 @@ export class WorkspaceQueueLoop implements OnModuleInit, OnModuleDestroy {
 /** Lookup of the SAMPLE workspace a user owns. Only the owner's own ACTIVE Membership counts. */
 @Injectable()
 export class SampleDirectoryService implements SampleDirectory {
-  constructor(private readonly control: ControlPrismaService) {}
+  constructor(
+    private readonly control: ControlPrismaService,
+    private readonly config: ConfigService<AppConfig, true>,
+  ) {}
 
-  async find(ownerSubject: string): Promise<string | null> {
+  async find(
+    ownerSubject: string,
+    ownerIssuer?: string,
+  ): Promise<string | null> {
+    const issuer =
+      ownerIssuer?.replace(/\/+$/, '') ??
+      (this.config.get('AUTH_ISSUERS', { infer: true }) ?? '')
+        .split(',')
+        .map((i) => i.trim().replace(/\/+$/, ''))
+        .find(Boolean);
+    if (!issuer) return null;
     const tenant = await this.control.tenant.findFirst({
       where: {
         kind: 'SAMPLE',
+        ownerIssuer: issuer,
         ownerSubject,
         status: { not: 'DELETED' },
-        memberships: { some: { subject: ownerSubject, status: 'ACTIVE' } },
+        memberships: {
+          some: { issuer, subject: ownerSubject, status: 'ACTIVE' },
+        },
       },
       select: { id: true },
     });

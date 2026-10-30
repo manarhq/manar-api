@@ -54,6 +54,7 @@ export class JwtAuthGuard implements CanActivate {
     const identity = await this.tokenVerifier.verify(token);
 
     const workspace = await this.memberships.resolveActive({
+      issuer: identity.issuer,
       subject: identity.subject,
       requestedTenantId: requestedWorkspace(request.headers),
       boundTenantId: identity.boundTenant?.id,
@@ -77,6 +78,7 @@ export class JwtAuthGuard implements CanActivate {
     });
 
     request.authContext = {
+      issuer: identity.issuer,
       tenant: { id: workspace.tenantId, slug: workspace.tenantSlug },
       user: {
         id: userProfile.id,

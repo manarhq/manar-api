@@ -50,6 +50,7 @@ function make(
 }
 const base = {
   tenantId: 't1',
+  issuer: 'https://kc.test/realms/manar',
   targetUserId: 'u1',
   grantedByUserId: 'a',
   grantedByRoles: ['SECURITY_ADMIN'] as never,
@@ -93,6 +94,8 @@ describe('UsersService roles live in Membership', () => {
       extraRoles: [],
       status: 'PENDING',
     });
-    expect((await svc.getUserOrThrow(client, 't1', 'u1')).roles).toEqual([]);
+    expect(
+      (await svc.getUserOrThrow(client, 't1', base.issuer, 'u1')).roles,
+    ).toEqual([]);
   });
 });

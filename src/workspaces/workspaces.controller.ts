@@ -59,7 +59,7 @@ export class WorkspacesController {
   async list(
     @CurrentIdentity() id: VerifiedIdentity,
   ): Promise<WorkspaceListResponseDto> {
-    return { items: await this.workspaces.list(id.subject) };
+    return { items: await this.workspaces.list(id) };
   }
 
   @Post('bootstrap')
@@ -88,7 +88,7 @@ export class WorkspacesController {
     @Body() body: SwitchWorkspaceRequestDto,
   ) {
     const input = parseBodyOrThrow(SwitchWorkspaceRequestSchema, body);
-    return this.workspaces.assertSwitchable(id.subject, input.tenantId);
+    return this.workspaces.assertSwitchable(id, input.tenantId);
   }
 
   @Get('company')

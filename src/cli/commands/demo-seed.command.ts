@@ -633,10 +633,18 @@ export class DemoSeedCommand extends CommandRunner {
         this.logger.log(`Created Keycloak user "${user.username}"`);
       }
       await this.keycloakAdminClient.assignRealmRole(realm, userId, user.role);
+      const realmIssuer = this.keycloakAdminClient.issuerUrlForRealm(realm);
       // Roles are read from Membership only (the realm role above is kept for the Keycloak admin view).
       await this.control.membership.upsert({
-        where: { subject_tenantId: { subject: userId, tenantId } },
+        where: {
+          issuer_subject_tenantId: {
+            issuer: realmIssuer,
+            subject: userId,
+            tenantId,
+          },
+        },
         create: {
+          issuer: realmIssuer,
           subject: userId,
           tenantId,
           role: user.role,

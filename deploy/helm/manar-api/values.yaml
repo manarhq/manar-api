@@ -347,7 +347,8 @@ extraVolumeMounts: []
 
 # Database migrations as a Helm hook Job (templates/migration-job.yaml): after install
 # and before every upgrade it runs `prisma migrate deploy` on the control database, then
-# `tenants:migrate` on every ACTIVE tenant database. Same image, ConfigMap, Secret, CA
+# `tenants:migrate` on every ACTIVE tenant database, then `memberships:migrate-from-realms`
+# (idempotent; turns current Keycloak realm roles into Membership rows). Same image, ConfigMap, Secret, CA
 # mount and extra* values as the Deployment. Its pod carries
 # `manar.vax.sh/migration: "true"` for the namespace NetworkPolicy that admits it to
 # PostgreSQL, and is not selected by this chart's NetworkPolicy. A pre-upgrade hook runs
