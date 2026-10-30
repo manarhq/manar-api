@@ -23,7 +23,7 @@ const id = (
 });
 
 /** A small in-memory control DB: tenants and memberships with just the filters the service uses. */
-function world() {
+function world(deployment: 'hosted' | 'customer' = 'hosted') {
   const tenants: any[] = [];
   const memberships: any[] = [];
   let n = 0;
@@ -106,8 +106,7 @@ function world() {
     control as unknown as ControlPrismaService,
     { createWorkspace } as unknown as WorkspaceProvisioningService,
     {
-      get: (k: string) =>
-        k === 'COMPANY_TRIAL_ENABLED' ? undefined : undefined,
+      get: (k: string) => (k === 'MANAR_DEPLOYMENT' ? deployment : undefined),
     } as never,
   );
   return { svc, tenants, memberships, createWorkspace };
@@ -139,6 +138,22 @@ describe('personal workspaces are keyed by subject, never by email', () => {
     const b = await svc.ensurePersonal(id({ subject: 's1' }));
     expect(b.tenantId).toBe(a.tenantId);
     expect(createWorkspace).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('customer-hosted installs', () => {
+  it('create no personal workspaces, for a configured issuer or a legacy realm', async () => {
+    const { svc, createWorkspace } = world('customer');
+    await expect(svc.ensurePersonal(id({ subject: 's' }))).rejects.toThrow(
+      'personal_workspaces_disabled',
+    );
+    const hosted = world('hosted');
+    await expect(
+      hosted.svc.ensurePersonal(
+        id({ subject: 's', boundTenant: { id: 't', slug: 't' } }),
+      ),
+    ).rejects.toThrow('personal_workspaces_disabled');
+    expect(createWorkspace).not.toHaveBeenCalled();
   });
 });
 

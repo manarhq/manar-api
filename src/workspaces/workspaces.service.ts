@@ -94,6 +94,14 @@ export class WorkspacesService {
   async ensurePersonal(
     identity: VerifiedIdentity,
   ): Promise<CreateWorkspaceResult> {
+    // Customer-hosted installs (and legacy per-tenant realms) have no personal workspaces: people
+    // there use the workspaces an administrator gave them.
+    if (
+      identity.boundTenant ||
+      this.config.get('MANAR_DEPLOYMENT', { infer: true }) === 'customer'
+    ) {
+      throw new ForbiddenException('personal_workspaces_disabled');
+    }
     const existing = await failClosed('control-db', () =>
       this.control.tenant.findFirst({
         where: { kind: 'PERSONAL', ownerSubject: identity.subject },
