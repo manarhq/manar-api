@@ -24,7 +24,26 @@ export interface HostActionDefinition {
   riskBaseScore: number;
   mutating: boolean;
   destructive: boolean;
+  /**
+   * What `resource` holds, for policy alias matching (src/policy/resource-aliases.ts). Absent
+   * means a file path, the fail-closed default: only an action listed here as `command` or
+   * `other` is read any other way.
+   */
+  resourceKind?: 'command' | 'other';
 }
+
+/** The catalogue of host tool ids (launch BRIEF section 2; `coverage` extends this list). */
+export const KNOWN_HOST_TOOL_IDS: readonly string[] = [
+  'host.claude-code',
+  'host.claude-desktop',
+  'host.cursor',
+  'host.windsurf',
+  'host.vscode-copilot',
+  'host.copilot-cli',
+  'host.codex-cli',
+  'host.chatgpt-desktop',
+  'host.gemini-cli',
+];
 
 /**
  * Risk = baseline 10 + base + 15 if mutating + 25 if destructive (src/risk/risk-engine.service.ts).
@@ -45,6 +64,7 @@ export const HOST_CLAUDE_CODE_ACTIONS: readonly HostActionDefinition[] = [
     riskBaseScore: 0,
     mutating: false,
     destructive: false,
+    resourceKind: 'other',
   },
   {
     name: 'grep',
@@ -52,6 +72,7 @@ export const HOST_CLAUDE_CODE_ACTIONS: readonly HostActionDefinition[] = [
     riskBaseScore: 0,
     mutating: false,
     destructive: false,
+    resourceKind: 'other',
   },
   {
     name: 'ls',
@@ -59,6 +80,7 @@ export const HOST_CLAUDE_CODE_ACTIONS: readonly HostActionDefinition[] = [
     riskBaseScore: 0,
     mutating: false,
     destructive: false,
+    resourceKind: 'other',
   },
   {
     name: 'notebookread',
@@ -74,6 +96,7 @@ export const HOST_CLAUDE_CODE_ACTIONS: readonly HostActionDefinition[] = [
     riskBaseScore: 0,
     mutating: false,
     destructive: false,
+    resourceKind: 'other',
   },
   {
     name: 'task',
@@ -81,6 +104,7 @@ export const HOST_CLAUDE_CODE_ACTIONS: readonly HostActionDefinition[] = [
     riskBaseScore: 5,
     mutating: false,
     destructive: false,
+    resourceKind: 'other',
   },
   {
     name: 'websearch',
@@ -88,6 +112,7 @@ export const HOST_CLAUDE_CODE_ACTIONS: readonly HostActionDefinition[] = [
     riskBaseScore: 5,
     mutating: false,
     destructive: false,
+    resourceKind: 'other',
   },
   {
     name: 'webfetch',
@@ -96,6 +121,7 @@ export const HOST_CLAUDE_CODE_ACTIONS: readonly HostActionDefinition[] = [
     riskBaseScore: 10,
     mutating: false,
     destructive: false,
+    resourceKind: 'other',
   },
   {
     name: 'edit',
@@ -132,6 +158,7 @@ export const HOST_CLAUDE_CODE_ACTIONS: readonly HostActionDefinition[] = [
     riskBaseScore: 20,
     mutating: true,
     destructive: true,
+    resourceKind: 'command',
   },
 ];
 
