@@ -207,6 +207,9 @@ export const AUDIT_EVENT_TYPES = {
   MCP_SERVER_DISCOVERED: 'mcp.server.discovered',
   /** Insight: an owner shared a redacted agent session as a public report. */
   SESSION_SHARED: 'session.report.shared',
+
+  /** The workspace changed how far secret blocking goes (off, keys, all). */
+  SECRET_SETTINGS_CHANGED: 'secret.settings.changed',
 } as const;
 
 export type AuditEventType =

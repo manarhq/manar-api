@@ -374,6 +374,8 @@ describe('device config', () => {
       { instructions: () => Promise.resolve({ unprotect: [] }) } as never,
       { isPaused: () => Promise.resolve(false) } as never,
       { doorConfig: () => Promise.reject(new Error('db down')) } as never,
+      { getClient: () => Promise.resolve({}) } as never,
+      { features: () => Promise.resolve([]) } as never,
     );
     const cfg = await c.config(host('h1') as never);
     expect(cfg.door).toEqual({ unavailable: true });

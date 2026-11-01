@@ -2,7 +2,9 @@ import { Controller, Get, Logger, UseGuards } from '@nestjs/common';
 import { AiSpendService } from '../ai-spend/ai-spend.service';
 import { HostToolsService } from '../host-coverage/host-tools.service';
 import { ApiExcludeController, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { PauseService } from '../pause/pause.service';
+import { SecretsService } from '../secrets/secrets.service';
 import { CurrentHost, type HostContext } from './host-context';
 import { HostAuthGuard } from './host-auth.guard';
 
@@ -22,7 +24,22 @@ export class HostConfigController {
     private readonly tools: HostToolsService,
     private readonly pause: PauseService,
     private readonly spend: AiSpendService,
+    private readonly tenants: TenantDatabaseManager,
+    private readonly secrets: SecretsService,
   ) {}
+
+  /** Secret blocking flags. Any failure reads as "off": a lookup problem must never lock a person out. */
+  private async secretFeatures(host: HostContext): Promise<string[]> {
+    if (host.status !== 'APPROVED') return [];
+    try {
+      return await this.secrets.features(
+        await this.tenants.getClient(host.tenantId),
+      );
+    } catch (e) {
+      this.logger.warn(`secret features unavailable: ${(e as Error).message}`);
+      return [];
+    }
+  }
 
   @Get('config')
   @ApiOperation({
@@ -35,7 +52,7 @@ export class HostConfigController {
       // The `features` track stores the workspace's mode (PUT /workspace/start-mode) and
       // replaces this default with a read of it.
       startMode: DEFAULT_START_MODE,
-      features: [] as string[],
+      features: await this.secretFeatures(host),
       // "Pause all AI": while true the device denies every protected tool with reason `paused`.
       paused: await this.pause.isPaused(host.tenantId),
       // Tools whose owner turned protection off; the device restores their backups.
