@@ -156,7 +156,7 @@ export class LaunchOfferService {
       );
       await this.control.launchOfferClaim.update({
         where: { id: claim.id },
-        data: { stripeSubscriptionId: sub.id },
+        data: { stripeSubscriptionId: sub.id, trialEndsAt: end },
       });
       await this.entitlements.change(
         tenantId,

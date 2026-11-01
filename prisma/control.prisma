@@ -498,6 +498,12 @@ model LaunchOfferClaim {
   deviceHash           String   @unique
   stripeSubscriptionId String?
   claimedAt            DateTime @default(now())
+  /// When the free months end (the trial_end given to Stripe).
+  trialEndsAt          DateTime?
+  /// The person added a card, billing address and tax id ("Keep Pro"); automatic tax is on.
+  keptAt               DateTime?
+  /// The 7-days-before reminder email went out.
+  reminderSentAt       DateTime?
 
   @@unique([issuer, subject])
   @@map("launch_offer_claims")
