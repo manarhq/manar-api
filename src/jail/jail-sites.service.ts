@@ -11,7 +11,7 @@ import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-cli
 import {
   isJailTool,
   jailFlags,
-  JAIL_TOOL_IDS,
+  jailToolsForOs,
   normalizeRuleSite,
   ruleLive,
   siteCovers,
@@ -108,11 +108,19 @@ export class JailSitesService {
     if (!flags.enabled)
       return { enabled: false, windows: false, tools: [], rules: [] };
     const client = await this.tenants.getClient(host.tenantId);
+    const row = await client.host.findUnique({
+      where: { id: host.hostId },
+      select: { os: true },
+    });
+    const isWindows = /windows/i.test(row?.os ?? '');
+    // A Windows device is filtered only while the Windows switch is on.
+    if (isWindows && !flags.windows)
+      return { enabled: true, windows: false, tools: [], rules: [] };
     const [tools, rules] = await Promise.all([
       client.hostTool.findMany({
         where: {
           hostId: host.hostId,
-          toolId: { in: [...JAIL_TOOL_IDS] },
+          toolId: { in: [...jailToolsForOs(row?.os ?? '')] },
           desiredProtection: true,
           missing: false,
         },

@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HostApprovalsService } from '../approvals/host-approvals.service';
 import type { HostContext } from '../host-mtls/host-context';
 import { JailHostController } from './jail-host.controller';
@@ -27,6 +27,8 @@ type Rule = {
   source?: string;
   expiresAt: Date | null;
 };
+
+const osLabel = { value: 'Ubuntu 24.04 (linux)' };
 
 function world() {
   const rules: Rule[] = [];
@@ -97,9 +99,15 @@ function world() {
       ),
   };
   const client: Record<string, unknown> = {
+    host: { findUnique: () => Promise.resolve({ os: osLabel.value }) },
     hostSiteRule: ruleApi,
     hostTool: {
-      findMany: () => Promise.resolve([{ toolId: 'host.claude-code' }]),
+      findMany: ({ where }: { where: { toolId: { in: string[] } } }) =>
+        Promise.resolve(
+          ['host.claude-code', 'host.codex-cli']
+            .filter((t) => where.toolId.in.includes(t))
+            .map((toolId) => ({ toolId })),
+        ),
     },
     approvalAllowGrant: { create: () => Promise.resolve({ id: 'g1' }) },
     hostApproval: {
@@ -454,8 +462,33 @@ describe('GET /host/v1/config jail key', () => {
     expect(c).toMatchObject({
       enabled: true,
       windows: false,
-      tools: ['host.claude-code'],
+      tools: ['host.claude-code', 'host.codex-cli'],
     });
     expect(c.rules).toHaveLength(1);
+  });
+});
+
+describe('jail key by operating system', () => {
+  afterEach(() => {
+    delete process.env.MANAR_JAIL_WINDOWS;
+    osLabel.value = 'Ubuntu 24.04 (linux)';
+  });
+  it('gives Linux both CLI tools it has', async () => {
+    const w = world();
+    expect((await w.sites.config(HOST)).tools).toEqual([
+      'host.claude-code',
+      'host.codex-cli',
+    ]);
+  });
+  it('filters nothing on Windows while the Windows switch is off', async () => {
+    osLabel.value = 'Windows 11 Pro';
+    const c = await world().sites.config(HOST);
+    expect(c).toMatchObject({ enabled: true, windows: false, tools: [] });
+  });
+  it('filters only Claude Code on Windows when the switch is on', async () => {
+    osLabel.value = 'Windows 11 Pro';
+    process.env.MANAR_JAIL_WINDOWS = 'true';
+    const c = await world().sites.config(HOST);
+    expect(c).toMatchObject({ windows: true, tools: ['host.claude-code'] });
   });
 });

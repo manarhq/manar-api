@@ -15,6 +15,17 @@ export const JAIL_TOOL_IDS = [
   'host.copilot-cli',
 ] as const;
 
+/**
+ * Windows: only Claude Code (native install). Its settings.json takes a proxy in `env` (documented);
+ * the other CLI tools have no documented setting for their own proxy, so they are not filtered there.
+ */
+export const JAIL_WINDOWS_TOOL_IDS = ['host.claude-code'] as const;
+
+/** The tools JAIL filters on a device, by its OS label (`windows ...`, `linux`). */
+export function jailToolsForOs(os: string): readonly string[] {
+  return /windows/i.test(os) ? JAIL_WINDOWS_TOOL_IDS : JAIL_TOOL_IDS;
+}
+
 export const JAIL_TOOL_NAMES: Record<string, string> = {
   'host.claude-code': 'Claude Code',
   'host.codex-cli': 'Codex CLI',
