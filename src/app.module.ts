@@ -13,6 +13,7 @@ import { OpenBaoModule } from './openbao/openbao.module';
 import { AgentsHttpModule } from './agents/agents-http.module';
 import { AiToolsHttpModule } from './host-coverage/host-coverage.module';
 import { DevicesHttpModule } from './devices/devices-http.module';
+import { SecretsHttpModule } from './secrets/secrets.module';
 import { HostsHttpModule } from './hosts/hosts-http.module';
 import { AuthorizationModule } from './authorization/authorization.module';
 import { TasksModule } from './tasks/tasks.module';
@@ -64,6 +65,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     HostsHttpModule,
     DevicesHttpModule,
     AiToolsHttpModule,
+    SecretsHttpModule,
     AuthorizationModule,
     TasksModule,
     TasksHttpModule,

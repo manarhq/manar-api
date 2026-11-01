@@ -22,14 +22,18 @@ import { AuditService } from '../audit/audit.service';
 import { JwksCacheService } from '../auth/jwks-cache.service';
 import { ACCEPTED_SIGNING_ALGORITHMS } from '../auth/jwt-auth.guard';
 import { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
+import { MembershipService } from '../auth/membership.service';
+import type { RoleName } from '../auth/roles';
 import { failClosed, throwFailClosed } from '../common/fail-closed/fail-closed';
 import type { AppConfig } from '../config/env.validation';
+import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { recordCloudMcpRejection } from '../metrics/metrics';
 import { CloudAgentsService } from './cloud-agents.service';
 import {
   AGENT_ROLE_CLAIM,
   PRE_REGISTERED_CLIENT_PREFIX,
+  TENANT_CLAIM,
   cloudMcpMetadataUrl,
   cloudMcpResourceUrl,
   cloudMcpRole,
@@ -49,6 +53,21 @@ const FAILURES_PER_TENANT = 600;
 /** A refused, validly signed token is audited once a minute per tenant, client and reason. */
 const AUDIT_DEDUP_MS = 60_000;
 const LOG_SAMPLE_MS = 60_000;
+/** Shared realm: roles that may use a workspace's cloud agent (read-only roles may not). */
+const SHARED_REALM_AGENT_ROLES: readonly RoleName[] = [
+  'TENANT_OWNER',
+  'SECURITY_ADMIN',
+  'AI_GOVERNANCE_MANAGER',
+  'DEVELOPER',
+];
+const TENANT_CACHE_MS = 60_000;
+
+interface SlugTenant {
+  id: string;
+  status: string;
+  /** Null: the tenant has no realm of its own and is on the shared realm. */
+  keycloakIssuerUrl: string | null;
+}
 
 export type CloudMcpRequest = FastifyRequest & {
   cloudAgent?: { context: AgentContext; taskId: string };
@@ -103,7 +122,41 @@ export class CloudMcpAuthGuard implements CanActivate {
     private readonly audit: AuditService,
     private readonly cloudAgents: CloudAgentsService,
     @InjectThrottlerStorage() private readonly limits: ThrottlerStorage,
+    private readonly membership: MembershipService,
+    private readonly control: ControlPrismaService,
   ) {}
+
+  // ponytail: per-process, one minute; only decides which scope name to hint and which issuer to
+  // expect. Tenant status and membership are read fresh on every accepted call.
+  private readonly tenantsBySlug = new Map<
+    string,
+    { tenant: SlugTenant | null; until: number }
+  >();
+
+  private readonly unknownSlugs = new Map<
+    string,
+    { tenant: SlugTenant | null; until: number }
+  >();
+
+  private async tenantBySlug(slug: string): Promise<SlugTenant | null> {
+    const hit = this.tenantsBySlug.get(slug) ?? this.unknownSlugs.get(slug);
+    if (hit && hit.until > Date.now()) return hit.tenant;
+    const row = await failClosed('control-db', () =>
+      this.control.tenant.findUnique({ where: { slug } }),
+    );
+    const tenant = row
+      ? {
+          id: row.id,
+          status: row.status,
+          keycloakIssuerUrl: row.keycloakIssuerUrl,
+        }
+      : null;
+    // Misses (random slugs) live in their own small map so they cannot evict real tenants.
+    const cache = tenant ? this.tenantsBySlug : this.unknownSlugs;
+    if (cache.size > (tenant ? 10_000 : 1_000)) cache.clear();
+    cache.set(slug, { tenant, until: Date.now() + TENANT_CACHE_MS });
+    return tenant;
+  }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<CloudMcpRequest>();
@@ -118,11 +171,17 @@ export class CloudMcpAuthGuard implements CanActivate {
     }
 
     const resource = cloudMcpResourceUrl(host, tenantSlug, agentSlug);
-    const scope = cloudMcpScope(agentSlug);
+    // Shared realm (a shared issuer is configured and the tenant has no realm of its own): the
+    // scope name carries the tenant id. Looking the tenant up costs a database query, so it
+    // happens only for a decodable token claiming the shared issuer, after the failure budget
+    // check. Until then the challenge omits the scope hint (the metadata lists it).
+    let sharedTenant: SlugTenant | null = null;
+    let scope = cloudMcpScope(agentSlug);
+    let scopeHint: string | null = settings.sharedIssuer ? null : scope;
     const challenge = (error?: string) =>
       [
         `Bearer resource_metadata="${cloudMcpMetadataUrl(host, tenantSlug, agentSlug)}"`,
-        `scope="${scope}"`,
+        ...(scopeHint ? [`scope="${scopeHint}"`] : []),
         ...(error ? [`error="${error}"`] : []),
       ].join(', ');
 
@@ -183,6 +242,16 @@ export class CloudMcpAuthGuard implements CanActivate {
       // Not a JWT: cheap to refuse, so it counts for this caller only.
       return refuse({ status: 401, reason: 'malformed_token' }, {}, false);
     }
+    if (settings.sharedIssuer && unverified.iss === settings.sharedIssuer) {
+      sharedTenant = await this.tenantBySlug(tenantSlug);
+      if (sharedTenant && !sharedTenant.keycloakIssuerUrl) {
+        scope = cloudMcpScope(agentSlug, sharedTenant.id);
+        scopeHint = scope;
+      }
+    }
+    const sharedTenantId = sharedTenant?.keycloakIssuerUrl
+      ? undefined
+      : sharedTenant?.id;
     const outcome = await this.check(
       token,
       unverified,
@@ -191,6 +260,11 @@ export class CloudMcpAuthGuard implements CanActivate {
       `https://${host}/mcp/`,
       resource,
       scope,
+      sharedTenantId &&
+        sharedTenant?.status === 'ACTIVE' &&
+        settings.sharedIssuer
+        ? { id: sharedTenantId, issuer: settings.sharedIssuer }
+        : null,
     );
     if ('status' in outcome) return refuse(outcome, unverified, true);
 
@@ -272,14 +346,24 @@ export class CloudMcpAuthGuard implements CanActivate {
     mcpPrefix: string,
     resource: string,
     scope: string,
+    shared: { id: string; issuer: string } | null,
   ): Promise<Rejection | { context: AgentContext; taskId: string }> {
     const issuer = typeof unverified.iss === 'string' ? unverified.iss : '';
-    const known = issuer
+    const own = issuer
       ? await failClosed('control-db', () =>
           this.knownIssuers.resolveByIssuer(issuer),
         )
       : null;
+    // A tenant's own realm names the tenant (legacy / customer-hosted). Otherwise the shared
+    // realm: its issuer is the configured one and the tenant is the path's, to be proven by the
+    // token's tenant claim below.
+    const known =
+      own ??
+      (shared && issuer === shared.issuer
+        ? { tenantId: shared.id, tenantSlug, issuerUrl: shared.issuer }
+        : null);
     if (!known) return { status: 401, reason: 'unknown_issuer' };
+    const isShared = !own;
     // The tenant is the issuer's; a path naming another tenant is refused.
     if (known.tenantSlug !== tenantSlug) {
       return { status: 401, reason: 'issuer_tenant_mismatch' };
@@ -287,7 +371,12 @@ export class CloudMcpAuthGuard implements CanActivate {
 
     let payload: JWTPayload;
     // jose checks the signature before any claim, so claim failures below are post-signature.
-    const verified = { status: 401 as const, tenantId: known.tenantId };
+    // Shared realm: any account can hold a validly signed token, so nothing is audited in a
+    // tenant's chain until the token proves it is for that tenant (the tenant claim).
+    const verified: { status: 401; tenantId?: string } = {
+      status: 401,
+      tenantId: isShared ? undefined : known.tenantId,
+    };
     try {
       ({ payload } = await jwtVerify(
         token,
@@ -327,6 +416,13 @@ export class CloudMcpAuthGuard implements CanActivate {
       return { ...verified, reason: 'foreign_audience' };
     }
 
+    if (isShared) {
+      if (payload[TENANT_CLAIM] !== known.tenantId) {
+        return { ...verified, reason: 'tenant_mismatch' };
+      }
+      verified.tenantId = known.tenantId;
+    }
+
     const forbidden = (reason: string): Rejection => ({
       status: 403,
       reason,
@@ -346,10 +442,48 @@ export class CloudMcpAuthGuard implements CanActivate {
       return forbidden('unknown_agent');
     }
     if (agent.status !== 'ACTIVE') return forbidden('agent_not_active');
+    // ChatGPT on the shared realm is off: existing bindings are refused too, not just new ones.
+    if (
+      isShared &&
+      binding.platform === 'CHATGPT' &&
+      !cloudMcpSettings(this.config).chatGptOnSharedRealm
+    ) {
+      return forbidden('chatgpt_not_enabled');
+    }
+    // Over the plan cap after a downgrade: paused, not deleted.
+    const paused = await failClosed('entitlements', () =>
+      this.cloudAgents.isPaused(known.tenantId, tenantClient, agent.id),
+    );
+    if (paused) return forbidden('agent_paused');
 
-    const roles = payload[AGENT_ROLE_CLAIM];
-    if (!Array.isArray(roles) || !roles.includes(cloudMcpRole(agentSlug))) {
-      return forbidden('user_not_allowed');
+    if (isShared) {
+      // The binding must be this tenant's (its scope name carries the tenant id), and the
+      // person must hold an ACTIVE membership right now: removing it revokes at once.
+      if (binding.oauthScope !== scope) {
+        return forbidden('binding_tenant_mismatch');
+      }
+      const subject = typeof payload.sub === 'string' ? payload.sub : '';
+      const roles = subject
+        ? await this.membership
+            .resolveActive({
+              issuer: known.issuerUrl,
+              subject,
+              requestedTenantId: known.tenantId,
+            })
+            .then((m) => m.roles)
+            .catch((error: unknown) => {
+              if (error instanceof ForbiddenException) return [];
+              throw error;
+            })
+        : [];
+      if (!roles.some((r) => SHARED_REALM_AGENT_ROLES.includes(r))) {
+        return forbidden('user_not_allowed');
+      }
+    } else {
+      const roles = payload[AGENT_ROLE_CLAIM];
+      if (!Array.isArray(roles) || !roles.includes(cloudMcpRole(agentSlug))) {
+        return forbidden('user_not_allowed');
+      }
     }
     const scopes =
       typeof payload.scope === 'string' ? payload.scope.split(' ') : [];

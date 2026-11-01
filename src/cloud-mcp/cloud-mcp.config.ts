@@ -43,6 +43,20 @@ export const CloudMcpConfigSchema = z.object({
       'comma-separated plain host names (no scheme, port, path or wildcard)',
     )
     .optional(),
+  /**
+   * Issuer of the shared hosted realm (`https://auth-manar.vax.sh/realms/manar`). Tenants with no
+   * realm of their own connect their cloud agents there. Unset: such tenants cannot connect any.
+   */
+  MANAR_MCP_SHARED_ISSUER: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.string().url().optional(),
+  ),
+  /**
+   * ChatGPT (dynamic client registration) on the shared realm. Off until the DCR security review;
+   * Claude and Copilot Studio use pre-registered clients and do not need it. Per-tenant realms
+   * are not affected.
+   */
+  MANAR_MCP_CHATGPT_ENABLED: z.enum(['true', 'false']).optional(),
   /** Requests per cloud agent per minute, all MCP methods (default 60). */
   MANAR_MCP_RATE_LIMIT_PER_MINUTE: z.coerce
     .number()
@@ -70,6 +84,9 @@ export interface CloudMcpSettings {
   /** Null when the endpoint is off. */
   host: string | null;
   dcrTrustedHosts: string[];
+  /** Shared realm issuer without a trailing slash, or null. */
+  sharedIssuer: string | null;
+  chatGptOnSharedRealm: boolean;
   ratePerMinute: number;
   maxBodyBytes: number;
 }
@@ -88,6 +105,8 @@ export function cloudMcpSettings(
       .split(',')
       .map((host) => host.trim().toLowerCase())
       .filter(Boolean),
+    sharedIssuer: get('MANAR_MCP_SHARED_ISSUER')?.replace(/\/+$/, '') ?? null,
+    chatGptOnSharedRealm: get('MANAR_MCP_CHATGPT_ENABLED') === 'true',
     ratePerMinute: get('MANAR_MCP_RATE_LIMIT_PER_MINUTE') ?? 60,
     maxBodyBytes: get('MANAR_MCP_MAX_BODY_BYTES') ?? 262_144,
   };
@@ -111,12 +130,27 @@ export function cloudMcpMetadataUrl(
   return `https://${host}/.well-known/oauth-protected-resource/mcp/${tenantSlug}/${agentSlug}`;
 }
 
-/** The Keycloak client scope that puts one agent's MCP URL in the token audience. */
-export function cloudMcpScope(agentSlug: string): string {
-  return `manar-mcp-${agentSlug}`;
+/** Token claim the shared realm's agent scope stamps with the tenant id. */
+export const TENANT_CLAIM = 'manar_tenant';
+
+/**
+ * The Keycloak client scope that puts one agent's MCP URL in the token audience. On the shared
+ * realm the name carries the tenant id, so two tenants never collide.
+ */
+export function cloudMcpScope(agentSlug: string, tenantId?: string): string {
+  return tenantId
+    ? `manar-mcp-${tenantId}-${agentSlug}`
+    : `manar-mcp-${agentSlug}`;
 }
 
-/** Realm role a person needs to use one cloud agent (assigned by the tenant admin). */
+/** Pre-registered client id of an agent (shared realm: tenant id in the name). */
+export function cloudMcpClientId(agentSlug: string, tenantId?: string): string {
+  return tenantId
+    ? `${PRE_REGISTERED_CLIENT_PREFIX}${tenantId}-${agentSlug}`
+    : `${PRE_REGISTERED_CLIENT_PREFIX}${agentSlug}`;
+}
+
+/** Realm role a person needs to use one cloud agent (per-tenant realms only; assigned by the tenant admin). */
 export function cloudMcpRole(agentSlug: string): string {
   return `manar-agent-${agentSlug}`;
 }

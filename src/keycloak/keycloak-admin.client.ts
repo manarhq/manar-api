@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../config/env.validation';
-import { AGENT_ROLE_CLAIM } from '../cloud-mcp/cloud-mcp.config';
+import { AGENT_ROLE_CLAIM, TENANT_CLAIM } from '../cloud-mcp/cloud-mcp.config';
 
 /** Alias of the Entra ID identity provider in a tenant realm (docs/cloud-agents.md). */
 export const ENTRA_IDP_ALIAS = 'entra';
@@ -346,13 +346,21 @@ export class KeycloakAdminClient {
    * holds it (the role is the scope's only scope mapping, so a client without full scope gets
    * just that role). Not a realm default or optional scope: only the clients Manar assigns it to
    * (the agent's own client, or a self-registered client the DCR policy lets ask for it) get it.
+   *
+   * Shared realm (`tenantId` set, no role): a hardcoded-claim mapper stamps `TENANT_CLAIM` with the
+   * tenant id instead. It lives on the scope, so a self-registered client that asks for the scope
+   * gets the stamp and cannot change it. Who may use the agent is Manar's Membership, not a role.
    */
   async createAgentClientScope(
     realmName: string,
     name: string,
     audience: string,
-    roleName: string,
+    roleName: string | null,
+    tenantId?: string,
   ): Promise<string> {
+    if (!roleName && !tenantId) {
+      throw new Error('An agent scope needs a role or a tenant id');
+    }
     const realm = encodeURIComponent(realmName);
     const created = await this.adminRequest(
       'POST',
@@ -376,20 +384,35 @@ export class KeycloakAdminClient {
               'introspection.token.claim': 'true',
             },
           },
-          {
-            name: 'agent-role',
-            protocol: 'openid-connect',
-            protocolMapper: 'oidc-usermodel-realm-role-mapper',
-            config: {
-              'claim.name': AGENT_ROLE_CLAIM,
-              multivalued: 'true',
-              'jsonType.label': 'String',
-              'access.token.claim': 'true',
-              'id.token.claim': 'false',
-              'userinfo.token.claim': 'false',
-              'introspection.token.claim': 'true',
-            },
-          },
+          roleName
+            ? {
+                name: 'agent-role',
+                protocol: 'openid-connect',
+                protocolMapper: 'oidc-usermodel-realm-role-mapper',
+                config: {
+                  'claim.name': AGENT_ROLE_CLAIM,
+                  multivalued: 'true',
+                  'jsonType.label': 'String',
+                  'access.token.claim': 'true',
+                  'id.token.claim': 'false',
+                  'userinfo.token.claim': 'false',
+                  'introspection.token.claim': 'true',
+                },
+              }
+            : {
+                name: 'tenant',
+                protocol: 'openid-connect',
+                protocolMapper: 'oidc-hardcoded-claim-mapper',
+                config: {
+                  'claim.name': TENANT_CLAIM,
+                  'claim.value': tenantId,
+                  'jsonType.label': 'String',
+                  'access.token.claim': 'true',
+                  'id.token.claim': 'false',
+                  'userinfo.token.claim': 'false',
+                  'introspection.token.claim': 'true',
+                },
+              },
         ],
       },
       { returnLocation: true },
@@ -400,6 +423,7 @@ export class KeycloakAdminClient {
         `Keycloak did not return an id for client scope "${name}"`,
       );
     }
+    if (!roleName) return scopeId;
     try {
       const role = (
         await this.adminRequest(

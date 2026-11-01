@@ -59,6 +59,16 @@ export class CloudAgentsController {
     );
   }
 
+  @Get()
+  @ApiOperation({
+    summary: 'The tenant cloud agents',
+    description:
+      'Each agent with its platform, MCP URL, `paused` (over the plan cap after a downgrade: nothing is deleted, it resumes when under the cap) and any client waiting for confirmation, plus `limit` `{ max, used }`.',
+  })
+  list(@CurrentAuth() auth: AuthContext) {
+    return this.cloudAgents.list(auth);
+  }
+
   @Put(':id/redirect-uris')
   @ApiOperation({
     summary: "Set a Copilot Studio agent's OAuth callback URL(s)",

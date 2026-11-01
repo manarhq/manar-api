@@ -1,4 +1,8 @@
-import { HttpException, type ExecutionContext } from '@nestjs/common';
+import {
+  ForbiddenException,
+  HttpException,
+  type ExecutionContext,
+} from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type { ThrottlerStorage } from '@nestjs/throttler';
 import { generateKeyPair, SignJWT, type JWTVerifyGetKey } from 'jose';
@@ -6,6 +10,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuditService } from '../audit/audit.service';
 import type { JwksCacheService } from '../auth/jwks-cache.service';
 import type { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
+import type { MembershipService } from '../auth/membership.service';
 import type { AppConfig } from '../config/env.validation';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
@@ -114,6 +119,14 @@ function setup(
     blocked?: (key: string) => boolean;
     proposal?: 'pending' | 'refused';
     auditHits?: number;
+    paused?: boolean;
+    /** Roles the person holds in the workspace right now; `null` = no ACTIVE membership. */
+    membershipRoles?: string[] | null;
+    /** Tenant rows by slug (shared realm). */
+    tenants?: Record<
+      string,
+      { id: string; status: string; keycloakIssuerUrl: string | null }
+    >;
   } = {},
 ) {
   const env: Record<string, unknown> = {
@@ -150,7 +163,25 @@ function setup(
   const proposeDcrClient = vi
     .fn()
     .mockResolvedValue(options.proposal ?? 'pending');
-  const cloudAgents = { proposeDcrClient } as unknown as CloudAgentsService;
+  const isPaused = vi.fn().mockResolvedValue(options.paused ?? false);
+  const cloudAgents = {
+    proposeDcrClient,
+    isPaused,
+  } as unknown as CloudAgentsService;
+  const resolveActive = vi.fn(() =>
+    options.membershipRoles === null
+      ? Promise.reject(new ForbiddenException('Workspace not available'))
+      : Promise.resolve({
+          roles: options.membershipRoles ?? ['TENANT_OWNER'],
+        }),
+  );
+  const membership = { resolveActive } as unknown as MembershipService;
+  const control = {
+    tenant: {
+      findUnique: ({ where }: { where: { slug: string } }) =>
+        Promise.resolve(options.tenants?.[where.slug] ?? null),
+    },
+  } as unknown as ControlPrismaService;
   const increment = vi.fn((key: string) => {
     const blocked = options.blocked?.(key) ?? false;
     return Promise.resolve({
@@ -171,6 +202,8 @@ function setup(
     audit,
     cloudAgents,
     limits,
+    membership,
+    control,
   );
   return {
     guard,
@@ -181,6 +214,8 @@ function setup(
     proposeDcrClient,
     resolveByIssuer,
     getJwks,
+    resolveActive,
+    isPaused,
   };
 }
 
@@ -603,5 +638,299 @@ describe('CloudMcpController protected resource metadata', () => {
       .catch((e: unknown) => e);
     expect((error as HttpException).getStatus()).toBe(429);
     expect(findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe('legacy (own realm) agent over the plan cap', () => {
+  it('is paused: 403 agent_paused, audited, nothing deleted', async () => {
+    const s = setup({ paused: true });
+    const { ctx } = context(`Bearer ${await token()}`);
+    const { status, body } = await refusal(s.guard.canActivate(ctx));
+    expect([status, body.reason]).toEqual([403, 'agent_paused']);
+    expect(s.recordSafely).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The shared realm (spec 4.1, #38): one issuer for every tenant. The tenant is proven by the
+ * `manar_tenant` claim, the person by Manar's Membership, the client by `azp`.
+ */
+describe('CloudMcpAuthGuard on the shared realm', () => {
+  const SHARED = 'https://auth.manar.test/realms/manar';
+  const T_SCOPE = 'manar-mcp-t-acme-copilot-1';
+  const T_CLIENT = 'manar-cloud-t-acme-copilot-1';
+  const TENANTS = {
+    acme: { id: 't-acme', status: 'ACTIVE', keycloakIssuerUrl: null },
+    globex: { id: 't-globex', status: 'ACTIVE', keycloakIssuerUrl: null },
+    // Has its own realm: never served by the shared issuer.
+    own: { id: 't-own', status: 'ACTIVE', keycloakIssuerUrl: ISSUER },
+  };
+  const sharedAgent = (
+    overrides: Partial<Agent['cloudBinding'] & object> = {},
+  ) =>
+    cloudAgent({
+      cloudBinding: {
+        platform: 'COPILOT_STUDIO',
+        oauthClientId: T_CLIENT,
+        oauthScope: T_SCOPE,
+        taskId: 'task-1',
+        ...overrides,
+      },
+    });
+  const shared = (o: Parameters<typeof setup>[0] = {}) =>
+    setup({
+      agent: sharedAgent(),
+      tenants: TENANTS,
+      ...o,
+      env: { MANAR_MCP_SHARED_ISSUER: SHARED, ...o.env },
+    });
+  const sharedToken = (
+    overrides: Record<string, unknown> = {},
+    options: Parameters<typeof token>[1] = {},
+  ) =>
+    token(
+      {
+        azp: T_CLIENT,
+        scope: `openid ${T_SCOPE}`,
+        manar_tenant: 't-acme',
+        manar_roles: undefined,
+        ...overrides,
+      },
+      { issuer: SHARED, ...options },
+    );
+
+  it('accepts: tenant claim, audience, client and an ACTIVE membership all agree', async () => {
+    const s = shared();
+    const { ctx, request } = context(`Bearer ${await sharedToken()}`);
+    await expect(s.guard.canActivate(ctx)).resolves.toBe(true);
+    expect(request.cloudAgent?.context.tenant).toEqual({
+      id: 't-acme',
+      slug: 'acme',
+    });
+    expect(s.resolveActive).toHaveBeenCalledWith({
+      issuer: 'https://auth.manar.test/realms/manar',
+      subject: 'user-1',
+      requestedTenantId: 't-acme',
+    });
+  });
+
+  it('a bare 401 costs no tenant lookup and carries no scope hint (the metadata lists it)', async () => {
+    const s = shared();
+    const lookup = vi.spyOn(
+      (s.guard as unknown as { control: ControlPrismaService }).control.tenant,
+      'findUnique',
+    );
+    const { ctx, replyHeaders } = context(undefined, {
+      tenantSlug: 'random-xyz',
+      agentSlug: 'a',
+    });
+    await refusal(s.guard.canActivate(ctx));
+    expect(lookup).not.toHaveBeenCalled();
+    expect(replyHeaders['WWW-Authenticate']).not.toContain('scope=');
+  });
+
+  it('a token for another issuer or garbage does no tenant lookup either; a shared token does, and names the scope', async () => {
+    const s = shared();
+    const lookup = vi.spyOn(
+      (s.guard as unknown as { control: ControlPrismaService }).control.tenant,
+      'findUnique',
+    );
+    await refusal(s.guard.canActivate(context('Bearer not-a-jwt').ctx));
+    await refusal(
+      s.guard.canActivate(
+        context(`Bearer ${await token({}, { issuer: 'https://evil.test/r' })}`)
+          .ctx,
+      ),
+    );
+    expect(lookup).not.toHaveBeenCalled();
+    const { ctx, replyHeaders } = context(
+      `Bearer ${await sharedToken({ manar_tenant: 't-globex' })}`,
+    );
+    await refusal(s.guard.canActivate(ctx));
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(replyHeaders['WWW-Authenticate']).toContain(`scope="${T_SCOPE}"`);
+  });
+
+  it('unknown slugs are cached apart from real tenants and never evict them', async () => {
+    const s = shared();
+    const g = s.guard as unknown as {
+      tenantBySlug(slug: string): Promise<unknown>;
+      tenantsBySlug: Map<string, unknown>;
+      unknownSlugs: Map<string, unknown>;
+    };
+    await g.tenantBySlug('acme');
+    for (let i = 0; i < 1_100; i++) await g.tenantBySlug(`nobody-${i}`);
+    expect(g.tenantsBySlug.has('acme')).toBe(true);
+    expect(g.unknownSlugs.size).toBeLessThanOrEqual(1_000);
+  });
+
+  it('an existing ChatGPT binding is refused while ChatGPT is off on the shared realm', async () => {
+    const chat = { platform: 'CHATGPT', oauthClientId: T_CLIENT };
+    const off = shared({ agent: sharedAgent(chat) });
+    const refused = await refusal(
+      off.guard.canActivate(context(`Bearer ${await sharedToken()}`).ctx),
+    );
+    expect([refused.status, refused.body.reason]).toEqual([
+      403,
+      'chatgpt_not_enabled',
+    ]);
+    const on = shared({
+      agent: sharedAgent(chat),
+      env: { MANAR_MCP_CHATGPT_ENABLED: 'true' },
+    });
+    await expect(
+      on.guard.canActivate(context(`Bearer ${await sharedToken()}`).ctx),
+    ).resolves.toBe(true);
+  });
+
+  it("a token for tenant B used on tenant A's MCP URL is 401, and nothing lands in A's audit", async () => {
+    const s = shared();
+    const other = await sharedToken(
+      {
+        manar_tenant: 't-globex',
+        scope: 'openid manar-mcp-t-globex-copilot-1',
+      },
+      { aud: 'https://mcp.manar.test/mcp/globex/copilot-1' },
+    );
+    const { ctx } = context(`Bearer ${other}`);
+    const { status, body } = await refusal(s.guard.canActivate(ctx));
+    expect([status, body.reason]).toEqual([401, 'wrong_audience']);
+    expect(s.recordSafely).not.toHaveBeenCalled();
+    expect(s.getClient).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['another tenant', { manar_tenant: 't-globex' }],
+    ['no tenant claim', { manar_tenant: undefined }],
+    ['a non-string tenant claim', { manar_tenant: ['t-acme'] }],
+  ])(
+    'right audience but %s in the tenant claim: 401 tenant_mismatch, no tenant database',
+    async (_l, claims) => {
+      const s = shared();
+      const { ctx } = context(`Bearer ${await sharedToken(claims)}`);
+      const { status, body } = await refusal(s.guard.canActivate(ctx));
+      expect([status, body.reason]).toEqual([401, 'tenant_mismatch']);
+      expect(s.getClient).not.toHaveBeenCalled();
+      expect(s.recordSafely).not.toHaveBeenCalled();
+    },
+  );
+
+  it("valid tenant claim but the azp of another agent's client: 403 unknown_client", async () => {
+    const s = shared();
+    const { ctx } = context(
+      `Bearer ${await sharedToken({ azp: 'manar-cloud-t-acme-other' })}`,
+    );
+    const { status, body } = await refusal(s.guard.canActivate(ctx));
+    expect([status, body.reason]).toEqual([403, 'unknown_client']);
+  });
+
+  it("a binding whose scope is another tenant's is refused even if the token carries this tenant's scope", async () => {
+    const s = shared({
+      agent: sharedAgent({ oauthScope: 'manar-mcp-t-globex-copilot-1' }), // gitleaks:allow (scope name, not a key)
+    });
+    const { ctx } = context(`Bearer ${await sharedToken()}`);
+    const { status, body } = await refusal(s.guard.canActivate(ctx));
+    expect([status, body.reason]).toEqual([403, 'binding_tenant_mismatch']);
+  });
+
+  it('removing the membership revokes at once: no ACTIVE membership is 403 user_not_allowed', async () => {
+    const s = shared({ membershipRoles: null });
+    const { ctx } = context(`Bearer ${await sharedToken()}`);
+    const { status, body } = await refusal(s.guard.canActivate(ctx));
+    expect([status, body.reason]).toEqual([403, 'user_not_allowed']);
+  });
+
+  it('a member with only a read-only role is refused', async () => {
+    const s = shared({ membershipRoles: ['READ_ONLY', 'AUDITOR'] });
+    const { ctx } = context(`Bearer ${await sharedToken()}`);
+    expect((await refusal(s.guard.canActivate(ctx))).body.reason).toBe(
+      'user_not_allowed',
+    );
+  });
+
+  it('ignores a manar_roles claim: roles come from the membership, not the token', async () => {
+    const s = shared({ membershipRoles: null });
+    const { ctx } = context(
+      `Bearer ${await sharedToken({ manar_roles: ['manar-agent-copilot-1'] })}`,
+    );
+    expect((await refusal(s.guard.canActivate(ctx))).status).toBe(403);
+  });
+
+  it('a paused agent (over the cap after a downgrade) is 403 agent_paused', async () => {
+    const s = shared({ paused: true });
+    const { ctx } = context(`Bearer ${await sharedToken()}`);
+    const { status, body } = await refusal(s.guard.canActivate(ctx));
+    expect([status, body.reason]).toEqual([403, 'agent_paused']);
+    expect(s.isPaused).toHaveBeenCalledWith(
+      't-acme',
+      expect.anything(),
+      'agent-1',
+    );
+  });
+
+  it('a self-registered client is never accepted before the tenant admin confirms it', async () => {
+    const s = shared({
+      agent: sharedAgent({ platform: 'CHATGPT', oauthClientId: null }),
+      env: { MANAR_MCP_CHATGPT_ENABLED: 'true' },
+    });
+    const { ctx } = context(
+      `Bearer ${await sharedToken({ azp: 'dcr-attacker' })}`,
+    );
+    const { status, body } = await refusal(s.guard.canActivate(ctx));
+    expect([status, body.reason]).toEqual([
+      403,
+      'cloud_client_pending_approval',
+    ]);
+    // Proposed for this tenant's agent only, from a member's token.
+    expect(s.proposeDcrClient).toHaveBeenCalledWith(
+      't-acme',
+      'agent-1',
+      'dcr-attacker',
+    );
+  });
+
+  it('a confirmed client of tenant A is not accepted for tenant B (azp binds to the binding)', async () => {
+    const s = shared({
+      agent: sharedAgent({
+        platform: 'CHATGPT',
+        oauthClientId: 'dcr-of-globex',
+      }),
+    });
+    const { ctx } = context(
+      `Bearer ${await sharedToken({ azp: 'dcr-of-acme' })}`,
+    );
+    expect((await refusal(s.guard.canActivate(ctx))).status).toBe(403);
+  });
+
+  it('a shared-realm token for a tenant that has its own realm is refused', async () => {
+    const s = shared();
+    const { ctx } = context(
+      `Bearer ${await sharedToken({}, { aud: 'https://mcp.manar.test/mcp/own/copilot-1' })}`,
+      { tenantSlug: 'own', agentSlug: 'copilot-1' },
+    );
+    expect((await refusal(s.guard.canActivate(ctx))).body.reason).toBe(
+      'unknown_issuer',
+    );
+  });
+
+  it('a suspended tenant is refused', async () => {
+    const s = shared({
+      tenants: {
+        ...TENANTS,
+        acme: { ...TENANTS.acme, status: 'SUSPENDED' },
+      },
+    });
+    const { ctx } = context(`Bearer ${await sharedToken()}`);
+    expect((await refusal(s.guard.canActivate(ctx))).body.reason).toBe(
+      'unknown_issuer',
+    );
+  });
+
+  it('without a configured shared issuer a shared-realm token is unknown', async () => {
+    const s = setup({ agent: sharedAgent(), tenants: TENANTS });
+    const { ctx } = context(`Bearer ${await sharedToken()}`);
+    expect((await refusal(s.guard.canActivate(ctx))).body.reason).toBe(
+      'unknown_issuer',
+    );
   });
 });
