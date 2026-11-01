@@ -29,8 +29,16 @@ function setup(opts: { soleOwner?: boolean } = {}) {
         stripeCustomerId: 'cus_1',
       }),
     },
+    contactEmail: {
+      deleteMany: async () => (calls.push('contact'), { count: 1 }),
+    },
     accountDeletion: {
-      findMany: async () => [row],
+      findMany: async (a: { where: { status: { in: string[] } } }) =>
+        a.where.status.in.includes(row.status) ? [row] : [],
+      findUnique: async () => row,
+      deleteMany: async (a: { where: { status: { in: string[] } } }) => ({
+        count: a.where.status.in.includes(row.status) ? 1 : 0,
+      }),
       updateMany: async () => ({ count: 1 }),
       update: vi.fn(
         async (a: { data: { status: string } }) => (row.status = a.data.status),
@@ -57,6 +65,7 @@ function setup(opts: { soleOwner?: boolean } = {}) {
       }),
     } as never,
     { send: async () => true } as never,
+    { verified: async () => 'me@acme.io' } as never,
     { get: () => undefined } as never,
   );
   return { svc, calls, row };
@@ -73,6 +82,7 @@ describe('account deletion', () => {
       'workspace',
       'memberships',
       'kc:manar:u1',
+      'contact',
     ]);
     expect(row.status).toBe('DONE');
   });
@@ -80,7 +90,20 @@ describe('account deletion', () => {
     const { svc, calls, row } = setup({ soleOwner: true });
     expect(await svc.executeDue()).toEqual({ done: 0, failed: 1 });
     expect(calls).toEqual([]);
-    expect(row.status).toBe('FAILED');
+    // ends the request instead of retrying every hour, and the status says why
+    expect(row.status).toBe('REFUSED');
+    expect(await svc.status(row.issuer, row.subject)).toEqual({
+      scheduled: false,
+      refused: 'sole_owner',
+    });
+    expect(await svc.executeDue()).toEqual({ done: 0, failed: 0 });
+  });
+  it('lets the person cancel a request that is retrying after a failure', async () => {
+    const { svc, row } = setup();
+    row.status = 'FAILED';
+    await expect(svc.cancel(row.issuer, row.subject)).resolves.toEqual({
+      scheduled: false,
+    });
   });
   it('finds the realm in an issuer', () => {
     expect(realmOf('https://auth-manar.vax.sh/realms/manar')).toBe('manar');

@@ -35,6 +35,8 @@ export interface VerifiedIdentity {
    * an email link. Company decisions need `microsoft` AND these claims from the same session.
    */
   idp?: string;
+  /** Seconds since epoch of the last interactive sign-in (`auth_time`); absent = unknown. */
+  authTime?: number;
 }
 
 /**
@@ -109,6 +111,8 @@ export class TokenVerifierService {
       oid: str(payload.oid),
       wids: entraAdminWids(payload),
       idp: str(payload.idp),
+      authTime:
+        typeof payload.auth_time === 'number' ? payload.auth_time : undefined,
     };
   }
 

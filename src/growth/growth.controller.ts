@@ -8,6 +8,7 @@ import {
   Header,
   HttpCode,
   NotFoundException,
+  UnauthorizedException,
   Param,
   Post,
   Put,
@@ -34,6 +35,7 @@ import { ROLES } from '../auth/roles';
 import { RolesGuard } from '../auth/roles.guard';
 import type { VerifiedIdentity } from '../auth/token-verifier.service';
 import type { AppConfig } from '../config/env.validation';
+import { ContactEmailService } from '../contact/contact-email.service';
 import { ContactFlowService } from './contact-flow.service';
 import { AccountService } from './account.service';
 import { renderBadge } from './badge.svg';
@@ -43,6 +45,8 @@ import { MembersService } from './members.service';
 import { ProfileService } from './profile.service';
 import { verifyToken } from './signed-token';
 
+/** How recent the last interactive sign-in must be to delete an account. */
+export const FRESH_SIGN_IN_SECONDS = 300;
 const Toggle = z.object({ enabled: z.boolean() });
 const AutoJoinBody = z.object({
   enabled: z.boolean(),
@@ -242,6 +246,7 @@ export class GrowthIdentityController {
     private readonly members: MembersService,
     private readonly account: AccountService,
     private readonly contact: ContactFlowService,
+    private readonly contactEmail: ContactEmailService,
   ) {}
 
   @Get('me/contact-email')
@@ -347,8 +352,19 @@ export class GrowthIdentityController {
     description:
       'Export first. Cancel with DELETE /account/deletion until the date returned.',
   })
-  requestDeletion(@CurrentIdentity() id: VerifiedIdentity) {
-    return this.account.request(id.issuer, id.subject, id.email);
+  async requestDeletion(@CurrentIdentity() id: VerifiedIdentity) {
+    // A destructive step needs a fresh sign-in (5 minutes). Unknown auth_time counts as stale.
+    if (!id.authTime || Date.now() / 1000 - id.authTime > FRESH_SIGN_IN_SECONDS)
+      throw new UnauthorizedException({
+        statusCode: 401,
+        code: 'reauth_required',
+        maxAge: FRESH_SIGN_IN_SECONDS,
+      });
+    return this.account.request(
+      id.issuer,
+      id.subject,
+      (await this.contactEmail.verified(id.issuer, id.subject)) ?? undefined,
+    );
   }
 
   @Delete('account/deletion')

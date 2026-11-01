@@ -13,6 +13,7 @@ import { KeycloakAdminClient } from '../keycloak/keycloak-admin.client';
 import { StripeGateway } from '../billing/stripe.gateway';
 import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { growthSetting } from './growth.config';
+import { ContactEmailService } from '../contact/contact-email.service';
 import { MailerService } from './mailer.service';
 import { zip } from './zip';
 
@@ -51,6 +52,7 @@ export class AccountService {
     private readonly keycloak: KeycloakAdminClient,
     private readonly stripe: StripeGateway,
     private readonly mailer: MailerService,
+    private readonly contact: ContactEmailService,
     private readonly config: ConfigService<AppConfig, true>,
   ) {}
 
@@ -155,6 +157,9 @@ export class AccountService {
     const row = await this.control.accountDeletion.findUnique({
       where: { issuer_subject: { issuer, subject } },
     });
+    // The only owner of a company workspace: the request ended; the person is told.
+    if (row?.status === 'REFUSED')
+      return { scheduled: false as const, refused: 'sole_owner' as const };
     return row && row.status !== 'DONE'
       ? {
           scheduled: true,
@@ -165,14 +170,32 @@ export class AccountService {
   }
 
   async request(issuer: string, subject: string, email?: string) {
-    await this.assertNotSoleOwner(issuer, subject);
+    try {
+      await this.assertNotSoleOwner(issuer, subject);
+    } catch (e) {
+      if (e instanceof SoleOwnerError)
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'transfer_ownership_first',
+        });
+      throw e;
+    }
     const days = growthSetting(this.config, 'ACCOUNT_DELETION_GRACE_DAYS');
     const executeAfter = new Date(Date.now() + days * DAY_MS);
-    const row = await this.control.accountDeletion.upsert({
-      where: { issuer_subject: { issuer, subject } },
-      create: { issuer, subject, executeAfter },
-      update: {},
-    });
+    const key = { issuer_subject: { issuer, subject } };
+    const prior = await this.control.accountDeletion.findUnique({ where: key });
+    // A refused request starts over; one that is scheduled or retrying keeps its date.
+    const row =
+      prior?.status === 'REFUSED'
+        ? await this.control.accountDeletion.update({
+            where: key,
+            data: { status: 'SCHEDULED', executeAfter, summary: undefined },
+          })
+        : await this.control.accountDeletion.upsert({
+            where: key,
+            create: { issuer, subject, executeAfter },
+            update: {},
+          });
     if (email)
       void this.mailer.send({
         to: email,
@@ -189,7 +212,11 @@ export class AccountService {
 
   async cancel(issuer: string, subject: string) {
     const r = await this.control.accountDeletion.deleteMany({
-      where: { issuer, subject, status: 'SCHEDULED' },
+      where: {
+        issuer,
+        subject,
+        status: { in: ['SCHEDULED', 'FAILED', 'REFUSED'] },
+      },
     });
     if (r.count === 0) throw new NotFoundException('no_deletion_scheduled');
     return { scheduled: false as const };
@@ -214,11 +241,7 @@ export class AccountService {
           ],
         },
       });
-      if (others === 0)
-        throw new ConflictException({
-          statusCode: 409,
-          code: 'transfer_ownership_first',
-        });
+      if (others === 0) throw new SoleOwnerError();
     }
   }
 
@@ -251,10 +274,21 @@ export class AccountService {
       });
       if (claimed.count !== 1) continue;
       try {
+        const notify = await this.contact.verified(row.issuer, row.subject);
         const summary = await this.executeOne(row.issuer, row.subject);
         const hash = createHash('sha256')
           .update(`${row.issuer}\n${row.subject}`)
           .digest('hex');
+        await this.control.contactEmail.deleteMany({
+          where: { issuer: row.issuer, subject: row.subject },
+        });
+        if (notify)
+          void this.mailer.send({
+            to: notify,
+            subject: 'Your Manar account was deleted',
+            text: 'Your Manar account and workspace were deleted as you asked. Thank you for trying Manar.\n',
+            html: '<p>Your Manar account and workspace were deleted as you asked. Thank you for trying Manar.</p>',
+          });
         await this.control.accountDeletion.update({
           where: { id: row.id },
           data: {
@@ -270,6 +304,23 @@ export class AccountService {
         done++;
       } catch (error) {
         failed++;
+        if (error instanceof SoleOwnerError) {
+          // Not a glitch to retry every hour: the request ends and the person is told.
+          await this.control.accountDeletion.update({
+            where: { id: row.id },
+            data: { status: 'REFUSED', summary: { reason: 'sole_owner' } },
+          });
+          const to = await this.contact.verified(row.issuer, row.subject);
+          if (to)
+            void this.mailer.send({
+              to,
+              subject: 'Your Manar account was not deleted',
+              text: 'Your account deletion was stopped: you are the only owner of a company workspace. Make someone else an owner, then ask again in Settings, Account.\n',
+              html: '<p>Your account deletion was stopped: you are the only owner of a company workspace. Make someone else an owner, then ask again in Settings, Account.</p>',
+            });
+          this.logger.warn(`account ${row.id} deletion refused: sole owner`);
+          continue;
+        }
         await this.control.accountDeletion.update({
           where: { id: row.id },
           data: {
@@ -357,5 +408,12 @@ export function realmOf(issuer: string): string | null {
     return m?.[1] ?? null;
   } catch {
     return null;
+  }
+}
+
+/** The person is the only owner of a company workspace. */
+export class SoleOwnerError extends Error {
+  constructor() {
+    super('sole_owner');
   }
 }
