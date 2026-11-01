@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { acsHeaders, parseAcs } from './mailer.service';
+import { describe, expect, it, vi } from 'vitest';
+import { MailerService, acsHeaders, parseAcs } from './mailer.service';
 
 describe('ACS mail signing', () => {
   it('parses the connection string and refuses a non-https endpoint', () => {
@@ -26,5 +26,24 @@ describe('ACS mail signing', () => {
     expect(h.Authorization).toMatch(
       /^HMAC-SHA256 SignedHeaders=x-ms-date;host;x-ms-content-sha256&Signature=/,
     );
+  });
+});
+
+describe('mailer', () => {
+  it('refuses the realm placeholder addresses without calling ACS', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const k = Buffer.from('k').toString('base64');
+    const m = new MailerService({
+      get: () => `endpoint=https://a.communication.azure.com/;accesskey=${k}`,
+    } as never);
+    expect(
+      await m.send({
+        to: 'abc@idp.invalid',
+        subject: 's',
+        text: 't',
+        html: 'h',
+      }),
+    ).toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

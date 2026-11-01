@@ -59,6 +59,17 @@ describe.skipIf(!url)('weekly digest (postgres)', () => {
       } as never,
       { configured: true, send } as never,
       {
+        verifiedMany: (people: { issuer: string; subject: string }[]) =>
+          Promise.resolve(
+            new Map(
+              people.map((p) => [
+                `${p.issuer}\n${p.subject}`,
+                `${p.subject}@x.io`,
+              ]),
+            ),
+          ),
+      } as never,
+      {
         get: (k: string) =>
           ({
             MANAR_LINK_SECRET: 's'.repeat(32),

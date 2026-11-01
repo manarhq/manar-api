@@ -1,5 +1,6 @@
 import {
   Body,
+  ConflictException,
   Controller,
   Get,
   Headers,
@@ -23,6 +24,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { BillingService } from './billing.service';
+import { ContactEmailService } from '../contact/contact-email.service';
 import { KeepProService } from './keep-pro.service';
 import { StripeWebhookService } from './stripe-webhook.service';
 
@@ -37,6 +39,7 @@ export class BillingController {
   constructor(
     private readonly billing: BillingService,
     private readonly keepPro: KeepProService,
+    private readonly contact: ContactEmailService,
   ) {}
 
   @Get()
@@ -57,9 +60,20 @@ export class BillingController {
     summary:
       'Stripe Checkout session URL for Pro (monthly or yearly) or Company',
   })
-  checkout(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
+  async checkout(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const { plan } = parseBodyOrThrow(CheckoutSchema, body);
-    return this.billing.checkout(auth.tenant.id, auth.user.email, plan);
+    // The token's email can be the realm's `.invalid` placeholder: Stripe gets the verified one.
+    const email = await this.contact.verified(
+      auth.issuer,
+      auth.user.keycloakSubject,
+    );
+    if (!email)
+      throw new ConflictException({
+        statusCode: 409,
+        code: 'contact_email_required',
+        message: 'Confirm a contact email before checkout.',
+      });
+    return this.billing.checkout(auth.tenant.id, email, plan);
   }
 
   @Post('keep-pro')

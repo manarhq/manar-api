@@ -34,6 +34,7 @@ import { ROLES } from '../auth/roles';
 import { RolesGuard } from '../auth/roles.guard';
 import type { VerifiedIdentity } from '../auth/token-verifier.service';
 import type { AppConfig } from '../config/env.validation';
+import { ContactFlowService } from './contact-flow.service';
 import { AccountService } from './account.service';
 import { renderBadge } from './badge.svg';
 import { DigestService } from './digest.service';
@@ -47,6 +48,11 @@ const InviteBody = z.object({
   email: z.string().trim().email().max(254),
   role: z.enum(ROLES).default('DEVELOPER'),
 });
+const EmailBody = z.object({
+  email: z.string().trim().email().max(254),
+  locale: z.enum(['en', 'ar']).default('en'),
+});
+const CodeBody = z.object({ code: z.string().regex(/^\d{6}$/) });
 const AcceptBody = z.object({ token: z.string().min(10).max(1024) });
 const PrefsBody = z.object({
   weeklyDigest: z.boolean().optional(),
@@ -230,7 +236,39 @@ export class GrowthIdentityController {
   constructor(
     private readonly members: MembersService,
     private readonly account: AccountService,
+    private readonly contact: ContactFlowService,
   ) {}
+
+  @Get('me/contact-email')
+  @ApiOperation({
+    summary: 'Your verified contact email (receipts, alerts, weekly email)',
+  })
+  contactStatus(@CurrentIdentity() id: VerifiedIdentity) {
+    return this.contact.status(id);
+  }
+
+  @Post('me/contact-email')
+  @HttpCode(200)
+  @Throttle({ human: { limit: 10, ttl: 3_600_000 } })
+  @ApiOperation({ summary: 'Send a 6-digit code to confirm a contact email' })
+  contactRequest(
+    @CurrentIdentity() id: VerifiedIdentity,
+    @Body() body: unknown,
+  ) {
+    const b = parseBodyOrThrow(EmailBody, body);
+    return this.contact.request(id, b.email, b.locale);
+  }
+
+  @Post('me/contact-email/confirm')
+  @HttpCode(200)
+  @Throttle({ human: { limit: 20, ttl: 3_600_000 } })
+  @ApiOperation({ summary: 'Confirm the contact email with the code' })
+  contactConfirm(
+    @CurrentIdentity() id: VerifiedIdentity,
+    @Body() body: unknown,
+  ) {
+    return this.contact.confirm(id, parseBodyOrThrow(CodeBody, body).code);
+  }
 
   @Post('workspaces/invites/accept')
   @HttpCode(200)

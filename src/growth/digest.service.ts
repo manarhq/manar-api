@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
+import { ContactEmailService } from '../contact/contact-email.service';
 import { ReportCardService } from '../workspace/report-card.service';
 import { DEFAULT_TZ, dueNow, renderDigest } from './digest';
 import { growthSetting } from './growth.config';
@@ -22,6 +23,7 @@ export class DigestService {
     private readonly control: ControlPrismaService,
     private readonly cards: ReportCardService,
     private readonly mailer: MailerService,
+    private readonly contact: ContactEmailService,
     private readonly config: ConfigService<AppConfig, true>,
   ) {}
 
@@ -56,13 +58,16 @@ export class DigestService {
           weeklyDigest: true,
           status: 'ACTIVE',
           role: 'TENANT_OWNER',
-          email: { not: null },
           OR: [{ digestSentWeek: null }, { digestSentWeek: { not: week } }],
           tenant: { kind: 'PERSONAL', status: 'ACTIVE' },
         },
         take: 5_000, // ponytail: one pass per hour; page it if a single zone ever holds more
       });
+      // Mail goes to the verified contact email only; nobody without one is claimed or mailed.
+      const emails = await this.contact.verifiedMany(rows);
       for (const m of rows) {
+        const to = emails.get(`${m.issuer}\n${m.subject}`);
+        if (!to) continue;
         const claimed = await this.control.membership.updateMany({
           where: {
             id: m.id,
@@ -72,7 +77,7 @@ export class DigestService {
         });
         if (claimed.count !== 1) continue;
         try {
-          if (!(await this.sendOne(m, week))) out.skipped++;
+          if (!(await this.sendOne(m, to, week))) out.skipped++;
           else out.sent++;
         } catch (error) {
           out.failed++;
@@ -96,13 +101,13 @@ export class DigestService {
     m: {
       id: string;
       tenantId: string;
-      email: string | null;
       locale: string | null;
     },
+    to: string,
     week: string,
   ): Promise<boolean> {
     const unsub = this.unsubscribeUrl(m.id);
-    if (!unsub || !m.email) return false;
+    if (!unsub) return false;
     const totals = await this.cards.refresh(m.tenantId);
     if (totals.actions === 0) return false;
     const web = (
@@ -115,7 +120,7 @@ export class DigestService {
       unsubscribeUrl: unsub,
     });
     const ok = await this.mailer.send({
-      to: m.email,
+      to,
       ...mail,
       headers: {
         'List-Unsubscribe': `<${unsub}>`,

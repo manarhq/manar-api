@@ -7,8 +7,13 @@ import { EntitlementsService } from '../billing/entitlements.service';
 import { StripeGateway } from '../billing/stripe.gateway';
 import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
+import {
+  ContactEmailService,
+  isPlaceholderEmail,
+} from '../contact/contact-email.service';
 import { GrowthAuditService } from './growth-audit.service';
 import { growthSetting } from './growth.config';
+import { isDisposableDomain, isConsumerDomain } from './disposable';
 
 export interface LaunchOfferCounter {
   enabled: boolean;
@@ -18,6 +23,8 @@ export interface LaunchOfferCounter {
 }
 
 const COUNTER_TTL_MS = 15_000;
+const sha = (prefix: string, v: string) =>
+  createHash('sha256').update(`${prefix}${v}`).digest('hex');
 const deviceHash = (machineId: string) =>
   createHash('sha256').update(`manar-launch-device:${machineId}`).digest('hex');
 
@@ -45,6 +52,7 @@ export class LaunchOfferService {
     private readonly billing: BillingService,
     private readonly entitlements: EntitlementsService,
     private readonly audit: GrowthAuditService,
+    private readonly contact: ContactEmailService,
   ) {}
 
   private get enabled(): boolean {
@@ -79,10 +87,10 @@ export class LaunchOfferService {
    */
   async onDeviceRegistered(
     tenantId: string,
-    machineId: string,
+    device: DeviceFacts,
   ): Promise<boolean> {
     try {
-      return await this.claim(tenantId, machineId);
+      return await this.claim(tenantId, device);
     } catch (error) {
       this.logger.error(
         `launch offer failed for ${tenantId}: ${String(error)}`,
@@ -91,7 +99,7 @@ export class LaunchOfferService {
     }
   }
 
-  async claim(tenantId: string, machineId: string): Promise<boolean> {
+  async claim(tenantId: string, device: DeviceFacts): Promise<boolean> {
     if (!this.enabled) return false;
     const tenant = await this.control.tenant.findUnique({
       where: { id: tenantId },
@@ -110,50 +118,111 @@ export class LaunchOfferService {
     if (current?.stripeSubscriptionId || (current && current.plan !== 'free'))
       return false;
 
-    const slots = growthSetting(this.config, 'LAUNCH_OFFER_SLOTS');
-    const device = deviceHash(machineId);
     const issuer = tenant.ownerIssuer;
     const subject = tenant.ownerSubject;
+    // Who is this? A Microsoft or GitHub account is a real identity. Otherwise (email link) the
+    // person needs a verified contact email on a domain that is not a throwaway mailbox service.
+    const [idp, email] = await Promise.all([
+      this.contact.idpOf(issuer, subject),
+      this.contact.verified(issuer, subject),
+    ]);
+    const domain =
+      email && !isPlaceholderEmail(email)
+        ? email.split('@')[1]!.toLowerCase()
+        : null;
+    const strong = idp === 'microsoft' || idp === 'github';
+    if (!strong && (!domain || isDisposableDomain(domain))) return false;
+    if (domain && isDisposableDomain(domain)) return false;
+
+    const slots = growthSetting(this.config, 'LAUNCH_OFFER_SLOTS');
+    const domainCap = growthSetting(
+      this.config,
+      'LAUNCH_OFFER_DOMAIN_DAILY_CAP',
+    );
+    const ipCap = growthSetting(this.config, 'LAUNCH_OFFER_IP_DAILY_CAP');
+    const dev = deviceHash(device.machineId);
+    // The TPM endorsement key survives a reinstall and a changed machine id, so it counts when known.
+    const ek = device.ekFingerprint
+      ? sha('manar-launch-ek:', device.ekFingerprint)
+      : null;
+    const ipHash = device.ip ? sha('manar-launch-ip:', device.ip) : null;
+    const since = new Date(Date.now() - 86_400_000);
     const claim = await this.control.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('launch-offer'))`;
       const taken = await tx.launchOfferClaim.findFirst({
         where: {
-          OR: [{ issuer, subject }, { deviceHash: device }, { tenantId }],
+          OR: [
+            { issuer, subject },
+            { deviceHash: dev },
+            { tenantId },
+            ...(ek ? [{ ekHash: ek }] : []),
+          ],
         },
       });
       if (taken) return null;
       if ((await tx.launchOfferClaim.count()) >= slots) return null;
+      if (domain && !isConsumerDomain(domain)) {
+        const n = await tx.launchOfferClaim.count({
+          where: { emailDomain: domain, claimedAt: { gt: since } },
+        });
+        if (n >= domainCap) return null;
+      }
+      if (ipHash) {
+        const n = await tx.launchOfferClaim.count({
+          where: { ipHash, claimedAt: { gt: since } },
+        });
+        if (n >= ipCap) return null;
+      }
       return tx.launchOfferClaim.create({
-        data: { issuer, subject, tenantId, deviceHash: device },
+        data: {
+          issuer,
+          subject,
+          tenantId,
+          deviceHash: dev,
+          ekHash: ek,
+          emailDomain: domain,
+          ipHash,
+        },
       });
     });
     if (!claim) return false;
     this.cached = undefined;
 
     try {
-      const owner = await this.control.membership.findUnique({
-        where: { issuer_subject_tenantId: { issuer, subject, tenantId } },
-        select: { email: true },
-      });
-      if (!owner?.email)
-        throw new Error('owner has no email for the Stripe customer');
       const months = growthSetting(this.config, 'LAUNCH_OFFER_MONTHS');
-      const customer = await this.billing.ensureCustomer(tenantId, owner.email);
-      const end = new Date();
-      end.setUTCMonth(end.getUTCMonth() + months);
-      const sub = await this.stripe.client().subscriptions.create(
-        {
-          customer,
-          items: [{ price: this.stripe.price('PRO_MONTHLY')!, quantity: 1 }],
-          trial_end: Math.floor(end.getTime() / 1000),
-          trial_settings: {
-            end_behavior: { missing_payment_method: 'cancel' },
-          },
-          payment_settings: { save_default_payment_method: 'on_subscription' },
-          metadata: { tenantId, launchOffer: 'true' },
-        },
-        { idempotencyKey: `manar-launch-offer-${tenantId}` },
+      const customer = await this.billing.ensureCustomer(
+        tenantId,
+        email ?? undefined,
       );
+      // From the claim time, not from now: a retry sends identical parameters.
+      const end = new Date(claim.claimedAt);
+      end.setUTCMonth(end.getUTCMonth() + months);
+      const stripe = this.stripe.client();
+      // A subscription made by an earlier attempt that died before we recorded it is adopted.
+      const prior = (
+        await stripe.subscriptions.list({ customer, status: 'all', limit: 20 })
+      ).data.find(
+        (x) =>
+          x.metadata?.launchOffer === 'true' &&
+          ['trialing', 'active', 'past_due'].includes(x.status),
+      );
+      const sub =
+        prior ??
+        (await stripe.subscriptions.create(
+          {
+            customer,
+            items: [{ price: this.stripe.price('PRO_MONTHLY')!, quantity: 1 }],
+            trial_end: Math.floor(end.getTime() / 1000),
+            trial_settings: {
+              end_behavior: { missing_payment_method: 'cancel' },
+            },
+            payment_settings: {
+              save_default_payment_method: 'on_subscription',
+            },
+            metadata: { tenantId, launchOffer: 'true' },
+          },
+          { idempotencyKey: `manar-launch-offer-${claim.id}` },
+        ));
       await this.control.launchOfferClaim.update({
         where: { id: claim.id },
         data: { stripeSubscriptionId: sub.id, trialEndsAt: end },
@@ -185,4 +254,11 @@ export class LaunchOfferService {
       throw error;
     }
   }
+}
+
+export interface DeviceFacts {
+  machineId: string;
+  /** TPM endorsement key fingerprint, when the device attested one. */
+  ekFingerprint?: string | null;
+  ip?: string | null;
 }

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
+import { ContactEmailService } from '../contact/contact-email.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { MailerService } from './mailer.service';
 import { renderTrialReminder } from './trial-reminder';
@@ -19,6 +20,7 @@ export class TrialReminderService {
   constructor(
     private readonly control: ControlPrismaService,
     private readonly mailer: MailerService,
+    private readonly contact: ContactEmailService,
     private readonly config: ConfigService<AppConfig, true>,
   ) {}
 
@@ -57,8 +59,10 @@ export class TrialReminderService {
         const ent = await this.control.tenantEntitlement.findUnique({
           where: { tenantId: c.tenantId },
         });
+        const to = await this.contact.verified(c.issuer, c.subject);
         if (
-          !m?.email ||
+          !to ||
+          !m ||
           m.status !== 'ACTIVE' ||
           ent?.stripeSubscriptionId !== c.stripeSubscriptionId
         )
@@ -68,7 +72,7 @@ export class TrialReminderService {
           endsAt: c.trialEndsAt!,
           link: `${web || 'https://manar.vax.sh'}/settings/billing`,
         });
-        if (!(await this.mailer.send({ to: m.email, ...mail })))
+        if (!(await this.mailer.send({ to, ...mail })))
           throw new Error('mail not accepted');
         out.sent++;
       } catch (error) {

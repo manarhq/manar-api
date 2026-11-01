@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { isPlaceholderEmail } from '../contact/contact-email.service';
 import type { AppConfig } from '../config/env.validation';
 import { growthSetting } from './growth.config';
 
@@ -73,6 +74,8 @@ export class MailerService {
   async send(mail: Mail): Promise<boolean> {
     const acs = this.acs();
     if (!acs) return false;
+    // The shared realm's placeholder addresses are never real mailboxes.
+    if (isPlaceholderEmail(mail.to)) return false;
     const path = '/emails:send?api-version=2023-03-31';
     const body = JSON.stringify({
       senderAddress: growthSetting(this.config, 'MAIL_FROM'),

@@ -36,6 +36,7 @@ import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.
  */
 import { ReportCardService } from '../workspace/report-card.service';
 import { WeeklyReportJob } from '../workspace/weekly-report.job';
+import { ContactModule } from '../contact/contact.module';
 import { GrowthWorkerModule } from '../growth/growth.module';
 import { GrowthActivitiesFactory } from './activities/growth.activities';
 
@@ -62,6 +63,7 @@ import { GrowthActivitiesFactory } from './activities/growth.activities';
     // Company billing: daily user and extra-device quantities on Stripe.
     BillingWorkerModule,
     // Growth: weekly digest and account deletion, run by the hourly schedule.
+    ContactModule,
     GrowthWorkerModule,
   ],
   providers: [

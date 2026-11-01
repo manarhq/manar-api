@@ -58,14 +58,20 @@ describe.skipIf(!url)('launch offer slots (postgres)', () => {
       { ensureCustomer: () => Promise.resolve('cus_x') } as never,
       { change: () => Promise.resolve() } as never,
       { record: () => Promise.resolve() } as never,
+      {
+        idpOf: () => Promise.resolve('github'),
+        verified: () => Promise.resolve(null),
+      } as never,
     );
     const got = await Promise.all(
-      ids.map((id, i) => svc.claim(id, `machine-${i}`)),
+      ids.map((id, i) => svc.claim(id, { machineId: `machine-${i}` })),
     );
     expect(got.filter(Boolean)).toHaveLength(7);
     expect(await control.launchOfferClaim.count()).toBe(7);
     // a second device from the same person does not take another slot
     const winner = ids[got.indexOf(true)]!;
-    expect(await svc.claim(winner, 'another-machine')).toBe(false);
+    expect(await svc.claim(winner, { machineId: 'another-machine' })).toBe(
+      false,
+    );
   }, 30_000);
 });

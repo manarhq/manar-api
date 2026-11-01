@@ -1,5 +1,8 @@
 import { ModuleRef } from '@nestjs/core';
-import { LaunchOfferService } from '../growth/launch-offer.service';
+import {
+  LaunchOfferService,
+  type DeviceFacts,
+} from '../growth/launch-offer.service';
 import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import * as x509 from '@peculiar/x509';
@@ -197,15 +200,19 @@ export class HostsService {
     });
     if (code) await this.codes.deleteByCode(code); // used: one registration per code
     if (result.status === 'APPROVED')
-      this.offerLaunchPro(tenant.id, input.machineId);
+      this.offerLaunchPro(tenant.id, {
+        machineId: input.machineId,
+        ekFingerprint: redeemed?.ekFingerprint ?? null,
+        ip: input.ip,
+      });
     return result;
   }
 
   /** Launch offer: a personal workspace adding a device may earn Pro. Detached; it cannot fail the install. */
-  private offerLaunchPro(tenantId: string, machineId: string): void {
+  private offerLaunchPro(tenantId: string, device: DeviceFacts): void {
     try {
       const offer = this.moduleRef?.get(LaunchOfferService, { strict: false });
-      void offer?.onDeviceRegistered(tenantId, machineId);
+      void offer?.onDeviceRegistered(tenantId, device);
     } catch {
       // not in this app (worker, tests): no launch offer here
     }

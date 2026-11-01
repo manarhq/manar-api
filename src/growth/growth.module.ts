@@ -5,6 +5,7 @@ import { KeycloakModule } from '../keycloak/keycloak.module';
 import { ReportCardService } from '../workspace/report-card.service';
 import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { AccountService } from './account.service';
+import { ContactFlowService } from './contact-flow.service';
 import { DigestService } from './digest.service';
 import { GrowthAuditService } from './growth-audit.service';
 import {
@@ -37,7 +38,13 @@ const SHARED = [
     GrowthWorkspaceController,
     GrowthIdentityController,
   ],
-  providers: [...SHARED, LaunchOfferService, ProfileService, MembersService],
+  providers: [
+    ...SHARED,
+    ContactFlowService,
+    LaunchOfferService,
+    ProfileService,
+    MembersService,
+  ],
   exports: [LaunchOfferService],
 })
 export class GrowthModule {}

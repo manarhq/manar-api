@@ -142,7 +142,7 @@ export class BillingService {
   }
 
   /** One Stripe customer per tenant; the id is stored before checkout so webhooks resolve the tenant from it. */
-  async ensureCustomer(tenantId: string, email: string) {
+  async ensureCustomer(tenantId: string, email?: string) {
     const row = await this.control.tenantEntitlement.findUnique({
       where: { tenantId },
     });

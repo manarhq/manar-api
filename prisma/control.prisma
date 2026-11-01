@@ -118,6 +118,8 @@ model Tenant {
   entraTenantId     String?
   /// COMPANY: anyone signing in with Microsoft from `entraTenantId` (verified `tid`) joins as a member.
   autoJoinEntra Boolean @default(false)
+  /// Auto-join stops adding people once this many members are ACTIVE (the admin can raise it).
+  autoJoinSeatCap Int @default(25)
 
   residency              TenantResidency @default(UAE)
   allowExternalAi        Boolean         @default(false)
@@ -491,6 +493,7 @@ model PushSubscription {
 /// is a claimed slot; the count of rows under an advisory lock is the counter. One per person and
 /// per device (hash of the machine id), enforced by the unique indexes as well as the service.
 model LaunchOfferClaim {
+  /// (claimedAt is indexed in the migration for the per-day caps)
   id                   String   @id @default(uuid())
   issuer               String
   subject              String
@@ -504,8 +507,13 @@ model LaunchOfferClaim {
   keptAt               DateTime?
   /// The 7-days-before reminder email went out.
   reminderSentAt       DateTime?
+  /// Anti-farming: domain of the verified contact email, hash of the registering IP, TPM EK hash.
+  emailDomain          String?
+  ipHash               String?
+  ekHash               String?  @unique
 
   @@unique([issuer, subject])
+  @@index([claimedAt])
   @@map("launch_offer_claims")
 }
 
@@ -556,4 +564,27 @@ model AccountDeletion {
   @@unique([issuer, subject])
   @@index([status, executeAfter])
   @@map("account_deletions")
+}
+
+/// A person's own verified contact email (the shared realm stores a placeholder `@idp.invalid`
+/// for Microsoft and GitHub users). Receipts, alerts, the weekly email and Stripe use this and
+/// nothing else. `pending*` is an unconfirmed change: a 6-digit code, HMAC-stored, 10 minutes,
+/// 5 attempts. `idp` is how the person last signed in (microsoft, github or null for an email link).
+model ContactEmail {
+  issuer          String
+  subject         String
+  email           String?
+  verifiedAt      DateTime?
+  idp             String?
+  pendingEmail    String?
+  codeHash        String?
+  codeExpiresAt   DateTime?
+  attempts        Int       @default(0)
+  sendsInWindow   Int       @default(0)
+  windowStartedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@id([issuer, subject])
+  @@map("contact_emails")
 }

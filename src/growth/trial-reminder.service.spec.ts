@@ -57,6 +57,7 @@ function make(
   const svc = new TrialReminderService(
     control as never,
     { configured: true, send } as never,
+    { verified: async () => 'a@b.c' } as never,
     { get: () => 'https://console.test' } as never,
   );
   return { svc, send, claim };

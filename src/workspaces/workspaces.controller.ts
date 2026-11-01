@@ -14,8 +14,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { ModuleRef } from '@nestjs/core';
-import { MembersService } from '../growth/members.service';
+import { ContactEmailService } from '../contact/contact-email.service';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { CurrentAuth, type AuthContext } from '../auth/auth-context';
 import { CurrentIdentity, IdentityGuard } from '../auth/identity.guard';
@@ -55,7 +54,7 @@ import { WorkspacesService } from './workspaces.service';
 export class WorkspacesController {
   constructor(
     private readonly workspaces: WorkspacesService,
-    private readonly moduleRef: ModuleRef,
+    private readonly contact: ContactEmailService,
   ) {}
 
   @Get()
@@ -76,16 +75,8 @@ export class WorkspacesController {
   })
   @ApiResponse({ status: 200, type: CreateWorkspaceResponseDto })
   async bootstrap(@CurrentIdentity() id: VerifiedIdentity) {
-    // Growth: a Microsoft sign-in from a company's Entra tenant joins it when its admin turned
-    // auto-join on. Never blocks or fails the sign-in.
-    try {
-      await this.moduleRef
-        .get(MembersService, { strict: false })
-        .autoJoin(id)
-        .catch(() => undefined);
-    } catch {
-      // growth module not loaded in this app
-    }
+    // Records how the person signed in (and pre-verifies an email-link address) for the growth track.
+    await this.contact.noteSignIn(id).catch(() => undefined);
     return this.workspaces.ensurePersonal(id);
   }
 

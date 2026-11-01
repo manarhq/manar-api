@@ -43,6 +43,7 @@ import { UsersModule } from './users/users.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
 import { WorkspaceModule } from './workspace/workspace.module';
+import { ContactModule } from './contact/contact.module';
 import { GrowthModule } from './growth/growth.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
 import { ComplianceModule } from './compliance/compliance.module';
@@ -100,6 +101,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     WorkspacesModule,
     TenantSettingsModule,
     WorkspaceModule,
+    ContactModule,
     GrowthModule,
     // Phase 15a: Data Classification, Compliance Mapping & Incidents.
     ComplianceModule,
