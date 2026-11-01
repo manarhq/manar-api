@@ -35,6 +35,10 @@ import {
   CloudMcpConfigSchema,
   cloudMcpConfigIssues,
 } from '../cloud-mcp/cloud-mcp.config';
+import {
+  DevicesConfigSchema,
+  devicesConfigIssues,
+} from '../devices/devices.config';
 import { EdgeConfigSchema, edgeConfigIssues } from '../edge/edge.config';
 
 /**
@@ -88,6 +92,7 @@ export const AppConfigSchema = z
   .extend(TrustedProxyConfigSchema.shape)
   .extend(EdgeConfigSchema.shape)
   .extend(BillingConfigSchema.shape)
+  .extend(DevicesConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {
@@ -97,6 +102,7 @@ export const AppConfigSchema = z
       ...redisConfigIssues(c),
       ...cloudMcpConfigIssues(c),
       ...trustedProxyIssues(c),
+      ...devicesConfigIssues(c),
       ...edgeConfigIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });

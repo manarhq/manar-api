@@ -3,11 +3,15 @@ import type {
   InstallKey,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
+
+/** A tenant client or an open transaction on one. */
+type KeyDb = Pick<TenantPrismaClient, 'installKey' | '$queryRaw'>;
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES, type AuditActor } from '../audit/audit-event-types';
 import {
   generateInstallKey,
   hashInstallKey,
+  legacyHashInstallKey,
   ipAllowed,
   isValidCidr,
 } from './install-key.util';
@@ -30,6 +34,8 @@ export interface CreateInstallKeyInput {
   allowedCidrs?: string[];
   maxUses?: number;
   expiresAt?: Date;
+  /** A caller-chosen secret (the "Add device" short code); default: a generated `mik_` key. */
+  rawKey?: string;
 }
 
 /**
@@ -51,7 +57,7 @@ export class InstallKeysService {
   ): Promise<{ key: InstallKey; raw: string }> {
     const bad = (input.allowedCidrs ?? []).filter((c) => !isValidCidr(c));
     if (bad.length > 0) throw new InvalidCidrError(bad.join(', '));
-    const raw = generateInstallKey(tenant.slug);
+    const raw = input.rawKey ?? generateInstallKey(tenant.slug);
     const [key, publish] = await client.$transaction(async (tx) => {
       const group = await tx.hostGroup.findUnique({
         where: { id: input.hostGroupId },
@@ -111,18 +117,40 @@ export class InstallKeysService {
     return result?.key ?? null;
   }
 
+  private async find(client: KeyDb, raw: string): Promise<InstallKey | null> {
+    return client.installKey.findFirst({
+      where: {
+        keyHash: { in: [hashInstallKey(raw), legacyHashInstallKey(raw)] },
+      },
+    });
+  }
+
+  /**
+   * Whether the key could be used now (known, in range, not revoked, expired or used up),
+   * WITHOUT using it. Registration checks everything that can refuse a machine first and only
+   * then consumes, so a refused install does not burn the one-hour code.
+   */
+  async peek(client: KeyDb, raw: string, ip: string): Promise<InstallKey> {
+    const key = await this.find(client, raw);
+    if (
+      !key ||
+      !ipAllowed(ip, key.allowedCidrs) ||
+      key.revokedAt ||
+      (key.expiresAt && key.expiresAt.getTime() <= Date.now()) ||
+      (key.maxUses !== null && key.uses >= key.maxUses)
+    ) {
+      throw new InstallKeyInvalidError();
+    }
+    return key;
+  }
+
   /**
    * Uses the key once. The range check comes first; the count, expiry and
    * revocation are checked by the one conditional UPDATE that takes the
    * use, so concurrent registrations can never exceed `maxUses`.
    */
-  async consume(
-    client: TenantPrismaClient,
-    raw: string,
-    ip: string,
-  ): Promise<InstallKey> {
-    const keyHash = hashInstallKey(raw);
-    const key = await client.installKey.findUnique({ where: { keyHash } });
+  async consume(client: KeyDb, raw: string, ip: string): Promise<InstallKey> {
+    const key = await this.find(client, raw);
     if (!key || !ipAllowed(ip, key.allowedCidrs)) {
       this.logger.warn(
         `install key refused (${key ? `key ${key.id}: address outside its ranges` : 'unknown key'})`,
@@ -132,7 +160,7 @@ export class InstallKeysService {
     const [used] = await client.$queryRaw<InstallKey[]>`
       UPDATE "install_keys"
       SET "uses" = "uses" + 1, "updatedAt" = now()
-      WHERE "keyHash" = ${keyHash}
+      WHERE "id" = ${key.id}
         AND "revokedAt" IS NULL
         AND ("expiresAt" IS NULL OR "expiresAt" > (now() AT TIME ZONE 'UTC'))
         AND ("maxUses" IS NULL OR "uses" < "maxUses")

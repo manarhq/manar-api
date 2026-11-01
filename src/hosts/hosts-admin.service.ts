@@ -6,6 +6,7 @@ import type {
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
+import { EntitlementsService } from '../billing/entitlements.service';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES, type AuditActor } from '../audit/audit-event-types';
 import {
@@ -56,6 +57,7 @@ export class HostsAdminService {
   constructor(
     private readonly audit: AuditService,
     private readonly ca: CertificateAuthorityService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   listHosts(
@@ -148,6 +150,19 @@ export class HostsAdminService {
           `cannot ${decision} a host that is ${current.status}`,
         );
       }
+      // REJECTED -> APPROVED adds a device back to the count (PENDING and APPROVED are the
+      // counted states), so it takes the same locked cap check as a new registration.
+      if (decision === 'approve' && current.status === 'REJECTED') {
+        await this.entitlements.assertWithinLocked(
+          tx,
+          tenantId,
+          'devices',
+          () =>
+            tx.host.count({
+              where: { status: { in: ['PENDING', 'APPROVED'] } },
+            }),
+        );
+      }
       const updated = await this.writeIfUnchanged(tx, current, {
         status: rule.to,
         // Revoking or rejecting also drops any rekey waiting for approval.
@@ -171,6 +186,32 @@ export class HostsAdminService {
       await this.ca.revokeHostCertificates(client, hostId);
     }
     return host;
+  }
+
+  /**
+   * "Remove device": revokes the host's certificates, then deletes its record, so the machine
+   * can be installed again from scratch (a REJECTED or REVOKED machineId is otherwise refused
+   * for good). Audited in the same transaction as the delete.
+   */
+  async remove(
+    client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
+    hostId: string,
+  ): Promise<void> {
+    const host = await client.host.findUnique({ where: { id: hostId } });
+    if (!host) throw new HostNotFoundError(hostId);
+    await this.ca.revokeHostCertificates(client, hostId);
+    const publish = await client.$transaction(async (tx) => {
+      await tx.hostCertificate.deleteMany({ where: { hostId } });
+      await tx.host.delete({ where: { id: hostId } });
+      return this.audit.recordInTransaction(tx, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.HOST_REMOVED,
+        actor,
+        data: { hostId, machineId: host.machineId, from: host.status },
+      });
+    });
+    publish();
   }
 
   /**

@@ -3,6 +3,7 @@ import {
   Body,
   ConflictException,
   Controller,
+  Delete,
   Get,
   NotFoundException,
   Param,
@@ -18,6 +19,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { PlanLimitError } from '../billing/plan-limit.error';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import type { AuditActor } from '../audit/audit-event-types';
 import { CurrentAuth } from '../auth/auth-context';
@@ -40,6 +42,7 @@ import {
   UnverifiedRuleError,
   type HostDecision,
 } from './hosts-admin.service';
+import { InstallCodesService } from './install-codes.service';
 import {
   HostGroupNotFoundError,
   InstallKeysService,
@@ -72,6 +75,7 @@ function shown(key: InstallKey): Omit<InstallKey, 'keyHash'> {
 
 /** Maps the hosts domain errors onto HTTP. */
 function http(error: unknown): never {
+  if (error instanceof PlanLimitError) throw error;
   if (
     error instanceof HostNotFoundError ||
     error instanceof HostGroupNotFoundError
@@ -120,6 +124,26 @@ export class HostsController {
       limit: parseLimit(limit),
       cursor: parseCursor(cursor),
     });
+  }
+
+  @Delete(':id')
+  @RequireRole(...WRITE)
+  @ApiOperation({
+    summary: 'Remove a device',
+    description:
+      'Revokes its certificates and deletes the record, so the machine can be installed again. Audited.',
+  })
+  @ApiResponse({ status: 200, description: '{ removed: true }' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async remove(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    const client = await this.tenants.getClient(auth.tenant.id);
+    await this.admin
+      .remove(client, auth.tenant.id, actorOf(auth), id)
+      .catch(http);
+    return { removed: true };
   }
 
   @Post(':id/approve')
@@ -191,6 +215,7 @@ export class InstallKeysController {
   constructor(
     private readonly tenants: TenantDatabaseManager,
     private readonly keys: InstallKeysService,
+    private readonly codes: InstallCodesService,
   ) {}
 
   @Get()
@@ -235,6 +260,8 @@ export class InstallKeysController {
       id,
     );
     if (!key) throw new NotFoundException('install key not found');
+    // A revoked key's short code must not resolve any more.
+    await this.codes.deleteByKeyId(id);
     return shown(key);
   }
 }

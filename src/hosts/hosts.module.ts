@@ -6,6 +6,7 @@ import { AdcsDirectoryService } from './adcs/adcs-directory.service';
 import { AdcsEnrolmentService } from './adcs/adcs-enrolment.service';
 import { HostsAdminService } from './hosts-admin.service';
 import { HostsService } from './hosts.service';
+import { InstallCodesService } from './install-codes.service';
 import { InstallKeysService } from './install-keys.service';
 import { TpmAttestationService } from './tpm/tpm-attestation.service';
 
@@ -15,6 +16,7 @@ import { TpmAttestationService } from './tpm/tpm-attestation.service';
   providers: [
     HostsService,
     InstallKeysService,
+    InstallCodesService,
     HostsAdminService,
     TpmAttestationService,
     AdcsDirectoryService,
@@ -25,6 +27,7 @@ import { TpmAttestationService } from './tpm/tpm-attestation.service';
   exports: [
     HostsService,
     InstallKeysService,
+    InstallCodesService,
     HostsAdminService,
     TpmAttestationService,
     AdcsAdminService,

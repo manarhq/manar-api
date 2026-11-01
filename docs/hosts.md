@@ -16,6 +16,33 @@ sits between the tenant and its agents. Code: `src/hosts/`. Records: `prisma/ten
   `UPDATE … RETURNING` (not revoked, not expired, under `maxUses`), so concurrent registrations
   never exceed the limit. Every refusal returns the same `401 install key is not valid`.
 
+## Add device: the one-liner
+
+`POST /devices/install-code` (owner or security admin) creates an install key with `maxUses 1` and
+`expiresAt` one hour out, in the group "My devices", after the plan's device cap check. The key's
+secret is a 10-character code (alphabet without I, L, O, 0, 1): the tenant stores its SHA-256 like
+any key, and the control DB (`install_codes`) maps the same hash to the tenant and the key id.
+Neither keeps the code. The row is deleted when the code is used, when the key is revoked, and on
+expiry. `GET /i/<code>` (PowerShell) and `GET /i/<code>.sh` (sh) are public, rate limited per
+address (20 a minute) and return the bootstrap script with the code and tenant slug embedded;
+fetching does not use the key. An unknown or expired code gets a script that prints that, with
+HTTP 200. `/i/uninstall(.sh)` serve the uninstall scripts. `POST /hosts/register` accepts the code
+in `installKey`: the control DB gives the tenant, the key is consumed, the row is deleted.
+
+Config: `MANAR_CONSOLE_URL`, `MANAR_HOST_URL`, `MANAR_EDGE_VERSION`, `MANAR_EDGE_RELEASE_BASE`,
+`MANAR_EDGE_SHA256_{WINDOWS_AMD64,LINUX_AMD64,LINUX_ARM64}` (see `.env.example`).
+
+The device cap counts PENDING and APPROVED hosts. A new registration and a REJECTED -> APPROVED
+approval both check it inside their own transaction under `pg_advisory_xact_lock`.
+
+## Host channel: `/host/v1/*` (mTLS, :3443)
+
+`HostAuthGuard` resolves the certificate SAN `host://<tenantSlug>/<machineId>` to a host in that
+tenant's database and requires the exact certificate serial to be issued to it and unrevoked.
+REJECTED and REVOKED hosts are refused; a PENDING host may call. Handlers read `@CurrentHost()`
+(`hostId`, `tenantId`, `machineId`, `ownerSubject`, `status`). `GET /host/v1/config` returns
+`{ hostId, status, startMode, features }`.
+
 ## Registration: `POST /hosts/register` (public)
 
 Body: `installKey`, `csr`, `machineId` (`[A-Za-z0-9._-]{1,128}`), `hostname`, `os`, `keyType`
