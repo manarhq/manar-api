@@ -150,12 +150,18 @@ describe('Auth (e2e) — JwtAuthGuard / RolesGuard', () => {
       'SECURITY_ADMIN',
     );
 
-    // ...and a user with no roles at all, for the RolesGuard-denies test.
+    // ...and a member with only READ_ONLY, for the RolesGuard-denies test (a Membership always
+    // holds a role; a user with none is not a member and never reaches the tenant).
     plainUserAId.current = await createRealmUser(tenantA.keycloakRealm, {
       username: PLAIN_USERNAME,
       email: `${PLAIN_USERNAME}@example.test`,
       password: USER_PASSWORD,
     });
+    await assignRealmRole(
+      tenantA.keycloakRealm,
+      plainUserAId.current,
+      'READ_ONLY',
+    );
   }, 120_000);
 
   afterAll(async () => {
@@ -165,10 +171,11 @@ describe('Auth (e2e) — JwtAuthGuard / RolesGuard', () => {
     await control.$disconnect();
   }, 60_000);
 
-  it('8. concurrent first requests from a new user all succeed and bind each role once', async () => {
+  it('8. concurrent first requests from a new user all succeed and create one profile', async () => {
     // Load test finding (9 Oct): two simultaneous first requests both saw
-    // no RoleBinding and both inserted it; the loser hit the (userId, role)
-    // unique constraint and the request returned 500.
+    // no row and both inserted it; the loser hit a unique constraint and
+    // the request returned 500. Roles now come from the Membership (no
+    // RoleBinding is written); the first request still creates the profile.
     const username = `first-${randomUUID().slice(0, 8)}`;
     const userId = await createRealmUser(tenantA.keycloakRealm!, {
       username,
@@ -195,10 +202,10 @@ describe('Auth (e2e) — JwtAuthGuard / RolesGuard', () => {
 
     expect(statuses).toEqual(Array.from({ length: 20 }, () => 200));
     const tenantAClient = await tenantDatabaseManager.getClient(tenantA.id);
-    const bindings = await tenantAClient.roleBinding.findMany({
-      where: { user: { keycloakSubject: userId } },
+    const profiles = await tenantAClient.userProfile.findMany({
+      where: { keycloakSubject: userId },
     });
-    expect(bindings.map((b) => b.role)).toEqual(['SECURITY_ADMIN']);
+    expect(profiles).toHaveLength(1);
   }, 30_000);
 
   it('1. a valid token from a known tenant realm succeeds with the correct AuthContext', async () => {

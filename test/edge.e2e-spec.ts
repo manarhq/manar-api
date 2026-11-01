@@ -42,6 +42,7 @@ import {
   getClientCredentialsToken,
   getUserToken,
 } from './support/keycloak-test-helpers';
+import { onCompanyPlan } from './support/free-entitlements';
 
 /**
  * Manar edge (docs/edge.md) against the real stack: enrollment with a WireGuard key, address
@@ -351,6 +352,8 @@ describe('Manar edge (e2e)', () => {
       name: 'Edge e2e two',
     });
     created.push(t2);
+    await onCompanyPlan(control, t1.id);
+    await onCompanyPlan(control, t2.id);
     admin1 = await userToken(t1, 'SECURITY_ADMIN');
     admin2 = await userToken(t2, 'SECURITY_ADMIN');
     readOnly1 = await userToken(t1, 'READ_ONLY');

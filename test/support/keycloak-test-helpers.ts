@@ -15,6 +15,10 @@
  * test/auth.e2e-spec.ts.
  */
 
+import { Client as PgClient } from 'pg';
+import { rolesOf, splitRoles } from '../../src/auth/membership.service';
+import { isRoleName, type RoleName } from '../../src/auth/roles';
+
 const baseUrl = process.env.KEYCLOAK_BASE_URL ?? 'http://localhost:8081';
 
 async function getMasterAdminToken(): Promise<string> {
@@ -125,6 +129,51 @@ export async function assignRealmRole(
       body: JSON.stringify([{ id: role.id, name: role.name }]),
     },
   );
+  if (isRoleName(roleName)) await grantMembershipRole(realm, userId, roleName);
+}
+
+/**
+ * Roles come from `Membership`, never the token, so a realm role alone grants nothing. This does
+ * for one user what `memberships:migrate-from-realms` does on upgrade: the realm's tenant gets an
+ * ACTIVE Membership (issuer = the tenant's realm issuer) holding every role assigned here. A realm
+ * with no tenant row gets nothing.
+ */
+async function grantMembershipRole(
+  realm: string,
+  subject: string,
+  roleName: RoleName,
+): Promise<void> {
+  const db = new PgClient({
+    connectionString: process.env.CONTROL_DATABASE_URL,
+  });
+  await db.connect();
+  try {
+    const { rows: tenants } = await db.query<{ id: string; issuer: string }>(
+      `SELECT id, "keycloakIssuerUrl" AS issuer FROM tenants WHERE "keycloakRealm" = $1 AND "keycloakIssuerUrl" IS NOT NULL`,
+      [realm],
+    );
+    const tenant = tenants[0];
+    if (!tenant) return;
+    const issuer = tenant.issuer.replace(/\/+$/, '');
+    const { rows: existing } = await db.query<{
+      role: string;
+      extraRoles: string[];
+    }>(
+      `SELECT role::text AS role, "extraRoles"::text[] AS "extraRoles" FROM memberships WHERE issuer = $1 AND subject = $2 AND "tenantId" = $3`,
+      [issuer, subject, tenant.id],
+    );
+    const held = existing[0] ? rolesOf(existing[0]) : [];
+    const split = splitRoles([...held, roleName])!;
+    await db.query(
+      `INSERT INTO memberships (id, issuer, subject, "tenantId", role, "extraRoles", status, "grantedBy", "updatedAt")
+       VALUES (gen_random_uuid(), $1, $2, $3, $4::"MembershipRole", $5::"MembershipRole"[], 'ACTIVE', 'e2e:assignRealmRole', now())
+       ON CONFLICT (issuer, subject, "tenantId") DO UPDATE
+         SET role = EXCLUDED.role, "extraRoles" = EXCLUDED."extraRoles", status = 'ACTIVE', "updatedAt" = now()`,
+      [issuer, subject, tenant.id, split.role, split.extraRoles],
+    );
+  } finally {
+    await db.end();
+  }
 }
 
 /** Resource Owner Password Credentials grant — returns a real signed access token. */

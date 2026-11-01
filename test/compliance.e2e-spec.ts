@@ -13,6 +13,7 @@ import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
 import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
 import {
+  assignRealmRole,
   createRealmUser,
   deleteRealm,
   getUserToken,
@@ -94,15 +95,16 @@ describe('Compliance mapping (e2e)', () => {
       where: { tenantId: tenant.id, kind: 'KEYCLOAK_CLIENT_SECRET' },
     });
 
-    await createRealmUser(tenant.keycloakRealm, {
+    const userId = await createRealmUser(tenant.keycloakRealm, {
       username: USERNAME,
       email: `${USERNAME}@example.test`,
       password: USER_PASSWORD,
     });
-    // Deliberately NO role assigned -- ComplianceController is JWT-guarded
-    // only (Section 55: reference content, not sensitive per-tenant data,
-    // mirrors GET /users's posture), so a plain authenticated user must
-    // succeed.
+    // Only the least role -- ComplianceController is JWT-guarded only
+    // (Section 55: reference content, not sensitive per-tenant data,
+    // mirrors GET /users's posture), so any member must succeed. A
+    // Membership always holds a role; READ_ONLY is the least.
+    await assignRealmRole(tenant.keycloakRealm, userId, 'READ_ONLY');
 
     userToken = await getUserToken({
       realm: tenant.keycloakRealm,

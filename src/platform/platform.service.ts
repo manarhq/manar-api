@@ -8,6 +8,7 @@ import {
   Inject,
   forwardRef,
 } from '@nestjs/common';
+import { rolesOf } from '../auth/membership.service';
 import { EdgePeerService } from '../edge/edge-peer.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
@@ -88,6 +89,40 @@ export class PlatformService {
     return t;
   }
 
+  /**
+   * Admins are ACTIVE Memberships holding an admin role (roles live in the control DB, not the
+   * tenant's role bindings); name and email come from the tenant's user profile when there is one.
+   */
+  private async admins(
+    tenantId: string,
+    db: Awaited<ReturnType<TenantDatabaseManager['getClient']>>,
+  ) {
+    const roles = [...ADMIN_ROLES];
+    const members = await this.control.membership.findMany({
+      where: {
+        tenantId,
+        status: 'ACTIVE',
+        OR: [{ role: { in: roles } }, { extraRoles: { hasSome: roles } }],
+      },
+      take: 50,
+    });
+    const profiles = await db.userProfile.findMany({
+      where: { keycloakSubject: { in: members.map((m) => m.subject) } },
+      select: { keycloakSubject: true, displayName: true, email: true },
+    });
+    const bySubject = new Map(profiles.map((p) => [p.keycloakSubject, p]));
+    return members
+      .map((m) => {
+        const p = bySubject.get(m.subject);
+        return {
+          displayName: p?.displayName ?? m.displayName ?? m.subject,
+          email: p?.email ?? m.email ?? '',
+          roles: rolesOf(m),
+        };
+      })
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  }
+
   /** Control fields always; admins, tools, agents and usage only while the tenant is ACTIVE. */
   async summary(id: string) {
     const t = await this.tenantOr404(id);
@@ -103,16 +138,7 @@ export class PlatformService {
       toolInvocations,
       approvalRequests,
     ] = await Promise.all([
-      db.userProfile.findMany({
-        where: { roleBindings: { some: { role: { in: [...ADMIN_ROLES] } } } },
-        select: {
-          displayName: true,
-          email: true,
-          roleBindings: { select: { role: true } },
-        },
-        orderBy: { displayName: 'asc' },
-        take: 50,
-      }),
+      this.admins(id, db),
       db.tool.findMany({
         select: { name: true, vendor: true, enabled: true },
         orderBy: { name: 'asc' },
@@ -125,11 +151,7 @@ export class PlatformService {
     ]);
     return {
       ...view(t),
-      admins: admins.map((a) => ({
-        displayName: a.displayName,
-        email: a.email,
-        roles: a.roleBindings.map((b) => b.role),
-      })),
+      admins,
       tools,
       agents: { total, active },
       usage: {

@@ -14,6 +14,7 @@ import { TenantDatabaseManager } from '../src/database/tenant-database-manager.s
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
 import { TenantProvisioningService } from '../src/keycloak/tenant-provisioning.service';
 import {
+  assignRealmRole,
   createRealmUser,
   deleteRealm,
   getUserToken,
@@ -85,11 +86,13 @@ describe('Incidents (e2e)', () => {
       where: { tenantId: t.id, kind: 'KEYCLOAK_CLIENT_SECRET' },
     });
     const username = `inc-user-${label}-${randomUUID().slice(0, 8)}`;
-    await createRealmUser(t.keycloakRealm, {
+    const userId = await createRealmUser(t.keycloakRealm, {
       username,
       email: `${username}@example.test`,
       password: USER_PASSWORD,
     });
+    // IncidentsController is JWT-guarded only: any member, so the least role.
+    await assignRealmRole(t.keycloakRealm, userId, 'READ_ONLY');
     const token = await getUserToken({
       realm: t.keycloakRealm,
       clientId: t.keycloakClientId!,
