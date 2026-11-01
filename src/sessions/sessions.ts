@@ -64,6 +64,8 @@ export function kindOfAction(actionId: string): StepKind {
 }
 
 interface Norm {
+  /** Who called the device's relay (`uid:1000`): two accounts never share a session. */
+  caller: string;
   at: Date;
   hostId: string;
   toolId: string;
@@ -93,6 +95,7 @@ function normalise(events: readonly RawEvent[]): Norm[] {
       at: e.timestamp,
       hostId,
       toolId,
+      caller: str(d.caller),
       sessionId: str(d.sessionId),
     };
     if (e.eventType === 'host.action_decided') {
@@ -222,12 +225,12 @@ export function groupSessions(events: readonly RawEvent[]): Session[] {
   const norm = normalise(events);
   const byPair = new Map<string, Norm[]>();
   for (const n of norm) {
-    const k = `${n.hostId}|${n.toolId}`;
+    const k = `${n.hostId}|${n.toolId}|${n.caller}`;
     (byPair.get(k) ?? byPair.set(k, []).get(k)!).push(n);
   }
   const sessions: Session[] = [];
   for (const items of byPair.values()) {
-    const { hostId, toolId } = items[0]!;
+    const { hostId, toolId, caller } = items[0]!;
     const hooked = new Map<string, Norm[]>();
     const loose: Norm[] = [];
     for (const n of items) {
@@ -238,27 +241,55 @@ export function groupSessions(events: readonly RawEvent[]): Session[] {
         ).push(n);
       else loose.push(n);
     }
-    const bounds = [...hooked.entries()].map(([id, ns]) => ({
-      id,
-      from: Math.min(...ns.map((n) => n.at.getTime())),
-      to: Math.max(...ns.map((n) => n.at.getTime())),
-    }));
-    // An event with no id that falls inside a hook session belongs to it (secrets, approvals).
+    // Hook sessions as time ranges, sorted by start with a running maximum of their ends, so each
+    // id-less event finds its session by binary search instead of scanning them all.
+    const bounds = [...hooked.entries()]
+      .map(([id, ns]) => {
+        const ts = ns.map((n) => n.at.getTime());
+        return { id, from: Math.min(...ts), to: Math.max(...ts), maxTo: 0 };
+      })
+      .sort((a, b) => a.from - b.from);
+    bounds.forEach((b, k) => {
+      b.maxTo = Math.max(b.to, bounds[k - 1]?.maxTo ?? 0);
+    });
     const rest: Norm[] = [];
     for (const n of loose) {
       const t = n.at.getTime();
-      const b = bounds.find((x) => t >= x.from && t <= x.to);
-      if (b) hooked.get(b.id)!.push(n);
+      let lo = 0;
+      let hi = bounds.length - 1;
+      let at = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (bounds[mid]!.from <= t) {
+          at = mid;
+          lo = mid + 1;
+        } else hi = mid - 1;
+      }
+      let found: (typeof bounds)[number] | undefined;
+      // Stops as soon as no earlier session can still be open at t.
+      for (let k = at; k >= 0 && bounds[k]!.maxTo >= t; k--) {
+        if (bounds[k]!.to >= t) {
+          found = bounds[k];
+          break;
+        }
+      }
+      if (found) hooked.get(found.id)!.push(n);
       else rest.push(n);
     }
     for (const [id, ns] of hooked)
-      sessions.push(build(hostId, toolId, 'hook', id, ns));
+      sessions.push(build(hostId, toolId, 'hook', `${caller}\n${id}`, ns));
     rest.sort((a, b) => a.at.getTime() - b.at.getTime());
     let cur: Norm[] = [];
     const flush = () => {
       if (cur.length)
         sessions.push(
-          build(hostId, toolId, 'gap', String(cur[0]!.at.getTime()), cur),
+          build(
+            hostId,
+            toolId,
+            'gap',
+            `${caller}\n${cur[0]!.at.getTime()}`,
+            cur,
+          ),
         );
       cur = [];
     };
@@ -292,6 +323,14 @@ export interface SharedSession {
   }[];
 }
 
+// What a secret looks like, so a token typed where a program or host name should be never leaves.
+const SECRET_PREFIX =
+  /^(sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_|glpat-|xox[abprs]-|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{10,}\.|npm_[A-Za-z0-9]{20,}|pypi-)/;
+export function looksSecret(v: string): boolean {
+  if (SECRET_PREFIX.test(v)) return true;
+  return /^[A-Za-z0-9_+=-]{20,}$/.test(v) && /\d/.test(v) && /[A-Za-z]/.test(v);
+}
+
 function program(cmd: string): string {
   const words = cmd.trim().split(/\s+/);
   const w =
@@ -302,29 +341,46 @@ function program(cmd: string): string {
     /\.(exe|cmd|bat)$/i,
     '',
   );
-  return /^[A-Za-z0-9._+-]{1,40}$/.test(base) ? base : '';
+  return /^[A-Za-z0-9._+-]{1,40}$/.test(base) && !looksSecret(base) ? base : '';
 }
 
+/** The extension only, never the file name: short, letters first, not all digits. */
 function ext(path: string): string {
-  const m = /\.([A-Za-z0-9]{1,8})$/.exec(
+  const m = /\.([A-Za-z][A-Za-z0-9]{0,5})$/.exec(
     path.replace(/\\/g, '/').split('/').pop() ?? '',
   );
   return m ? `.${m[1]!.toLowerCase()}` : '';
 }
 
+const INTERNAL_SUFFIX =
+  /\.(internal|local|lan|corp|home|intranet|localdomain|test|invalid|localhost)$/;
+
+/** A public website name only: two or more labels, no address, no internal domain. */
 function hostName(u: string): string {
   try {
-    const h = new URL(u).hostname;
-    return /^[A-Za-z0-9.-]{1,100}$/.test(h) ? h.toLowerCase() : '';
+    const h = new URL(u).hostname.toLowerCase();
+    if (!/^[a-z0-9.-]{3,100}$/.test(h)) return '';
+    if (!h.includes('.') || h.startsWith('.') || h.endsWith('.')) return '';
+    if (/^[0-9.]+$/.test(h)) return ''; // an IP address
+    if (INTERNAL_SUFFIX.test(h)) return '';
+    if (h.split('.').some((l) => !l || looksSecret(l))) return '';
+    return h;
   } catch {
     return '';
   }
 }
 
+/** The MCP server name of `server/tool`, only for a real MCP call. */
+function serverName(step: Step): string {
+  if (step.action.toLowerCase() !== 'mcp') return '';
+  const n = step.label.split('/')[0] ?? '';
+  return /^[A-Za-z0-9._-]{1,60}$/.test(n) && !looksSecret(n) ? n : '';
+}
+
 /**
  * Redaction rules, fixed: a command shows its program only, a file shows its extension only, a
- * site shows its host only, an MCP call shows the server name only, a secret shows its class only.
- * Times are seconds from the start. Device, folders, prompts and approver are never included.
+ * site shows its public host only, an MCP call shows the server name only, a secret shows its class
+ * only. Times are seconds from the start. Device, folders, prompts and approver are never included.
  */
 export function redactSession(s: Session, toolName: string): SharedSession {
   const t0 = Date.parse(s.startedAt);
@@ -339,10 +395,7 @@ export function redactSession(s: Session, toolName: string): SharedSession {
       if (x.kind === 'command') text = program(x.label);
       else if (x.kind === 'file') text = ext(x.label);
       else if (x.kind === 'site') text = hostName(x.label);
-      else if (x.kind === 'tool')
-        text = /^[A-Za-z0-9._-]{1,60}$/.test(x.label.split('/')[0] ?? '')
-          ? x.label.split('/')[0]!
-          : '';
+      else if (x.kind === 'tool') text = serverName(x);
       else if (x.kind === 'secret')
         text = /^[a-z0-9-]{1,30}$/.test(x.action) ? x.action : 'secret';
       return {

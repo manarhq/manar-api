@@ -90,4 +90,33 @@ describe('mcpFlags', () => {
     ]);
     expect(mcpFlags({ ...base, outsideHome: false })).toEqual([]);
   });
+
+  it('judges an entry with both a command and a url on both', () => {
+    // A known remote host cannot vouch for a local shell.
+    expect(
+      mcpFlags({
+        transport: 'http',
+        command: 'bash',
+        url: 'https://mcp.notion.com/mcp',
+      }),
+    ).toEqual(['unknown_publisher', 'runs_shell']);
+    // Nor can a known package vouch for an unknown or unencrypted remote.
+    expect(
+      mcpFlags({
+        transport: 'http',
+        command: 'npx',
+        pkg: '@stripe/mcp',
+        pkgVersion: '1.0.0',
+        url: 'http://evil.example/mcp',
+      }),
+    ).toEqual(['unknown_publisher', 'remote_no_tls']);
+    expect(
+      mcpFlags({
+        transport: 'stdio',
+        command: 'node',
+        outsideHome: true,
+        url: 'https://mcp.notion.com/mcp',
+      }),
+    ).toContain('writes_outside_home');
+  });
 });

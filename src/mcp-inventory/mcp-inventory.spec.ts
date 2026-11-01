@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { InventoryRequestSchema } from '../host-coverage/host-tools.service';
 import {
   McpServerReportSchema,
+  parseMcpServers,
   listMcpServers,
   replaceHostMcpServers,
 } from './mcp-inventory';
@@ -84,6 +85,26 @@ describe('MCP inventory', () => {
     expect(parse({ argCount: 3 })).not.toHaveProperty('args');
   });
 
+  it('never fails the whole inventory because of one MCP entry', () => {
+    const body = InventoryRequestSchema.parse({
+      tools: [],
+      mcpServers: [
+        server,
+        { ...server, name: 'long', package: 'p'.repeat(300) },
+        { ...server, name: 'bad\nname' },
+        { ...server, name: 'p214', package: 'p'.repeat(214) },
+        'junk',
+        null,
+        42,
+      ],
+    });
+    expect(parseMcpServers(body.mcpServers).map((s) => s.name)).toEqual([
+      'fs',
+      'p214',
+    ]);
+    expect(parseMcpServers(Array(500).fill(server))).toHaveLength(200);
+  });
+
   it('replaces the device list, scoped to that host, and returns only new servers', async () => {
     const { client, ops } = fakeClient([
       { toolId: 'host.cursor', name: 'old' },
@@ -103,7 +124,7 @@ describe('MCP inventory', () => {
     expect(client.hostMcpServer.deleteMany).toHaveBeenCalledWith({
       where: {
         hostId: 'h-a',
-        NOT: [{ toolId: 'host.cursor', name: 'fs' }],
+        NOT: [expect.objectContaining({ toolId: 'host.cursor', name: 'fs' })],
       },
     });
     expect(JSON.stringify(ops)).not.toContain('"args"');

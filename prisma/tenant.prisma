@@ -1327,6 +1327,7 @@ model AuditEvent {
 
   @@unique([partition, partitionSeq])
   @@index([eventType])
+  @@index([eventType, timestamp])
   @@index([correlationId])
   /// Release 2026-11-11: `AuditService.verifyAuditChain` walks the chain in
   /// keyset-paginated batches (`WHERE sequence > ?` ordered by `sequence`)
@@ -2539,6 +2540,9 @@ model HostMcpServer {
   /// Catalogue id of the tool whose config holds it (`host.cursor`).
   toolId     String
   name       String
+  /// Short hash of transport, command, URL host and package: two servers with one name (a tool's
+  /// per-project entries) stay two rows.
+  fingerprint String
   /// `stdio`, `http` or `sse`.
   transport  String
   command    String?
@@ -2553,7 +2557,7 @@ model HostMcpServer {
   firstSeenAt DateTime @default(now())
   lastSeenAt  DateTime @default(now())
 
-  @@unique([hostId, toolId, name])
+  @@unique([hostId, toolId, name, fingerprint])
   @@index([toolId])
   @@map("host_mcp_servers")
 }

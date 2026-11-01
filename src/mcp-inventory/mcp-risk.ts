@@ -123,16 +123,27 @@ function hostOf(url: string): { scheme: string; host: string } | null {
   }
 }
 
+/**
+ * Every part the entry has must be recognised: a remote host AND a local package. An entry with
+ * both a command and a url is judged on both, so neither can vouch for the other.
+ */
 function knownPublisher(s: McpServerFacts): boolean {
+  if (!s.url && !s.command) return false;
   if (s.url) {
     const h = hostOf(s.url)?.host.toLowerCase();
-    return !!h && KNOWN_REMOTE_HOSTS.includes(h);
+    if (!h || !KNOWN_REMOTE_HOSTS.includes(h)) return false;
   }
-  const pkg = (s.pkg ?? '').toLowerCase();
-  if (!pkg) return false; // a local script or binary: we cannot tell who made it
-  if (KNOWN_PACKAGES.has(pkg)) return true;
-  if (KNOWN_NPM_SCOPES.some((sc) => pkg.startsWith(`${sc}/`))) return true;
-  return KNOWN_IMAGE_PREFIXES.some((p) => pkg.startsWith(p));
+  if (s.command) {
+    const pkg = (s.pkg ?? '').toLowerCase();
+    if (!pkg) return false; // a local script or binary: we cannot tell who made it
+    if (
+      !KNOWN_PACKAGES.has(pkg) &&
+      !KNOWN_NPM_SCOPES.some((sc) => pkg.startsWith(`${sc}/`)) &&
+      !KNOWN_IMAGE_PREFIXES.some((p) => pkg.startsWith(p))
+    )
+      return false;
+  }
+  return true;
 }
 
 /** A version is pinned when it is one exact version, or a container digest. */
@@ -147,19 +158,17 @@ function pinned(version: string | null | undefined): boolean {
 export function mcpFlags(s: McpServerFacts): McpFlag[] {
   const flags: McpFlag[] = [];
   if (!knownPublisher(s)) flags.push('unknown_publisher');
-  // Unpinned: a launcher that fetches a package or image without one exact version. Remote servers
-  // have no version to pin, so they get no such flag.
-  if (!s.url && s.pkg && !pinned(s.pkgVersion)) flags.push('unpinned_version');
+  // Unpinned: a launcher that fetches a package or image without one exact version.
+  if (s.pkg && !pinned(s.pkgVersion)) flags.push('unpinned_version');
   if (s.url) {
     const u = hostOf(s.url);
     if (u && u.scheme === 'http' && !loopback(u.host))
       flags.push('remote_no_tls');
   }
-  if (!s.url) {
-    // Only the program's base name is reported: a shell as the program is the signal. A shell
-    // started by another program (`npx x -c ...`) cannot be seen without the arguments.
-    if (SHELLS.has(baseName(s.command ?? ''))) flags.push('runs_shell');
-    if (s.outsideHome) flags.push('writes_outside_home');
-  }
+  // Checked whatever the transport says: a command is what runs.
+  // Only the program's base name is reported: a shell as the program is the signal. A shell
+  // started by another program (`npx x -c ...`) cannot be seen without the arguments.
+  if (SHELLS.has(baseName(s.command ?? ''))) flags.push('runs_shell');
+  if (s.outsideHome) flags.push('writes_outside_home');
   return flags;
 }

@@ -12,7 +12,7 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { ensureHostTools, hostTool } from '../tools/host-actions';
 import type { ProtectMode } from '../tools/host-actions';
 import {
-  McpServerReportSchema,
+  parseMcpServers,
   replaceHostMcpServers,
 } from '../mcp-inventory/mcp-inventory';
 
@@ -37,7 +37,8 @@ export const InventoryRequestSchema = z.object({
     )
     .max(MAX_TOOLS),
   /** The device's whole MCP list. Absent from an older device: the stored list is left as it is. */
-  mcpServers: z.array(McpServerReportSchema).max(200).optional(),
+  // Entries are checked one by one in `parseMcpServers`: a bad one is dropped, never a 400.
+  mcpServers: z.array(z.unknown()).optional(),
 });
 export type InventoryRequest = z.infer<typeof InventoryRequestSchema>;
 
@@ -170,7 +171,7 @@ export class HostToolsService {
         const fresh = await replaceHostMcpServers(
           client,
           host.hostId,
-          input.mcpServers,
+          parseMcpServers(input.mcpServers),
           now,
         );
         for (const f of fresh.slice(0, 20)) {

@@ -36,13 +36,17 @@ export class SessionsController {
     @CurrentAuth() auth: AuthContext,
     @Query('days') days?: string,
     @Query('hostId') hostId?: string,
+    @Query('before') before?: string,
   ) {
     const d = days === undefined ? 14 : Number(days);
     if (!Number.isInteger(d) || d < 1 || d > 30)
       throw new BadRequestException('days must be 1 to 30');
     if (hostId !== undefined && !ID.test(hostId))
       throw new BadRequestException('bad hostId');
-    return this.sessions.list(auth.tenant.id, d, hostId);
+    const b = before === undefined ? undefined : new Date(before);
+    if (b && Number.isNaN(b.getTime()))
+      throw new BadRequestException('bad before');
+    return this.sessions.list(auth.tenant.id, d, hostId, b);
   }
 
   @Get(':id')

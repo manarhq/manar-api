@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { mcpFlags, type McpFlag } from './mcp-risk';
@@ -6,23 +7,27 @@ import { mcpFlags, type McpFlag } from './mcp-risk';
 const STALE_MS = 30 * 60 * 1000;
 
 /** One server in `POST /host/v1/inventory` (`mcpServers`). The device masks; we also cap sizes. */
+/** npm allows 214; the device and this side use the same limit. */
+const PACKAGE_MAX = 214;
+
 const McpServerReportRaw = z.object({
   tool: z.string().regex(/^host\.[a-z0-9-]{1,40}$/),
-  name: z.string().min(1).max(100),
+  /** Letters, digits and plain punctuation: a name is shown in the console and in logs. */
+  name: z.string().regex(/^[\p{L}\p{N} ._@:+/-]{1,100}$/u),
   transport: z.enum(['stdio', 'http', 'sse']),
   /** Base name of the program only. */
   command: z.string().max(100).nullish(),
   argCount: z.number().int().min(0).max(1000).default(0),
   /** Scheme, host and port only. */
   url: z.string().max(200).nullish(),
-  package: z.string().max(200).nullish(),
+  package: z.string().max(PACKAGE_MAX).nullish(),
   version: z.string().max(100).nullish(),
   envKeys: z.array(z.string().max(100)).max(40).default([]),
   outsideHome: z.boolean().default(false),
 });
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-const PACKAGE = /^[A-Za-z0-9@._/+-]{1,200}$/;
+const PACKAGE = /^[A-Za-z0-9@._/+-]{1,214}$/;
 const VERSION = /^[A-Za-z0-9._+:-]{1,64}$/;
 
 /** Scheme and host only; nothing if it has credentials or does not parse. */
@@ -67,6 +72,37 @@ export const McpServerReportSchema = McpServerReportRaw.transform((s) => ({
   envKeys: s.envKeys.filter((k) => ENV_NAME.test(k)),
 }));
 
+/**
+ * The entries of a report that pass the checks. One bad entry is dropped and never fails the whole
+ * inventory (tools, protection state and the other servers still go in).
+ */
+export function parseMcpServers(
+  raw: readonly unknown[] | undefined,
+): McpServerReport[] {
+  const out: McpServerReport[] = [];
+  for (const r of raw ?? []) {
+    const p = McpServerReportSchema.safeParse(r);
+    if (p.success && out.length < 200) out.push(p.data);
+  }
+  return out;
+}
+
+/** Tells apart same-name servers whose configuration differs. */
+export function fingerprint(s: McpServerReport): string {
+  return createHash('sha256')
+    .update(
+      [
+        s.transport,
+        s.command ?? '',
+        s.url ?? '',
+        s.package ?? '',
+        s.version ?? '',
+      ].join('|'),
+    )
+    .digest('hex')
+    .slice(0, 16);
+}
+
 export type McpServerReport = z.output<typeof McpServerReportSchema>;
 
 /**
@@ -82,13 +118,15 @@ export async function replaceHostMcpServers(
 ): Promise<{ toolId: string; name: string; flags: McpFlag[] }[]> {
   const existing = await client.hostMcpServer.findMany({
     where: { hostId },
-    select: { toolId: true, name: true },
+    select: { toolId: true, name: true, fingerprint: true },
   });
-  const had = new Set(existing.map((e) => `${e.toolId}|${e.name}`));
+  const had = new Set(
+    existing.map((e) => `${e.toolId}|${e.name}|${e.fingerprint}`),
+  );
   const seen = new Set<string>();
   const fresh: { toolId: string; name: string; flags: McpFlag[] }[] = [];
   const rows = servers.filter((s) => {
-    const k = `${s.tool}|${s.name}`;
+    const k = `${s.tool}|${s.name}|${fingerprint(s)}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
@@ -97,7 +135,11 @@ export async function replaceHostMcpServers(
     client.hostMcpServer.deleteMany({
       where: {
         hostId,
-        NOT: rows.map((s) => ({ toolId: s.tool, name: s.name })),
+        NOT: rows.map((s) => ({
+          toolId: s.tool,
+          name: s.name,
+          fingerprint: fingerprint(s),
+        })),
       },
     }),
     ...rows.map((s) => {
@@ -113,14 +155,27 @@ export async function replaceHostMcpServers(
         lastSeenAt: now,
       };
       return client.hostMcpServer.upsert({
-        where: { hostId_toolId_name: { hostId, toolId: s.tool, name: s.name } },
-        create: { hostId, toolId: s.tool, name: s.name, ...data },
+        where: {
+          hostId_toolId_name_fingerprint: {
+            hostId,
+            toolId: s.tool,
+            name: s.name,
+            fingerprint: fingerprint(s),
+          },
+        },
+        create: {
+          hostId,
+          toolId: s.tool,
+          name: s.name,
+          fingerprint: fingerprint(s),
+          ...data,
+        },
         update: data,
       });
     }),
   ]);
   for (const s of rows) {
-    if (!had.has(`${s.tool}|${s.name}`)) {
+    if (!had.has(`${s.tool}|${s.name}|${fingerprint(s)}`)) {
       fresh.push({
         toolId: s.tool,
         name: s.name,

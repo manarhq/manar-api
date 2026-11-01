@@ -8,6 +8,7 @@ CREATE TABLE "host_mcp_servers" (
     "hostId" TEXT NOT NULL,
     "toolId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
+    "fingerprint" TEXT NOT NULL,
     "transport" TEXT NOT NULL,
     "command" TEXT,
     "argCount" INTEGER NOT NULL DEFAULT 0,
@@ -26,7 +27,7 @@ CREATE TABLE "host_mcp_servers" (
 CREATE INDEX "host_mcp_servers_toolId_idx" ON "host_mcp_servers"("toolId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "host_mcp_servers_hostId_toolId_name_key" ON "host_mcp_servers"("hostId", "toolId", "name");
+CREATE UNIQUE INDEX "host_mcp_servers_hostId_toolId_name_fingerprint_key" ON "host_mcp_servers"("hostId", "toolId", "name", "fingerprint");
 
 -- AddForeignKey
 ALTER TABLE "host_mcp_servers" ADD CONSTRAINT "host_mcp_servers_hostId_fkey" FOREIGN KEY ("hostId") REFERENCES "hosts"("id") ON DELETE CASCADE ON UPDATE CASCADE;
