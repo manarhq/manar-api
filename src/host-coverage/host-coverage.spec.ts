@@ -341,7 +341,16 @@ describe('HostAuthorizeService', () => {
     } = {},
   ) {
     const tenants = {
-      getClient: over.getClient ?? vi.fn(() => Promise.resolve({})),
+      getClient:
+        over.getClient ??
+        vi.fn(() =>
+          Promise.resolve({
+            approvalAllowGrant: {
+              findFirst: () => Promise.resolve(null),
+              update: () => Promise.resolve({}),
+            },
+          }),
+        ),
     };
     const kill = {
       checkAll: vi.fn(() => Promise.resolve(over.kill ?? { killed: false })),

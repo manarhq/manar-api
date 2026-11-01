@@ -14,7 +14,9 @@ export const DecideApprovalRequestSchema = z
   .transform((v) => ({
     /** What the workflow is signalled with. */
     decision:
-      v.decision === 'deny' || v.decision === 'DENY' ? 'DENY' : 'APPROVE',
+      v.decision === 'deny' || v.decision === 'DENY'
+        ? ('DENY' as const)
+        : ('APPROVE' as const),
     /** Create an 8-hour allow grant after the approval took effect. */
     extended: v.decision === 'approve_8h',
     reason: v.reason,
