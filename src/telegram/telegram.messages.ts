@@ -1,6 +1,7 @@
 export type TelegramLocale = 'en' | 'ar';
 
-export type Outcome = 'approve_once' | 'approve_8h' | 'deny' | 'expired';
+export type Outcome =
+  'approve_once' | 'approve_8h' | 'approve_always' | 'deny' | 'expired';
 
 interface Strings {
   approve: string;
@@ -32,6 +33,7 @@ const en: Strings = {
   outcome: {
     approve_once: 'Approved once.',
     approve_8h: 'Approved for 8 hours.',
+    approve_always: 'Always allowed for this site.',
     deny: 'Denied.',
     expired: 'No answer in time. Denied.',
   },
@@ -62,6 +64,7 @@ const ar: Strings = {
   outcome: {
     approve_once: 'تمت الموافقة لمرة واحدة.',
     approve_8h: 'تمت الموافقة لمدة 8 ساعات.',
+    approve_always: 'مسموح دائماً لهذا الموقع.',
     deny: 'تم الرفض.',
     expired: 'انتهت المهلة دون إجابة. تم الرفض.',
   },

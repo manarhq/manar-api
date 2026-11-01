@@ -158,6 +158,9 @@ function world() {
       },
       updateMany: () => Promise.resolve({ count: 1 }),
     },
+    // warden2: approvals read the database clock and the workspace pause.
+    $queryRaw: () => Promise.resolve([{ now: new Date() }]),
+    workspacePause: { findUnique: () => Promise.resolve(null) },
     $transaction: (fn: (tx: unknown) => unknown) => fn(client),
   };
   const auditSvc = {
@@ -212,7 +215,9 @@ describe('POST /host/v1/jail/ask', () => {
       toolId: 'host.claude-code',
       site: 'Evil.example.',
     });
-    expect(r).toMatchObject({ decision: 'ask', id: 'new' });
+    expect(r).toMatchObject({ decision: 'ask' });
+    // The approval id is a fresh uuid (phone match codes are derived from it).
+    expect(r).toHaveProperty('id', w.approvalRows.at(-1)?.id);
   });
   it('answers from a remembered rule without a prompt', async () => {
     const w = world();
