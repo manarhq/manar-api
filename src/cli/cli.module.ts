@@ -18,6 +18,15 @@ import { GitLabConnectorRegisterCommand } from './commands/gitlab-connector-regi
 import { FleetKeygenCommand } from './commands/fleet-keygen.command';
 import { FleetReportCommand } from './commands/fleet-report.command';
 import { FleetHeartbeatModule } from '../fleet-heartbeat/fleet-heartbeat.module';
+import {
+  MembershipsGrantCommand,
+  MembershipsMigrateCommand,
+} from './commands/memberships.command';
+import {
+  WorkspacesDrainCommand,
+  WorkspacesRetryCommand,
+} from './commands/workspaces-drain.command';
+import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { LicenseVerifyCommand } from './commands/license-verify.command';
 
 /**
@@ -72,6 +81,11 @@ import { LicenseVerifyCommand } from './commands/license-verify.command';
     FleetKeygenCommand,
     FleetReportCommand,
     LicenseVerifyCommand,
+    MembershipsMigrateCommand,
+    MembershipsGrantCommand,
+    WorkspacesDrainCommand,
+    WorkspacesRetryCommand,
+    WorkspaceProvisioningService,
   ],
 })
 export class CliModule {}

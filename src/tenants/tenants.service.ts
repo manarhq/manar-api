@@ -40,7 +40,7 @@ export class TenantsService {
    * couldn't already get by hitting Keycloak directly once it knows the
    * realm name; the value-add is that a caller only needs to know the
    * tenant's `slug`; the client *secret* is never returned here — see
-   * `getClientSecretOrThrow`.
+   * (the client secret is no longer served by this API).
    */
   async getOidcConfigOrThrow(slug: string): Promise<TenantOidcConfig> {
     const tenant = await this.control.tenant.findUnique({ where: { slug } });
@@ -69,34 +69,5 @@ export class TenantsService {
       endSessionEndpoint: `${issuerUrl}/protocol/openid-connect/logout`,
       jwksUri: `${issuerUrl}/protocol/openid-connect/certs`,
     };
-  }
-
-  /**
-   * The one sensitive value this module holds — gated entirely by
-   * `BffServiceGuard` at the controller layer, never by tenant identity
-   * (there is no tenant JWT yet at this point in the login flow). Reads
-   * the plaintext secret `TenantProvisioningService` stored as a
-   * `SecretReference` row (`kind: KEYCLOAK_CLIENT_SECRET`, `provider:
-   * CONTROL_DB` — see docs/human-auth.md's "Storing the client secret")
-   * at provisioning time; this is what lets `manar-web`'s BFF complete its
-   * OIDC authorization-code exchange without holding a standing copy of
-   * Keycloak's own master-admin credentials.
-   */
-  async getClientSecretOrThrow(slug: string): Promise<string> {
-    const tenant = await this.control.tenant.findUnique({ where: { slug } });
-    if (!tenant) {
-      throw new NotFoundException(`No provisioned tenant "${slug}" was found`);
-    }
-
-    const secretRow = await this.control.secretReference.findFirst({
-      where: { tenantId: tenant.id, kind: 'KEYCLOAK_CLIENT_SECRET' },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (!secretRow) {
-      throw new NotFoundException(
-        `Tenant "${slug}" has no stored Keycloak client secret (provisioning may not have completed)`,
-      );
-    }
-    return secretRow.reference;
   }
 }

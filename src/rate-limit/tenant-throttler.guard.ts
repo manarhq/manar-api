@@ -11,11 +11,13 @@ import type {
   ThrottlerRequest,
   ThrottlerStorage,
 } from '@nestjs/throttler';
-import { decodeJwt, jwtVerify } from 'jose';
 import type { RequestWithAuthContext } from '../auth/auth-context';
-import { JwksCacheService } from '../auth/jwks-cache.service';
-import { ACCEPTED_SIGNING_ALGORITHMS } from '../auth/jwt-auth.guard';
-import { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
+import { requestedWorkspace } from '../auth/jwt-auth.guard';
+import { MembershipService } from '../auth/membership.service';
+import {
+  extractBearerToken,
+  TokenVerifierService,
+} from '../auth/token-verifier.service';
 import { isHealthRoutePath } from '../health/health.routes';
 import { isCloudMcpPath } from '../cloud-mcp/cloud-mcp.config';
 
@@ -50,8 +52,8 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
     @InjectThrottlerOptions() options: ThrottlerModuleOptions,
     @InjectThrottlerStorage() storage: ThrottlerStorage,
     reflector: Reflector,
-    private readonly knownIssuerRegistry: KnownIssuerRegistry,
-    private readonly jwksCache: JwksCacheService,
+    private readonly tokenVerifier: TokenVerifierService,
+    private readonly memberships: MembershipService,
   ) {
     super(options, storage, reflector);
   }
@@ -162,49 +164,27 @@ export class TenantThrottlerGuard extends ThrottlerGuard {
       return `tenant:${req.authContext.tenant.id}`;
     }
 
+    // Not authenticated yet: verify the token, then resolve the workspace the same way
+    // JwtAuthGuard will (Membership). Anything that does not resolve falls back to the IP.
     const token = extractBearerToken(req.headers.authorization);
     if (token) {
-      const issuer = readUnverifiedIssuer(token);
-      if (issuer) {
-        const knownIssuer =
-          await this.knownIssuerRegistry.resolveByIssuer(issuer);
-        if (
-          knownIssuer &&
-          (await this.isSignedBy(token, knownIssuer.issuerUrl))
-        ) {
-          return `tenant:${knownIssuer.tenantId}`;
+      const identity = await this.tokenVerifier.tryVerify(token);
+      if (identity) {
+        try {
+          const workspace = await this.memberships.resolveActive({
+            issuer: identity.issuer,
+            subject: identity.subject,
+            requestedTenantId: requestedWorkspace(req.headers),
+            boundTenantId: identity.boundTenant?.id,
+          });
+          return `tenant:${workspace.tenantId}`;
+        } catch {
+          // no usable membership: not a tenant bucket
         }
       }
     }
 
     return `ip:${req.ip}`;
-  }
-
-  private async isSignedBy(token: string, issuerUrl: string): Promise<boolean> {
-    try {
-      await jwtVerify(token, this.jwksCache.getJwks(issuerUrl), {
-        issuer: issuerUrl,
-        algorithms: [...ACCEPTED_SIGNING_ALGORITHMS],
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-}
-
-function extractBearerToken(header: string | undefined): string | null {
-  if (!header) return null;
-  const match = /^Bearer\s+(.+)$/.exec(header);
-  return match?.[1]?.trim() ? match[1].trim() : null;
-}
-
-function readUnverifiedIssuer(token: string): string | null {
-  try {
-    const claims = decodeJwt(token);
-    return typeof claims.iss === 'string' && claims.iss ? claims.iss : null;
-  } catch {
-    return null;
   }
 }
 

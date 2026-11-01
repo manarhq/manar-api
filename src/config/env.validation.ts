@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DatabaseConfigSchema } from '../database/database.config';
+import { AuthConfigSchema } from '../auth/auth.config';
 import { KeycloakConfigSchema } from '../keycloak/keycloak.config';
 import { OpenBaoConfigSchema } from '../openbao/openbao.config';
 import { AgentMtlsConfigSchema } from '../agent-mtls/agent-mtls.config';
@@ -60,6 +61,7 @@ export const AppConfigSchema = z
   })
   .extend(DatabaseConfigSchema.shape)
   .extend(KeycloakConfigSchema.shape)
+  .extend(AuthConfigSchema.shape)
   .extend(OpenBaoConfigSchema.shape)
   .extend(AgentMtlsConfigSchema.shape)
   .extend(OpenFgaConfigSchema.shape)

@@ -462,7 +462,7 @@ export class DemoSeedCommand extends CommandRunner {
       { where: { tenantId: tenant.id, kind: 'KEYCLOAK_CLIENT_SECRET' } },
     );
 
-    const userIds = await this.ensureUsers(realm);
+    const userIds = await this.ensureUsers(realm, tenant.id);
     this.logger.log(`Ensured ${Object.keys(userIds).length} demo users`);
 
     const ownerToken = await this.getUserToken({
@@ -608,7 +608,10 @@ export class DemoSeedCommand extends CommandRunner {
 
   // ---- Keycloak users ----
 
-  private async ensureUsers(realm: string): Promise<Record<string, string>> {
+  private async ensureUsers(
+    realm: string,
+    tenantId: string,
+  ): Promise<Record<string, string>> {
     const userIds: Record<string, string> = {};
     for (const user of DEMO_USERS) {
       const existing = await this.keycloakAdminClient.findUserByUsername(
@@ -630,6 +633,26 @@ export class DemoSeedCommand extends CommandRunner {
         this.logger.log(`Created Keycloak user "${user.username}"`);
       }
       await this.keycloakAdminClient.assignRealmRole(realm, userId, user.role);
+      const realmIssuer = this.keycloakAdminClient.issuerUrlForRealm(realm);
+      // Roles are read from Membership only (the realm role above is kept for the Keycloak admin view).
+      await this.control.membership.upsert({
+        where: {
+          issuer_subject_tenantId: {
+            issuer: realmIssuer,
+            subject: userId,
+            tenantId,
+          },
+        },
+        create: {
+          issuer: realmIssuer,
+          subject: userId,
+          tenantId,
+          role: user.role,
+          status: 'ACTIVE',
+          grantedBy: 'system:demo-seed',
+        },
+        update: { role: user.role, status: 'ACTIVE' },
+      });
       userIds[user.username] = userId;
     }
     return userIds;

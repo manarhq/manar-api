@@ -103,3 +103,13 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
+
+{{/* Labels of the post-upgrade role migration pod: not the API's selector labels (the Service must never select it) and not the Postgres-only migration label. */}}
+{{- define "manar-api.membershipJobLabels" -}}
+helm.sh/chart: {{ include "manar-api.chart" . }}
+app.kubernetes.io/name: {{ printf "%s-members" (include "manar-api.name" .) | trunc 63 | trimSuffix "-" }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: membership-migration
+app.kubernetes.io/part-of: manar
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}

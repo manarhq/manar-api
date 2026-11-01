@@ -163,7 +163,9 @@ async function main() {
   });
 
   if (await caAlreadyIssued(INTERMEDIATE_PATH)) {
-    console.log('==> Intermediate CA already generated, skipping sign/set-signed');
+    console.log(
+      '==> Intermediate CA already generated, skipping sign/set-signed',
+    );
   } else {
     console.log('==> Generating intermediate CA CSR (ECDSA P-256)');
     const intermediateGenerate = await baoRequest(
@@ -177,11 +179,15 @@ async function main() {
     );
 
     console.log('==> Signing intermediate CSR with root CA');
-    const signed = await baoRequest('POST', `${ROOT_PATH}/root/sign-intermediate`, {
-      csr: intermediateGenerate.data.csr,
-      format: 'pem_bundle',
-      ttl: INTERMEDIATE_TTL,
-    });
+    const signed = await baoRequest(
+      'POST',
+      `${ROOT_PATH}/root/sign-intermediate`,
+      {
+        csr: intermediateGenerate.data.csr,
+        format: 'pem_bundle',
+        ttl: INTERMEDIATE_TTL,
+      },
+    );
 
     console.log('==> Setting signed certificate on intermediate mount');
     await baoRequest('POST', `${INTERMEDIATE_PATH}/intermediate/set-signed`, {
@@ -213,7 +219,9 @@ async function main() {
     ext_key_usage: ['ClientAuth'],
   });
 
-  console.log(`==> Creating + issuing dev TLS server role/cert "${SERVER_ROLE}"`);
+  console.log(
+    `==> Creating + issuing dev TLS server role/cert "${SERVER_ROLE}"`,
+  );
   await baoRequest('POST', `${INTERMEDIATE_PATH}/roles/${SERVER_ROLE}`, {
     allowed_domains: 'localhost',
     allow_bare_domains: true,
@@ -252,7 +260,10 @@ async function main() {
     path.join(outDir, 'server-cert.pem'),
     `${serverCert.data.certificate}\n${serverCert.data.issuing_ca}`,
   );
-  await writeFile(path.join(outDir, 'server-key.pem'), serverCert.data.private_key);
+  await writeFile(
+    path.join(outDir, 'server-key.pem'),
+    serverCert.data.private_key,
+  );
 
   console.log(`\nDone. Wrote CA/server material to ${outDir}/`);
   console.log(

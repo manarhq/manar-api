@@ -6,9 +6,8 @@ import type {
   ThrottlerStorage,
 } from '@nestjs/throttler';
 import { describe, expect, it, vi } from 'vitest';
-import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from 'jose';
-import type { JwksCacheService } from '../auth/jwks-cache.service';
-import type { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
+import type { MembershipService } from '../auth/membership.service';
+import type { TokenVerifierService } from '../auth/token-verifier.service';
 import { TenantThrottlerGuard } from './tenant-throttler.guard';
 
 /**
@@ -77,16 +76,12 @@ async function makeGuard(
 ): Promise<{ guard: TenantThrottlerGuard }> {
   const storage = { increment };
 
-  const knownIssuerRegistry = {
-    resolveByIssuer: () => Promise.resolve(null),
-  } as unknown as KnownIssuerRegistry;
-
   const guard = new TenantThrottlerGuard(
     THROTTLER_OPTIONS,
     storage,
     new Reflector(),
-    knownIssuerRegistry,
-    {} as JwksCacheService,
+    {} as TokenVerifierService,
+    {} as MembershipService,
   );
   // The base class resolves its throttler list here; `canActivate` reads it.
   await guard.onModuleInit();
@@ -186,58 +181,59 @@ describe('TenantThrottlerGuard storage failure handling', () => {
   });
 });
 
-describe('TenantThrottlerGuard tracker (S11: never trust an unverified issuer)', () => {
-  const ISSUER = 'http://keycloak.test/realms/victim';
-
-  async function setup() {
-    const trusted = await generateKeyPair('RS256');
-    const attacker = await generateKeyPair('RS256');
-    const jwks = createLocalJWKSet({
-      keys: [{ ...(await exportJWK(trusted.publicKey)), alg: 'RS256' }],
-    });
+describe('TenantThrottlerGuard tracker (never trust an unverified token)', () => {
+  function setup(memberships: { resolveActive: ReturnType<typeof vi.fn> }) {
+    const verifier = {
+      tryVerify: (token: string) =>
+        Promise.resolve(
+          token === 'good' ? { subject: 'sub-1', wids: [] } : null,
+        ),
+    } as unknown as TokenVerifierService;
     const guard = new TenantThrottlerGuard(
       THROTTLER_OPTIONS,
       { increment: vi.fn() },
       new Reflector(),
-      {
-        resolveByIssuer: (issuer: string) =>
-          Promise.resolve(
-            issuer === ISSUER
-              ? { tenantId: 'victim-tenant', issuerUrl: ISSUER }
-              : null,
-          ),
-      } as unknown as KnownIssuerRegistry,
-      { getJwks: () => jwks } as unknown as JwksCacheService,
+      verifier,
+      memberships as unknown as MembershipService,
     );
-    const sign = (key: CryptoKey) =>
-      new SignJWT({})
-        .setProtectedHeader({ alg: 'RS256' })
-        .setIssuer(ISSUER)
-        .setExpirationTime('5m')
-        .sign(key);
-    const tracker = (token: string) =>
+    return (token: string, headers: Record<string, string> = {}) =>
       (
-        guard as unknown as {
-          getTracker(req: unknown): Promise<string>;
-        }
+        guard as unknown as { getTracker(req: unknown): Promise<string> }
       ).getTracker({
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, ...headers },
         ip: '203.0.113.9',
       });
-    return { trusted, attacker, sign, tracker };
   }
 
-  it("keys a forged token naming another tenant's issuer on the caller IP, not that tenant", async () => {
-    const { attacker, sign, tracker } = await setup();
-    await expect(tracker(await sign(attacker.privateKey))).resolves.toBe(
+  it('keys a token that does not verify on the caller IP', async () => {
+    const resolveActive = vi.fn();
+    await expect(setup({ resolveActive })('forged')).resolves.toBe(
       'ip:203.0.113.9',
     );
+    expect(resolveActive).not.toHaveBeenCalled();
   });
 
-  it('keys a correctly signed token on its tenant', async () => {
-    const { trusted, sign, tracker } = await setup();
-    await expect(tracker(await sign(trusted.privateKey))).resolves.toBe(
-      'tenant:victim-tenant',
-    );
+  it('keys a verified token on the tenant its membership resolves to', async () => {
+    const resolveActive = vi
+      .fn()
+      .mockResolvedValue({ tenantId: 'victim-tenant' });
+    const tracker = setup({ resolveActive });
+    await expect(
+      tracker('good', { 'x-manar-workspace': 'victim-tenant' }),
+    ).resolves.toBe('tenant:victim-tenant');
+    expect(resolveActive).toHaveBeenCalledWith({
+      subject: 'sub-1',
+      requestedTenantId: 'victim-tenant',
+      boundTenantId: undefined,
+    });
+  });
+
+  it('keys a verified token with no membership on the IP, so a named workspace is not a free bucket', async () => {
+    const resolveActive = vi.fn().mockRejectedValue(new Error('forbidden'));
+    await expect(
+      setup({ resolveActive })('good', {
+        'x-manar-workspace': 'someone-elses',
+      }),
+    ).resolves.toBe('ip:203.0.113.9');
   });
 });

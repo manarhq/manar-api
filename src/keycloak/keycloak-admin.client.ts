@@ -177,6 +177,36 @@ export class KeycloakAdminClient {
   }
 
   /**
+   * Ids (== token `sub`) of the users that hold `roleName` directly in the realm right now.
+   * Paged; used once per upgrade to turn current realm roles into Membership rows. Roles inherited
+   * through groups or composite roles are not included.
+   */
+  async listRealmRoleMemberIds(
+    realmName: string,
+    roleName: string,
+  ): Promise<string[]> {
+    const ids: string[] = [];
+    const page = 200;
+    for (let first = 0; ; first += page) {
+      let users: { id: string }[];
+      try {
+        const response = await this.adminRequest(
+          'GET',
+          `/admin/realms/${encodeURIComponent(realmName)}/roles/${encodeURIComponent(roleName)}/users?first=${first}&max=${page}`,
+        );
+        users = response.body as { id: string }[];
+      } catch (error) {
+        // A realm that never had this role (older installs): nobody holds it.
+        if (error instanceof Error && /with HTTP 404/.test(error.message))
+          return ids;
+        throw error;
+      }
+      ids.push(...users.map((u) => u.id));
+      if (users.length < page) return ids;
+    }
+  }
+
+  /**
    * Phase 14 — the revoke half of `assignRealmRole`, used by
    * `UsersService.revokeRole` (`DELETE /users/:id/role-bindings/:role`) so
    * a Manar-side revoke actually updates Keycloak, the role-assignment

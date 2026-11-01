@@ -33,11 +33,7 @@ import {
   parseLimit,
 } from '../common/pagination/cursor-pagination';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
-import {
-  PrivilegeEscalationError,
-  TenantRealmNotProvisionedError,
-  UserNotFoundError,
-} from './users.errors';
+import { PrivilegeEscalationError, UserNotFoundError } from './users.errors';
 import { UsersService } from './users.service';
 import { GrantRoleRequestSchema } from './users.validation';
 import {
@@ -56,9 +52,6 @@ async function mapUserErrors<T>(operation: () => Promise<T>): Promise<T> {
     }
     if (error instanceof PrivilegeEscalationError) {
       throw new ForbiddenException(error.message);
-    }
-    if (error instanceof TenantRealmNotProvisionedError) {
-      throw new BadRequestException(error.message);
     }
     throw error;
   }
@@ -112,10 +105,15 @@ export class UsersController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    return this.usersService.listUsers(tenantClient, {
-      limit: parseLimit(limit),
-      cursor: parseCursor(cursor),
-    });
+    return this.usersService.listUsers(
+      tenantClient,
+      auth.tenant.id,
+      auth.issuer,
+      {
+        limit: parseLimit(limit),
+        cursor: parseCursor(cursor),
+      },
+    );
   }
 
   @Get(':id')
@@ -136,7 +134,12 @@ export class UsersController {
       auth.tenant.id,
     );
     return mapUserErrors(() =>
-      this.usersService.getUserOrThrow(tenantClient, id),
+      this.usersService.getUserOrThrow(
+        tenantClient,
+        auth.tenant.id,
+        auth.issuer,
+        id,
+      ),
     );
   }
 
@@ -145,7 +148,7 @@ export class UsersController {
   @ApiOperation({
     summary: 'Grant a role to a user',
     description:
-      "Requires TENANT_OWNER or SECURITY_ADMIN, AND enforces a privilege-escalation guard: the caller can never grant a role more privileged than any role they themselves currently hold (e.g. a SECURITY_ADMIN can never grant TENANT_OWNER, including to themselves) -- see src/auth/role-privilege.ts. Also updates the underlying Keycloak realm role mapping (the role-assignment source of truth -- see docs/human-auth.md), not just the local RoleBinding row, so the grant survives the user's next JwtAuthGuard sync. Audited.",
+      'Requires TENANT_OWNER or SECURITY_ADMIN, AND enforces a privilege-escalation guard: the caller can never grant a role more privileged than any role they themselves currently hold (e.g. a SECURITY_ADMIN can never grant TENANT_OWNER, including to themselves) -- see src/auth/role-privilege.ts. Writes the workspace Membership (the only source of roles). Audited.',
   })
   @ApiParam({
     name: 'id',
@@ -179,6 +182,7 @@ export class UsersController {
     return mapUserErrors(() =>
       this.usersService.grantRole(tenantClient, {
         tenantId: auth.tenant.id,
+        issuer: auth.issuer,
         targetUserId: id,
         role: input.role,
         grantedByUserId: auth.user.id,
@@ -192,7 +196,7 @@ export class UsersController {
   @ApiOperation({
     summary: 'Revoke a role from a user',
     description:
-      "Requires TENANT_OWNER or SECURITY_ADMIN, AND enforces the same privilege-escalation guard as the grant endpoint, applied to revoke: the caller can never revoke a role more privileged than any role they themselves currently hold (e.g. a SECURITY_ADMIN can never strip TENANT_OWNER from anyone, including the actual owner) -- see src/auth/role-privilege.ts. Idempotent -- revoking a role the user doesn't currently hold succeeds as a no-op. Also updates the underlying Keycloak realm role mapping, not just the local RoleBinding row. Audited.",
+      "Requires TENANT_OWNER or SECURITY_ADMIN, AND enforces the same privilege-escalation guard as the grant endpoint, applied to revoke: the caller can never revoke a role more privileged than any role they themselves currently hold (e.g. a SECURITY_ADMIN can never strip TENANT_OWNER from anyone, including the actual owner) -- see src/auth/role-privilege.ts. Idempotent -- revoking a role the user doesn't currently hold succeeds as a no-op. Revoking the last role removes the member. Audited.",
   })
   @ApiParam({ name: 'id', description: 'UserProfile ID', format: 'uuid' })
   @ApiParam({ name: 'role', enum: ROLES })
@@ -228,6 +232,7 @@ export class UsersController {
     return mapUserErrors(() =>
       this.usersService.revokeRole(tenantClient, {
         tenantId: auth.tenant.id,
+        issuer: auth.issuer,
         targetUserId: id,
         role,
         revokedByUserId: auth.user.id,

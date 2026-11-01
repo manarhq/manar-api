@@ -1,306 +1,263 @@
-import { UnauthorizedException, type ExecutionContext } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
-import { generateKeyPair, SignJWT, type JWTVerifyGetKey } from 'jose';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
-import type { AppConfig } from '../config/env.validation';
+/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call -- in-memory fakes of the control DB */
+import {
+  ForbiddenException,
+  UnauthorizedException,
+  type ExecutionContext,
+} from '@nestjs/common';
+import { describe, expect, it, vi } from 'vitest';
 import type { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { RequestWithAuthContext } from './auth-context';
 import { JwtAuthGuard } from './jwt-auth.guard';
-import type { JwksCacheService } from './jwks-cache.service';
-import type { KnownIssuerRegistry } from './known-issuer-registry.service';
+import { MembershipService } from './membership.service';
+import type {
+  TokenVerifierService,
+  VerifiedIdentity,
+} from './token-verifier.service';
 
 /**
- * Unit tests for the token-validation half of `JwtAuthGuard` — the checks
- * that decide whether an already-signature-valid JWT is a credential this
- * API should honour at all.
- *
- * `test/auth.e2e-spec.ts` covers the happy path against a *real* Keycloak
- * (per the Phase 3 testing requirement), but it structurally cannot cover
- * these cases: a real Keycloak will not mint an access token for a client
- * that was never registered, and driving it into issuing an ID token to
- * this API's endpoints would require a second client and a full
- * authorization-code flow just to produce one token. So these fabricate
- * tokens with `jose`'s `SignJWT` and hand the guard a fake JWKS resolver
- * that returns the matching key — the same "fabricate the token when a real
- * flow structurally cannot produce it" exception `test/auth.e2e-spec.ts`
- * already makes for its unrecognized-issuer and wrong-key scenarios.
- *
- * Every token below is otherwise *completely valid*: correctly signed by
- * the realm's own key, unexpired, with the right issuer and a real
- * `realm_access.roles` claim. That is the point — before this guard pinned
- * the algorithm and checked what the token is and who it was issued to,
- * every one of them authenticated and had its claimed roles written
- * straight into `RoleBinding` rows.
- *
- * Collaborators are plain in-memory fakes (no Nest DI container, no
- * database), matching `credential-broker.service.spec.ts`'s house style.
+ * Tenant isolation at the guard: tenant and roles come from Membership only.
+ * The token verifier is faked (its own spec covers token checks); the Membership
+ * service is the real one over an in-memory control DB fake that applies the same
+ * `where` filters Prisma would.
  */
-
-const ISSUER = 'http://localhost:8081/realms/acme';
-const CLIENT_ID = 'manar-api';
-const TENANT = { tenantId: 'tenant-1', tenantSlug: 'acme', issuerUrl: ISSUER };
-
-let signingKey: CryptoKey;
-let verificationKey: CryptoKey;
-
-beforeAll(async () => {
-  const { privateKey, publicKey } = await generateKeyPair('RS256', {
-    extractable: true,
-  });
-  signingKey = privateKey;
-  verificationKey = publicKey;
+type M = {
+  id: string;
+  issuer: string;
+  subject: string;
+  tenantId: string;
+  role: string;
+  extraRoles: string[];
+  status: 'ACTIVE' | 'PENDING' | 'REMOVED';
+  createdAt: Date;
+  tenant: { id: string; slug: string; kind: string; status: string };
+};
+const T = (id: string, kind = 'COMPANY', status = 'ACTIVE') => ({
+  id,
+  slug: id,
+  kind,
+  status,
+});
+const mem = (
+  subject: string,
+  tenant: M['tenant'],
+  role: string,
+  extra: string[] = [],
+  status: M['status'] = 'ACTIVE',
+  n = 0,
+): M => ({
+  id: `m-${subject}-${tenant.id}`,
+  issuer: 'iss-a',
+  subject,
+  tenantId: tenant.id,
+  role,
+  extraRoles: extra,
+  status,
+  createdAt: new Date(n),
+  tenant,
 });
 
-/**
- * The shape a real Keycloak 26 access token actually has for this
- * deployment: `typ: "Bearer"`, the requesting client in `azp`, and an
- * `aud` of `["account"]` — *not* the client id, because
- * `KeycloakAdminClient.createConfidentialClient` registers no audience
- * mapper. Every test below starts from this and changes one thing.
- */
-function keycloakAccessTokenClaims(): Record<string, unknown> {
-  return {
-    typ: 'Bearer',
-    azp: CLIENT_ID,
-    aud: ['account'],
-    sub: 'keycloak-subject-1',
-    email: 'operator@acme.test',
-    preferred_username: 'operator',
-    realm_access: { roles: ['SECURITY_ADMIN', 'offline_access'] },
-  };
-}
-
-async function signToken(
-  claims: Record<string, unknown>,
-  options: { alg?: string; key?: CryptoKey | Uint8Array } = {},
-): Promise<string> {
-  return new SignJWT(claims)
-    .setProtectedHeader({ alg: options.alg ?? 'RS256' })
-    .setIssuer(ISSUER)
-    .setIssuedAt()
-    .setExpirationTime('5m')
-    .sign(options.key ?? signingKey);
-}
-
-function fakeTenantClient() {
-  const userProfile = {
-    id: 'user-1',
-    keycloakSubject: 'keycloak-subject-1',
-    email: 'operator@acme.test',
-    displayName: 'operator',
-  };
-  const roleBindingCreateMany = vi.fn().mockResolvedValue({ count: 1 });
-  const client = {
-    userProfile: { upsert: vi.fn().mockResolvedValue(userProfile) },
-    roleBinding: {
-      findMany: vi.fn().mockResolvedValue([]),
-      createMany: roleBindingCreateMany,
-      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+function setup(
+  rows: M[],
+  identity: Partial<VerifiedIdentity> & { subject: string },
+) {
+  const control = {
+    membership: {
+      findMany: ({ where }: { where: any }) =>
+        Promise.resolve(
+          rows
+            .filter(
+              (r) => r.issuer === where.issuer && r.subject === where.subject,
+            )
+            .filter(
+              (r) =>
+                !where.status ||
+                (typeof where.status === 'string'
+                  ? r.status === where.status
+                  : where.status.in.includes(r.status)),
+            )
+            .filter((r) => !where.tenantId || r.tenantId === where.tenantId)
+            .filter(
+              (r) => !where.tenant || r.tenant.status === where.tenant.status,
+            ),
+        ),
     },
+  } as unknown as ControlPrismaService;
+  const upsert = vi.fn().mockResolvedValue({
+    id: 'u1',
+    keycloakSubject: identity.subject,
+    email: '',
+    displayName: 'x',
+  });
+  const getClient = vi.fn().mockResolvedValue({ userProfile: { upsert } });
+  const guard = new JwtAuthGuard(
+    {
+      verify: () => Promise.resolve({ wids: [], issuer: 'iss-a', ...identity }),
+    } as unknown as TokenVerifierService,
+    new MembershipService(control),
+    { getClient } as unknown as TenantDatabaseManager,
+  );
+  const run = async (headers: Record<string, string> = {}) => {
+    const request = {
+      headers: { authorization: 'Bearer t', ...headers },
+    } as unknown as RequestWithAuthContext;
+    const context = {
+      switchToHttp: () => ({ getRequest: () => request }),
+    } as unknown as ExecutionContext;
+    await guard.canActivate(context);
+    return request;
   };
-  return { client, roleBindingCreateMany };
+  return { run, getClient };
 }
 
-function makeGuard(
-  options: { jwks?: JWTVerifyGetKey; clientId?: string } = {},
-): {
-  guard: JwtAuthGuard;
-  roleBindingCreateMany: ReturnType<typeof vi.fn>;
-} {
-  const { client, roleBindingCreateMany } = fakeTenantClient();
-
-  const knownIssuerRegistry = {
-    resolveByIssuer: (issuer: string) =>
-      Promise.resolve(issuer === ISSUER ? TENANT : null),
-  } as unknown as KnownIssuerRegistry;
-
-  const realmJwks: JWTVerifyGetKey = () => Promise.resolve(verificationKey);
-  const jwksCache = {
-    getJwks: () => options.jwks ?? realmJwks,
-  } as unknown as JwksCacheService;
-
-  const tenantDatabaseManager = {
-    getClient: () => Promise.resolve(client),
-  } as unknown as TenantDatabaseManager;
-
-  const configService = {
-    get: () => options.clientId ?? CLIENT_ID,
-  } as unknown as ConfigService<AppConfig, true>;
-
-  return {
-    guard: new JwtAuthGuard(
-      knownIssuerRegistry,
-      jwksCache,
-      tenantDatabaseManager,
-      configService,
-    ),
-    roleBindingCreateMany,
-  };
-}
-
-function contextFor(token: string): {
-  context: ExecutionContext;
-  request: RequestWithAuthContext;
-} {
-  const request = {
-    headers: { authorization: `Bearer ${token}` },
-  } as unknown as RequestWithAuthContext;
-  const context = {
-    switchToHttp: () => ({ getRequest: () => request }),
-  } as unknown as ExecutionContext;
-  return { context, request };
-}
-
-describe('JwtAuthGuard token validation', () => {
-  it('accepts a real-shaped Keycloak access token and attaches the auth context', async () => {
-    const { guard } = makeGuard();
-    const { context, request } = contextFor(
-      await signToken(keycloakAccessTokenClaims()),
+describe('JwtAuthGuard: tenant and roles come from Membership', () => {
+  it('uses the personal workspace by default and the Membership roles', async () => {
+    const { run } = setup(
+      [
+        mem('s1', T('co'), 'AUDITOR', [], 'ACTIVE', 0),
+        mem(
+          's1',
+          T('me', 'PERSONAL'),
+          'TENANT_OWNER',
+          ['AUDITOR'],
+          'ACTIVE',
+          1,
+        ),
+      ],
+      { subject: 's1' },
     );
+    const req = await run();
+    expect(req.authContext?.tenant.id).toBe('me');
+    expect(req.authContext?.workspaceKind).toBe('PERSONAL');
+    expect(req.authContext?.roles).toEqual(['TENANT_OWNER', 'AUDITOR']);
+  });
 
-    await expect(guard.canActivate(context)).resolves.toBe(true);
-    expect(request.authContext).toEqual({
-      tenant: { id: 'tenant-1', slug: 'acme' },
-      user: {
-        id: 'user-1',
-        keycloakSubject: 'keycloak-subject-1',
-        email: 'operator@acme.test',
-        displayName: 'operator',
-      },
-      roles: ['SECURITY_ADMIN'],
+  it('switches to the selected workspace when the user is a member', async () => {
+    const { run } = setup(
+      [
+        mem('s1', T('co'), 'READ_ONLY'),
+        mem('s1', T('me', 'PERSONAL'), 'TENANT_OWNER'),
+      ],
+      { subject: 's1' },
+    );
+    const req = await run({ 'x-manar-workspace': 'co' });
+    expect(req.authContext?.tenant.id).toBe('co');
+    expect(req.authContext?.roles).toEqual(['READ_ONLY']);
+  });
+
+  it('403 when the user has no Membership for the selected tenant, and never opens its database', async () => {
+    const { run, getClient } = setup(
+      [
+        mem('s1', T('me', 'PERSONAL'), 'TENANT_OWNER'),
+        mem('other', T('victim'), 'TENANT_OWNER'),
+      ],
+      { subject: 's1' },
+    );
+    await expect(run({ 'x-manar-workspace': 'victim' })).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(getClient).not.toHaveBeenCalled();
+  });
+
+  it.each(['PENDING', 'REMOVED'] as const)(
+    '403 for a %s Membership',
+    async (status) => {
+      const { run } = setup([mem('s1', T('co'), 'TENANT_OWNER', [], status)], {
+        subject: 's1',
+      });
+      await expect(run({ 'x-manar-workspace': 'co' })).rejects.toThrow(
+        ForbiddenException,
+      );
+    },
+  );
+
+  it('403 for a suspended tenant even with an ACTIVE Membership', async () => {
+    const { run } = setup(
+      [mem('s1', T('co', 'COMPANY', 'SUSPENDED'), 'TENANT_OWNER')],
+      { subject: 's1' },
+    );
+    await expect(run({ 'x-manar-workspace': 'co' })).rejects.toThrow(
+      ForbiddenException,
+    );
+  });
+
+  it('403 for a signed-in user with no workspace at all', async () => {
+    const { run } = setup([], { subject: 'new' });
+    await expect(run()).rejects.toThrow(ForbiddenException);
+  });
+
+  it('a legacy per-tenant realm token only reaches its own tenant', async () => {
+    const rows = [
+      mem('s1', T('legacy'), 'SOC_OPERATOR'),
+      mem('s1', T('me', 'PERSONAL'), 'TENANT_OWNER'),
+    ];
+    const { run } = setup(rows, {
+      subject: 's1',
+      boundTenant: { id: 'legacy', slug: 'legacy' },
     });
+    expect((await run()).authContext?.tenant.id).toBe('legacy');
+    await expect(run({ 'x-manar-workspace': 'me' })).rejects.toThrow(
+      ForbiddenException,
+    );
   });
 
-  it('accepts a token whose single `aud` is this client and which therefore omits `azp`', async () => {
-    const claims = keycloakAccessTokenClaims();
-    delete claims.azp;
-    const { guard } = makeGuard();
-    const { context } = contextFor(
-      await signToken({ ...claims, aud: CLIENT_ID }),
-    );
-
-    await expect(guard.canActivate(context)).resolves.toBe(true);
+  it('ignores roles in the token: the verified identity has none and the Membership decides', async () => {
+    // The verifier fake even smuggles a roles-like field; the guard must not read it.
+    const { run } = setup([mem('s1', T('co'), 'READ_ONLY')], {
+      subject: 's1',
+      ...({
+        roles: ['TENANT_OWNER'],
+        realm_access: { roles: ['TENANT_OWNER'] },
+      } as object),
+    });
+    expect((await run()).authContext?.roles).toEqual(['READ_ONLY']);
   });
 
-  it('rejects a token issued to a different client in the same realm', async () => {
-    const { guard, roleBindingCreateMany } = makeGuard();
-    const { context, request } = contextFor(
-      await signToken({
-        ...keycloakAccessTokenClaims(),
-        azp: 'some-other-client',
-      }),
+  it('a missing bearer token is a 401', async () => {
+    const { run } = setup([], { subject: 's1' });
+    const guard = new JwtAuthGuard(
+      {} as TokenVerifierService,
+      {} as MembershipService,
+      {} as TenantDatabaseManager,
     );
-
+    const context = {
+      switchToHttp: () => ({ getRequest: () => ({ headers: {} }) }),
+    } as unknown as ExecutionContext;
     await expect(guard.canActivate(context)).rejects.toThrow(
       UnauthorizedException,
     );
-    expect(request.authContext).toBeUndefined();
-    // The whole point: its `realm_access.roles` never reached the tenant DB.
-    expect(roleBindingCreateMany).not.toHaveBeenCalled();
+    void run;
+  });
+});
+
+describe('SAMPLE workspaces are never a default', () => {
+  it('without a selection a SAMPLE membership is not picked', async () => {
+    const { run } = setup([mem('s1', T('sample', 'SAMPLE'), 'TENANT_OWNER')], {
+      subject: 's1',
+    });
+    await expect(run()).rejects.toThrow(ForbiddenException);
+    expect(
+      (await run({ 'x-manar-workspace': 'sample' })).authContext?.workspaceKind,
+    ).toBe('SAMPLE');
+  });
+});
+
+describe('a sub is only unique within its issuer', () => {
+  it("the same sub from another issuer gets no access to the first issuer's workspace", async () => {
+    const rows = [mem('s1', T('co'), 'TENANT_OWNER')];
+    const { run, getClient } = setup(rows, {
+      subject: 's1',
+      issuer: 'iss-evil',
+    });
+    await expect(run({ 'x-manar-workspace': 'co' })).rejects.toThrow(
+      ForbiddenException,
+    );
+    await expect(run()).rejects.toThrow(ForbiddenException);
+    expect(getClient).not.toHaveBeenCalled();
   });
 
-  it('rejects a token whose `aud` names another client and which has no `azp`', async () => {
-    const claims = keycloakAccessTokenClaims();
-    delete claims.azp;
-    const { guard } = makeGuard();
-    const { context } = contextFor(
-      await signToken({ ...claims, aud: ['account', 'some-other-client'] }),
-    );
-
-    await expect(guard.canActivate(context)).rejects.toThrow(
-      UnauthorizedException,
-    );
-  });
-
-  it('rejects an ID token minted by the same realm for this same client', async () => {
-    const { guard, roleBindingCreateMany } = makeGuard();
-    const { context, request } = contextFor(
-      await signToken({ ...keycloakAccessTokenClaims(), typ: 'ID' }),
-    );
-
-    await expect(guard.canActivate(context)).rejects.toThrow(
-      UnauthorizedException,
-    );
-    expect(request.authContext).toBeUndefined();
-    expect(roleBindingCreateMany).not.toHaveBeenCalled();
-  });
-
-  it('rejects a refresh token minted by the same realm for this same client', async () => {
-    const { guard } = makeGuard();
-    const { context } = contextFor(
-      await signToken({ ...keycloakAccessTokenClaims(), typ: 'Refresh' }),
-    );
-
-    await expect(guard.canActivate(context)).rejects.toThrow(
-      UnauthorizedException,
-    );
-  });
-
-  it('rejects a token carrying no `typ` claim at all', async () => {
-    const claims = keycloakAccessTokenClaims();
-    delete claims.typ;
-    const { guard } = makeGuard();
-    const { context } = contextFor(await signToken(claims));
-
-    await expect(guard.canActivate(context)).rejects.toThrow(
-      UnauthorizedException,
-    );
-  });
-
-  it('rejects a symmetrically-signed token even when the key resolver hands back the matching key', async () => {
-    // Algorithm confusion: `alg: HS256` asks the verifier to treat key
-    // material it only ever meant to use asymmetrically as an HMAC secret.
-    // Modelled here by a resolver that hands back exactly the key the token
-    // was signed with, so the *only* thing standing between this token and
-    // a successful verification is the pinned algorithm list.
-    const hmacKey = new Uint8Array(32).fill(7);
-    const hmacJwks: JWTVerifyGetKey = () => Promise.resolve(hmacKey);
-    const { guard } = makeGuard({ jwks: hmacJwks });
-    const { context } = contextFor(
-      await signToken(keycloakAccessTokenClaims(), {
-        alg: 'HS256',
-        key: hmacKey,
-      }),
-    );
-
-    await expect(guard.canActivate(context)).rejects.toThrow(
-      UnauthorizedException,
-    );
-  });
-
-  it('rejects an expired token', async () => {
-    const { guard } = makeGuard();
-    const token = await new SignJWT(keycloakAccessTokenClaims())
-      .setProtectedHeader({ alg: 'RS256' })
-      .setIssuer(ISSUER)
-      .setIssuedAt(Math.floor(Date.now() / 1000) - 3600)
-      .setExpirationTime(Math.floor(Date.now() / 1000) - 600)
-      .sign(signingKey);
-    const { context } = contextFor(token);
-
-    await expect(guard.canActivate(context)).rejects.toThrow(
-      UnauthorizedException,
-    );
-  });
-
-  it('rejects a token that expired seconds ago — there is no clock-skew grace', async () => {
-    // Pins the deliberate absence of `clockTolerance`. A skew allowance was
-    // tried and removed: whatever its size, it is exactly the extra time a
-    // genuinely expired token keeps working, and `test/auth.e2e-spec.ts`
-    // asserts a 1-second token is refused 2.5 seconds later. See the guard's
-    // own doc comment for the full reasoning. If this test is ever changed
-    // to expect acceptance, that is a security decision, not a test fix.
-    const { guard } = makeGuard();
-    const token = await new SignJWT(keycloakAccessTokenClaims())
-      .setProtectedHeader({ alg: 'RS256' })
-      .setIssuer(ISSUER)
-      .setIssuedAt(Math.floor(Date.now() / 1000) - 300)
-      .setExpirationTime(Math.floor(Date.now() / 1000) - 5)
-      .sign(signingKey);
-    const { context } = contextFor(token);
-
-    await expect(guard.canActivate(context)).rejects.toThrow(
-      UnauthorizedException,
-    );
+  it('the auth context carries the issuer', async () => {
+    const { run } = setup([mem('s1', T('co'), 'AUDITOR')], { subject: 's1' });
+    expect((await run()).authContext?.issuer).toBe('iss-a');
   });
 });

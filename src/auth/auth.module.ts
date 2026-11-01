@@ -1,5 +1,8 @@
 import { Global, Module } from '@nestjs/common';
 import { DatabaseModule } from '../database/database.module';
+import { IdentityGuard } from './identity.guard';
+import { MembershipService } from './membership.service';
+import { TokenVerifierService } from './token-verifier.service';
 import { JwksCacheService } from './jwks-cache.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { KnownIssuerRegistry } from './known-issuer-registry.service';
@@ -15,7 +18,23 @@ import { RolesGuard } from './roles.guard';
 @Global()
 @Module({
   imports: [DatabaseModule],
-  providers: [KnownIssuerRegistry, JwksCacheService, JwtAuthGuard, RolesGuard],
-  exports: [KnownIssuerRegistry, JwksCacheService, JwtAuthGuard, RolesGuard],
+  providers: [
+    KnownIssuerRegistry,
+    JwksCacheService,
+    TokenVerifierService,
+    MembershipService,
+    JwtAuthGuard,
+    IdentityGuard,
+    RolesGuard,
+  ],
+  exports: [
+    KnownIssuerRegistry,
+    JwksCacheService,
+    TokenVerifierService,
+    MembershipService,
+    JwtAuthGuard,
+    IdentityGuard,
+    RolesGuard,
+  ],
 })
 export class AuthModule {}

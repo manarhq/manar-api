@@ -1,11 +1,7 @@
-import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
-import { BffServiceGuard } from './bff-service.guard';
-import {
-  TenantOidcClientSecretResponseDto,
-  TenantOidcConfigResponseDto,
-} from './tenants.dto';
+import { TenantOidcConfigResponseDto } from './tenants.dto';
 import { TenantsService } from './tenants.service';
 
 /**
@@ -50,7 +46,10 @@ import { TenantsService } from './tenants.service';
  *     `manar-web/docs/auth-flow.md`'s BFF/token-handler design, which this
  *     endpoint slots into unchanged).
  *
- * Neither endpoint uses `JwtAuthGuard` — both are necessarily reachable
+ * RETIRED (spec 4.1): `GET /tenants/:slug/oidc-client-secret` and `BffServiceGuard`. manar-web now holds its
+ * own OIDC client secret for the shared realm (ExternalSecret), so no endpoint hands a client secret out.
+ *
+ * The remaining endpoint does not use `JwtAuthGuard` — both are necessarily reachable
  * pre-login. `openapi-docs.e2e-spec.ts`'s "every documented path requires
  * bearer auth" check deliberately does not include either path in its
  * fixed list, for exactly this reason.
@@ -80,34 +79,5 @@ export class TenantsController {
     @Param('slug') slug: string,
   ): Promise<TenantOidcConfigResponseDto> {
     return this.tenantsService.getOidcConfigOrThrow(slug);
-  }
-
-  @Get(':slug/oidc-client-secret')
-  @UseGuards(BffServiceGuard)
-  @ApiOperation({
-    summary: "Resolve a tenant's confidential OIDC client secret",
-    description:
-      'BFF-only — gated by the `X-Manar-Bff-Token` shared service credential (see BffServiceGuard), never by a tenant JWT (there is none yet at this point in the login flow) and never by Keycloak master-admin credentials. Lets manar-web complete its OIDC authorization-code exchange server-side without holding its own copy of Keycloak admin credentials.',
-  })
-  @ApiParam({
-    name: 'slug',
-    description: "The tenant's slug (== its Keycloak realm name)",
-  })
-  @ApiResponse({ status: 200, type: TenantOidcClientSecretResponseDto })
-  @ApiResponse({
-    status: 401,
-    type: ErrorResponseDto,
-    description: 'Missing or invalid X-Manar-Bff-Token header.',
-  })
-  @ApiResponse({
-    status: 404,
-    type: ErrorResponseDto,
-    description: 'No such tenant, or it has no stored client secret.',
-  })
-  async getOidcClientSecret(
-    @Param('slug') slug: string,
-  ): Promise<TenantOidcClientSecretResponseDto> {
-    const clientSecret = await this.tenantsService.getClientSecretOrThrow(slug);
-    return { clientSecret };
   }
 }

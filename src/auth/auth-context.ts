@@ -1,6 +1,7 @@
 import { createParamDecorator, ExecutionContext } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
 import type { RoleName } from './roles';
+import type { WorkspaceKind } from './membership.service';
 
 /**
  * The trustworthy identity context `JwtAuthGuard` attaches to a request on
@@ -10,6 +11,8 @@ import type { RoleName } from './roles';
  * param, or request body (Section 23 of the master prompt).
  */
 export interface AuthContext {
+  /** Issuer of the token the caller signed in with (a `sub` is only unique within an issuer). */
+  issuer: string;
   tenant: {
     id: string;
     slug: string;
@@ -20,7 +23,9 @@ export interface AuthContext {
     email: string;
     displayName: string;
   };
+  /** From the Membership row, never from the token. */
   roles: RoleName[];
+  workspaceKind: WorkspaceKind;
 }
 
 /** The property `JwtAuthGuard` attaches `AuthContext` to on the request. */

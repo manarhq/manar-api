@@ -2,21 +2,17 @@ import { Injectable } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
-import { canGrantRole } from '../auth/role-privilege';
+import { canGrantRole, privilegeRank } from '../auth/role-privilege';
 import type { RoleName } from '../auth/roles';
 import { ControlPrismaService } from '../database/control-prisma.service';
-import { KeycloakAdminClient } from '../keycloak/keycloak-admin.client';
+import { rolesOf, splitRoles } from '../auth/membership.service';
 import {
   CursorPage,
   DecodedCursor,
   cursorWhereClause,
   toCursorPage,
 } from '../common/pagination/cursor-pagination';
-import {
-  PrivilegeEscalationError,
-  TenantRealmNotProvisionedError,
-  UserNotFoundError,
-} from './users.errors';
+import { PrivilegeEscalationError, UserNotFoundError } from './users.errors';
 
 export interface ListUsersInput {
   limit: number;
@@ -35,6 +31,8 @@ export interface UserSummary {
 
 export interface GrantRoleInput {
   tenantId: string;
+  /** Issuer of the caller (a workspace's members share its issuer). */
+  issuer: string;
   targetUserId: string;
   role: RoleName;
   /** The authenticated caller performing the grant — `AuthContext.user.id`. */
@@ -45,6 +43,7 @@ export interface GrantRoleInput {
 
 export interface RevokeRoleInput {
   tenantId: string;
+  issuer: string;
   targetUserId: string;
   role: RoleName;
   revokedByUserId: string;
@@ -52,19 +51,34 @@ export interface RevokeRoleInput {
   revokedByRoles: RoleName[];
 }
 
-const ROLE_BINDING_INCLUDE = {
-  roleBindings: { orderBy: { role: 'asc' as const } },
+type MembershipRow = {
+  subject: string;
+  role: string;
+  extraRoles: string[];
+  status: string;
+  grantedBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
-function toUserSummary(row: {
+type ProfileRow = {
   id: string;
   keycloakSubject: string;
   email: string;
   displayName: string;
   createdAt: Date;
   lastSeenAt: Date;
-  roleBindings: { role: string; grantedAt: Date; grantedBy: string }[];
-}): UserSummary {
+};
+
+/** Roles come from the workspace Membership (control DB). Only an ACTIVE Membership holds any. */
+function toUserSummary(
+  row: ProfileRow,
+  membership: MembershipRow | undefined,
+): UserSummary {
+  const roles =
+    membership?.status === 'ACTIVE'
+      ? rolesOf(membership).sort((a, b) => privilegeRank(a) - privilegeRank(b))
+      : [];
   return {
     id: row.id,
     keycloakSubject: row.keycloakSubject,
@@ -72,45 +86,38 @@ function toUserSummary(row: {
     displayName: row.displayName,
     createdAt: row.createdAt,
     lastSeenAt: row.lastSeenAt,
-    roles: row.roleBindings.map((binding) => ({
-      role: binding.role as RoleName,
-      grantedAt: binding.grantedAt,
-      grantedBy: binding.grantedBy,
+    roles: roles.map((role) => ({
+      role,
+      grantedAt: membership?.updatedAt ?? row.createdAt,
+      grantedBy: membership?.grantedBy ?? 'system',
     })),
   };
 }
 
 /**
- * Phase 14 (Users/Roles/Settings) — `GET /users`'s backing rows (the
- * `UserProfile`/`RoleBinding` models `JwtAuthGuard` has found-or-created
- * and synced since Phase 3, see docs/human-auth.md) plus the one new
- * mutating capability this phase adds: a Manar-side role grant/revoke
- * surface with its own privilege-escalation guard
- * (`src/auth/role-privilege.ts`).
- *
- * **Keycloak stays the role-assignment source of truth** — `grantRole`/
- * `revokeRole` call `KeycloakAdminClient.assignRealmRole`/`removeRealmRole`
- * *before* touching the local `RoleBinding` row, for exactly the reason
- * `JwtAuthGuard.syncRoleBindings`'s doc comment already establishes: that
- * guard reconciles every authenticated user's `RoleBinding` rows to match
- * their JWT's `realm_access.roles` claim on *every* request. A grant that
- * only ever touched the local row would be silently reverted the next
- * time the affected user authenticates, since Keycloak would have no
- * record of it. Writing to Keycloak first (and only writing the local row
- * once that succeeds) keeps the two in agreement rather than letting them
- * drift and then get forcibly reconciled out from under the caller.
+ * `GET /users` and role grant/revoke for one workspace. Roles live in the control DB's
+ * `Membership` (spec 4.1): nothing here reads a token's roles or writes Keycloak realm roles, and
+ * the tenant's `RoleBinding` table is no longer consulted. The privilege-escalation guard
+ * (`src/auth/role-privilege.ts`) still runs before any write.
  */
 @Injectable()
 export class UsersService {
   constructor(
     private readonly auditService: AuditService,
     private readonly control: ControlPrismaService,
-    private readonly keycloakAdminClient: KeycloakAdminClient,
   ) {}
 
-  /** `GET /users` — cursor-paginated, newest first, each row including its current `RoleBinding`s. */
+  private membershipsFor(tenantId: string, issuer: string, subjects: string[]) {
+    return this.control.membership.findMany({
+      where: { tenantId, issuer, subject: { in: subjects } },
+    });
+  }
+
+  /** `GET /users`: cursor-paginated, newest first, each row with its Membership roles. */
   async listUsers(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
+    issuer: string,
     input: ListUsersInput,
   ): Promise<CursorPage<UserSummary>> {
     const where = cursorWhereClause('createdAt', input.cursor) ?? {};
@@ -118,11 +125,18 @@ export class UsersService {
       where,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: input.limit + 1,
-      include: ROLE_BINDING_INCLUDE,
     });
     const page = toCursorPage(rows, input.limit, (row) => row.createdAt);
+    const memberships = await this.membershipsFor(
+      tenantId,
+      issuer,
+      page.items.map((r) => r.keycloakSubject),
+    );
+    const bySubject = new Map(memberships.map((m) => [m.subject, m]));
     return {
-      items: page.items.map(toUserSummary),
+      items: page.items.map((r) =>
+        toUserSummary(r, bySubject.get(r.keycloakSubject)),
+      ),
       nextCursor: page.nextCursor,
     };
   }
@@ -130,25 +144,21 @@ export class UsersService {
   /** `GET /users/:id`. */
   async getUserOrThrow(
     tenantClient: TenantPrismaClient,
+    tenantId: string,
+    issuer: string,
     userId: string,
   ): Promise<UserSummary> {
     const row = await tenantClient.userProfile.findUnique({
       where: { id: userId },
-      include: ROLE_BINDING_INCLUDE,
     });
     if (!row) throw new UserNotFoundError(userId);
-    return toUserSummary(row);
+    const [membership] = await this.membershipsFor(tenantId, issuer, [
+      row.keycloakSubject,
+    ]);
+    return toUserSummary(row, membership);
   }
 
-  /**
-   * `POST /users/:id/role-bindings`. Enforces the privilege-escalation
-   * guard (`canGrantRole`) *before* ever calling Keycloak or writing any
-   * row — a caller can never grant a role more privileged than any role
-   * they themselves currently hold, regardless of the endpoint's own
-   * coarse `@RequireRole('TENANT_OWNER', 'SECURITY_ADMIN')` gate (see
-   * `PrivilegeEscalationError`'s doc comment for why that gate alone
-   * isn't enough).
-   */
+  /** `POST /users/:id/role-bindings`. Privilege check first, then the Membership write, then audit. */
   async grantRole(
     tenantClient: TenantPrismaClient,
     input: GrantRoleInput,
@@ -160,37 +170,36 @@ export class UsersService {
         input.grantedByRoles,
       );
     }
-
-    const targetUser = await tenantClient.userProfile.findUnique({
+    const target = await tenantClient.userProfile.findUnique({
       where: { id: input.targetUserId },
     });
-    if (!targetUser) throw new UserNotFoundError(input.targetUserId);
+    if (!target) throw new UserNotFoundError(input.targetUserId);
 
-    const tenant = await this.control.tenant.findUnique({
-      where: { id: input.tenantId },
-    });
-    if (!tenant?.keycloakRealm) {
-      throw new TenantRealmNotProvisionedError(input.tenantId);
-    }
-
-    await this.keycloakAdminClient.assignRealmRole(
-      tenant.keycloakRealm,
-      targetUser.keycloakSubject,
-      input.role,
-    );
-
-    await tenantClient.roleBinding.upsert({
-      where: { userId_role: { userId: input.targetUserId, role: input.role } },
+    const [existing] = await this.membershipsFor(input.tenantId, input.issuer, [
+      target.keycloakSubject,
+    ]);
+    const held = existing?.status === 'ACTIVE' ? rolesOf(existing) : [];
+    const split = splitRoles([...held, input.role]);
+    if (!split) throw new UserNotFoundError(input.targetUserId);
+    await this.control.membership.upsert({
+      where: {
+        issuer_subject_tenantId: {
+          issuer: input.issuer,
+          subject: target.keycloakSubject,
+          tenantId: input.tenantId,
+        },
+      },
       create: {
-        userId: input.targetUserId,
-        role: input.role,
+        issuer: input.issuer,
+        subject: target.keycloakSubject,
+        tenantId: input.tenantId,
+        ...split,
+        status: 'ACTIVE',
+        email: target.email || null,
+        displayName: target.displayName,
         grantedBy: input.grantedByUserId,
       },
-      // Already held locally (e.g. re-granting an existing role) -- the
-      // Keycloak call above is what actually matters; leave the original
-      // grantedAt/grantedBy as the historical record rather than
-      // overwriting it on every idempotent re-grant.
-      update: {},
+      update: { ...split, status: 'ACTIVE', grantedBy: input.grantedByUserId },
     });
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
@@ -198,27 +207,17 @@ export class UsersService {
       actor: { type: 'human', id: input.grantedByUserId },
       data: { targetUserId: input.targetUserId, role: input.role },
     });
-
-    return this.getUserOrThrow(tenantClient, input.targetUserId);
+    return this.getUserOrThrow(
+      tenantClient,
+      input.tenantId,
+      input.issuer,
+      input.targetUserId,
+    );
   }
 
   /**
-   * `DELETE /users/:id/role-bindings/:role`. Idempotent, same posture as
-   * `KeycloakAdminClient.removeRealmRole`: revoking a role the target
-   * doesn't currently hold still succeeds as a no-op (the privilege check
-   * below runs regardless of the target's current state, since it's a
-   * property of the *role being acted on*, not of whether this particular
-   * call happens to change anything).
-   *
-   * Enforces the identical privilege-escalation guard `grantRole` does,
-   * applied to revoke rather than grant: a caller can never revoke a role
-   * more privileged than any role they themselves currently hold. Without
-   * this, the endpoint's coarse `@RequireRole('TENANT_OWNER',
-   * 'SECURITY_ADMIN')` gate alone would let any `SECURITY_ADMIN` strip
-   * `TENANT_OWNER` from the actual tenant owner (or remove another
-   * `SECURITY_ADMIN`'s/`AUDITOR`'s role to cover their tracks) — the same
-   * class of bug the grant-side guard exists to prevent, just on the
-   * other verb.
+   * `DELETE /users/:id/role-bindings/:role`. Idempotent; same privilege check as grant. Revoking
+   * the last role removes the Membership (the user loses access to the workspace).
    */
   async revokeRole(
     tenantClient: TenantPrismaClient,
@@ -231,35 +230,46 @@ export class UsersService {
         input.revokedByRoles,
       );
     }
-
-    const targetUser = await tenantClient.userProfile.findUnique({
+    const target = await tenantClient.userProfile.findUnique({
       where: { id: input.targetUserId },
     });
-    if (!targetUser) throw new UserNotFoundError(input.targetUserId);
+    if (!target) throw new UserNotFoundError(input.targetUserId);
 
-    const tenant = await this.control.tenant.findUnique({
-      where: { id: input.tenantId },
-    });
-    if (!tenant?.keycloakRealm) {
-      throw new TenantRealmNotProvisionedError(input.tenantId);
+    const [existing] = await this.membershipsFor(input.tenantId, input.issuer, [
+      target.keycloakSubject,
+    ]);
+    if (existing?.status === 'ACTIVE') {
+      const split = splitRoles(
+        rolesOf(existing).filter((r) => r !== input.role),
+      );
+      await this.control.membership.update({
+        where: {
+          issuer_subject_tenantId: {
+            issuer: input.issuer,
+            subject: target.keycloakSubject,
+            tenantId: input.tenantId,
+          },
+        },
+        data: split
+          ? { ...split, grantedBy: input.revokedByUserId }
+          : {
+              status: 'REMOVED',
+              extraRoles: [],
+              grantedBy: input.revokedByUserId,
+            },
+      });
     }
-
-    await this.keycloakAdminClient.removeRealmRole(
-      tenant.keycloakRealm,
-      targetUser.keycloakSubject,
-      input.role,
-    );
-
-    await tenantClient.roleBinding.deleteMany({
-      where: { userId: input.targetUserId, role: input.role },
-    });
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
       eventType: AUDIT_EVENT_TYPES.USER_ROLE_REVOKED,
       actor: { type: 'human', id: input.revokedByUserId },
       data: { targetUserId: input.targetUserId, role: input.role },
     });
-
-    return this.getUserOrThrow(tenantClient, input.targetUserId);
+    return this.getUserOrThrow(
+      tenantClient,
+      input.tenantId,
+      input.issuer,
+      input.targetUserId,
+    );
   }
 }

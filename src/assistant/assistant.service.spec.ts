@@ -20,6 +20,8 @@ const auth = (tenant = 't-acme', user = 'u-1'): AuthContext => ({
   tenant: { id: tenant, slug: tenant },
   user: { id: user, keycloakSubject: user, email: '', displayName: '' },
   roles: ['APPROVER'],
+  workspaceKind: 'COMPANY',
+  issuer: 'https://kc.test/realms/manar',
 });
 
 type Reply = { content?: string; tool_calls?: unknown[] };
