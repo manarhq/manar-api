@@ -177,6 +177,17 @@ export const AUDIT_EVENT_TYPES = {
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
+  /** A launch-offer slot was claimed and Pro was started for 3 months. Data: slot count, months. */
+  LAUNCH_OFFER_CLAIMED: 'launch.offer.claimed',
+  /** The owner turned the public "Protected by Manar" badge on or off. */
+  PROFILE_BADGE_CHANGED: 'profile.badge.changed',
+  WORKSPACE_INVITE_CREATED: 'workspace.invite.created',
+  WORKSPACE_INVITE_ACCEPTED: 'workspace.invite.accepted',
+  WORKSPACE_INVITE_REVOKED: 'workspace.invite.revoked',
+  /** Microsoft auto-join was turned on or off by an admin. */
+  WORKSPACE_AUTOJOIN_CHANGED: 'workspace.autojoin.changed',
+  /** A person joined through the Entra auto-join setting (matched on the verified tid). */
+  WORKSPACE_MEMBER_AUTOJOINED: 'workspace.member.autojoined',
 } as const;
 
 export type AuditEventType =
