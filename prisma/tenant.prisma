@@ -2449,7 +2449,7 @@ model HostApproval {
   /// approve_once | approve_8h | deny
   decision   String?
   decidedBy  String?
-  /// device | console
+  /// device | console | push | telegram
   decidedVia String?
   decidedAt  DateTime?
   expiresAt  DateTime

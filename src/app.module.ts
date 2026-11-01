@@ -22,6 +22,7 @@ import { PolicyHttpModule } from './policy/policy-http.module';
 import { TemporalModule } from './temporal/temporal.module';
 import { ApprovalsHttpModule } from './approvals/approvals-http.module';
 import { PushHttpModule } from './push/push-http.module';
+import { TelegramHttpModule } from './telegram/telegram-http.module';
 import { AuditModule } from './audit/audit.module';
 import { AuditHttpModule } from './audit/audit-http.module';
 import { AuditIndexerModule } from './audit/opensearch/audit-indexer.module';
@@ -73,6 +74,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     TemporalModule,
     ApprovalsHttpModule,
     PushHttpModule,
+    TelegramHttpModule,
     AuditHttpModule,
     AuditIndexerModule,
     LiveEventsHttpModule,

@@ -4,11 +4,13 @@ import {
   HttpException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { PushService } from '../push/push.service';
+import { TelegramService } from '../telegram/telegram.service';
 import { createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
 
@@ -39,7 +41,8 @@ export interface DecideHostApprovalInput {
   hostId?: string;
   subject: string;
   decision: HostDecision;
-  via: 'device' | 'console';
+  /** push and telegram are the phone: like the device, they never give a standing 8-hour permission. */
+  via: 'device' | 'console' | 'push' | 'telegram';
   makeRule?: boolean;
 }
 
@@ -48,6 +51,7 @@ export class HostApprovalsService {
   constructor(
     private readonly audit: AuditService,
     private readonly push: PushService,
+    @Optional() private readonly telegram?: TelegramService,
   ) {}
 
   /** Called by the host authorize path when the answer is "ask". Pushes to the workspace's approvers. */
@@ -106,6 +110,17 @@ export class HostApprovalsService {
       url: '/approvals',
       // One tag per device: a burst of requests collapses into one notification.
       tag: `approval-host-${input.hostId}`,
+      approvalId: row.id,
+      // High-risk approvals are decided in the console only: no buttons on the phone.
+      actionable: !input.highRisk,
+      expiresAt: row.expiresAt.getTime(),
+    });
+    void this.telegram?.notifyApproval(client, tenantId, {
+      approvalId: row.id,
+      toolName: input.toolName,
+      summary: row.summary,
+      highRisk: input.highRisk,
+      expiresAt: row.expiresAt,
     });
     return row;
   }
@@ -165,7 +180,7 @@ export class HostApprovalsService {
   ) {
     // 8 hours is a standing permission: it is given in the console, in a browser session, never
     // from a prompt on the device (a process on the device could answer that prompt).
-    if (input.via === 'device' && input.decision === 'approve_8h')
+    if (input.via !== 'console' && input.decision === 'approve_8h')
       throw new ForbiddenException('eight_hours_in_console');
     const row = await this.get(client, input.approvalId, input.hostId);
     const result = await client.$transaction(async (tx) => {
@@ -210,6 +225,20 @@ export class HostApprovalsService {
         toolId: row.toolId,
         actionId: row.actionId,
       },
+    });
+    // Close the phone's buttons and notification, whichever channel decided.
+    void this.telegram?.closeApproval(
+      tenantId,
+      row.id,
+      input.decision === 'deny' ? 'deny' : input.decision,
+    );
+    void this.push.notifyApprovers(client, tenantId, {
+      kind: 'approval_closed',
+      title: 'WARDEN',
+      body: '',
+      url: '/approvals',
+      tag: `approval-closed-${row.id}`,
+      approvalId: row.id,
     });
     if (result.grantId) {
       await this.audit.recordSafely(client, tenantId, {

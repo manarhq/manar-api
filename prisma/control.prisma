@@ -476,3 +476,57 @@ model PushSubscription {
   @@index([subject])
   @@map("push_subscriptions")
 }
+
+/// A Telegram chat linked to one person of one workspace (phone track). One row per chat.
+model TelegramLink {
+  id        String   @id @default(uuid())
+  tenantId  String
+  /// Keycloak subject.
+  subject   String
+  chatId    String   @unique
+  /// en | ar, from the person's Telegram language at link time.
+  locale    String   @default("en")
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, subject])
+  @@map("telegram_links")
+}
+
+/// One-time code shown in the console, sent to the bot as `/start <code>`. Only the SHA-256 is stored.
+model TelegramLinkCode {
+  codeHash  String   @id
+  tenantId  String
+  subject   String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([subject])
+  @@map("telegram_link_codes")
+}
+
+/// The Telegram message that carries an approval's buttons, so they can be disabled when the approval
+/// is decided or times out.
+model TelegramApprovalMessage {
+  id         String    @id @default(uuid())
+  tenantId   String
+  approvalId String
+  chatId     String
+  messageId  Int
+  /// The message text without the outcome line.
+  text       String
+  closedAt   DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([approvalId, chatId])
+  @@index([closedAt, createdAt])
+  @@map("telegram_approval_messages")
+}
+
+/// Single-use nonces of push action tokens (Approve once / Deny buttons).
+model PhoneActionUse {
+  nonce     String   @id
+  expiresAt DateTime
+
+  @@index([expiresAt])
+  @@map("phone_action_uses")
+}

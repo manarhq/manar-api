@@ -329,6 +329,17 @@ already boots both Nest apps in-process), and the real
   none). `GET /push/vapid-key`, `POST|DELETE /push/subscriptions`. A push goes to subscribed approvers
   of the workspace when an approval opens; `PushService.notifySecretAlert` is for the secrets track.
   Payloads carry no resource path, prompt or secret. 404 and 410 answers delete the subscription.
+- **Phone (push buttons and Telegram)**: a push for a device approval carries a per-subscriber signed token
+  (HMAC keyed from `APPROVAL_GRANT_SIGNING_SECRET`, bound to the approval, the person, the workspace and the
+  approval's expiry). The service worker posts it with the person's session to `POST /phone/push-decide`;
+  both must agree, the token is spent once (`phone_action_uses`), the approver role is re-checked, and
+  `highRisk` approvals and `approve_8h` are refused (`via: push`). Telegram: `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_WEBHOOK_SECRET` (ExternalSecret keys), `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_URL`. Console:
+  `GET|POST|DELETE /telegram/link` (status, 10-minute one-time code, unlink). `POST /telegram/webhook` is public but
+  answers only with the secret header (401), is 404 when the bot is off, and is rate limited. `callback_data` is
+  `a.<approval id>.<y|n>.<sig>`; the signature binds the chat, so a forwarded button does nothing. When an
+  approval is decided on any channel or times out, the Telegram message loses its buttons (decide path and a
+  15-second sweep) and a closing push removes the notification. Audit: `telegram.link.created|removed`.
 
 ### Hardening after review
 
