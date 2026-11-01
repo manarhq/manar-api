@@ -465,7 +465,11 @@ export class CloudMcpAuthGuard implements CanActivate {
       const subject = typeof payload.sub === 'string' ? payload.sub : '';
       const roles = subject
         ? await this.membership
-            .resolveActive({ subject, requestedTenantId: known.tenantId })
+            .resolveActive({
+              issuer: known.issuerUrl,
+              subject,
+              requestedTenantId: known.tenantId,
+            })
             .then((m) => m.roles)
             .catch((error: unknown) => {
               if (error instanceof ForbiddenException) return [];

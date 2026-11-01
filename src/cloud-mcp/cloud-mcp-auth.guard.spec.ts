@@ -708,6 +708,7 @@ describe('CloudMcpAuthGuard on the shared realm', () => {
       slug: 'acme',
     });
     expect(s.resolveActive).toHaveBeenCalledWith({
+      issuer: 'https://auth.manar.test/realms/manar',
       subject: 'user-1',
       requestedTenantId: 't-acme',
     });
