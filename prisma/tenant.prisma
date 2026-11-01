@@ -2449,7 +2449,7 @@ model HostApproval {
   /// approve_once | approve_8h | deny
   decision   String?
   decidedBy  String?
-  /// device | console
+  /// device | console | push | telegram
   decidedVia String?
   decidedAt  DateTime?
   expiresAt  DateTime
@@ -2524,4 +2524,14 @@ model SecretVaultAccess {
   @@index([hostId, status])
   @@index([status, createdAt])
   @@map("secret_vault_access")
+}
+
+/// Single-use nonces of push action tokens (Approve once / Deny buttons). Written in the same
+/// transaction as the decision, so a token is spent only by a decision that took effect.
+model PhoneActionUse {
+  nonce     String   @id
+  expiresAt DateTime
+
+  @@index([expiresAt])
+  @@map("phone_action_uses")
 }

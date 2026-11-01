@@ -7,6 +7,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { approvalMatchCode } from '../phone/phone-token';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
@@ -52,6 +53,7 @@ export class HostApprovalsController {
         actionId: r.actionId,
         resource: r.resource,
         summary: r.summary,
+        matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,
         // The prompt shows buttons only when this is true; otherwise "Open in console".
         decidableHere: ownerMayApprove && !r.highRisk,

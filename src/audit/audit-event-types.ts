@@ -35,6 +35,10 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_GRANT_USED: 'approval.grant.used',
   APPROVAL_HANDOVER_COLLECTED: 'approval.handover_collected',
 
+  /** Phone track: a Telegram chat was linked to / unlinked from a person. No chat id in the event. */
+  TELEGRAM_LINK_CREATED: 'telegram.link.created',
+  TELEGRAM_LINK_REMOVED: 'telegram.link.removed',
+
   TOOL_INVOCATION_STARTED: 'tool.invocation.started',
   TOOL_INVOCATION_COMPLETED: 'tool.invocation.completed',
   TOOL_INVOCATION_FAILED: 'tool.invocation.failed',

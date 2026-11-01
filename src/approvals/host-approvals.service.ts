@@ -4,11 +4,15 @@ import {
   HttpException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { PushService } from '../push/push.service';
+import { TelegramService } from '../telegram/telegram.service';
+import { approvalMatchCode } from '../phone/phone-token';
 import { createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
 
@@ -39,8 +43,14 @@ export interface DecideHostApprovalInput {
   hostId?: string;
   subject: string;
   decision: HostDecision;
-  via: 'device' | 'console';
+  /** push and telegram are the phone: like the device, they never give a standing 8-hour permission. */
+  via: 'device' | 'console' | 'push' | 'telegram';
   makeRule?: boolean;
+  /**
+   * Single-use push token nonce: recorded in the same transaction as the decision, so a token is
+   * spent only by a decision that took effect, and never twice.
+   */
+  nonce?: { value: string; expiresAt: Date };
 }
 
 @Injectable()
@@ -48,6 +58,7 @@ export class HostApprovalsService {
   constructor(
     private readonly audit: AuditService,
     private readonly push: PushService,
+    @Optional() private readonly telegram?: TelegramService,
   ) {}
 
   /** Called by the host authorize path when the answer is "ask". Pushes to the workspace's approvers. */
@@ -78,13 +89,18 @@ export class HostApprovalsService {
     });
     if (recent >= HOST_APPROVALS_PER_WINDOW)
       throw new HttpException('too many approvals opened by this device', 429);
+    // The id is made here so the short match code (shown on the device prompt, the push and
+    // Telegram) can be part of the stored summary.
+    const id = randomUUID();
+    const matchCode = approvalMatchCode(id);
     const row = await client.hostApproval.create({
       data: {
+        id,
         hostId: input.hostId,
         toolId: input.toolId,
         actionId: input.actionId,
         resource: input.resource,
-        summary: input.summary.slice(0, 300),
+        summary: `${input.summary.slice(0, 280)} #${matchCode}`,
         highRisk: input.highRisk,
         expiresAt: new Date(now.getTime() + HOST_APPROVAL_TTL_MS),
       },
@@ -102,10 +118,23 @@ export class HostApprovalsService {
     void this.push.notifyApprovers(client, tenantId, {
       kind: 'approval',
       title: 'WARDEN',
-      body: `${input.toolName} is waiting for your decision`,
+      // Tool, action type and match code. Never the resource.
+      body: `${input.toolName}: ${input.actionId} #${matchCode}`,
       url: '/approvals',
-      // One tag per device: a burst of requests collapses into one notification.
-      tag: `approval-host-${input.hostId}`,
+      // One tag per approval: two requests never replace each other on the phone.
+      tag: `approval-${row.id}`,
+      approvalId: row.id,
+      // High-risk approvals are decided in the console only: no buttons on the phone.
+      actionable: !input.highRisk,
+      expiresAt: row.expiresAt.getTime(),
+    });
+    void this.telegram?.notifyApproval(client, tenantId, {
+      approvalId: row.id,
+      toolName: input.toolName,
+      actionId: input.actionId,
+      matchCode,
+      highRisk: input.highRisk,
+      expiresAt: row.expiresAt,
     });
     return row;
   }
@@ -165,7 +194,7 @@ export class HostApprovalsService {
   ) {
     // 8 hours is a standing permission: it is given in the console, in a browser session, never
     // from a prompt on the device (a process on the device could answer that prompt).
-    if (input.via === 'device' && input.decision === 'approve_8h')
+    if (input.via !== 'console' && input.decision === 'approve_8h')
       throw new ForbiddenException('eight_hours_in_console');
     const row = await this.get(client, input.approvalId, input.hostId);
     const result = await client.$transaction(async (tx) => {
@@ -181,6 +210,20 @@ export class HostApprovalsService {
       });
       if (won.count === 0)
         throw new ConflictException('already decided or expired');
+      if (input.nonce) {
+        try {
+          await tx.phoneActionUse.create({
+            data: {
+              nonce: input.nonce.value,
+              expiresAt: input.nonce.expiresAt,
+            },
+          });
+        } catch {
+          // Unique violation: the token was spent. This aborts the transaction, so the decision
+          // above is rolled back with it.
+          throw new ConflictException('action_already_used');
+        }
+      }
       if (input.decision !== 'approve_8h')
         return { grantId: null as string | null };
       const grant = await createAllowGrant(tx, {
@@ -210,6 +253,20 @@ export class HostApprovalsService {
         toolId: row.toolId,
         actionId: row.actionId,
       },
+    });
+    // Close the phone's buttons and notification, whichever channel decided.
+    void this.telegram?.closeApproval(
+      tenantId,
+      row.id,
+      input.decision === 'deny' ? 'deny' : input.decision,
+    );
+    void this.push.notifyApprovers(client, tenantId, {
+      kind: 'approval_closed',
+      title: 'WARDEN',
+      body: '',
+      url: '/approvals',
+      tag: `approval-closed-${row.id}`,
+      approvalId: row.id,
     });
     if (result.grantId) {
       await this.audit.recordSafely(client, tenantId, {

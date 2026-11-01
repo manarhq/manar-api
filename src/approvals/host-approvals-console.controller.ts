@@ -1,3 +1,4 @@
+import { approvalMatchCode } from '../phone/phone-token';
 import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
@@ -35,6 +36,7 @@ export class HostApprovalsConsoleController {
         actionId: r.actionId,
         resource: r.resource,
         summary: r.summary,
+        matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,

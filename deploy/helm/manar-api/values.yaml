@@ -247,6 +247,10 @@ config:
   LLM_ANTHROPIC_MODELS: ''
   # Whether that upstream processes prompts in the UAE (a UAE tenant is refused otherwise).
   LLM_ANTHROPIC_UAE_RESIDENT: 'false'
+  # Telegram approvals bot. Off until TELEGRAM_BOT_TOKEN (secret, below) is set. Bot name without @;
+  # the webhook URL is the public https URL of POST /telegram/webhook (registered at start).
+  TELEGRAM_BOT_USERNAME: ''
+  TELEGRAM_WEBHOOK_URL: ''
 
 # Secret application configuration (credentials, connection strings that
 # embed a password, signing keys, static tokens). templates/secret.yaml
@@ -276,6 +280,10 @@ secrets:
     VAPID_PUBLIC_KEY: ''
     VAPID_PRIVATE_KEY: ''
     VAPID_SUBJECT: ''
+    # Telegram approvals bot (optional, both or none). ExternalSecret keys. The webhook secret is 32+
+    # random characters of A-Z a-z 0-9 _ -.
+    TELEGRAM_BOT_TOKEN: ''
+    TELEGRAM_WEBHOOK_SECRET: ''
     # REQUIRED — `MANAR_BFF_SERVICE_TOKEN` has no default and a `min(16)`
     # constraint (src/tenants/tenants.config.ts), so `validate()` rejects the
     # environment and the process exits before listening if it is missing.

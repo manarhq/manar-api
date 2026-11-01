@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { verifyPushAction } from '../phone/phone-token';
 import { PushService, type PushSender } from './push.service';
 
 type Sub = {
@@ -148,5 +149,37 @@ describe('PushService', () => {
         auth: 'a',
       }),
     ).rejects.toThrow('not a browser push service');
+  });
+
+  it('gives each subscriber its own signed token for an actionable approval, and none otherwise', async () => {
+    const sender = vi.fn<PushSender>().mockResolvedValue({});
+    const { service, tenantClient } = setup(
+      [sub('a', 'u1'), sub('b', 'u2')],
+      ['u1', 'u2'],
+      sender,
+    );
+    const id = '3f2b1c9e-8d7a-4b6c-9e5d-1a2b3c4d5e6f';
+    const e = Date.now() + 60_000;
+    await service.notifyApprovers(tenantClient, 't1', {
+      ...payload,
+      approvalId: id,
+      actionable: true,
+      expiresAt: e,
+    });
+    const bodies = sender.mock.calls.map(
+      (c) => JSON.parse(c[1]) as { action?: string; actionable?: boolean },
+    );
+    const claims = bodies.map((b) => verifyPushAction('x', b.action!));
+    expect(claims.map((c) => c?.s).sort()).toEqual(['u1', 'u2']);
+    expect(claims.every((c) => c?.a === id && c.t === 't1')).toBe(true);
+    expect(bodies[0]!.actionable).toBeUndefined();
+    sender.mockClear();
+    await service.notifyApprovers(tenantClient, 't1', {
+      ...payload,
+      approvalId: id,
+    });
+    expect(
+      (JSON.parse(sender.mock.calls[0]![1]) as { action?: string }).action,
+    ).toBeUndefined();
   });
 });

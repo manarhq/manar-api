@@ -6,18 +6,28 @@ import { ControlPrismaService } from '../database/control-prisma.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { ApproverDirectory } from '../approvals/approver-directory';
 import { isAllowedPushEndpoint } from './push-endpoint';
+import { signPushAction } from '../phone/phone-token';
 
 /**
  * What a push carries. Never a resource path, a prompt or a secret: the push service sees only the
  * (encrypted) payload, and the console shows the details after sign-in.
  */
 export interface PushPayload {
-  kind: 'approval' | 'secret_alert';
+  kind: 'approval' | 'approval_closed' | 'secret_alert';
   title: string;
   body: string;
   /** Console path to open, e.g. `/approvals`. */
   url: string;
   tag: string;
+  /** The approval this push is about (an id, never its contents). */
+  approvalId?: string;
+  /**
+   * Add Approve once / Deny buttons: each subscriber gets its own signed single-use token bound to
+   * that person and workspace. Needs `approvalId` and `expiresAt`; never for high-risk approvals.
+   */
+  actionable?: boolean;
+  /** Approval expiry, ms since epoch; the buttons stop working then. */
+  expiresAt?: number;
 }
 
 export interface PushSubscriptionInput {
@@ -39,6 +49,7 @@ export class PushService {
   private readonly logger = new Logger(PushService.name);
   private readonly sender: PushSender | null;
   readonly publicKey: string | null;
+  private readonly signingSecret: string | undefined;
 
   constructor(
     private readonly control: ControlPrismaService,
@@ -49,6 +60,9 @@ export class PushService {
     const pub = config.get('VAPID_PUBLIC_KEY', { infer: true });
     const priv = config.get('VAPID_PRIVATE_KEY', { infer: true });
     const subject = config.get('VAPID_SUBJECT', { infer: true });
+    this.signingSecret = config.get('APPROVAL_GRANT_SIGNING_SECRET', {
+      infer: true,
+    });
     this.publicKey = pub && priv && subject ? pub : null;
     if (sender) this.sender = sender;
     else if (pub && priv && subject) {
@@ -101,7 +115,24 @@ export class PushService {
       const subs = await this.control.pushSubscription.findMany({
         where: { tenantId, subject: { in: subjects } },
       });
-      const body = JSON.stringify(payload);
+      const { actionable, expiresAt, ...plain } = payload;
+      const canAct =
+        actionable && payload.approvalId && expiresAt && this.signingSecret;
+      const bodyFor = (subject: string) =>
+        JSON.stringify(
+          canAct
+            ? {
+                ...plain,
+                expiresAt,
+                action: signPushAction(this.signingSecret, {
+                  a: payload.approvalId!,
+                  s: subject,
+                  t: tenantId,
+                  e: expiresAt,
+                }).token,
+              }
+            : plain,
+        );
       let sent = 0;
       await Promise.all(
         subs.map(async (s) => {
@@ -118,7 +149,7 @@ export class PushService {
                 endpoint: s.endpoint,
                 keys: { p256dh: s.p256dh, auth: s.auth },
               },
-              body,
+              bodyFor(s.subject),
             );
             sent += 1;
           } catch (error) {
