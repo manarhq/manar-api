@@ -14,6 +14,7 @@ import {
   JAIL_TOOL_IDS,
   normalizeRuleSite,
   ruleLive,
+  siteCovers,
   type SiteMode,
 } from './jail-sites';
 
@@ -70,6 +71,30 @@ export function upsertSiteRule(
   });
 }
 
+/**
+ * True when an answer to a prompt must not be remembered: a person's DENY covers the site, or a
+ * rule made by hand in the console already exists for exactly this site. The approval then applies
+ * once only.
+ */
+export async function siteRuleBlocksRemember(
+  client: Pick<TenantPrismaClient, 'hostSiteRule'>,
+  hostId: string,
+  toolId: string,
+  site: string,
+  now = new Date(),
+) {
+  const rows = await client.hostSiteRule.findMany({
+    where: { hostId, toolId },
+    take: 1000,
+  });
+  return rows.some(
+    (r) =>
+      ruleLive(r, now) &&
+      ((r.mode === 'DENY' && siteCovers(r.site, site)) ||
+        (r.site === site && r.source === 'console')),
+  );
+}
+
 @Injectable()
 export class JailSitesService {
   constructor(
@@ -115,18 +140,25 @@ export class JailSitesService {
     };
   }
 
-  /** The live rule that answers an ask without a prompt: exact site only. */
+  /**
+   * The live rule that answers an ask without a prompt. A wildcard rule covers the site too, and a
+   * DENY (exact or wildcard) always wins over an ALLOW.
+   */
   async findLive(
-    client: TenantPrismaClient,
+    client: Pick<TenantPrismaClient, 'hostSiteRule'>,
     hostId: string,
     toolId: string,
     site: string,
     now = new Date(),
   ) {
-    const r = await client.hostSiteRule.findUnique({
-      where: { hostId_toolId_site: { hostId, toolId, site } },
+    const rows = await client.hostSiteRule.findMany({
+      where: { hostId, toolId },
+      take: 1000,
     });
-    return r && ruleLive(r, now) ? r : null;
+    const hits = rows.filter(
+      (r) => ruleLive(r, now) && siteCovers(r.site, site),
+    );
+    return hits.find((r) => r.mode === 'DENY') ?? hits[0] ?? null;
   }
 
   async list(tenantId: string, hostId?: string, now = new Date()) {

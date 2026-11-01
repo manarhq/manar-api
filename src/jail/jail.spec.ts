@@ -24,6 +24,7 @@ type Rule = {
   toolId: string;
   site: string;
   mode: string;
+  source?: string;
   expiresAt: Date | null;
 };
 
@@ -82,9 +83,17 @@ function world() {
       else rules.push({ ...create });
       return Promise.resolve({ id: 'r1', ...(ex ?? create) });
     },
-    findMany: () =>
+    findMany: ({
+      where,
+    }: {
+      where?: { hostId?: string; toolId?: string };
+    } = {}) =>
       Promise.resolve(
-        rules.filter((r) => !r.expiresAt || r.expiresAt > new Date()),
+        rules.filter(
+          (r) =>
+            (!where?.hostId || r.hostId === where.hostId) &&
+            (!where?.toolId || r.toolId === where.toolId),
+        ),
       ),
   };
   const client: Record<string, unknown> = {
@@ -118,7 +127,7 @@ function world() {
   const approvals = new HostApprovalsService(auditSvc as never, push as never);
   const sites = new JailSitesService(tenants as never, auditSvc as never);
   const ctrl = new JailHostController(sites, approvals, tenants as never);
-  return { rules, audit, client, approvals, sites, ctrl };
+  return { rules, audit, approvalRows, client, approvals, sites, ctrl };
 }
 
 describe('site names', () => {
@@ -252,6 +261,7 @@ describe('deciding a new-site prompt', () => {
       ...base,
       decision: 'approve_always',
       via: 'console',
+      canWriteSiteRules: true,
     });
     expect(w.rules).toHaveLength(1);
     expect(w.rules[0]!.expiresAt).toBeNull();
@@ -299,6 +309,134 @@ describe('deciding a new-site prompt', () => {
         via: 'console',
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe("an approval never overrides a person's rule", () => {
+  const base = { approvalId: 'ap1', hostId: 'h1', subject: 'sub1' };
+  const rule = (over: Partial<Rule>): Rule => ({
+    hostId: 'h1',
+    toolId: 'host.claude-code',
+    site: 'example.org',
+    mode: 'DENY',
+    source: 'console',
+    expiresAt: null,
+    ...over,
+  });
+  it('keeps an exact DENY and applies once only', async () => {
+    const w = world();
+    w.rules.push(rule({}));
+    const r = await w.approvals.decide(w.client as never, 't1', {
+      ...base,
+      decision: 'approve_always',
+      via: 'console',
+      canWriteSiteRules: true,
+    });
+    expect(w.rules).toEqual([rule({})]);
+    expect(r).toMatchObject({
+      decision: 'approve_once',
+      remembered: false,
+      note: 'site_rule_exists',
+    });
+  });
+  it('keeps a wildcard DENY', async () => {
+    const w = world();
+    w.rules.push(rule({ site: '*.example.org' }));
+    w.approvalRows[0]!.resource = 'a.example.org';
+    await w.approvals.decide(w.client as never, 't1', {
+      ...base,
+      decision: 'approve_8h',
+      via: 'console',
+    });
+    expect(w.rules).toHaveLength(1);
+    expect(w.rules[0]!.mode).toBe('DENY');
+  });
+  it('keeps a console ALLOW and its expiry', async () => {
+    const w = world();
+    const mine = rule({ mode: 'ALLOW', expiresAt: null });
+    w.rules.push(mine);
+    const r = await w.approvals.decide(w.client as never, 't1', {
+      ...base,
+      decision: 'approve_8h',
+      via: 'console',
+    });
+    expect(w.rules).toEqual([mine]);
+    expect(r.remembered).toBe(false);
+  });
+  it('overwrites its own earlier approval rule', async () => {
+    const w = world();
+    w.rules.push(
+      rule({
+        mode: 'ALLOW',
+        source: 'approval',
+        expiresAt: new Date(Date.now() + 60_000),
+      }),
+    );
+    const r = await w.approvals.decide(w.client as never, 't1', {
+      ...base,
+      decision: 'approve_always',
+      via: 'console',
+      canWriteSiteRules: true,
+    });
+    expect(r.remembered).toBe(true);
+    expect(w.rules[0]!.expiresAt).toBeNull();
+  });
+  it('gives an approver without the site-rule role "once" for always', async () => {
+    const w = world();
+    const r = await w.approvals.decide(w.client as never, 't1', {
+      ...base,
+      decision: 'approve_always',
+      via: 'console',
+    });
+    expect(w.rules).toHaveLength(0);
+    expect(r).toMatchObject({
+      decision: 'approve_once',
+      remembered: false,
+      note: 'always_needs_owner',
+    });
+  });
+  it('lets that approver still give 8 hours', async () => {
+    const w = world();
+    const r = await w.approvals.decide(w.client as never, 't1', {
+      ...base,
+      decision: 'approve_8h',
+      via: 'console',
+    });
+    expect(r.remembered).toBe(true);
+    expect(w.rules).toHaveLength(1);
+  });
+  it('answers an ask from an exact or wildcard DENY without opening a prompt', async () => {
+    const w = world();
+    w.rules.push(rule({ site: '*.example.org' }));
+    const before = w.approvalRows.length;
+    expect(
+      await w.ctrl.ask(HOST, {
+        toolId: 'host.claude-code',
+        site: 'a.example.org',
+      }),
+    ).toEqual({ decision: 'deny' });
+    w.rules.push(rule({ site: 'evil.test', mode: 'DENY' }));
+    expect(
+      await w.ctrl.ask(HOST, { toolId: 'host.claude-code', site: 'evil.test' }),
+    ).toEqual({ decision: 'deny' });
+    expect(w.approvalRows.length).toBe(before);
+  });
+  it('lets a DENY beat an ALLOW for the same site', async () => {
+    const w = world();
+    w.rules.push(rule({ site: '*.example.org', mode: 'ALLOW' }));
+    w.rules.push(rule({ site: 'bad.example.org', mode: 'DENY' }));
+    expect(
+      await w.ctrl.ask(HOST, {
+        toolId: 'host.claude-code',
+        site: 'bad.example.org',
+      }),
+    ).toEqual({ decision: 'deny' });
+    expect(
+      await w.ctrl.ask(HOST, {
+        toolId: 'host.claude-code',
+        site: 'ok.example.org',
+      }),
+    ).toEqual({ decision: 'allow' });
   });
 });
 

@@ -74,3 +74,9 @@ export function jailFlags(env: NodeJS.ProcessEnv = process.env): {
     windows: env.MANAR_JAIL_WINDOWS === 'true',
   };
 }
+
+/** Exact site, or `*.suffix` covering one label or more in front of the suffix (never the suffix itself). */
+export function siteCovers(rule: string, site: string): boolean {
+  if (rule === site) return true;
+  return rule.startsWith('*.') && site.endsWith(rule.slice(1));
+}

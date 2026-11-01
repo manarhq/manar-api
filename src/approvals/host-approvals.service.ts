@@ -11,7 +11,10 @@ import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { PushService } from '../push/push.service';
 import { SITE_CONNECT_ACTION } from '../jail/jail-sites';
-import { upsertSiteRule } from '../jail/jail-sites.service';
+import {
+  siteRuleBlocksRemember,
+  upsertSiteRule,
+} from '../jail/jail-sites.service';
 import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
 
@@ -46,6 +49,8 @@ export interface DecideHostApprovalInput {
   decision: HostDecision;
   via: 'device' | 'console';
   makeRule?: boolean;
+  /** Console only: the caller may write site rules (owner / security admin). Absent means no. */
+  canWriteSiteRules?: boolean;
 }
 
 @Injectable()
@@ -179,15 +184,39 @@ export class HostApprovalsService {
     const isSite = row.actionId === SITE_CONNECT_ACTION;
     if (input.decision === 'approve_always' && !isSite)
       throw new BadRequestException('always is for a new site only');
-    const remember =
-      isSite &&
-      (input.decision === 'approve_8h' || input.decision === 'approve_always');
+    // A permanent site rule needs the role that may write site rules; an approver without it
+    // gets "once" (fail closed: an absent flag is "no").
+    let decision: HostDecision = input.decision;
+    let note: 'always_needs_owner' | 'site_rule_exists' | null = null;
+    if (decision === 'approve_always' && !input.canWriteSiteRules) {
+      decision = 'approve_once';
+      note = 'always_needs_owner';
+    }
+    const wantsRemember =
+      isSite && (decision === 'approve_8h' || decision === 'approve_always');
+    let remember = false;
     const result = await client.$transaction(async (tx) => {
+      // A person's answer to "may this tool connect to this site?" is remembered per device and
+      // tool, unless a DENY or a rule made by hand already speaks for this site: then it is
+      // "once", and the stored decision says so (the device reads it).
+      if (
+        wantsRemember &&
+        (await siteRuleBlocksRemember(
+          tx,
+          row.hostId,
+          row.toolId,
+          row.resource,
+          now,
+        ))
+      ) {
+        decision = 'approve_once';
+        note = 'site_rule_exists';
+      }
       const won = await tx.hostApproval.updateMany({
         where: { id: row.id, status: 'PENDING', expiresAt: { gt: now } },
         data: {
-          status: input.decision === 'deny' ? 'DENIED' : 'APPROVED',
-          decision: input.decision,
+          status: decision === 'deny' ? 'DENIED' : 'APPROVED',
+          decision,
           decidedBy: input.subject,
           decidedVia: input.via,
           decidedAt: now,
@@ -195,22 +224,23 @@ export class HostApprovalsService {
       });
       if (won.count === 0)
         throw new ConflictException('already decided or expired');
-      if (remember) {
-        // A person's answer to "may this tool connect to this site?" is remembered per device and tool.
+      if (wantsRemember && note !== 'site_rule_exists') {
         await upsertSiteRule(tx, {
           hostId: row.hostId,
           toolId: row.toolId,
           site: row.resource,
           mode: 'ALLOW',
           expiresAt:
-            input.decision === 'approve_always'
+            decision === 'approve_always'
               ? null
               : new Date(now.getTime() + ALLOW_GRANT_TTL_MS),
           source: 'approval',
           createdBy: input.subject,
         });
+        remember = true;
       }
-      if (input.decision !== 'approve_8h')
+      // A site prompt is answered by the site rule, never by an 8-hour action grant.
+      if (decision !== 'approve_8h' || isSite)
         return { grantId: null as string | null };
       const grant = await createAllowGrant(tx, {
         scope: { hostId: row.hostId },
@@ -227,14 +257,14 @@ export class HostApprovalsService {
     });
     await this.audit.recordSafely(client, tenantId, {
       eventType:
-        input.decision === 'deny'
+        decision === 'deny'
           ? AUDIT_EVENT_TYPES.APPROVAL_DENIED
           : AUDIT_EVENT_TYPES.APPROVAL_APPROVED,
       actor: { type: 'human', id: input.subject },
       data: {
         hostApprovalId: row.id,
         hostId: row.hostId,
-        decision: input.decision,
+        decision,
         via: input.via,
         toolId: row.toolId,
         actionId: row.actionId,
@@ -250,7 +280,7 @@ export class HostApprovalsService {
           site: row.resource,
           mode: 'ALLOW',
           via: input.via,
-          decision: input.decision,
+          decision,
         },
       });
     }
@@ -269,12 +299,14 @@ export class HostApprovalsService {
     }
     return {
       id: row.id,
-      status:
-        input.decision === 'deny' ? ('DENIED' as const) : ('APPROVED' as const),
-      decision: input.decision,
+      status: decision === 'deny' ? ('DENIED' as const) : ('APPROVED' as const),
+      decision,
       grantId: result.grantId,
+      /** True when a site rule was made; `note` says why not ("once" only). */
+      remembered: remember,
+      note,
       ruleDraft:
-        input.makeRule && input.decision !== 'deny'
+        input.makeRule && decision !== 'deny'
           ? buildRuleDraft({
               toolId: row.toolId,
               actionId: row.actionId,
