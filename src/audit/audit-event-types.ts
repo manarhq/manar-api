@@ -186,6 +186,22 @@ export const AUDIT_EVENT_TYPES = {
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
+
+  // AI spend tracker and secrets-in-prompt guard (DOOR).
+  /** DOOR replaced a secret in an outbound prompt with a mask. Data: tool, kind, count, masked sample; never the prompt. */
+  DOOR_SECRET_MASKED: 'door.secret.masked',
+  /** DOOR refused an outbound prompt that contained a secret (block mode). */
+  DOOR_SECRET_BLOCKED: 'door.secret.blocked',
+  /** The workspace's AI budget, cap or secrets-guard mode changed (before and after). */
+  AI_SPEND_SETTINGS_CHANGED: 'ai_spend.settings_changed',
+  /** Month spend crossed the budget (alert) or a tool's cap (the tool is paused on its devices). */
+  AI_SPEND_LIMIT_REACHED: 'ai_spend.limit_reached',
+  /** A device's usage report was refused (unknown tool, out-of-bound counts). Data: host and reason, never the payload. */
+  DOOR_USAGE_REJECTED: 'door.usage.rejected',
+  /** DOOR turned requests away because their body could not be checked (unsupported encoding). Data: host and count. */
+  DOOR_REQUEST_REFUSED: 'door.request.refused',
+  /** One device's spend today is far above the workspace's other devices. Data: host, today's spend, threshold. */
+  AI_SPEND_HOST_OUTLIER: 'ai_spend.host_outlier',
 } as const;
 
 export type AuditEventType =

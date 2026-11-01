@@ -1,3 +1,4 @@
+import { HostAiUsageModule } from '../ai-spend/ai-spend.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AppConfigModule } from '../config/config.module';
@@ -72,6 +73,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     HostCoverageModule,
     HostApprovalsMtlsModule,
     SecretsHostModule,
+    HostAiUsageModule,
     AgentsModule,
     AuthorizationModule,
     TasksModule,

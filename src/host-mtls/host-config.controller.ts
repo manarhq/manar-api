@@ -1,7 +1,7 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Logger, UseGuards } from '@nestjs/common';
+import { AiSpendService } from '../ai-spend/ai-spend.service';
 import { HostToolsService } from '../host-coverage/host-tools.service';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { ApiExcludeController } from '@nestjs/swagger';
+import { ApiExcludeController, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { PauseService } from '../pause/pause.service';
 import { CurrentHost, type HostContext } from './host-context';
 import { HostAuthGuard } from './host-auth.guard';
@@ -16,9 +16,12 @@ export const DEFAULT_START_MODE: StartMode = 'ask';
 @Controller('host/v1')
 @UseGuards(HostAuthGuard)
 export class HostConfigController {
+  private readonly logger = new Logger(HostConfigController.name);
+
   constructor(
     private readonly tools: HostToolsService,
     private readonly pause: PauseService,
+    private readonly spend: AiSpendService,
   ) {}
 
   @Get('config')
@@ -37,6 +40,14 @@ export class HostConfigController {
       paused: await this.pause.isPaused(host.tenantId),
       // Tools whose owner turned protection off; the device restores their backups.
       tools: await this.tools.instructions(host),
+      // DOOR: secrets guard mode and tools paused by the monthly spend cap.
+      door: await this.spend.doorConfig(host).catch((e: unknown) => {
+        // Not worth failing the whole config for: the device keeps its last DOOR settings.
+        this.logger.error(
+          `door config: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return { unavailable: true };
+      }),
     };
   }
 }

@@ -1,3 +1,4 @@
+import { AiSpendHttpModule } from './ai-spend/ai-spend.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AppController } from './app.controller';
@@ -68,6 +69,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     DevicesHttpModule,
     AiToolsHttpModule,
     SecretsHttpModule,
+    AiSpendHttpModule,
     AuthorizationModule,
     TasksModule,
     TasksHttpModule,
