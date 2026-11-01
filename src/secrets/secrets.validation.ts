@@ -62,7 +62,7 @@ export const VaultReportSchema = z
   .object({
     kind: z.enum(VAULT_KINDS),
     ref,
-    state: z.enum(['STORED', 'RESTORED', 'FAILED']),
+    state: z.enum(['STORED', 'RESTORED', 'FAILED', 'AVAILABLE']),
     detail: text(300).optional(),
   })
   .strict();

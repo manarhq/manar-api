@@ -292,10 +292,13 @@ describe('secret blocking settings', () => {
   };
 
   it.each([
-    [null, ['secrets.block']],
-    [{ blockMode: 'keys' }, ['secrets.block']],
-    [{ blockMode: 'all' }, ['secrets.block', 'secrets.block.all']],
-    [{ blockMode: 'off' }, []],
+    [null, ['secrets.block', 'secrets.vault.ssh']],
+    [{ blockMode: 'keys' }, ['secrets.block', 'secrets.vault.ssh']],
+    [
+      { blockMode: 'all' },
+      ['secrets.block', 'secrets.block.all', 'secrets.vault.ssh'],
+    ],
+    [{ blockMode: 'off' }, ['secrets.vault.ssh']],
   ])('device features for %j', async (row, want) => {
     const { client } = settings(row);
     const { service } = setup();
@@ -373,5 +376,68 @@ describe('file access requests (the watcher asks once per program)', () => {
         sha: 'a'.repeat(64),
       }),
     ).rejects.toThrow('not in the vault');
+  });
+});
+
+describe('ssh key offers and device-initiated moves', () => {
+  const vaultClient = (row: { id: string; state: string } | null) => ({
+    secretVault: {
+      findUnique: vi.fn().mockResolvedValue(row),
+      create: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
+    },
+  });
+  it('a detected key is offered, not moved', async () => {
+    const c = vaultClient(null);
+    const { service } = setup();
+    await service.report(
+      c as never,
+      't',
+      'h',
+      'ssh',
+      'id_ed25519',
+      'AVAILABLE',
+    );
+    expect(c.secretVault.create).toHaveBeenCalledWith({
+      data: {
+        hostId: 'h',
+        kind: 'ssh',
+        ref: 'id_ed25519',
+        state: 'AVAILABLE',
+        requestedBy: 'device',
+      },
+    });
+  });
+  it('an offer never disturbs a key that is stored or being moved', async () => {
+    const c = vaultClient({ id: 'v1', state: 'STORED' });
+    const { service } = setup();
+    await service.report(c as never, 't', 'h', 'ssh', 'k', 'AVAILABLE');
+    expect(c.secretVault.update).not.toHaveBeenCalled();
+    expect(c.secretVault.create).not.toHaveBeenCalled();
+  });
+  it('the command line can store and restore without a console request', async () => {
+    const { service, audit } = setup();
+    const none = vaultClient(null);
+    expect(
+      await service.report(none as never, 't', 'h', 'ssh', 'k', 'STORED'),
+    ).toEqual({ state: 'STORED' });
+    expect(audit.recordSafely).toHaveBeenCalled();
+    const stored = vaultClient({ id: 'v1', state: 'STORED' });
+    expect(
+      await service.report(stored as never, 't', 'h', 'ssh', 'k', 'RESTORED'),
+    ).toEqual({ state: 'RESTORED' });
+  });
+  it('a restore report for a key never seen is refused', async () => {
+    const { service } = setup();
+    await expect(
+      service.report(
+        vaultClient(null) as never,
+        't',
+        'h',
+        'ssh',
+        'k',
+        'RESTORED',
+      ),
+    ).rejects.toThrow('No such vault entry');
   });
 });

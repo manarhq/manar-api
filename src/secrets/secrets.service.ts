@@ -342,16 +342,56 @@ export class SecretsService {
     hostId: string,
     kind: string,
     ref: string,
-    state: 'STORED' | 'RESTORED' | 'FAILED',
+    state: 'STORED' | 'RESTORED' | 'FAILED' | 'AVAILABLE',
     detail?: string,
   ) {
     const row = await client.secretVault.findUnique({
       where: { hostId_kind_ref: { hostId, kind, ref } },
     });
+    if (state === 'AVAILABLE') {
+      // The device found a key it could move. It only offers; nothing moves until a person asks.
+      if (!row) {
+        await client.secretVault.create({
+          data: {
+            hostId,
+            kind,
+            ref,
+            state: 'AVAILABLE',
+            requestedBy: 'device',
+          },
+        });
+      } else if (['RESTORED', 'FAILED'].includes(row.state)) {
+        await client.secretVault.update({
+          where: { id: row.id },
+          data: { state: 'AVAILABLE', detail: null },
+        });
+      }
+      return { state: 'AVAILABLE' };
+    }
+    // `manar-edge vault add` / `vault restore` on the device are not console requests: they may
+    // report a move or a restore nobody asked for here.
+    if (state === 'STORED' && !row) {
+      await client.secretVault.create({
+        data: { hostId, kind, ref, state: 'STORED', requestedBy: 'device' },
+      });
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.SECRET_VAULT_STORED,
+        actor: hostActor(hostId),
+        data: { hostId, kind, ref },
+      });
+      return { state: 'STORED' };
+    }
     if (!row) throw new SecretsNotFoundError('No such vault entry');
     let next: string;
-    if (state === 'STORED' && row.state === 'REQUESTED') next = 'STORED';
-    else if (state === 'RESTORED' && row.state === 'RESTORE_REQUESTED')
+    if (
+      state === 'STORED' &&
+      ['REQUESTED', 'AVAILABLE', 'RESTORED', 'FAILED'].includes(row.state)
+    )
+      next = 'STORED';
+    else if (
+      state === 'RESTORED' &&
+      ['RESTORE_REQUESTED', 'STORED'].includes(row.state)
+    )
       next = 'RESTORED';
     else if (state === 'FAILED')
       next = row.state === 'RESTORE_REQUESTED' ? 'STORED' : 'FAILED';
@@ -444,9 +484,15 @@ export class SecretsService {
     return (row?.blockMode as BlockMode | undefined) ?? DEFAULT_BLOCK_MODE;
   }
 
-  /** Device feature flags for the workspace's mode. */
+  /**
+   * Device feature flags for the workspace's mode. `secrets.vault.ssh` means the option to move an
+   * ssh key into the vault is offered; the person still clicks per key.
+   */
   async features(client: TenantPrismaClient): Promise<string[]> {
-    return blockFeatures(await this.blockMode(client));
+    return [
+      ...blockFeatures(await this.blockMode(client)),
+      'secrets.vault.ssh',
+    ];
   }
 
   async setBlockMode(
