@@ -2,16 +2,19 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   AiSpendService,
   AiUsageBatchSchema,
+  BOUNDS,
+  boundsProblem,
   type AiUsageBatch,
 } from './ai-spend.service';
 import { costMicros, isPriced } from './pricing';
 
-type Usage = Record<string, unknown> & {
-  toolId: string;
-  costMicros: bigint;
-};
+type Usage = { hostId: string; toolId: string; costMicros: bigint };
+type Host = { id: string; ownerSubject: string | null };
 
-function fake(settings: Record<string, unknown> | null = null) {
+function fake(
+  settings: Record<string, unknown> | null = null,
+  hosts: Host[] = [],
+) {
   const rowsOf = new Map<string, Usage[]>();
   const batches = new Set<string>();
   const clients = new Map<string, unknown>();
@@ -31,20 +34,33 @@ function fake(settings: Record<string, unknown> | null = null) {
           batches.add(k);
           return Promise.resolve({ count: 1 });
         },
+        deleteMany: () => Promise.resolve({}),
       },
       aiUsageDaily: {
         upsert: ({ create }: { create: Usage }) => {
           rows.push(create);
           return Promise.resolve({});
         },
-        groupBy: () => {
+        groupBy: ({ where }: { where: { hostId?: { in: string[] } } }) => {
           const by = new Map<string, bigint>();
-          for (const r of rows)
-            by.set(r.toolId, (by.get(r.toolId) ?? 0n) + r.costMicros);
+          for (const r of rows) {
+            if (where.hostId && !where.hostId.in.includes(r.hostId)) continue;
+            const k = `${r.toolId}|${r.hostId}`;
+            by.set(k, (by.get(k) ?? 0n) + r.costMicros);
+          }
           return Promise.resolve(
-            [...by].map(([toolId, v]) => ({ toolId, _sum: { costMicros: v } })),
+            [...by].map(([k, v]) => {
+              const [toolId, hostId] = k.split('|');
+              return { toolId, hostId, _sum: { costMicros: v } };
+            }),
           );
         },
+      },
+      host: {
+        findMany: ({ where }: { where: { ownerSubject?: string } }) =>
+          Promise.resolve(
+            hosts.filter((h) => h.ownerSubject === where.ownerSubject),
+          ),
       },
       aiSpendSettings: { findUnique: () => Promise.resolve(settings) },
       $transaction: (fn: (t: unknown) => Promise<void>) => fn(tx),
@@ -62,13 +78,13 @@ function fake(settings: Record<string, unknown> | null = null) {
       return rowsOf.get('t1') ?? [];
     },
     audit,
-    tenants,
     svc: new AiSpendService(tenants as never, audit as never),
   };
 }
 
+let n = 0;
 const batch = (over: Partial<AiUsageBatch> = {}): AiUsageBatch => ({
-  batchId: 'a'.repeat(32),
+  batchId: (++n).toString(16).padStart(32, '0'),
   usage: [
     {
       toolId: 'host.codex-cli',
@@ -82,7 +98,18 @@ const batch = (over: Partial<AiUsageBatch> = {}): AiUsageBatch => ({
   guard: [],
   ...over,
 });
-const host = { hostId: 'h1', tenantId: 't1' };
+const host = (hostId = 'h1', ownerSubject: string | null = 'alice') => ({
+  hostId,
+  tenantId: 't1',
+  ownerSubject,
+});
+type Call = [
+  unknown,
+  string,
+  { eventType: string; data: Record<string, unknown> },
+];
+const events = (f: ReturnType<typeof fake>) =>
+  (f.audit.recordSafely.mock.calls as unknown as Call[]).map((c) => c[2]);
 
 describe('pricing', () => {
   it('prices by longest prefix and leaves unknown models at zero', () => {
@@ -93,37 +120,83 @@ describe('pricing', () => {
   });
 });
 
-describe('batch schema', () => {
-  it('refuses a guard sample that is not a masked fragment', () => {
-    const bad = batch({
-      guard: [
-        {
-          toolId: 'host.codex-cli',
-          kind: 'aws_access_key',
-          action: 'masked',
-          count: 1,
-          sample: 'AKIAIOSFODNN7EXAMPLE',
-        },
-      ],
+describe('batch schema and bounds', () => {
+  it('refuses unknown tools, odd model names and unmasked samples', () => {
+    const bad = (o: Partial<AiUsageBatch>) =>
+      AiUsageBatchSchema.safeParse(batch(o)).success;
+    expect(bad({})).toBe(true);
+    expect(
+      bad({ usage: [{ ...batch().usage[0]!, toolId: 'host.evil' }] }),
+    ).toBe(false);
+    expect(
+      bad({ usage: [{ ...batch().usage[0]!, toolId: 'other:unknown' }] }),
+    ).toBe(true);
+    expect(
+      bad({ usage: [{ ...batch().usage[0]!, model: 'gpt 5; drop' }] }),
+    ).toBe(false);
+    const g = {
+      toolId: 'host.codex-cli',
+      kind: 'aws_access_key',
+      action: 'masked' as const,
+      count: 1,
+    };
+    expect(bad({ guard: [{ ...g, sample: 'AKIAIOSFODNN7EXAMPLE' }] })).toBe(
+      false,
+    );
+    expect(bad({ guard: [{ ...g, sample: 'AKIA****' }] })).toBe(true);
+  });
+
+  it('flags counts no real device reaches', () => {
+    const u = batch().usage[0]!;
+    expect(boundsProblem(batch())).toBeNull();
+    expect(
+      boundsProblem(
+        batch({ usage: [{ ...u, inputTokens: BOUNDS.inputPerRecord + 1 }] }),
+      ),
+    ).toMatch(/input/);
+    expect(
+      boundsProblem(batch({ usage: Array.from({ length: 101 }, () => u) })),
+    ).toMatch(/records/);
+    const heavy = { ...u, inputTokens: 400_000_000, outputTokens: 90_000_000 };
+    expect(boundsProblem(batch({ usage: [heavy, heavy, heavy] }))).toMatch(
+      /batch/,
+    );
+  });
+});
+
+describe('submit', () => {
+  it('rejects an out-of-bound report with 400 and an audit event, and stores nothing', async () => {
+    const f = fake();
+    const u = batch().usage[0]!;
+    await expect(
+      f.svc.submit(
+        host(),
+        batch({ usage: [{ ...u, inputTokens: 9_000_000_000 }] }),
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(f.rows).toHaveLength(0);
+    expect(events(f)[0]).toMatchObject({
+      eventType: 'door.usage.rejected',
+      data: { hostId: 'h1' },
     });
-    expect(AiUsageBatchSchema.safeParse(bad).success).toBe(false);
-    const ok = batch({
-      guard: [
-        {
-          toolId: 'host.codex-cli',
-          kind: 'aws_access_key',
-          action: 'masked',
-          count: 1,
-          sample: 'AKIA****',
-        },
-      ],
+    await expect(f.svc.submit(host(), { nope: 1 })).rejects.toMatchObject({
+      status: 400,
     });
-    expect(AiUsageBatchSchema.safeParse(ok).success).toBe(true);
+  });
+
+  it('limits reports per device', async () => {
+    const f = fake();
+    for (let i = 0; i < BOUNDS.reportsPerWindow; i++)
+      await f.svc.submit(host(), batch());
+    await expect(f.svc.submit(host(), batch())).rejects.toMatchObject({
+      status: 429,
+    });
+    await expect(f.svc.submit(host('h2'), batch())).resolves.toBeTruthy(); // another device is not limited
   });
 });
 
 describe('ingest', () => {
-  it('stores usage once per batch id and audits masked samples only', async () => {
+  it('counts a batch id once and audits masked samples only', async () => {
     const f = fake();
     const b = batch({
       guard: [
@@ -136,48 +209,90 @@ describe('ingest', () => {
         },
       ],
     });
-    expect((await f.svc.ingest(host, b)).accepted).toBe(true);
-    expect((await f.svc.ingest(host, b)).accepted).toBe(false); // resend after a lost reply
+    expect((await f.svc.ingest(host(), b)).accepted).toBe(true);
+    expect((await f.svc.ingest(host(), b)).accepted).toBe(false); // replay
     expect(f.rows).toHaveLength(1);
     expect(f.rows[0]!.costMicros).toBe(2_250_000n);
-    const calls = f.audit.recordSafely.mock.calls as unknown as Array<
-      [unknown, string, { eventType: string; data: Record<string, unknown> }]
-    >;
-    expect(calls).toHaveLength(1);
-    expect(calls[0]![2].eventType).toBe('door.secret.blocked');
-    expect(calls[0]![2].data).toMatchObject({ sample: 'AKIA****', count: 3 });
+    expect(events(f)).toHaveLength(1);
+    expect(events(f)[0]).toMatchObject({
+      eventType: 'door.secret.blocked',
+      data: { sample: 'AKIA****', count: 3 },
+    });
   });
 
-  it('records a limit event once when a tool crosses its cap, and pauses it in config', async () => {
-    const f = fake({
-      monthlyCapMicros: 2_000_000n,
-      monthlyBudgetMicros: 1_000_000n,
-      secretsMode: 'block',
+  it('pauses a tool only for the owner whose devices reached the cap', async () => {
+    const hosts = [
+      { id: 'h1', ownerSubject: 'alice' },
+      { id: 'h2', ownerSubject: 'alice' },
+      { id: 'h3', ownerSubject: 'bob' },
+    ];
+    const f = fake(
+      { monthlyCapMicros: 3_000_000n, secretsMode: 'block' },
+      hosts,
+    );
+    await f.svc.ingest(host('h1'), batch()); // alice: 2.25
+    await f.svc.ingest(host('h2'), batch()); // alice: 4.5 -> over the 3.0 cap
+    const limit = events(f).filter(
+      (e) => e.eventType === 'ai_spend.limit_reached',
+    );
+    expect(limit).toHaveLength(1);
+    expect(limit[0]!.data).toMatchObject({
+      limit: 'cap',
+      scope: 'owner',
+      toolId: 'host.codex-cli',
     });
-    await f.svc.ingest(host, batch());
-    const types = (
-      f.audit.recordSafely.mock.calls as unknown as Array<
-        [unknown, string, { eventType: string; data: { limit?: string } }]
-      >
-    ).map((c) => `${c[2].eventType}:${c[2].data.limit}`);
-    expect(types).toEqual([
-      'ai_spend.limit_reached:budget',
-      'ai_spend.limit_reached:cap',
-    ]);
-    await f.svc.ingest(host, batch({ batchId: 'b'.repeat(32) }));
-    expect(f.audit.recordSafely).toHaveBeenCalledTimes(2); // already over: no repeat
-    expect(await f.svc.doorConfig(host)).toEqual({
+    expect(limit[0]!.data.contributors).toHaveLength(2); // which devices added up to it
+    expect(await f.svc.doorConfig(host('h1'))).toEqual({
       secrets: 'block',
       paused: ['host.codex-cli'],
     });
-  });
-
-  it('keeps tenants apart: the config of another tenant sees nothing', async () => {
-    const f = fake({ monthlyCapMicros: 1n, secretsMode: 'mask' });
-    await f.svc.ingest(host, batch());
-    expect(await f.svc.doorConfig({ tenantId: 't2' })).toEqual({
-      secrets: 'mask',
+    expect(await f.svc.doorConfig(host('h2'))).toEqual({
+      secrets: 'block',
+      paused: ['host.codex-cli'],
+    });
+    expect(await f.svc.doorConfig(host('h3', 'bob'))).toEqual({
+      secrets: 'block',
       paused: [],
     });
+  });
+
+  it('a workspace-scope cap counts every device together', async () => {
+    const hosts = [
+      { id: 'h1', ownerSubject: 'alice' },
+      { id: 'h3', ownerSubject: 'bob' },
+    ];
+    const f = fake(
+      { monthlyCapMicros: 3_000_000n, capScope: 'workspace' },
+      hosts,
+    );
+    await f.svc.ingest(host('h1'), batch());
+    await f.svc.ingest(host('h3', 'bob'), batch());
+    expect((await f.svc.doorConfig(host('h3', 'bob'))).paused).toEqual([
+      'host.codex-cli',
+    ]);
+    expect(
+      events(f).find((e) => e.eventType === 'ai_spend.limit_reached')!.data,
+    ).toMatchObject({ scope: 'workspace' });
+  });
+
+  it('alerts once when the workspace passes its budget', async () => {
+    const f = fake({ monthlyBudgetMicros: 2_000_000n }, [
+      { id: 'h1', ownerSubject: 'alice' },
+    ]);
+    await f.svc.ingest(host(), batch());
+    await f.svc.ingest(host(), batch());
+    expect(events(f).filter((e) => e.data.limit === 'budget')).toHaveLength(1);
+  });
+
+  it('keeps tenants apart', async () => {
+    const f = fake({ monthlyCapMicros: 1n });
+    await f.svc.ingest(host(), batch());
+    expect(
+      await f.svc.doorConfig({
+        hostId: 'x',
+        tenantId: 't2',
+        ownerSubject: null,
+      }),
+    ).toEqual({ secrets: 'mask', paused: [] });
   });
 });

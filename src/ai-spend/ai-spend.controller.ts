@@ -22,11 +22,7 @@ import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { HostAuthGuard } from '../host-mtls/host-auth.guard';
 import { CurrentHost, type HostContext } from '../host-mtls/host-context';
-import {
-  AiSpendService,
-  AiSpendSettingsSchema,
-  AiUsageBatchSchema,
-} from './ai-spend.service';
+import { AiSpendService, AiSpendSettingsSchema } from './ai-spend.service';
 
 const READ = ['AUDITOR', 'SECURITY_ADMIN', 'TENANT_OWNER'] as const;
 const WRITE = ['SECURITY_ADMIN', 'TENANT_OWNER'] as const;
@@ -44,7 +40,7 @@ export class HostAiUsageController {
     // A device the owner has not approved reports nothing: fail closed.
     if (host.status !== 'APPROVED')
       throw new ForbiddenException('device not approved');
-    return this.spend.ingest(host, parseBodyOrThrow(AiUsageBatchSchema, body));
+    return this.spend.submit(host, body);
   }
 }
 

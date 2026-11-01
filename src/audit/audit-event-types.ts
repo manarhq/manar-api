@@ -187,6 +187,8 @@ export const AUDIT_EVENT_TYPES = {
   AI_SPEND_SETTINGS_CHANGED: 'ai_spend.settings_changed',
   /** Month spend crossed the budget (alert) or a tool's cap (the tool is paused on its devices). */
   AI_SPEND_LIMIT_REACHED: 'ai_spend.limit_reached',
+  /** A device's usage report was refused (unknown tool, out-of-bound counts). Data: host and reason, never the payload. */
+  DOOR_USAGE_REJECTED: 'door.usage.rejected',
 } as const;
 
 export type AuditEventType =

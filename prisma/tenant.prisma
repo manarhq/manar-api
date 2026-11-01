@@ -2564,6 +2564,9 @@ model AiSpendSettings {
   monthlyCapMicros    BigInt?
   /// `mask` (default) or `block`: what DOOR does with a secret found in a prompt.
   secretsMode         String   @default("mask")
+  /// `owner` (default): a tool's cap counts the spend of one device owner's devices and pauses it
+  /// only there. `workspace`: all devices count together (Company workspaces; an admin choice).
+  capScope            String   @default("owner")
   updatedAt           DateTime @updatedAt
   updatedBy           String?
 

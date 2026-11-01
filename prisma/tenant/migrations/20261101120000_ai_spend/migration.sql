@@ -34,6 +34,7 @@ CREATE TABLE "ai_spend_settings" (
     "monthlyBudgetMicros" BIGINT,
     "monthlyCapMicros" BIGINT,
     "secretsMode" TEXT NOT NULL DEFAULT 'mask',
+    "capScope" TEXT NOT NULL DEFAULT 'owner',
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "updatedBy" TEXT,
 
