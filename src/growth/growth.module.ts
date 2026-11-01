@@ -49,10 +49,10 @@ const SHARED = [
 })
 export class GrowthModule {}
 
-/** Growth track, worker: the hourly digest and account-deletion activities. */
+/** Growth track, worker: the hourly digest, trial reminder and account-deletion activities. */
 @Module({
   imports: [KeycloakModule],
   providers: [...SHARED, StripeGateway],
-  exports: [DigestService, AccountService],
+  exports: [DigestService, AccountService, TrialReminderService],
 })
 export class GrowthWorkerModule {}
