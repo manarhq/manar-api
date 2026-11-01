@@ -481,6 +481,7 @@ describe('EdgePeerService reads and timers', () => {
     const state = { quarantined: false };
     const db = {
       agent: { findUnique: () => Promise.resolve({ status: 'ACTIVE' }) },
+      workspacePause: { findUnique: () => Promise.resolve(null) },
       killSwitch: { findFirst: () => Promise.resolve(null) },
       agentQuarantine: {
         findFirst: () =>

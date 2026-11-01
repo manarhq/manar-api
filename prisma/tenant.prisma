@@ -2525,3 +2525,16 @@ model SecretVaultAccess {
   @@index([status, createdAt])
   @@map("secret_vault_access")
 }
+
+
+/// "Pause all AI" (launch spec, wave 2): one row per workspace (id is always 'workspace'). While
+/// `paused` is true every protected tool on every device is denied with reason `paused`.
+model WorkspacePause {
+  id        String   @id @default("workspace")
+  paused    Boolean  @default(false)
+  pausedBy  String?
+  pausedAt  DateTime?
+  updatedAt DateTime @updatedAt
+
+  @@map("workspace_pause")
+}

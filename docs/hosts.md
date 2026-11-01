@@ -41,7 +41,7 @@ approval both check it inside their own transaction under `pg_advisory_xact_lock
 tenant's database and requires the exact certificate serial to be issued to it and unrevoked.
 REJECTED and REVOKED hosts are refused; a PENDING host may call. Handlers read `@CurrentHost()`
 (`hostId`, `tenantId`, `machineId`, `ownerSubject`, `status`). `GET /host/v1/config` returns
-`{ hostId, status, startMode, features }`.
+`{ hostId, status, startMode, features, paused, tools }`. `paused` is the workspace's "Pause all AI": while true every protect and hook path answers deny with reason `paused` (the API also denies in the kill-switch check, so devices that miss the flag are still stopped).
 
 ## Registration: `POST /hosts/register` (public)
 

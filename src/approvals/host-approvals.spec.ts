@@ -79,12 +79,18 @@ function world(opts: {
           ) ?? null,
         ),
       count: () => Promise.resolve(opts.recent ?? 0),
-      findMany: ({ where }: { where: { hostId?: string } }) =>
+      findMany: ({
+        where,
+      }: {
+        where: { hostId?: string; expiresAt?: { gt?: Date; lte?: Date } };
+      }) =>
         Promise.resolve(
           rows.filter(
             (r) =>
               r.status === 'PENDING' &&
-              (!where.hostId || r.hostId === where.hostId),
+              (!where.hostId || r.hostId === where.hostId) &&
+              (!where.expiresAt?.gt || r.expiresAt > where.expiresAt.gt) &&
+              (!where.expiresAt?.lte || r.expiresAt <= where.expiresAt.lte),
           ),
         ),
       updateMany: ({

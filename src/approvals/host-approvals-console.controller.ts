@@ -8,6 +8,7 @@ import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { DecideHostApprovalSchema } from './approvals.validation';
+import { explainRisk } from './risk-explain';
 import { HostApprovalsService } from './host-approvals.service';
 
 /** Device approvals in the console: the same queue as WARDEN, plus the high-risk ones. */
@@ -26,6 +27,7 @@ export class HostApprovalsConsoleController {
   @ApiOperation({ summary: 'Pending approvals opened by devices' })
   async list(@CurrentAuth() auth: AuthContext) {
     const client = await this.tenants.getClient(auth.tenant.id);
+    await this.approvals.expireDue(client, auth.tenant.id);
     const rows = await this.approvals.listPending(client, undefined);
     return {
       items: rows.map((r) => ({
@@ -36,6 +38,7 @@ export class HostApprovalsConsoleController {
         resource: r.resource,
         summary: r.summary,
         highRisk: r.highRisk,
+        explanation: explainRisk(r.actionId, r.resource, r.highRisk),
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,
       })),

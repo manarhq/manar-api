@@ -33,6 +33,7 @@ function fakeClient(
   quarantines: FakeRow[] = [],
 ): TenantPrismaClient {
   return {
+    workspacePause: { findUnique: vi.fn(() => Promise.resolve(null)) },
     killSwitch: { findFirst: vi.fn(() => Promise.resolve(null)) },
     agentQuarantine: {
       findFirst: vi.fn(

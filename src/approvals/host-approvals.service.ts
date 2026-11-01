@@ -14,8 +14,12 @@ import { buildRuleDraft } from './rule-draft';
 
 export type HostDecision = 'approve_once' | 'approve_8h' | 'deny';
 
-/** How long a device approval waits for a person. */
-export const HOST_APPROVAL_TTL_MS = 10 * 60 * 1000;
+/**
+ * How long a device approval waits for a person (founder decision, 1 Nov 2026): the prompt shows
+ * and the phone is pushed at the same moment; with no answer in 2 minutes it is denied, logged,
+ * and the agent is told "denied: no answer".
+ */
+export const HOST_APPROVAL_TTL_MS = 2 * 60 * 1000;
 
 /** A host that opens more approvals than this in the window is refused (a looping tool, or a flood). */
 export const HOST_APPROVALS_PER_WINDOW = 20;
@@ -128,6 +132,44 @@ export class HostApprovalsService {
       highRisk: true,
       toolName: input.program.slice(0, 40),
     });
+  }
+
+  /**
+   * Denies what nobody answered in time: PENDING rows past `expiresAt` become EXPIRED (one
+   * conditional update, so concurrent readers log it once) and each gets an `approval.expired`
+   * audit event. Called on every read a device or console makes, so no scheduler is needed.
+   */
+  async expireDue(
+    client: TenantPrismaClient,
+    tenantId: string,
+    now: Date = new Date(),
+  ): Promise<number> {
+    const due = await client.hostApproval.findMany({
+      where: { status: 'PENDING', expiresAt: { lte: now } },
+      select: { id: true, hostId: true, toolId: true, actionId: true },
+      take: 50,
+    });
+    let n = 0;
+    for (const row of due) {
+      const won = await client.hostApproval.updateMany({
+        where: { id: row.id, status: 'PENDING' },
+        data: { status: 'EXPIRED' },
+      });
+      if (won.count === 0) continue;
+      n++;
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_EXPIRED,
+        actor: { type: 'system', id: row.hostId },
+        data: {
+          hostApprovalId: row.id,
+          hostId: row.hostId,
+          toolId: row.toolId,
+          actionId: row.actionId,
+          reason: 'no_answer',
+        },
+      });
+    }
+    return n;
   }
 
   listPending(
