@@ -31,3 +31,6 @@ e6dbaf307aa65f7c6fbed3dc7f470e2c355d6883:test/agent-runtime.e2e-spec.ts:azure-ad
 
 # Triaged 2026-10-26: the Anthropic proxy spec's JWT fixture (signature is "signature-value").
 d82a13e24a177fcc905c38ea8b3019dc7af00b4c:src/agent-runtime/llm-anthropic.service.spec.ts:jwt:46
+
+# Triaged 2026-11-01: cloud-agents MCP guard spec, an OAuth scope name fixture, not a key.
+1e0178863cbdbb263784fdaeb65fa4d92d85d90b:src/cloud-mcp/cloud-mcp-auth.guard.spec.ts:generic-api-key:765
