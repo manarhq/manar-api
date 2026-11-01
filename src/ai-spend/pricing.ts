@@ -1,7 +1,8 @@
 /**
  * List-price estimates in US dollars per million tokens, matched by model-name prefix (longest
  * first). They are estimates: provider invoices win, and the console says so. A model with no
- * entry is counted as `unpriced` (cost 0) rather than guessed.
+ * entry is priced at the most expensive known model, so a cap is never evaded by an unlisted name;
+ * the console marks it `not priced`.
  * Review these against the providers' price pages before relying on a cap.
  */
 const PRICES: ReadonlyArray<{ prefix: string; in: number; out: number }> = [
@@ -24,6 +25,8 @@ const PRICES: ReadonlyArray<{ prefix: string; in: number; out: number }> = [
   { prefix: 'gemini', in: 1.25, out: 10 },
 ].sort((a, b) => b.prefix.length - a.prefix.length);
 
+const TOP_PRICE = PRICES.reduce((a, b) => (b.out > a.out ? b : a));
+
 export function priceOf(
   model: string,
 ): { in: number; out: number } | undefined {
@@ -42,5 +45,6 @@ export function costMicros(
   outputTokens: number,
 ): number {
   const p = priceOf(model);
-  return p ? Math.round(inputTokens * p.in + outputTokens * p.out) : 0;
+  const q = p ?? TOP_PRICE;
+  return Math.round(inputTokens * q.in + outputTokens * q.out);
 }

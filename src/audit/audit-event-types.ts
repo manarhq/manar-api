@@ -189,6 +189,10 @@ export const AUDIT_EVENT_TYPES = {
   AI_SPEND_LIMIT_REACHED: 'ai_spend.limit_reached',
   /** A device's usage report was refused (unknown tool, out-of-bound counts). Data: host and reason, never the payload. */
   DOOR_USAGE_REJECTED: 'door.usage.rejected',
+  /** DOOR turned requests away because their body could not be checked (unsupported encoding). Data: host and count. */
+  DOOR_REQUEST_REFUSED: 'door.request.refused',
+  /** One device's spend today is far above the workspace's other devices. Data: host, today's spend, threshold. */
+  AI_SPEND_HOST_OUTLIER: 'ai_spend.host_outlier',
 } as const;
 
 export type AuditEventType =

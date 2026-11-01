@@ -9,6 +9,7 @@ CREATE TABLE "ai_usage_daily" (
     "hostId" TEXT NOT NULL,
     "day" DATE NOT NULL,
     "toolId" TEXT NOT NULL,
+    "localUser" TEXT NOT NULL DEFAULT '',
     "provider" TEXT NOT NULL,
     "model" TEXT NOT NULL,
     "requests" INTEGER NOT NULL DEFAULT 0,
@@ -45,7 +46,7 @@ CREATE TABLE "ai_spend_settings" (
 CREATE INDEX "ai_usage_daily_day_idx" ON "ai_usage_daily"("day");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ai_usage_daily_hostId_day_toolId_provider_model_key" ON "ai_usage_daily"("hostId", "day", "toolId", "provider", "model");
+CREATE UNIQUE INDEX "ai_usage_daily_hostId_day_toolId_localUser_provider_model_key" ON "ai_usage_daily"("hostId", "day", "toolId", "localUser", "provider", "model");
 
 -- AddForeignKey
 ALTER TABLE "ai_usage_daily" ADD CONSTRAINT "ai_usage_daily_hostId_fkey" FOREIGN KEY ("hostId") REFERENCES "hosts"("id") ON DELETE CASCADE ON UPDATE CASCADE;

@@ -2535,6 +2535,8 @@ model AiUsageDaily {
   host         Host     @relation(fields: [hostId], references: [id], onDelete: Cascade)
   day          DateTime @db.Date
   toolId       String
+  /// The local OS user DOOR named for the caller (`uid:1000`, `sid:S-1-5-...`).
+  localUser    String   @default("")
   provider     String
   model        String
   requests     Int      @default(0)
@@ -2542,7 +2544,7 @@ model AiUsageDaily {
   outputTokens BigInt   @default(0)
   costMicros   BigInt   @default(0)
 
-  @@unique([hostId, day, toolId, provider, model])
+  @@unique([hostId, day, toolId, localUser, provider, model])
   @@index([day])
   @@map("ai_usage_daily")
 }
