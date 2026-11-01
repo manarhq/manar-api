@@ -202,6 +202,11 @@ export const AUDIT_EVENT_TYPES = {
   DOOR_REQUEST_REFUSED: 'door.request.refused',
   /** One device's spend today is far above the workspace's other devices. Data: host, today's spend, threshold. */
   AI_SPEND_HOST_OUTLIER: 'ai_spend.host_outlier',
+
+  /** Insight: a device reported an MCP server of one of its AI tools for the first time (name, tool, flags; never args or env). */
+  MCP_SERVER_DISCOVERED: 'mcp.server.discovered',
+  /** Insight: an owner shared a redacted agent session as a public report. */
+  SESSION_SHARED: 'session.report.shared',
 } as const;
 
 export type AuditEventType =

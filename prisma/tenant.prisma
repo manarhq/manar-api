@@ -1327,6 +1327,7 @@ model AuditEvent {
 
   @@unique([partition, partitionSeq])
   @@index([eventType])
+  @@index([eventType, timestamp])
   @@index([correlationId])
   /// Release 2026-11-11: `AuditService.verifyAuditChain` walks the chain in
   /// keyset-paginated batches (`WHERE sequence > ?` ordered by `sequence`)
@@ -2232,6 +2233,7 @@ model Host {
   installKeyId          String?
   certificates          HostCertificate[]
   tools                 HostTool[]
+  mcpServers            HostMcpServer[]
   allowGrants           ApprovalAllowGrant[]
   hostApprovals         HostApproval[]
   createdAt             DateTime             @default(now())
@@ -2597,4 +2599,38 @@ model AiSpendSettings {
   updatedBy           String?
 
   @@map("ai_spend_settings")
+}
+
+/// One MCP server a tool on a device is configured to use, reported in `POST /host/v1/inventory`
+/// (`mcpServers`). The device masks env values and secret-looking args before sending, and we keep
+/// env NAMES only; arguments are not sent at all (allow-list: command base name, package, version,
+/// transport, URL scheme+host). Risk flags are not stored: they are computed from these columns on every read
+/// (`src/mcp-inventory/mcp-risk.ts`), so a rule change applies to old rows too.
+model HostMcpServer {
+  id         String   @id @default(uuid())
+  hostId     String
+  host       Host     @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  /// Catalogue id of the tool whose config holds it (`host.cursor`).
+  toolId     String
+  name       String
+  /// Short hash of transport, command, URL host and package: two servers with one name (a tool's
+  /// per-project entries) stay two rows.
+  fingerprint String
+  /// `stdio`, `http` or `sse`.
+  transport  String
+  command    String?
+  /// How many arguments the command has. The arguments themselves never leave the device.
+  argCount   Int      @default(0)
+  /// Worked out on the device: an argument names the disk root, a system folder or /home itself.
+  outsideHome Boolean @default(false)
+  url        String?
+  pkg        String?
+  pkgVersion String?
+  envKeys    String[] @default([])
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+
+  @@unique([hostId, toolId, name, fingerprint])
+  @@index([toolId])
+  @@map("host_mcp_servers")
 }
