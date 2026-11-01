@@ -15,6 +15,7 @@ import {
 import { LaunchOfferService } from './launch-offer.service';
 import { MailerService } from './mailer.service';
 import { MembersService } from './members.service';
+import { TrialReminderService } from './trial-reminder.service';
 import { ProfileService } from './profile.service';
 
 const SHARED = [
@@ -22,6 +23,7 @@ const SHARED = [
   MailerService,
   ReportCardService,
   DigestService,
+  TrialReminderService,
   // Account deletion removes the workspace; the queue loop is not started here.
   WorkspaceProvisioningService,
   AccountService,

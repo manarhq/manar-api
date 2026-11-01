@@ -13,7 +13,7 @@ function make(
   const calls: string[] = [];
   const update = vi.fn(() => Promise.resolve());
   const subUpdate = vi.fn(() => Promise.resolve());
-  const create = vi.fn(() =>
+  const create = vi.fn((...[,]: [Record<string, unknown>]) =>
     Promise.resolve({ url: 'https://stripe.example/setup' }),
   );
   const client = {
