@@ -1,5 +1,6 @@
 import { AiSpendHttpModule } from './ai-spend/ai-spend.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { JailHttpModule } from './jail/jail.module';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -72,6 +73,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     AiToolsHttpModule,
     SecretsHttpModule,
     AiSpendHttpModule,
+    JailHttpModule,
     AuthorizationModule,
     TasksModule,
     TasksHttpModule,

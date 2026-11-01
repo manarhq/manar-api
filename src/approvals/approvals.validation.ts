@@ -28,7 +28,7 @@ export type DecideApprovalRequest = z.output<
 
 /** Used by the device decide endpoint and the host-approval console routes. */
 export const DecideHostApprovalSchema = z.object({
-  decision: z.enum(['approve_once', 'approve_8h', 'deny']),
+  decision: z.enum(['approve_once', 'approve_8h', 'approve_always', 'deny']),
   makeRule: z.boolean().optional(),
 });
 

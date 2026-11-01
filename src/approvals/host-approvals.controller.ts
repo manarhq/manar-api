@@ -13,6 +13,7 @@ import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { HostAuthGuard } from '../host-mtls/host-auth.guard';
 import { CurrentHost, type HostContext } from '../host-mtls/host-context';
+import { SITE_CONNECT_ACTION } from '../jail/jail-sites';
 import { ApproverDirectory } from './approver-directory';
 import {
   DecideHostApprovalSchema,
@@ -61,7 +62,11 @@ export class HostApprovalsController {
         highRisk: r.highRisk,
         explanation: explainRisk(r.actionId, r.resource, r.highRisk),
         // The prompt shows buttons only when this is true; otherwise "Open in console".
-        decidableHere: ownerMayApprove && !r.highRisk,
+        decidableHere:
+          ownerMayApprove &&
+          !r.highRisk &&
+          // a new site is answered in the console or on the phone
+          r.actionId !== SITE_CONNECT_ACTION,
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,
       })),
@@ -125,6 +130,8 @@ export class HostApprovalsController {
     }
     const row = await this.approvals.get(client, id, host.hostId);
     if (row.highRisk) throw new ForbiddenException('high_risk_open_in_console');
+    if (row.actionId === SITE_CONNECT_ACTION && input.decision !== 'deny')
+      throw new ForbiddenException('site_in_console');
     const result = await this.approvals.decide(client, host.tenantId, {
       approvalId: id,
       hostId: host.hostId,

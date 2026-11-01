@@ -5,6 +5,7 @@ import { ApiExcludeController, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { PauseService } from '../pause/pause.service';
 import { SecretsService } from '../secrets/secrets.service';
+import { JailSitesService } from '../jail/jail-sites.service';
 import { CurrentHost, type HostContext } from './host-context';
 import { HostAuthGuard } from './host-auth.guard';
 
@@ -26,6 +27,7 @@ export class HostConfigController {
     private readonly spend: AiSpendService,
     private readonly tenants: TenantDatabaseManager,
     private readonly secrets: SecretsService,
+    private readonly jail: JailSitesService,
   ) {}
 
   /** Secret blocking flags. Any failure reads as "off": a lookup problem must never lock a person out. */
@@ -70,6 +72,8 @@ export class HostConfigController {
         );
         return { unavailable: true };
       }),
+      // JAIL: which tools the device filters and the remembered site decisions (owned by the jail track).
+      jail: await this.jail.config(host),
     };
   }
 }

@@ -66,6 +66,10 @@ export class HostApprovalsConsoleController {
       decision: input.decision,
       via: 'console',
       makeRule: input.makeRule,
+      // A permanent site rule needs the role that may write site rules in the console.
+      canWriteSiteRules: auth.roles.some(
+        (r) => r === 'TENANT_OWNER' || r === 'SECURITY_ADMIN',
+      ),
     });
   }
 }

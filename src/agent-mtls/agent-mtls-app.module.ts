@@ -1,5 +1,6 @@
 import { HostAiUsageModule } from '../ai-spend/ai-spend.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { JailMtlsModule } from '../jail/jail.module';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AppConfigModule } from '../config/config.module';
 import { CorrelationIdMiddleware } from '../logging/correlation-id.middleware';
@@ -74,6 +75,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     HostApprovalsMtlsModule,
     SecretsHostModule,
     HostAiUsageModule,
+    JailMtlsModule,
     AgentsModule,
     AuthorizationModule,
     TasksModule,

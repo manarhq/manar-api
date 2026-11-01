@@ -227,6 +227,12 @@ export const AUDIT_EVENT_TYPES = {
   WORKSPACE_AUTOJOIN_CHANGED: 'workspace.autojoin.changed',
   /** A person joined through the Entra auto-join setting (matched on the verified tid). */
   WORKSPACE_MEMBER_AUTOJOINED: 'workspace.member.autojoined',
+
+  // JAIL (per-site decisions for protected AI tools).
+  /** A person allowed or blocked a site for one tool on one device (an answer to a prompt, or by hand). */
+  JAIL_SITE_RULE_CREATED: 'jail.site_rule.created',
+  /** A person removed a site rule. */
+  JAIL_SITE_RULE_REMOVED: 'jail.site_rule.removed',
 } as const;
 
 export type AuditEventType =
