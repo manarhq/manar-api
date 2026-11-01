@@ -153,6 +153,15 @@ export const AUDIT_EVENT_TYPES = {
   BILLING_PLAN_CHANGED: 'billing.plan.changed',
   /** The owner removed a device (console "Remove device"): its record and certificates are gone, so it can be installed again. */
   HOST_REMOVED: 'host.removed',
+
+  // AI tool coverage (launch spec 4.5).
+  /** A device reported an AI tool for the first time. */
+  TOOL_DISCOVERED: 'tool.discovered',
+  /** Protection (hooks, MCP wrap, routing) was installed on a device's tool, or turned off by its owner. */
+  TOOL_PROTECTED: 'tool.protected',
+  TOOL_UNPROTECTED: 'tool.unprotected',
+  /** A non-Claude tool's action was decided through `POST /host/v1/authorize`. */
+  HOST_ACTION_DECIDED: 'host.action_decided',
 } as const;
 
 export type AuditEventType =

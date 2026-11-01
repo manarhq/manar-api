@@ -11,6 +11,7 @@ import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
 import { OpenBaoModule } from './openbao/openbao.module';
 import { AgentsHttpModule } from './agents/agents-http.module';
+import { AiToolsHttpModule } from './host-coverage/host-coverage.module';
 import { DevicesHttpModule } from './devices/devices-http.module';
 import { HostsHttpModule } from './hosts/hosts-http.module';
 import { AuthorizationModule } from './authorization/authorization.module';
@@ -61,6 +62,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     AgentsHttpModule,
     HostsHttpModule,
     DevicesHttpModule,
+    AiToolsHttpModule,
     AuthorizationModule,
     TasksModule,
     TasksHttpModule,

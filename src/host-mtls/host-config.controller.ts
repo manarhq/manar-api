@@ -1,4 +1,5 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
+import { HostToolsService } from '../host-coverage/host-tools.service';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { CurrentHost, type HostContext } from './host-context';
@@ -14,11 +15,13 @@ export const DEFAULT_START_MODE: StartMode = 'ask';
 @Controller('host/v1')
 @UseGuards(HostAuthGuard)
 export class HostConfigController {
+  constructor(private readonly tools: HostToolsService) {}
+
   @Get('config')
   @ApiOperation({
     summary: 'The effective preset and feature flags for this device',
   })
-  config(@CurrentHost() host: HostContext) {
+  async config(@CurrentHost() host: HostContext) {
     return {
       hostId: host.hostId,
       status: host.status,
@@ -26,6 +29,8 @@ export class HostConfigController {
       // replaces this default with a read of it.
       startMode: DEFAULT_START_MODE,
       features: [] as string[],
+      // Tools whose owner turned protection off; the device restores their backups.
+      tools: await this.tools.instructions(host),
     };
   }
 }

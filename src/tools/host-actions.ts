@@ -197,3 +197,146 @@ export async function ensureHostClaudeCodeTool(
     });
   }
 }
+
+/**
+ * The other AI tools on a device (public launch spec 4.5 and 6). Their hooks send these generic
+ * action ids, mapped from each tool's own event names by manar-edge `internal/protect`:
+ * `shell` (resource: the command), `read` / `edit` / `write` (the file path), `mcp` (the
+ * `server/tool` name) and `webfetch` (the URL). Risk uses the same formula as Claude Code.
+ */
+export const HOST_GENERIC_ACTIONS: readonly HostActionDefinition[] = [
+  {
+    name: 'read',
+    description: 'Read a file. Resource: the file path.',
+    riskBaseScore: 0,
+    mutating: false,
+    destructive: false,
+  },
+  {
+    name: 'edit',
+    description: 'Change or create a file. Resource: the file path.',
+    riskBaseScore: 10,
+    mutating: true,
+    destructive: false,
+  },
+  {
+    name: 'write',
+    description: 'Create or overwrite a file. Resource: the file path.',
+    riskBaseScore: 10,
+    mutating: true,
+    destructive: false,
+  },
+  {
+    name: 'shell',
+    description:
+      'Run a shell command. Resource: the command (first 2048 characters).',
+    riskBaseScore: 20,
+    mutating: true,
+    destructive: true,
+    resourceKind: 'command',
+  },
+  {
+    name: 'mcp',
+    description: 'Call an MCP tool. Resource: server/tool.',
+    riskBaseScore: 10,
+    mutating: true,
+    destructive: false,
+    resourceKind: 'other',
+  },
+  {
+    name: 'webfetch',
+    description: 'Fetch a URL. Resource: the URL.',
+    riskBaseScore: 10,
+    mutating: false,
+    destructive: false,
+    resourceKind: 'other',
+  },
+];
+
+/** How a tool can be protected. A device may never report more than its entry allows. */
+export type ProtectMode = 'hook' | 'mcp' | 'gateway' | 'none';
+
+export interface HostToolDefinition {
+  id: string;
+  name: string;
+  /** Modes the tool supports, from the day-1 verification (workspace plan 2026-10-31-coverage). */
+  modes: readonly Exclude<ProtectMode, 'none'>[];
+}
+
+export const HOST_TOOLS: readonly HostToolDefinition[] = [
+  { id: 'host.claude-code', name: 'Claude Code', modes: ['hook', 'gateway'] },
+  { id: 'host.cursor', name: 'Cursor', modes: ['hook', 'mcp'] },
+  { id: 'host.windsurf', name: 'Windsurf', modes: ['hook', 'mcp'] },
+  { id: 'host.gemini-cli', name: 'Gemini CLI', modes: ['hook', 'mcp'] },
+  {
+    id: 'host.codex-cli',
+    name: 'Codex CLI',
+    modes: ['hook', 'mcp', 'gateway'],
+  },
+  { id: 'host.copilot-cli', name: 'Copilot CLI', modes: ['hook', 'mcp'] },
+  { id: 'host.vscode-copilot', name: 'VS Code with Copilot', modes: ['mcp'] },
+  { id: 'host.claude-desktop', name: 'Claude desktop', modes: ['mcp'] },
+  // Remote connectors only: nothing on the device can be wrapped, so it is only seen.
+  { id: 'host.chatgpt-desktop', name: 'ChatGPT desktop', modes: [] },
+];
+
+export function hostTool(id: string): HostToolDefinition | undefined {
+  return HOST_TOOLS.find((t) => t.id === id);
+}
+
+/** Registers every non-Claude host tool and the generic actions in one tenant. Idempotent. */
+export async function ensureHostTools(
+  tenantClient: TenantPrismaClient,
+): Promise<void> {
+  for (const def of HOST_TOOLS) {
+    if (def.id === HOST_CLAUDE_CODE_TOOL) continue;
+    const data = {
+      type: 'HOST',
+      vendor: def.name,
+      description: `Local actions of ${def.name} on a manar-edge host: decided by Manar, executed on the host, never by Manar.`,
+      baseEndpoint: HOST_TOOL_ENDPOINT,
+      protocol: 'HTTP' as const,
+      credentialReference: {
+        provider: 'ENV',
+        reference: 'MANAR_CONNECTOR_NONE',
+      },
+      enabled: false,
+      metadata: { dataOrigin: 'HOST' },
+    };
+    const tool = await tenantClient.tool.upsert({
+      where: { name: def.id },
+      create: { name: def.id, ...data },
+      update: data,
+    });
+    for (const action of HOST_GENERIC_ACTIONS) {
+      const row = {
+        description: action.description,
+        riskBaseScore: action.riskBaseScore,
+        mutating: action.mutating,
+        destructive: action.destructive,
+        inputSchema: { type: 'object' } as Prisma.InputJsonObject,
+      };
+      await tenantClient.toolAction.upsert({
+        where: { toolId_name: { toolId: tool.id, name: action.name } },
+        create: { toolId: tool.id, name: action.name, ...row },
+        update: row,
+      });
+    }
+  }
+}
+
+/** Same formula as src/risk/risk-engine.service.ts: 10 + base + 15 mutating + 25 destructive. */
+export function hostActionRisk(
+  toolId: string,
+  actionId: string,
+): number | null {
+  const list =
+    toolId === HOST_CLAUDE_CODE_TOOL
+      ? HOST_CLAUDE_CODE_ACTIONS
+      : HOST_GENERIC_ACTIONS;
+  const a = list.find((x) => x.name === actionId);
+  if (!a) return null;
+  return (
+    10 + a.riskBaseScore + (a.mutating ? 15 : 0) + (a.destructive ? 25 : 0)
+  );
+}
