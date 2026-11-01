@@ -28,7 +28,8 @@ export class HostConfigController {
       // The `features` track stores the workspace's mode (PUT /workspace/start-mode) and
       // replaces this default with a read of it.
       startMode: DEFAULT_START_MODE,
-      features: [] as string[],
+      // `undo`: snapshot files an AI tool edits outside its project, restore on request.
+      features: process.env.HOST_UNDO_ENABLED === 'false' ? [] : ['undo'],
       // Tools whose owner turned protection off; the device restores their backups.
       tools: await this.tools.instructions(host),
     };

@@ -177,6 +177,11 @@ export const AUDIT_EVENT_TYPES = {
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
+
+  /** Undo AI file changes: an admin asked a device to put a file back; the device reported the result. */
+  HOST_FILE_CHANGE_RESTORE_REQUESTED: 'host.file_change.restore_requested',
+  HOST_FILE_CHANGE_RESTORED: 'host.file_change.restored',
+  HOST_FILE_CHANGE_RESTORE_FAILED: 'host.file_change.restore_failed',
 } as const;
 
 export type AuditEventType =

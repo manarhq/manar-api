@@ -2231,6 +2231,7 @@ model Host {
   /// device it waits for by this, never by time.
   installKeyId          String?
   certificates          HostCertificate[]
+  fileChanges           HostFileChange[]
   tools                 HostTool[]
   allowGrants           ApprovalAllowGrant[]
   hostApprovals         HostApproval[]
@@ -2271,6 +2272,44 @@ model HostTool {
   @@unique([hostId, toolId])
   @@index([toolId])
   @@map("host_tools")
+}
+
+enum FileChangeRestore {
+  NONE
+  REQUESTED
+  RESTORED
+  FAILED
+}
+
+/// A file an AI tool was about to edit OUTSIDE its project folder, snapshotted on the device
+/// (docs/hosts.md "Undo AI file changes"). Metadata only: the contents never leave the device.
+/// Kept 7 days. A restore is requested here and performed by the device.
+model HostFileChange {
+  id                 String            @id @default(uuid())
+  hostId             String
+  host               Host              @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  /// The device's own snapshot id (hex); unique per host so a re-sent report is idempotent.
+  snapshotId         String
+  tool               String
+  path               String
+  /// False when the file did not exist yet (a restore deletes what the agent created).
+  existed            Boolean
+  sizeBytes          Int
+  /// HMAC (keyed by a per-device secret) of the saved content hash: Manar never sees a hash of the user file.
+  sha256             String
+  takenAt            DateTime
+  expiresAt          DateTime
+  restoreStatus      FileChangeRestore @default(NONE)
+  restoreRequestedBy String?
+  restoreRequestedAt DateTime?
+  restoreDoneAt      DateTime?
+  restoreNote        String?
+  createdAt          DateTime          @default(now())
+
+  @@unique([hostId, snapshotId])
+  @@index([hostId, takenAt])
+  @@index([hostId, restoreStatus])
+  @@map("host_file_changes")
 }
 
 model HostCertificate {
