@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
@@ -15,6 +16,7 @@ import {
 } from '../authorization/authorization.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { ApprovalRequestService } from '../approvals/approval-request.service';
+import { PushService } from '../push/push.service';
 import { GrantService } from '../approvals/grant.service';
 import { TemporalClientService } from '../temporal/temporal-client.service';
 import { ApprovalWorkflow } from '../temporal/workflows/approval.workflow';
@@ -95,6 +97,7 @@ export class ToolInvocationService {
     private readonly temporalClient: TemporalClientService,
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly auditService: AuditService,
+    @Optional() private readonly push?: PushService,
   ) {}
 
   async invoke(
@@ -453,6 +456,15 @@ export class ToolInvocationService {
         policyVersionId: decision.policyVersionId,
         expiresAt,
       },
+    });
+
+    // Spec 4.6: tell the workspace's approvers who subscribed. Fire and forget, never throws.
+    void this.push?.notifyApprovers(tenantClient, agent.tenant.id, {
+      kind: 'approval',
+      title: 'WARDEN',
+      body: 'An AI tool is waiting for your decision',
+      url: '/approvals',
+      tag: `approval-${approvalRequest.id}`,
     });
 
     return { id: approvalRequest.id, expiresAt };

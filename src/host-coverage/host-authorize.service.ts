@@ -2,6 +2,10 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { z } from 'zod';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
+import {
+  findLiveAllowGrant,
+  markAllowGrantUsed,
+} from '../approvals/allow-grants';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
@@ -25,6 +29,8 @@ export interface HostAuthorizeDecision {
   riskScore?: number;
   approvalId?: string;
   expiresAt?: Date;
+  /** Set when a live "Approve for 8 hours" grant turned an approval requirement into ALLOW. */
+  grantId?: string;
 }
 
 /** Same as the default task ceiling for Claude Code: reads and fetches run, edits and shell ask. */
@@ -88,6 +94,25 @@ export class HostAuthorizeService {
         );
       }
     }
+    if (result.grantId) {
+      // Counting a use must not change the answer; the audit record below is what matters.
+      await markAllowGrantUsed(client, result.grantId).catch((error: unknown) =>
+        this.logger.error(
+          `could not count use of allow grant: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+      await this.audit.recordSafely(client, host.tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_GRANT_USED,
+        actor: { type: 'system', id: `host:${host.hostId}` },
+        data: {
+          grantId: result.grantId,
+          hostId: host.hostId,
+          toolId: request.toolId,
+          actionId: request.actionId.toLowerCase(),
+          resource: request.resource.slice(0, 512),
+        },
+      });
+    }
     // The audit record is the evidence of governance: no record, no ALLOW.
     const recorded = await this.audit.recordSafely(client, host.tenantId, {
       eventType: AUDIT_EVENT_TYPES.HOST_ACTION_DECIDED,
@@ -130,6 +155,13 @@ export class HostAuthorizeService {
     if (kill.killed)
       return { decision: 'DENY', reason: kill.reason ?? 'kill_switch' };
 
+    // "Approve for 8 hours" (spec 4.6): looked up before the policy runs, used only to satisfy an
+    // approval requirement below. A policy DENY and the kill switches above are never overridden.
+    const grant = await findLiveAllowGrant(
+      client,
+      { hostId: host.hostId },
+      { toolId: request.toolId, actionId, resource: request.resource },
+    );
     const policy = await this.policy.evaluate(client, host.tenantId, {
       toolId: request.toolId,
       actionId,
@@ -144,6 +176,8 @@ export class HostAuthorizeService {
       };
     }
     if (policy.effect === 'APPROVAL_REQUIRED') {
+      if (grant)
+        return { decision: 'ALLOW', riskScore: base, grantId: grant.id };
       return {
         decision: 'APPROVAL_REQUIRED',
         reason: 'policy_requires_approval',
@@ -151,6 +185,8 @@ export class HostAuthorizeService {
       };
     }
     if (!policy.matchedRule && base > HOST_RISK_CEILING) {
+      if (grant)
+        return { decision: 'ALLOW', riskScore: base, grantId: grant.id };
       return {
         decision: 'APPROVAL_REQUIRED',
         reason: 'risk_ceiling_exceeded',

@@ -459,3 +459,20 @@ model InstallCode {
   @@index([installKeyId])
   @@map("install_codes")
 }
+
+/// Browser Web Push subscription of one person (spec 4.6). One row per browser endpoint. Pruned when
+/// the push service answers 404 or 410.
+model PushSubscription {
+  id        String   @id @default(uuid())
+  /// Keycloak subject.
+  subject   String
+  tenantId  String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([subject])
+  @@map("push_subscriptions")
+}

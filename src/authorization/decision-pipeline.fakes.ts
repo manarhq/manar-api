@@ -33,6 +33,8 @@ export interface DecisionHarnessOptions {
   decisionWriteFails?: boolean;
   incrementLoses?: boolean;
   grantConsumeCount?: number;
+  /** A live 8-hour allow grant the lookup returns (spec 4.6). */
+  allowGrant?: { id: string; expiresAt: Date } | null;
   /** Default: an unmanaged tenant (everything on). */
   catalog?: CatalogService;
 }
@@ -93,6 +95,13 @@ export function makeDecisionHarness(options: DecisionHarnessOptions = {}) {
         const row = { id: `decision-${decisions.length + 1}`, ...data };
         decisions.push(row);
         return Promise.resolve(row);
+      }),
+    },
+    approvalAllowGrant: {
+      findFirst: vi.fn(() => Promise.resolve(options.allowGrant ?? null)),
+      update: vi.fn(() => {
+        log('grant-use');
+        return Promise.resolve({});
       }),
     },
     authorizationGrant: {

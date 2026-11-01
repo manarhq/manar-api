@@ -30,6 +30,9 @@ export const AUDIT_EVENT_TYPES = {
   /** ADR-0007: an open approval was expired because a fresh decision scored higher or changed policy version or reason. */
   APPROVAL_SUPERSEDED: 'approval.superseded',
   /** ADR-0011: the approver collected the value an approved action produced for them (field names only). */
+  /** "Approve for 8 hours": a time-boxed allow was created / used (spec 4.6). */
+  APPROVAL_GRANT_CREATED: 'approval.grant.created',
+  APPROVAL_GRANT_USED: 'approval.grant.used',
   APPROVAL_HANDOVER_COLLECTED: 'approval.handover_collected',
 
   TOOL_INVOCATION_STARTED: 'tool.invocation.started',

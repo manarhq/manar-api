@@ -47,6 +47,8 @@ import { failClosed } from '../common/fail-closed/fail-closed';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ApprovalRequestService } from './approval-request.service';
+import { createAllowGrant } from './allow-grants';
+import { buildRuleDraft } from './rule-draft';
 import { DecideApprovalRequestSchema } from './approvals.validation';
 import {
   ApprovalRequestListResponseDto,
@@ -345,6 +347,36 @@ export class ApprovalsController {
       id,
     );
 
+    // "Approve for 8 hours": only after the workflow really approved (re-evaluation can still
+    // deny), for this agent, tool, action and exact resource.
+    let grantId: string | undefined;
+    if (input.extended && result.outcome === 'APPROVED') {
+      const grant = await failClosed('tenant-db', () =>
+        createAllowGrant(tenantClient, {
+          scope: { agentId: approvalRequest.agentId },
+          target: {
+            toolId: approvalRequest.toolId,
+            actionId: approvalRequest.actionId,
+            resource: approvalRequest.resource,
+          },
+          createdBy: auth.user.keycloakSubject,
+          sourceId: approvalRequest.id,
+        }),
+      );
+      grantId = grant.id;
+      await this.auditService.recordSafely(tenantClient, auth.tenant.id, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_GRANT_CREATED,
+        actor: { type: 'human', id: auth.user.id },
+        data: {
+          grantId,
+          approvalRequestId: approvalRequest.id,
+          agentId: approvalRequest.agentId,
+          toolId: approvalRequest.toolId,
+          actionId: approvalRequest.actionId,
+        },
+      });
+    }
+
     return {
       id: approvalRequest.id,
       status: result.outcome,
@@ -354,6 +386,10 @@ export class ApprovalsController {
           : result.outcome === 'DENIED'
             ? 'DENY'
             : undefined,
+      ...(grantId ? { grantId } : {}),
+      ...(input.makeRule && result.outcome === 'APPROVED'
+        ? { ruleDraft: buildRuleDraft(approvalRequest) }
+        : {}),
     };
   }
 
