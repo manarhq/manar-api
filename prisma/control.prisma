@@ -413,12 +413,6 @@ model StripeEvent {
   @@map("stripe_events")
 }
 
-/// The short code of the "Add device" one-liner (`/i/<code>`) -> the tenant and the single-use
-/// install key it stands for, so the public route can find the tenant without a token. Valid for
-/// one hour; fetching the script does not use the key, registering does. The raw key is kept here
-/// until the code expires (same trust boundary as the other control-DB secrets, docs/hosts.md).
-}
-
 /// The short code of the "Add device" one-liner (`/i/<code>`) -> the tenant and the install key it
 /// stands for, so the public routes can find the tenant without a token. The code itself is the
 /// install key's secret (the tenant-side key row is its SHA-256), so only the hash is kept here.

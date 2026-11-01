@@ -6,7 +6,7 @@ import type {
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
-import { EntitlementsService } from '../entitlements/entitlements.service';
+import { EntitlementsService } from '../billing/entitlements.service';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES, type AuditActor } from '../audit/audit-event-types';
 import {

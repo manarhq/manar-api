@@ -21,7 +21,7 @@ import {
   HostRekeyPendingError,
   HostsService,
 } from './hosts.service';
-import { PlanLimitError } from '../entitlements/entitlements.service';
+import { PlanLimitError } from '../billing/plan-limit.error';
 import { InstallKeyInvalidError } from './install-keys.service';
 import {
   AdcsCertificateRejectedError,
@@ -87,7 +87,7 @@ export class HostRegisterController {
       if (error instanceof InstallKeyInvalidError) {
         throw new UnauthorizedException('Invalid install key');
       }
-      if (error instanceof PlanLimitError) throw error.toHttp();
+      if (error instanceof PlanLimitError) throw error;
       if (error instanceof HostRekeyPendingError) {
         throw new ConflictException({
           code: 'host_rekey_pending',
@@ -131,7 +131,7 @@ export class HostRegisterController {
         Logger.warn(error.message, HostRegisterController.name);
         throw new UnauthorizedException('Computer certificate not accepted');
       }
-      if (error instanceof PlanLimitError) throw error.toHttp();
+      if (error instanceof PlanLimitError) throw error;
       if (error instanceof HostRekeyPendingError) {
         throw new ConflictException({
           code: 'host_rekey_pending',

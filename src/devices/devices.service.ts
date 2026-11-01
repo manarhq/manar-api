@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import type { AuthContext } from '../auth/auth-context';
 import type { AppConfig } from '../config/env.validation';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
-import { EntitlementsService } from '../entitlements/entitlements.service';
+import { EntitlementsService } from '../billing/entitlements.service';
 import { InstallKeysService } from '../hosts/install-keys.service';
 import { DEVICES_DEFAULTS } from './devices.config';
 import { generateInstallCode } from '../hosts/install-code.util';
@@ -33,7 +33,7 @@ export class DevicesService {
     const used = await client.host.count({
       where: { status: { in: ['PENDING', 'APPROVED'] } },
     });
-    await this.entitlements.assertWithin(auth.tenant.id, 'devices', used + 1);
+    await this.entitlements.assertWithin(auth.tenant.id, 'devices', used);
     const group = await client.hostGroup.upsert({
       where: { name: DEFAULT_GROUP },
       update: {},

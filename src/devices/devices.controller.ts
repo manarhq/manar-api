@@ -11,7 +11,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
-import { PlanLimitError } from '../entitlements/entitlements.service';
+import { PlanLimitError } from '../billing/plan-limit.error';
 import { DevicesService } from './devices.service';
 
 @ApiTags('devices')
@@ -34,7 +34,7 @@ export class DevicesController {
     try {
       return await this.devices.createInstallCode(auth);
     } catch (error) {
-      if (error instanceof PlanLimitError) throw error.toHttp();
+      if (error instanceof PlanLimitError) throw error;
       throw error;
     }
   }

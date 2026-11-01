@@ -11,7 +11,7 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { matchApprovalRule, type VerifiedFacts } from './host-approval';
-import { EntitlementsService } from '../entitlements/entitlements.service';
+import { EntitlementsService } from '../billing/entitlements.service';
 import { TpmAttestationService } from './tpm/tpm-attestation.service';
 import { normalizeInstallCode } from './install-code.util';
 import { InstallCodesService } from './install-codes.service';

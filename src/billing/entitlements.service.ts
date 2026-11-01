@@ -117,6 +117,21 @@ export class EntitlementsService {
     });
   }
 
+  /**
+   * `withinLimit` for a caller already inside a tenant-DB transaction: takes the same lock, then
+   * counts what exists and checks it. Call it right before the insert, in that transaction.
+   */
+  async assertWithinLocked(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    limit: LimitName,
+    count: () => Promise<number>,
+  ): Promise<void> {
+    const entitlement = await this.get(tenantId);
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`plan-limit:${limit}`}))`;
+    this.check(entitlement, limit, await count());
+  }
+
   private check(e: Entitlement, limit: LimitName, current: number): void {
     const max = e.status === 'read_only' ? 0 : e.limits[limit];
     if (max === null || current < max) return;

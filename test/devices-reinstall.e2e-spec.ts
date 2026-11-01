@@ -8,10 +8,8 @@ import type { CertificateAuthorityService } from '../src/agents/certificate-auth
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
-import {
-  EntitlementsService,
-  PlanLimitError,
-} from '../src/entitlements/entitlements.service';
+import { PlanLimitError } from '../src/billing/plan-limit.error';
+import { freeEntitlements } from './support/free-entitlements';
 import { generateInstallCode } from '../src/hosts/install-code.util';
 import { InstallCodesService } from '../src/hosts/install-codes.service';
 import { HostsAdminService } from '../src/hosts/hosts-admin.service';
@@ -51,7 +49,6 @@ describe('Add device re-install (e2e)', () => {
   const provisioned: { tenantId: string; databaseName: string }[] = [];
 
   beforeAll(async () => {
-    process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS = 'true';
     control = new ControlPrismaService(fakeConfigService());
     await control.$connect();
     manager = new TenantDatabaseManager(
@@ -61,7 +58,7 @@ describe('Add device re-install (e2e)', () => {
     );
     keys = new InstallKeysService(audit);
     codes = new InstallCodesService(control);
-    const ent = new EntitlementsService();
+    const ent = freeEntitlements();
     hosts = new HostsService(
       control,
       manager,
@@ -76,7 +73,6 @@ describe('Add device re-install (e2e)', () => {
   }, 60_000);
 
   afterAll(async () => {
-    delete process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS;
     await manager.onModuleDestroy();
     for (const { tenantId, databaseName } of provisioned) {
       const pg = new PgClient({

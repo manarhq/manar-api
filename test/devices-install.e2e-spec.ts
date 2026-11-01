@@ -9,10 +9,8 @@ import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { DevicesService } from '../src/devices/devices.service';
-import {
-  EntitlementsService,
-  PlanLimitError,
-} from '../src/entitlements/entitlements.service';
+import { PlanLimitError } from '../src/billing/plan-limit.error';
+import { freeEntitlements } from './support/free-entitlements';
 import { HostsAdminService } from '../src/hosts/hosts-admin.service';
 import { InstallCodesService } from '../src/hosts/install-codes.service';
 import {
@@ -39,7 +37,6 @@ describe('Add device (e2e)', () => {
   const provisioned: { tenantId: string; databaseName: string }[] = [];
 
   beforeAll(async () => {
-    process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS = 'true';
     control = new ControlPrismaService(fakeConfigService());
     await control.$connect();
     manager = new TenantDatabaseManager(
@@ -53,13 +50,12 @@ describe('Add device (e2e)', () => {
       manager,
       keys,
       codes,
-      new EntitlementsService(),
+      freeEntitlements(),
       fakeConfigService(),
     );
   }, 60_000);
 
   afterAll(async () => {
-    delete process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS;
     await manager.onModuleDestroy();
     for (const { tenantId, databaseName } of provisioned) {
       const pg = new PgClient({
@@ -212,13 +208,13 @@ describe('Add device (e2e)', () => {
       });
     for (let i = 0; i < 3; i++) await make(i, 'PENDING');
     const rejected = await make(9, 'REJECTED');
-    const admin = new HostsAdminService(audit, ca, new EntitlementsService());
+    const admin = new HostsAdminService(audit, ca, freeEntitlements());
     const actor = { type: 'human' as const, id: 'u' };
     const err = await admin
       .decide(t.client, t.id, actor, rejected.id, 'approve')
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PlanLimitError);
-    expect((err as PlanLimitError).toHttp().getResponse()).toMatchObject({
+    expect((err as PlanLimitError).getResponse()).toMatchObject({
       code: 'plan_limit_reached',
       limit: 'devices',
     });

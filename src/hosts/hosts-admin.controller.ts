@@ -19,7 +19,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { PlanLimitError } from '../entitlements/entitlements.service';
+import { PlanLimitError } from '../billing/plan-limit.error';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import type { AuditActor } from '../audit/audit-event-types';
 import { CurrentAuth } from '../auth/auth-context';
@@ -75,7 +75,7 @@ function shown(key: InstallKey): Omit<InstallKey, 'keyHash'> {
 
 /** Maps the hosts domain errors onto HTTP. */
 function http(error: unknown): never {
-  if (error instanceof PlanLimitError) throw error.toHttp();
+  if (error instanceof PlanLimitError) throw error;
   if (
     error instanceof HostNotFoundError ||
     error instanceof HostGroupNotFoundError

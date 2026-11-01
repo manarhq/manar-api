@@ -5,10 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
-import {
-  EntitlementsService,
-  PlanLimitError,
-} from '../src/entitlements/entitlements.service';
+import { PlanLimitError } from '../src/billing/plan-limit.error';
+import { freeEntitlements } from './support/free-entitlements';
 import { fakeConfigService } from './support/audit-test-config';
 
 /** The device cap is enforced under a lock: N+1 parallel adds let exactly N through. */
@@ -19,7 +17,6 @@ describe('plan limit under concurrency (e2e)', () => {
   let databaseName = '';
 
   beforeAll(async () => {
-    process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS = 'true';
     control = new ControlPrismaService(fakeConfigService());
     await control.$connect();
     manager = new TenantDatabaseManager(
@@ -36,7 +33,6 @@ describe('plan limit under concurrency (e2e)', () => {
   }, 120_000);
 
   afterAll(async () => {
-    delete process.env.MANAR_STUB_ENFORCE_PLAN_LIMITS;
     await manager.onModuleDestroy();
     const pg = new PgClient({
       connectionString: process.env.CONTROL_DATABASE_URL,
@@ -53,7 +49,7 @@ describe('plan limit under concurrency (e2e)', () => {
   it('exactly 3 of 4 parallel adds succeed on the free plan', async () => {
     const client = await manager.getClient(tenantId);
     const group = await client.hostGroup.create({ data: { name: 'Dev' } });
-    const entitlements = new EntitlementsService();
+    const entitlements = freeEntitlements();
     const results = await Promise.allSettled(
       Array.from({ length: 4 }, (_, i) =>
         entitlements.withinLimit(
