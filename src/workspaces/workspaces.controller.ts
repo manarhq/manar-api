@@ -14,6 +14,8 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { ModuleRef } from '@nestjs/core';
+import { MembersService } from '../growth/members.service';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { CurrentAuth, type AuthContext } from '../auth/auth-context';
 import { CurrentIdentity, IdentityGuard } from '../auth/identity.guard';
@@ -51,7 +53,10 @@ import { WorkspacesService } from './workspaces.service';
 @Controller('workspaces')
 @UseGuards(IdentityGuard)
 export class WorkspacesController {
-  constructor(private readonly workspaces: WorkspacesService) {}
+  constructor(
+    private readonly workspaces: WorkspacesService,
+    private readonly moduleRef: ModuleRef,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: "The caller's workspaces (switcher, setup state)" })
@@ -70,7 +75,17 @@ export class WorkspacesController {
       'QUEUED means capacity was low: the workspace is set up in the background.',
   })
   @ApiResponse({ status: 200, type: CreateWorkspaceResponseDto })
-  bootstrap(@CurrentIdentity() id: VerifiedIdentity) {
+  async bootstrap(@CurrentIdentity() id: VerifiedIdentity) {
+    // Growth: a Microsoft sign-in from a company's Entra tenant joins it when its admin turned
+    // auto-join on. Never blocks or fails the sign-in.
+    try {
+      await this.moduleRef
+        .get(MembersService, { strict: false })
+        .autoJoin(id)
+        .catch(() => undefined);
+    } catch {
+      // growth module not loaded in this app
+    }
     return this.workspaces.ensurePersonal(id);
   }
 
