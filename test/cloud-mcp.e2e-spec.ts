@@ -54,6 +54,7 @@ import {
   exchangeCode,
 } from './support/oidc-browser';
 import type { Login } from './support/oidc-browser';
+import { onCompanyPlan } from './support/free-entitlements';
 
 /**
  * docs/cloud-agents.md end to end against a real Keycloak. Every agent token
@@ -246,6 +247,9 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
       slug: shortSlug('b'),
       name: 'Cloud MCP e2e B',
     });
+    // Several cloud agents per tenant: more than Free's one.
+    await onCompanyPlan(control, tenantA.id);
+    await onCompanyPlan(control, tenantB.id);
     realm = tenantA.keycloakRealm!;
     issuer = tenantA.keycloakIssuerUrl!;
 

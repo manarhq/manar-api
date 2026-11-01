@@ -20,6 +20,7 @@ import {
   deleteRealm,
   getUserToken,
 } from './support/keycloak-test-helpers';
+import { onCompanyPlan } from './support/free-entitlements';
 
 /**
  * Phase 11b Part 1 — the mandatory "Testing" scenarios for the new list/
@@ -99,6 +100,7 @@ describe('List/search endpoints (e2e)', () => {
       slug: uniqueSlug(slugLabel),
       name: `List Endpoints Test Tenant ${slugLabel}`,
     });
+    await onCompanyPlan(control, provisioned.id);
     if (!provisioned.keycloakRealm) {
       throw new Error('Expected provisioned tenant to have a Keycloak realm');
     }
@@ -626,33 +628,20 @@ describe('List/search endpoints (e2e)', () => {
         .expect(404);
     });
 
-    it('the client-secret endpoint refuses a request with no X-Manar-Bff-Token header', async () => {
-      await request(humanApp.getHttpServer() as App)
-        .get(`/tenants/${tenantA.slug}/oidc-client-secret`)
-        .expect(401);
-    });
-
-    it('the client-secret endpoint refuses a request with the wrong token', async () => {
-      await request(humanApp.getHttpServer() as App)
-        .get(`/tenants/${tenantA.slug}/oidc-client-secret`)
-        .set('X-Manar-Bff-Token', 'not-the-real-token')
-        .expect(401);
-    });
-
-    it('the client-secret endpoint returns the real secret to a caller presenting the correct service token', async () => {
-      const expectedSecret = await control.secretReference.findFirstOrThrow({
-        where: { tenantId: tenantA.id, kind: 'KEYCLOAK_CLIENT_SECRET' },
-      });
-      const realToken =
+    // The client-secret endpoint and its BFF token were retired with the shared realm (spec 4.1):
+    // manar-web holds its own client secret, so nothing hands one out, even to the old token.
+    it('the retired client-secret endpoint is gone, even for the old BFF service token', async () => {
+      const oldToken =
         process.env.MANAR_BFF_SERVICE_TOKEN ??
         'dev-only-manar-bff-service-token-change-me';
-
-      const res = await request(humanApp.getHttpServer() as App)
-        .get(`/tenants/${tenantA.slug}/oidc-client-secret`)
-        .set('X-Manar-Bff-Token', realToken)
-        .expect(200);
-      const body = res.body as { clientSecret: string };
-      expect(body.clientSecret).toBe(expectedSecret.reference);
+      for (const token of [undefined, 'not-the-real-token', oldToken]) {
+        const req = request(humanApp.getHttpServer()).get(
+          `/tenants/${tenantA.slug}/oidc-client-secret`,
+        );
+        if (token) void req.set('X-Manar-Bff-Token', token);
+        const res = await req.expect(404);
+        expect(JSON.stringify(res.body)).not.toContain('clientSecret');
+      }
     });
   });
 });

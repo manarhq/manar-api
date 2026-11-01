@@ -33,6 +33,7 @@ import {
 import { HttpFixtureServer } from './support/http-fixture-server';
 import { ensureManarConnector } from '../src/cli/commands/manar-connector-register.command';
 import { AUDIT_EVENT_TYPES } from '../src/audit/audit-event-types';
+import { onCompanyPlan } from './support/free-entitlements';
 
 /**
  * Kill Switches (all five scopes) — every mandatory scenario from the
@@ -138,6 +139,7 @@ describe('Kill Switches (e2e)', () => {
       slug: shortSlug(slugLabel),
       name: `Kill Switch Test Tenant ${slugLabel}`,
     });
+    await onCompanyPlan(control, provisioned.id);
     if (!provisioned.keycloakRealm) {
       throw new Error('Expected provisioned tenant to have a Keycloak realm');
     }
