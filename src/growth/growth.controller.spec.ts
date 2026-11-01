@@ -1,6 +1,10 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
-import { GrowthIdentityController } from './growth.controller';
+import {
+  GrowthIdentityController,
+  GrowthPublicController,
+} from './growth.controller';
+import { signToken } from './signed-token';
 
 function make() {
   const request = vi.fn(() => Promise.resolve({ scheduled: true }));
@@ -35,5 +39,34 @@ describe('account deletion needs a fresh sign-in', () => {
     const { c, request } = make();
     await c.requestDeletion(id(Date.now() / 1000 - 60));
     expect(request).toHaveBeenCalledWith('i', 'u', 'me@acme.io');
+  });
+});
+
+describe('unsubscribe', () => {
+  const make = () => {
+    const unsubscribe = vi.fn(() => Promise.resolve(true));
+    const c = new GrowthPublicController(
+      {} as never,
+      {} as never,
+      { unsubscribe } as never,
+      { get: () => 's'.repeat(32) } as never,
+    );
+    return { c, unsubscribe };
+  };
+  it('a GET (scanner, preview) changes nothing and shows a POST button', () => {
+    const { c, unsubscribe } = make();
+    const html = c.unsubscribeGet('abc.def');
+    expect(html).toContain('<form method="post"');
+    expect(unsubscribe).not.toHaveBeenCalled();
+  });
+  it('the POST with a valid token unsubscribes; a forged one does not', async () => {
+    const { c, unsubscribe } = make();
+    await c.unsubscribePost(
+      signToken('s'.repeat(32), 'unsubscribe', 'm1', null),
+    );
+    expect(unsubscribe).toHaveBeenCalledWith('m1');
+    await expect(c.unsubscribePost('forged.token')).rejects.toThrow(
+      'invalid_link',
+    );
   });
 });

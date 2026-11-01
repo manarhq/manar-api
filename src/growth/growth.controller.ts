@@ -122,24 +122,44 @@ export class GrowthPublicController {
     return this.profiles.publicStats(slug);
   }
 
-  /** One click, no sign-in. GET so a mail link works; POST for RFC 8058 one-click clients. */
+  /**
+   * The link in the email. A GET only shows a confirm page (mail scanners and link previews fetch
+   * GETs); the button POSTs. RFC 8058 mail clients POST straight to the same URL, one click.
+   */
   @Get('unsubscribe/:token')
   @Throttle({ human: { limit: 30, ttl: 60_000 } })
   @Header('Content-Type', 'text/html; charset=utf-8')
   @Header('Cache-Control', 'no-store')
+  @Header('X-Robots-Tag', 'noindex')
+  @Header(
+    'Content-Security-Policy',
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+  )
   @ApiExcludeEndpoint()
-  async unsubscribeGet(@Param('token') token: string) {
-    await this.doUnsubscribe(token);
-    return '<!doctype html><meta charset="utf-8"><title>Manar</title><body style="font-family:sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem"><p>You will not get the weekly email any more. / لن تصلك الرسالة الأسبوعية بعد الآن.</p></body>';
+  unsubscribeGet(@Param('token') token: string) {
+    // Only a well-formed token gets the button; the signature is checked when it is pressed.
+    if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token))
+      throw new BadRequestException('invalid_link');
+    return page(
+      `<form method="post" action="/public/unsubscribe/${token}"><p>Stop the weekly "Your AI week" email?<br>هل تريد إيقاف رسالة «أسبوعك مع الذكاء الاصطناعي» الأسبوعية؟</p><button type="submit">Unsubscribe / إيقاف</button></form>`,
+    );
   }
 
   @Post('unsubscribe/:token')
   @HttpCode(200)
   @Throttle({ human: { limit: 30, ttl: 60_000 } })
+  @Header('Content-Type', 'text/html; charset=utf-8')
+  @Header('Cache-Control', 'no-store')
+  @Header(
+    'Content-Security-Policy',
+    "default-src 'none'; style-src 'unsafe-inline'",
+  )
   @ApiExcludeEndpoint()
   async unsubscribePost(@Param('token') token: string) {
     await this.doUnsubscribe(token);
-    return { unsubscribed: true };
+    return page(
+      '<p>You will not get the weekly email any more. / لن تصلك الرسالة الأسبوعية بعد الآن.</p>',
+    );
   }
 
   private async doUnsubscribe(token: string) {
@@ -373,3 +393,6 @@ export class GrowthIdentityController {
     return this.account.cancel(id.issuer, id.subject);
   }
 }
+
+const page = (body: string) =>
+  `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Manar</title><body style="font-family:sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">${body}</body>`;
