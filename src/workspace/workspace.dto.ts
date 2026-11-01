@@ -19,6 +19,13 @@ export class ReportCardDto {
   @ApiProperty() blocked!: number;
   @ApiProperty() secretsKeptSafe!: number;
   @ApiProperty({ type: [Number] }) series!: number[];
+  @ApiProperty({
+    required: false,
+    type: Object,
+    description:
+      'Present when the link shares one agent session: tool, duration, counts and steps with programs, extensions and hosts only.',
+  })
+  session?: object;
 }
 
 export class ReportShareCreatedDto {

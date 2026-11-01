@@ -70,6 +70,11 @@ export class HostAuthorizeService {
     host: HostContext,
     request: HostAuthorizeRequest,
   ): Promise<HostAuthorizeDecision> {
+    // The device appends the tool's session id to the caller ("uid:1000|s:<id>"); it only groups
+    // events into sessions and decides nothing.
+    const m = /^(.*)\|s:([A-Za-z0-9._:-]{1,64})$/.exec(request.caller ?? '');
+    const caller = m ? m[1]! : (request.caller ?? null);
+    const sessionId = m ? m[2]! : null;
     let result: HostAuthorizeDecision;
     let client;
     try {
@@ -126,7 +131,8 @@ export class HostAuthorizeService {
         reason: result.reason ?? null,
         riskScore: result.riskScore ?? null,
         approvalId: result.approvalId ?? null,
-        caller: request.caller ?? null,
+        caller,
+        sessionId,
       },
     });
     if (!recorded && result.decision === 'ALLOW') {

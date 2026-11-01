@@ -8,6 +8,8 @@ import { SampleService } from './sample.service';
 import { WorkspacesModule } from '../workspaces/workspaces.module';
 import { StartModeController } from './start-mode.controller';
 import { StartModeService } from './start-mode.service';
+import { SessionsController } from '../sessions/sessions.controller';
+import { SessionsService } from '../sessions/sessions.service';
 
 /** Features track: start mode, sample workspace and the weekly report card. HTTP app only. */
 @Module({
@@ -17,12 +19,14 @@ import { StartModeService } from './start-mode.service';
     ReportCardController,
     PublicReportController,
     SampleController,
+    SessionsController,
   ],
   providers: [
     StartModeService,
     ReportCardService,
     ReportShareService,
     SampleService,
+    SessionsService,
   ],
 })
 export class WorkspaceModule {}

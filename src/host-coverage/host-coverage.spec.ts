@@ -395,6 +395,24 @@ describe('HostAuthorizeService', () => {
     );
     expect(audit.recordSafely).toHaveBeenCalledTimes(3);
   });
+  it('records the tool session id from the caller suffix, apart from the caller', async () => {
+    const { svc, audit } = make();
+    await svc.authorize(hostA, { ...req('read'), caller: 'uid:1000|s:abc-1' });
+    await svc.authorize(hostA, { ...req('read'), caller: 'uid:1000|s:bad id' });
+    const data = (i: number) =>
+      (
+        audit.recordSafely.mock.calls[i] as unknown as [
+          unknown,
+          unknown,
+          { data: object },
+        ]
+      )[2].data;
+    expect(data(0)).toMatchObject({ caller: 'uid:1000', sessionId: 'abc-1' });
+    expect(data(1)).toMatchObject({
+      caller: 'uid:1000|s:bad id',
+      sessionId: null,
+    });
+  });
   it('obeys a matched rule over the risk fallback (a watch preset allows everything)', async () => {
     const { svc } = make({ policy: { effect: 'ALLOW', matchedRule: {} } });
     expect((await svc.authorize(hostA, req('shell'))).decision).toBe('ALLOW');
