@@ -2,6 +2,7 @@ import type {
   PolicyContent,
   PolicyRule,
 } from '../policy/policy-content.schema';
+import { GIT_UNSAFE_KINDS, type GitUnsafeKind } from '../policy/git-safety';
 import { computeContentHash } from '../policy/policy-content-codec';
 
 export const START_MODES = ['watch', 'ask', 'strict'] as const;
@@ -40,13 +41,18 @@ const deletes = (effect: Effect): PolicyRule[] =>
     'Remove-Item*',
   ].map((p) => rule(`Deleting files (${p.trim()})`, effect, p));
 
-const forcePush = (effect: Effect): PolicyRule[] =>
-  [
-    'git push --force*',
-    'git push -f*',
-    'git push --delete*',
-    'git push -d*',
-  ].map((p) => rule(`Force pushes (${p})`, effect, p));
+/** Git safety: the `git-unsafe:*` aliases come from `policy/git-safety.ts` (shell-word aware). */
+const GIT_RULE_NAMES: Record<GitUnsafeKind, string> = {
+  'force-push': 'Git force pushes wait for you',
+  'push-default-branch': 'Git pushes to main or master wait for you',
+  'history-rewrite': 'Git history rewrites wait for you',
+  'branch-delete': 'Git branch deletes wait for you',
+  ambiguous: 'Git commands that may hide a risky push wait for you',
+};
+const gitSafety = (effect: Effect): PolicyRule[] =>
+  GIT_UNSAFE_KINDS.map((k) =>
+    rule(GIT_RULE_NAMES[k], effect, `git-unsafe:${k}`),
+  );
 
 /** curl|sh-style downloads: any download command starts with one of these. */
 const downloads = (effect: Effect): PolicyRule[] =>
@@ -78,7 +84,7 @@ export const START_MODE_PRESETS: Record<StartMode, PolicyContent> = {
         'unsafe-command:*',
       ),
       ...deletes('APPROVAL_REQUIRED'),
-      ...forcePush('APPROVAL_REQUIRED'),
+      ...gitSafety('APPROVAL_REQUIRED'),
       ...downloads('APPROVAL_REQUIRED'),
       ALLOW_REST,
     ],
@@ -97,7 +103,7 @@ export const START_MODE_PRESETS: Record<StartMode, PolicyContent> = {
         'unsafe-command:*',
       ),
       ...deletes('APPROVAL_REQUIRED'),
-      ...forcePush('APPROVAL_REQUIRED'),
+      ...gitSafety('APPROVAL_REQUIRED'),
       ...downloads('APPROVAL_REQUIRED'),
       // Outside the project: the server does not see the project folder yet, so this is the
       // set of places a project is not: parent folders, system folders, dotfolders in home.

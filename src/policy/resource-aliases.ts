@@ -1,3 +1,5 @@
+import { gitAliasesFor } from './git-allowlist';
+import { gitAliases, gitDataStart, isGitWord } from './git-safety';
 import {
   HOST_CLAUDE_CODE_ACTIONS,
   HOST_CLAUDE_CODE_TOOL,
@@ -141,8 +143,14 @@ function pathAliases(raw: string, into: Set<string>): void {
  * a plain `~/` or `~` at the start of a word. This list is closed: when a new bypass shows up,
  * extend the fail-closed condition, never the parser.
  */
-export function shellWords(cmd: string): { words: string[]; expands: boolean } {
+export function shellWords(cmd: string): {
+  words: string[];
+  expands: boolean;
+  /** `words` split at unquoted `; | &` (command boundaries). */
+  segments: string[][];
+} {
   const words: string[] = [];
+  const breaks: number[] = [];
   let cur = '';
   let has = false;
   // eslint-disable-next-line no-control-regex
@@ -188,7 +196,23 @@ export function shellWords(cmd: string): { words: string[]; expands: boolean } {
       }
     } else if (/\s|[;|&<>]/.test(c)) {
       end();
+      if (';|&'.includes(c)) breaks.push(words.length);
     } else {
+      if (c === '{') {
+        // `{u}` (as in `@{u}`) is literal: bash expands braces only with a comma or `..`.
+        const j = cmd.indexOf('}', i + 1);
+        const inner = j > i ? cmd.slice(i + 1, j) : '';
+        if (
+          j > i &&
+          /^[A-Za-z0-9_@^~.:/+-]*$/.test(inner) &&
+          !inner.includes('..')
+        ) {
+          has = true;
+          cur += cmd.slice(i, j + 1);
+          i = j;
+          continue;
+        }
+      }
       if ('*?[]{}()$`'.includes(c)) expands = true;
       if (c === '~') {
         const next = cmd[i + 1];
@@ -203,25 +227,118 @@ export function shellWords(cmd: string): { words: string[]; expands: boolean } {
     }
   }
   end();
-  return { words, expands };
+  const segments: string[][] = [];
+  let from = 0;
+  for (const b of [...breaks, words.length]) {
+    if (b > from) segments.push(words.slice(from, b));
+    from = Math.max(from, b);
+  }
+  return { words, expands, segments };
 }
 
+const SHELLISH =
+  /^(?:.*[\\/])?(?:sh|bash|zsh|dash|ksh|csh|tcsh|fish|pwsh|powershell|cmd|eval|env|xargs|su|sudo|doas|nohup|timeout|busybox)(?:\.exe)?$/i;
+const WINSHELL = /^(?:.*[\\/])?(?:powershell|pwsh|cmd)(?:\.exe)?$/i;
+/** Programs that put words of their own, or of stdin, after the command they run. */
+const FANOUT = /^(?:.*\/)?(?:xargs|parallel|find|fd|watch|entr)$/i;
+const ENCODED = (w: string) =>
+  /^[-/][a-z]+$/i.test(w) &&
+  'encodedcommand'.startsWith(w.slice(1).toLowerCase());
+/** Ways a Windows shell can build a command name or argument out of pieces. */
+const OBFUSCATED =
+  /[`^+$%]|\biex\b|invoke-expression|\[char\]|-join|frombase64/i;
+const AMBIGUOUS = 'git-unsafe:ambiguous';
+
+/**
+ * Also looks inside words that are themselves commands (`sh -c "git push -f"`), up to depth 3.
+ * A segment that runs a shell or wrapper has every multi-word argument parsed again, whether or
+ * not the text says `git`, because quoting can hide it (`g""it`); so does any multi-word word that
+ * mentions git. Fail closed: a nested string that expands (`$1`, `$X`, `$(..)`, backticks) and
+ * could be or build a git command is ambiguous, as is git run by xargs, parallel, find -exec,
+ * and anything encoded or built piecewise in PowerShell or cmd. The arguments of git commands
+ * that take text (commit, tag, log, ...) are data and are not parsed.
+ */
+function gitAliasesDeep(segments: string[][], depth: number): string[] {
+  const out = new Set(gitAliases(segments));
+  for (const seg of segments) {
+    if (seg.some(isGitWord) && seg.some((w) => FANOUT.test(w)))
+      out.add(AMBIGUOUS);
+    const win = seg.some((w) => WINSHELL.test(w));
+    if (win && seg.some((w) => ENCODED(w) || /[`^]/.test(w)))
+      out.add(AMBIGUOUS);
+    const shell = win || seg.some((w) => SHELLISH.test(w));
+    const dataFrom = gitDataStart(seg);
+    seg.forEach((w, i) => {
+      if (i >= dataFrom || !/\s/.test(w) || !(shell || /git/i.test(w))) return;
+      if (win && OBFUSCATED.test(w)) out.add(AMBIGUOUS);
+      // `env -S'git push -f'` and `--split-string=...` arrive attached to their option.
+      const inner = w.replace(/^(?:--split-string=|-[A-Za-z]*S)/, '');
+      const parsed = shellWords(inner);
+      if (depth >= 3) {
+        if (/git/i.test(inner)) out.add(AMBIGUOUS);
+        return;
+      }
+      for (const a of gitAliasesDeep(parsed.segments, depth + 1)) out.add(a);
+      if (parsed.expands) {
+        const buildsCommand =
+          /git/i.test(inner) ||
+          /\$\(|`/.test(inner) ||
+          parsed.segments.some(
+            (s) => s.some(isGitWord) || /[$`]/.test(s[0] ?? ''),
+          );
+        if (buildsCommand) out.add(AMBIGUOUS);
+      }
+    });
+  }
+  return [...out];
+}
+
+const memo = new Map<string, string[]>();
+
+/** Aliases are computed once per request: the engine asks for them again for every rule. */
 export function resourceAliases(
   resource: string,
   kind: ResourceKind = 'path',
 ): string[] {
+  const key = kind + '\0' + resource;
+  const hit = memo.get(key);
+  if (hit) return hit;
+  if (memo.size >= 512) memo.clear();
+  const out = computeAliases(resource, kind);
+  memo.set(key, out);
+  return out;
+}
+
+function computeAliases(resource: string, kind: ResourceKind): string[] {
   const out = new Set<string>();
   if (kind === 'path') {
     pathAliases(resource, out);
   } else if (kind === 'command') {
-    const { words, expands } = shellWords(resource);
+    const { words, expands, segments } = shellWords(resource);
+    // Raw whitespace tokens too: Windows paths keep their backslashes (`C:\\Git\\git.exe`).
+    const rawTokens = resource
+      .split(/\s+/)
+      .map((w) => w.replace(/^["'`;|&<>(]+|["'`;|&<>)]+$/g, ''))
+      .filter(Boolean);
+    for (const a of gitAliasesFor(resource, shellWords, () =>
+      gitAliasesDeep(
+        resource.includes('\\') ? [...segments, rawTokens] : segments,
+        0,
+      ),
+    ))
+      out.add(a);
     // Windows shells keep their backslashes, so the raw whitespace-split tokens are checked too.
     const raw = resource
       .split(/\s+/)
       .map((w) => w.replace(/^["'`;|&<>(]+|["'`;|&<>)]+$/g, ''))
       .filter(Boolean);
     const winOdd = raw.some((w) => w.includes('\\') && !/^[a-z]:\\/i.test(w));
-    if (expands || winOdd || resource.includes('%')) {
+    // %VAR% is cmd expansion; git format strings (`--format=%H`, `%an`) are not.
+    const noFormats = resource.replace(
+      /--(?:pretty|format|date)(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/g,
+      '',
+    );
+    if (expands || winOdd || /%[^%\s]+%|%[0-9*~]/.test(noFormats)) {
       out.add('unsafe-command:expansion');
     }
     for (const w of [...words, ...raw]) {

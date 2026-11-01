@@ -161,3 +161,174 @@ describe('resourceAliases', () => {
     expect(resourceAliases('https://example.com/.env', 'other')).toEqual([]);
   });
 });
+
+describe('git safety aliases', () => {
+  const git = (c: string) =>
+    resourceAliases(c, 'command').filter((a) => a.startsWith('git-unsafe:'));
+  const cases: Array<[string, string]> = [
+    ['git push --force origin feat', 'force-push'],
+    ['git push -f', 'force-push'],
+    ['git push -uf origin feat', 'force-push'],
+    ['git push --force-with-lease origin feat', 'force-push'],
+    ['git push origin +feat', 'force-push'],
+    ['git push origin +HEAD:feat', 'force-push'],
+    ['git push origin main', 'push-default-branch'],
+    ['git push origin HEAD:refs/heads/master', 'push-default-branch'],
+    ['git push --all', 'push-default-branch'],
+    ['git push origin :feat', 'branch-delete'],
+    ['git push origin --delete feat', 'branch-delete'],
+    ['git push -d origin feat', 'branch-delete'],
+    ['git branch -D feat', 'branch-delete'],
+    ['git branch --delete --force feat', 'branch-delete'],
+    ['git reset --hard origin/main', 'history-rewrite'],
+    ['git rebase -i HEAD~3', 'history-rewrite'],
+    ['git filter-branch --tree-filter x', 'history-rewrite'],
+    ['git filter-repo --path x', 'history-rewrite'],
+    ['git-filter-repo --path x', 'history-rewrite'],
+    ['git -C /repo push -f', 'force-push'],
+    ['git -c user.name=x --no-pager push -f', 'force-push'],
+    ['git -c core.x=1 push origin feat', 'ambiguous'],
+    ['GIT_TERMINAL_PROMPT=0 git push -f', 'force-push'],
+    ['env FOO=1 /usr/bin/git push -f', 'force-push'],
+    ['cd x && git push -f', 'force-push'],
+    ['sh -c "git push -f"', 'force-push'],
+    ["bash -lc 'cd r; git push origin main'", 'push-default-branch'],
+    ['git push', 'push-default-branch'],
+    ['git push origin', 'push-default-branch'],
+    ['git push --forc origin x', 'force-push'],
+    ['git push --force-with origin x', 'force-push'],
+    ['git push --mir', 'force-push'],
+    ['git push --del origin x', 'branch-delete'],
+    ['git push --al', 'push-default-branch'],
+    ['git push -u2f origin x', 'force-push'],
+    ['git push -fu origin x', 'force-push'],
+    ['git push -x origin feat', 'ambiguous'],
+    ['git push --weird origin feat', 'ambiguous'],
+    ['git reset --ha HEAD~1', 'history-rewrite'],
+    ['git reset --bogus', 'ambiguous'],
+    ['git branch --del --for x', 'branch-delete'],
+    ['git branch -Dq x', 'branch-delete'],
+    ['git rebase --inter main', 'history-rewrite'],
+    ['git -c push.default=matching push origin feat', 'ambiguous'],
+    ['git -c include.path=/x push origin feat', 'ambiguous'],
+    ['git -calias.x=push x', 'ambiguous'],
+    ['git --config-env=alias.p=E p', 'ambiguous'],
+    ['GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p git p', 'ambiguous'],
+    ['GIT_CONFIG_PARAMETERS="alias.p=push -f" git p', 'ambiguous'],
+    ['git push origin refs/heads/main', 'push-default-branch'],
+    ['git push origin heads/main', 'push-default-branch'],
+    ['git push origin refs/heads/heads/main', 'push-default-branch'],
+    ['git push origin +refs/heads/MAIN', 'push-default-branch'],
+    ['git push origin HEAD', 'push-default-branch'],
+    ['git push origin HEAD:refs/heads/main', 'push-default-branch'],
+    ['git push origin refs/heads/*:refs/heads/*', 'push-default-branch'],
+    ['git push origin feat:main', 'push-default-branch'],
+    ['git push --branches', 'push-default-branch'],
+    ['git push --mirror', 'push-default-branch'],
+    ['git-push --force', 'force-push'],
+    ['git-branch -D x', 'branch-delete'],
+    ['git-reset --hard', 'history-rewrite'],
+    ['git-filter-branch x', 'history-rewrite'],
+    ['/usr/bin/git-push -f', 'force-push'],
+    ['GIT.EXE push -f', 'force-push'],
+    ['"C:\\Program Files\\Git\\cmd\\git.exe" push -f', 'force-push'],
+    ['C:\\Git\\git-push.exe --force', 'force-push'],
+    ['command git push -f', 'force-push'],
+    ['exec git push -f', 'force-push'],
+    ['xargs git push -f', 'force-push'],
+    ["env -S 'git push -f'", 'force-push'],
+    ['sh -c \'g""it push -f\'', 'force-push'],
+    ['bash -c "sh -c \'git push -f\'"', 'force-push'],
+    ['git p', 'ambiguous'],
+    ['git push --recurse-submodules check origin main', 'push-default-branch'],
+    ['git-filter-repo.py --path x', 'history-rewrite'],
+    ['git-filter-repo.exe --path x', 'history-rewrite'],
+    [
+      'echo x | python -c \'print(1)\' ; printf "git push -f" | xargs -I{} {}',
+      'force-push',
+    ],
+    ['foo "git push -f"', 'force-push'],
+    ['git -c alias.p="push -f" p', 'ambiguous'],
+    ['git config alias.p "push -f"', 'ambiguous'],
+    ['git --weird push', 'ambiguous'],
+  ];
+  it.each(cases)('%s -> %s', (cmd, kind) => {
+    expect(git(cmd)).toContain(`git-unsafe:${kind}`);
+  });
+  it.each([
+    'git status',
+    'git push origin feat/x',
+    'git push -u origin feat/x',
+    'git -c user.name=x -c color.ui=never push origin feat',
+    'git branch feature',
+    'git log --oneline | head',
+    'echo push -f',
+    'git commit -m "push -f main"',
+  ])('%s is not flagged', (cmd) => {
+    expect(git(cmd)).toEqual([]);
+  });
+});
+
+describe('git safety: reviewer probes (nested shells, env -S, fan-out, Windows shells)', () => {
+  const kinds = (c: string) =>
+    resourceAliases(c, 'command').filter((a) => a.startsWith('git-unsafe:'));
+  it.each([
+    // H1: expansion inside a nested shell or eval
+    `sh -c 'git push origin feature "$1"' _ -f`,
+    `X=-f sh -c 'git push origin feature $X'`,
+    `bash -c 'git push $0 $1' origin +main`,
+    `eval 'X=main; git push origin feature:$X'`,
+    `pwsh -c '$x="-f"; git push origin feature $x'`,
+    `sh -c 'G=git; $G push -f'`,
+    `sh -c 'echo $(printf git) push -f'`,
+    // H2: env -S attached and long form
+    `env -S'git push -f'`,
+    `env --split-string='git push -f'`,
+    `env -iS'git push origin +main'`,
+    // H3: fan-out programs
+    `printf %s -f | xargs git push origin feature`,
+    `xargs -I{} git push origin {}`,
+    `parallel git push origin ::: feature`,
+    `find . -name x -exec git push origin feature {} +`,
+    // PowerShell and cmd
+    `powershell -EncodedCommand ZwBpAHQAIABwAHUAcwBoACAALQBmAA==`,
+    `pwsh -enc ZwBp`,
+    `pwsh -e ZwBp`,
+    `cmd /c g^it push -f`,
+    `pwsh -c "& ('g'+'it') push -f"`,
+    `powershell -Command "iex 'git push -f'"`,
+    `pwsh -c "g\`it push -f"`,
+    // history rewriting by other means
+    'git reflog expire --expire=now --all',
+    'git reflog delete HEAD@{1}',
+    'git gc --prune=now',
+    'git gc --pru=now',
+    'git prune',
+    'git branch -f main HEAD~3',
+    'git branch -M main',
+    'git branch -fC main other',
+    'git update-ref -d refs/heads/main',
+  ])('%s asks', (cmd) => {
+    expect(kinds(cmd).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'git commit -m "fix: stop git push -f from main"',
+    "git commit -m 'git reset --hard is scary'",
+    'git tag -a v1 -m "git push --force"',
+    'git log --grep="git push -f"',
+    'git --version',
+    'git --help',
+    'git log --format=%H',
+    'git log --pretty=format:"%h %an %s" -5',
+    'git log --format="%H%n%an"',
+    "sh -c 'git status'",
+    'git reflog',
+    'git reflog show',
+  ])('%s does not ask', (cmd) => {
+    expect(kinds(cmd)).toEqual([]);
+    expect(resourceAliases(cmd, 'command')).not.toContain(
+      'unsafe-command:expansion',
+    );
+  });
+});
