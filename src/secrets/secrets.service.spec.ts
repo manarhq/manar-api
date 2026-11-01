@@ -364,6 +364,12 @@ describe('file access requests (the watcher asks once per program)', () => {
     expect(r).toEqual({ id: 'a1', status: 'PENDING' });
     expect(client.secretVault.findUnique).not.toHaveBeenCalled();
   });
+  it('an AI tool asking to restore a key is a question without a vault lookup', () => {
+    expect(
+      AccessRequestSchema.safeParse(body({ kind: 'ssh-restore', ref: '*' }))
+        .success,
+    ).toBe(true);
+  });
   it('a vault secret still needs its entry', async () => {
     const client = {
       secretVault: { findUnique: vi.fn().mockResolvedValue(null) },

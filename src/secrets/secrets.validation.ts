@@ -68,7 +68,7 @@ export const VaultReportSchema = z
   .strict();
 
 /** `file`: a program was refused a secret file by the watcher; `ref` is the path class. */
-export const ACCESS_KINDS = [...VAULT_KINDS, 'file'] as const;
+export const ACCESS_KINDS = [...VAULT_KINDS, 'file', 'ssh-restore'] as const;
 
 export const BLOCK_MODES = ['off', 'keys', 'all'] as const;
 export type BlockMode = (typeof BLOCK_MODES)[number];

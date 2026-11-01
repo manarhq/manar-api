@@ -424,7 +424,7 @@ export class SecretsService {
     ref: string,
     program: { name: string; path: string; sha: string },
   ) {
-    if (kind !== 'file') {
+    if (kind !== 'file' && kind !== 'ssh-restore') {
       const vault = await client.secretVault.findUnique({
         where: { hostId_kind_ref: { hostId, kind, ref } },
       });
