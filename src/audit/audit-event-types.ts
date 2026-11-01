@@ -210,6 +210,11 @@ export const AUDIT_EVENT_TYPES = {
 
   /** The workspace changed how far secret blocking goes (off, keys, all). */
   SECRET_SETTINGS_CHANGED: 'secret.settings.changed',
+
+  /** Undo AI file changes: an admin asked a device to put a file back; the device reported the result. */
+  HOST_FILE_CHANGE_RESTORE_REQUESTED: 'host.file_change.restore_requested',
+  HOST_FILE_CHANGE_RESTORED: 'host.file_change.restored',
+  HOST_FILE_CHANGE_RESTORE_FAILED: 'host.file_change.restore_failed',
 } as const;
 
 export type AuditEventType =

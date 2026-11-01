@@ -52,7 +52,12 @@ export class HostConfigController {
       // The `features` track stores the workspace's mode (PUT /workspace/start-mode) and
       // replaces this default with a read of it.
       startMode: DEFAULT_START_MODE,
-      features: await this.secretFeatures(host),
+      // Secret blocking flags, plus `undo`: snapshot files an AI tool edits outside its project,
+      // restore on request.
+      features: [
+        ...(await this.secretFeatures(host)),
+        ...(process.env.HOST_UNDO_ENABLED === 'false' ? [] : ['undo']),
+      ],
       // "Pause all AI": while true the device denies every protected tool with reason `paused`.
       paused: await this.pause.isPaused(host.tenantId),
       // Tools whose owner turned protection off; the device restores their backups.
