@@ -253,8 +253,13 @@ A tenant with no realm of its own connects its cloud agents on the shared realm
   tenant of the path slug and of the binding, the exact audience, `azp` equal to the binding's
   client, and an ACTIVE Membership (owner, security admin, AI governance manager or developer)
   read on every call. Removing the membership revokes at once.
-- ChatGPT (dynamic client registration) is off (`MANAR_MCP_CHATGPT_ENABLED`) until its security
-  review. When on: the realm-wide Trusted Hosts policy lists only `MANAR_MCP_DCR_TRUSTED_HOSTS`, a
+- ChatGPT (dynamic client registration) is on unless `MANAR_MCP_CHATGPT_ENABLED=false`. Proved by
+  `test/cloud-mcp-shared-chatgpt.e2e-spec.ts` (needs manar-infra next to this repo: it imports
+  `platform/keycloak/realm-manar.yaml` into a throwaway realm): metadata, registration, code flow with
+  PKCE, MCP calls. ChatGPT registers a public client (`token_endpoint_auth_method: none`); a public
+  client has no registration time in Keycloak, so on the shared realm the unique agent scope
+  stands in for it. PKCE S256 is enforced when the admin confirms. The realm's anonymous
+  `max-clients` policy (200) also limits how many registrations can wait; disconnecting deletes them. When on: the realm-wide Trusted Hosts policy lists only `MANAR_MCP_DCR_TRUSTED_HOSTS`, a
   registered client is unusable until a tenant admin confirms it, and it is only proposed from a
   member's token when it carries exactly this agent's scope and no other agent's.
 - Plan cap: `cloudAgents` (Free 1, Pro 5). Agents over the cap after a downgrade are paused

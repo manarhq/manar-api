@@ -617,7 +617,11 @@ export class CloudAgentsService {
     }
     const pending: PendingClient = {
       clientId,
-      registeredAt: new Date(registeredAt(client)).toISOString(),
+      registeredAt: new Date(
+        Number.isFinite(registeredAt(client))
+          ? registeredAt(client)
+          : Date.now(),
+      ).toISOString(),
       redirectUris: client.redirectUris ?? [],
       grants: {
         authorizationCode: client.standardFlowEnabled !== false,
@@ -890,13 +894,17 @@ export class CloudAgentsService {
     return (
       tenantScoped &&
       client.enabled !== false &&
-      client.publicClient !== true &&
+      // A public client (token_endpoint_auth_method none, PKCE) is how ChatGPT registers; PKCE S256
+      // is enforced on confirmation, and nothing is served before that.
       client.clientId !==
         this.config.get('KEYCLOAK_CLIENT_ID', { infer: true }) &&
       !client.clientId.startsWith(PRE_REGISTERED_CLIENT_PREFIX) &&
       // Keycloak keeps seconds; a client registered in the same second as the connect counts.
-      Number.isFinite(at) &&
-      at >= Math.floor(connectedAt.getTime() / 1000) * 1000 &&
+      // A public client has no secret and so no registration time. On the shared realm that is
+      // fine: the agent's scope did not exist before the connect, so no older client carries it.
+      (Number.isFinite(at)
+        ? at >= Math.floor(connectedAt.getTime() / 1000) * 1000
+        : exclusiveScope !== null) &&
       (client.redirectUris?.length ?? 0) > 0 &&
       client.redirectUris!.every(onTrustedHost) &&
       client.standardFlowEnabled !== false &&
