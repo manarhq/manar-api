@@ -33,7 +33,7 @@ expiresAt }] }`. `tools` are the device's tools in `host.claude-code`, `host.cod
 
 ## Config
 
-`MANAR_JAIL_ENABLED` (default `true`), `MANAR_JAIL_WINDOWS` (default `false`). No secrets.
+`MANAR_JAIL_ENABLED` and `MANAR_JAIL_WINDOWS` (both default `true`; set `false` to switch off). No secrets.
 
 ## Audit
 

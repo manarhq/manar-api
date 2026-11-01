@@ -75,14 +75,14 @@ export function ruleLive(r: { expiresAt: Date | null }, now: Date): boolean {
   return r.expiresAt === null || r.expiresAt > now;
 }
 
-/** `MANAR_JAIL_ENABLED` (default on) and `MANAR_JAIL_WINDOWS` (default off). */
+/** `MANAR_JAIL_ENABLED` and `MANAR_JAIL_WINDOWS`: both on unless set to `false`. */
 export function jailFlags(env: NodeJS.ProcessEnv = process.env): {
   enabled: boolean;
   windows: boolean;
 } {
   return {
     enabled: env.MANAR_JAIL_ENABLED !== 'false',
-    windows: env.MANAR_JAIL_WINDOWS === 'true',
+    windows: env.MANAR_JAIL_WINDOWS !== 'false',
   };
 }
 

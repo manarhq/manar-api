@@ -198,10 +198,10 @@ describe('site names', () => {
     expect(ruleLive({ expiresAt: new Date(+now + 1000) }, now)).toBe(true);
     expect(ruleLive({ expiresAt: new Date(+now - 1000) }, now)).toBe(false);
   });
-  it('is on by default and Windows is off', () => {
-    expect(jailFlags({})).toEqual({ enabled: true, windows: false });
+  it('is on by default, Windows included', () => {
+    expect(jailFlags({})).toEqual({ enabled: true, windows: true });
     expect(jailFlags({ MANAR_JAIL_ENABLED: 'false' }).enabled).toBe(false);
-    expect(jailFlags({ MANAR_JAIL_WINDOWS: 'true' }).windows).toBe(true);
+    expect(jailFlags({ MANAR_JAIL_WINDOWS: 'false' }).windows).toBe(false);
   });
 });
 
@@ -504,7 +504,7 @@ describe('GET /host/v1/config jail key', () => {
     const c = await w.sites.config(HOST);
     expect(c).toMatchObject({
       enabled: true,
-      windows: false,
+      windows: true,
       tools: ['host.claude-code', 'host.codex-cli'],
     });
     expect(c.rules).toHaveLength(1);
@@ -525,12 +525,12 @@ describe('jail key by operating system', () => {
   });
   it('filters nothing on Windows while the Windows switch is off', async () => {
     osLabel.value = 'Windows 11 Pro';
+    process.env.MANAR_JAIL_WINDOWS = 'false';
     const c = await world().sites.config(HOST);
     expect(c).toMatchObject({ enabled: true, windows: false, tools: [] });
   });
-  it('filters only Claude Code on Windows when the switch is on', async () => {
+  it('filters only Claude Code on Windows by default', async () => {
     osLabel.value = 'Windows 11 Pro';
-    process.env.MANAR_JAIL_WINDOWS = 'true';
     const c = await world().sites.config(HOST);
     expect(c).toMatchObject({ windows: true, tools: ['host.claude-code'] });
   });
