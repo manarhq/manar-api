@@ -29,6 +29,7 @@ import { AuditIndexerModule } from './audit/opensearch/audit-indexer.module';
 import { LiveEventsHttpModule } from './audit/live/live-events-http.module';
 import { EvidenceHttpModule } from './evidence/evidence-http.module';
 import { KillSwitchesHttpModule } from './kill-switches/kill-switches-http.module';
+import { PauseHttpModule } from './pause/pause-http.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { WebhooksHttpModule } from './webhooks/webhooks-http.module';
 import { WebhookDeliveryConsumerModule } from './webhooks/webhook-delivery-consumer.module';
@@ -80,6 +81,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     LiveEventsHttpModule,
     EvidenceHttpModule,
     KillSwitchesHttpModule,
+    PauseHttpModule,
     RateLimitModule,
     WebhooksHttpModule,
     WebhookDeliveryConsumerModule,

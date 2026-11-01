@@ -34,6 +34,11 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_GRANT_CREATED: 'approval.grant.created',
   APPROVAL_GRANT_USED: 'approval.grant.used',
   APPROVAL_HANDOVER_COLLECTED: 'approval.handover_collected',
+  /** A device approval got no answer in time and was denied ("denied: no answer"). */
+  APPROVAL_EXPIRED: 'approval.expired',
+  /** "Pause all AI" was turned on / off for the workspace. */
+  WORKSPACE_AI_PAUSED: 'workspace.ai.paused',
+  WORKSPACE_AI_RESUMED: 'workspace.ai.resumed',
 
   /** Phone track: a Telegram chat was linked to / unlinked from a person. No chat id in the event. */
   TELEGRAM_LINK_CREATED: 'telegram.link.created',

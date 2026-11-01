@@ -1,3 +1,4 @@
+import { PAUSED_REASON, isWorkspacePaused } from '../pause/pause-state';
 import {
   Body,
   ConflictException,
@@ -313,6 +314,11 @@ export class ApprovalsController {
         throw new NotFoundException(error.message);
       }
       throw error;
+    }
+
+    // No approval is granted while AI is paused; a deny stays possible.
+    if (input.decision !== 'DENY' && (await isWorkspacePaused(tenantClient))) {
+      throw new ConflictException(PAUSED_REASON);
     }
 
     if (approvalRequest.status !== 'PENDING') {

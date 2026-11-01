@@ -18,6 +18,9 @@ import {
   DecideHostApprovalSchema,
   VaultRequestSchema,
 } from './approvals.validation';
+import { dbNow } from '../common/db-clock';
+import { isWorkspacePaused } from '../pause/pause-state';
+import { explainRisk } from './risk-explain';
 import { HostApprovalsService } from './host-approvals.service';
 
 /**
@@ -41,6 +44,7 @@ export class HostApprovalsController {
     if (host.status !== 'APPROVED')
       return { items: [], ownerMayApprove: false };
     const client = await this.tenants.getClient(host.tenantId);
+    await this.approvals.expireDue(client, host.tenantId);
     const [ownerMayApprove, rows] = await Promise.all([
       this.approvers.canApprove(host.tenantId, client, host.ownerSubject),
       this.approvals.listPending(client, host.hostId),
@@ -55,6 +59,7 @@ export class HostApprovalsController {
         summary: r.summary,
         matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,
+        explanation: explainRisk(r.actionId, r.resource, r.highRisk),
         // The prompt shows buttons only when this is true; otherwise "Open in console".
         decidableHere: ownerMayApprove && !r.highRisk,
         expiresAt: r.expiresAt,
@@ -82,12 +87,19 @@ export class HostApprovalsController {
   @Get(':id')
   async status(@CurrentHost() host: HostContext, @Param('id') id: string) {
     const client = await this.tenants.getClient(host.tenantId);
+    await this.approvals.expireDue(client, host.tenantId);
     const row = await this.approvals.get(client, id, host.hostId);
-    const expired = row.status === 'PENDING' && row.expiresAt <= new Date();
+    const expired =
+      row.status === 'PENDING' && row.expiresAt <= (await dbNow(client));
+    const status = expired ? 'EXPIRED' : row.status;
     return {
       id: row.id,
-      status: expired ? 'EXPIRED' : row.status,
+      status,
       decision: row.decision,
+      // The hook tells the agent "denied: no answer".
+      reason: status === 'EXPIRED' ? 'no_answer' : null,
+      // "paused": AI is paused, so an APPROVED answer that landed anyway must not let the call run.
+      paused: await isWorkspacePaused(client),
     };
   }
 

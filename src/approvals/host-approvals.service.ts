@@ -13,13 +13,19 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { PushService } from '../push/push.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { approvalMatchCode } from '../phone/phone-token';
+import { dbNow } from '../common/db-clock';
+import { PAUSED_REASON, isWorkspacePaused } from '../pause/pause-state';
 import { createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
 
 export type HostDecision = 'approve_once' | 'approve_8h' | 'deny';
 
-/** How long a device approval waits for a person. */
-export const HOST_APPROVAL_TTL_MS = 10 * 60 * 1000;
+/**
+ * How long a device approval waits for a person (founder decision, 1 Nov 2026): the prompt shows
+ * and the phone is pushed at the same moment; with no answer in 2 minutes it is denied, logged,
+ * and the agent is told "denied: no answer".
+ */
+export const HOST_APPROVAL_TTL_MS = 2 * 60 * 1000;
 
 /** A host that opens more approvals than this in the window is refused (a looping tool, or a flood). */
 export const HOST_APPROVALS_PER_WINDOW = 20;
@@ -66,8 +72,12 @@ export class HostApprovalsService {
     client: TenantPrismaClient,
     tenantId: string,
     input: OpenHostApprovalInput,
-    now: Date = new Date(),
+    at?: Date,
   ) {
+    const now = at ?? (await dbNow(client));
+    // Nothing new is asked while AI is paused (the authorize path has already denied it).
+    if (await isWorkspacePaused(client))
+      throw new ForbiddenException(PAUSED_REASON);
     // The same host asking again for the same thing while it is still pending is the same
     // question: reuse it (no second prompt, no second push, no second audit event).
     const existing = await client.hostApproval.findFirst({
@@ -159,11 +169,51 @@ export class HostApprovalsService {
     });
   }
 
-  listPending(
+  /**
+   * Denies what nobody answered in time: PENDING rows past `expiresAt` become EXPIRED (one
+   * conditional update, so concurrent readers log it once) and each gets an `approval.expired`
+   * audit event. Called on every read a device or console makes, so no scheduler is needed.
+   */
+  async expireDue(
+    client: TenantPrismaClient,
+    tenantId: string,
+    at?: Date,
+  ): Promise<number> {
+    const now = at ?? (await dbNow(client));
+    const due = await client.hostApproval.findMany({
+      where: { status: 'PENDING', expiresAt: { lte: now } },
+      select: { id: true, hostId: true, toolId: true, actionId: true },
+      take: 50,
+    });
+    let n = 0;
+    for (const row of due) {
+      const won = await client.hostApproval.updateMany({
+        where: { id: row.id, status: 'PENDING' },
+        data: { status: 'EXPIRED' },
+      });
+      if (won.count === 0) continue;
+      n++;
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_EXPIRED,
+        actor: { type: 'system', id: row.hostId },
+        data: {
+          hostApprovalId: row.id,
+          hostId: row.hostId,
+          toolId: row.toolId,
+          actionId: row.actionId,
+          reason: 'no_answer',
+        },
+      });
+    }
+    return n;
+  }
+
+  async listPending(
     client: TenantPrismaClient,
     hostId: string | undefined,
-    now: Date = new Date(),
+    at?: Date,
   ) {
+    const now = at ?? (await dbNow(client));
     return client.hostApproval.findMany({
       where: {
         ...(hostId ? { hostId } : {}),
@@ -190,7 +240,7 @@ export class HostApprovalsService {
     client: TenantPrismaClient,
     tenantId: string,
     input: DecideHostApprovalInput,
-    now: Date = new Date(),
+    at?: Date,
   ) {
     // 8 hours is a standing permission: it is given in the console, in a browser session, never
     // from a prompt on the device (a process on the device could answer that prompt).
@@ -198,6 +248,11 @@ export class HostApprovalsService {
       throw new ForbiddenException('eight_hours_in_console');
     const row = await this.get(client, input.approvalId, input.hostId);
     const result = await client.$transaction(async (tx) => {
+      // Inside the transaction, so a pause that lands between the check and the write cannot be
+      // missed. A deny is always allowed; an approval is refused while AI is paused.
+      if (input.decision !== 'deny' && (await isWorkspacePaused(tx)))
+        throw new ConflictException(PAUSED_REASON);
+      const now = at ?? (await dbNow(tx));
       const won = await tx.hostApproval.updateMany({
         where: { id: row.id, status: 'PENDING', expiresAt: { gt: now } },
         data: {

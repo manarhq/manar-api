@@ -2535,3 +2535,17 @@ model PhoneActionUse {
   @@index([expiresAt])
   @@map("phone_action_uses")
 }
+
+/// "Pause all AI" (launch spec, wave 2): one row per workspace (id is always 'workspace'). While
+/// `paused` is true every protected tool on every device is denied with reason `paused`.
+model WorkspacePause {
+  id        String   @id @default("workspace")
+  paused    Boolean  @default(false)
+  pausedBy  String?
+  /// The highest role of the person who paused (TENANT_OWNER > SECURITY_ADMIN > APPROVER); resuming needs at least this.
+  pausedByRole String?
+  pausedAt  DateTime?
+  updatedAt DateTime @updatedAt
+
+  @@map("workspace_pause")
+}

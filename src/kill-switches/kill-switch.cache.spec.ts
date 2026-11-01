@@ -19,6 +19,7 @@ function harness(maxAgeMs = 2000) {
         );
       }),
     },
+    workspacePause: { findUnique: vi.fn().mockResolvedValue(null) },
     agentQuarantine: { findFirst: vi.fn().mockResolvedValue(null) },
     agentGroupMembership: { findMany: vi.fn().mockResolvedValue([]) },
     aiSystemAgentLink: { findMany: vi.fn().mockResolvedValue([]) },
