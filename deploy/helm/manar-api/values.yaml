@@ -226,6 +226,8 @@ config:
   MANAR_MCP_ENABLED: 'false'
   MANAR_MCP_HOST: ''
   MANAR_MCP_DCR_TRUSTED_HOSTS: chatgpt.com
+  # ChatGPT (dynamic client registration) on the shared realm; 'false' turns it off.
+  MANAR_MCP_CHATGPT_ENABLED: 'true'
   MANAR_MCP_RATE_LIMIT_PER_MINUTE: '60'
   MANAR_MCP_MAX_BODY_BYTES: '262144'
   # cloudflared and Traefik pod ranges (comma-separated CIDRs) so request.ip is the real caller

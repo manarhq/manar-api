@@ -4,6 +4,7 @@ import {
   cloudMcpClientId,
   cloudMcpConfigIssues,
   cloudMcpScope,
+  cloudMcpSettings,
 } from './cloud-mcp.config';
 
 describe('CloudMcpConfigSchema', () => {
@@ -50,5 +51,17 @@ describe('CloudMcpConfigSchema', () => {
       CloudMcpConfigSchema.parse({ MANAR_MCP_SHARED_ISSUER: '' })
         .MANAR_MCP_SHARED_ISSUER,
     ).toBeUndefined();
+  });
+});
+
+describe('ChatGPT on the shared realm', () => {
+  it('is on unless MANAR_MCP_CHATGPT_ENABLED is false', () => {
+    const on = (v?: string) =>
+      cloudMcpSettings({
+        get: (k: string) => (k === 'MANAR_MCP_CHATGPT_ENABLED' ? v : undefined),
+      } as never).chatGptOnSharedRealm;
+    expect(on(undefined)).toBe(true);
+    expect(on('true')).toBe(true);
+    expect(on('false')).toBe(false);
   });
 });
