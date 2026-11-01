@@ -42,4 +42,4 @@ expiresAt }] }`. `tools` are the device's tools in `host.claude-code`, `host.cod
 
 ## Data
 
-Tenant table `host_site_rules` (migration `20261101120200_host_site_rules`, additive; rollback `DROP TABLE`).
+Tenant table `host_site_rules` (migration `20261101120400_host_site_rules`, additive; rollback `DROP TABLE`).
