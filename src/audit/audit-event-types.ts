@@ -215,6 +215,18 @@ export const AUDIT_EVENT_TYPES = {
   HOST_FILE_CHANGE_RESTORE_REQUESTED: 'host.file_change.restore_requested',
   HOST_FILE_CHANGE_RESTORED: 'host.file_change.restored',
   HOST_FILE_CHANGE_RESTORE_FAILED: 'host.file_change.restore_failed',
+
+  /** A launch-offer slot was claimed and Pro was started for 3 months. Data: slot count, months. */
+  LAUNCH_OFFER_CLAIMED: 'launch.offer.claimed',
+  /** The owner turned the public "Protected by Manar" badge on or off. */
+  PROFILE_BADGE_CHANGED: 'profile.badge.changed',
+  WORKSPACE_INVITE_CREATED: 'workspace.invite.created',
+  WORKSPACE_INVITE_ACCEPTED: 'workspace.invite.accepted',
+  WORKSPACE_INVITE_REVOKED: 'workspace.invite.revoked',
+  /** Microsoft auto-join was turned on or off by an admin. */
+  WORKSPACE_AUTOJOIN_CHANGED: 'workspace.autojoin.changed',
+  /** A person joined through the Entra auto-join setting (matched on the verified tid). */
+  WORKSPACE_MEMBER_AUTOJOINED: 'workspace.member.autojoined',
 } as const;
 
 export type AuditEventType =

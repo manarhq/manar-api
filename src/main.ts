@@ -38,6 +38,23 @@ async function bootstrap(): Promise<void> {
   const configService = app.get(ConfigService<AppConfig, true>);
   const port = configService.get('PORT', { infer: true });
   instrumentHttp(app.getHttpAdapter().getInstance(), 'human');
+  // RFC 8058 one-click unsubscribe (and its confirm-page form) POSTs form-encoded; nothing else
+  // on this listener takes a form body, so the parser is limited to that one route.
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .addContentTypeParser(
+      'application/x-www-form-urlencoded',
+      { parseAs: 'string', bodyLimit: 1024 },
+      (req, _body, done) =>
+        req.url.startsWith('/public/unsubscribe/')
+          ? done(null, {})
+          : done(
+              Object.assign(new Error('Unsupported Media Type'), {
+                statusCode: 415,
+              }),
+            ),
+    );
   setupHelmet(app);
   setupCors(app, configService);
   setupOpenApiDocs(app, configService);

@@ -5,6 +5,7 @@ import {
   EntitlementsService,
   type EntitlementPatch,
 } from './entitlements.service';
+import { KeepProService } from './keep-pro.service';
 import { StripeGateway } from './stripe.gateway';
 
 const ACTOR = { type: 'system', id: 'stripe' } as const;
@@ -29,6 +30,7 @@ export class StripeWebhookService {
     private readonly control: ControlPrismaService,
     private readonly entitlements: EntitlementsService,
     private readonly stripe: StripeGateway,
+    private readonly keepPro?: KeepProService,
   ) {}
 
   /** Verifies the signature on the raw body, then applies the event once. */
@@ -101,6 +103,11 @@ export class StripeWebhookService {
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object;
+        if (session.mode === 'setup') {
+          // Launch offer: card, address and tax id collected; turn automatic tax on.
+          await this.keepPro?.complete(tenantId, session);
+          return;
+        }
         if (session.mode !== 'subscription') return;
         subscriptionId = id(session.subscription);
         break;

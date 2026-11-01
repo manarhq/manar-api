@@ -151,12 +151,27 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
    * is not a SAMPLE, or is still being provisioned, is refused.
    */
   async deleteWorkspace(tenantId: string): Promise<void> {
+    await this.destroy(tenantId, ['SAMPLE']);
+  }
+
+  /**
+   * Account deletion (growth track): the same removal for a user's own PERSONAL (or SAMPLE)
+   * workspace, after the grace period. Devices stop being served the moment the tenant is DELETED.
+   */
+  async deleteOwnedWorkspace(tenantId: string): Promise<void> {
+    await this.destroy(tenantId, ['PERSONAL', 'SAMPLE']);
+  }
+
+  private async destroy(
+    tenantId: string,
+    kinds: ('PERSONAL' | 'SAMPLE')[],
+  ): Promise<void> {
     const tenant = await this.control.tenant.findUnique({
       where: { id: tenantId },
       include: { databaseBinding: true },
     });
     if (!tenant) return;
-    if (tenant.kind !== 'SAMPLE') {
+    if (!(kinds as string[]).includes(tenant.kind)) {
       throw new ForbiddenException('only_sample_workspaces_can_be_deleted');
     }
     if (tenant.status === 'PROVISIONING' && tenant.updatedAt > staleBefore()) {
@@ -173,6 +188,11 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     await this.control.$transaction([
       this.control.auditSealMark.deleteMany({ where: { tenantId } }),
       this.control.secretReference.deleteMany({ where: { tenantId } }),
+      this.control.reportShare.deleteMany({ where: { tenantId } }),
+      this.control.weeklyReportCard.deleteMany({ where: { tenantId } }),
+      this.control.installCode.deleteMany({ where: { tenantId } }),
+      this.control.publicProfile.deleteMany({ where: { tenantId } }),
+      this.control.workspaceInvite.deleteMany({ where: { tenantId } }),
       this.control.tenantDatabaseBinding.deleteMany({ where: { tenantId } }),
       this.control.tenant.delete({ where: { id: tenantId } }),
     ]);

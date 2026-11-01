@@ -1,3 +1,4 @@
+import { GrowthConfigSchema } from '../growth/growth.config';
 import { z } from 'zod';
 import { BillingConfigSchema } from '../billing/billing.config';
 import { DatabaseConfigSchema } from '../database/database.config';
@@ -100,6 +101,7 @@ export const AppConfigSchema = z
   .extend(DevicesConfigSchema.shape)
   .extend(PushConfigSchema.shape)
   .extend(TelegramConfigSchema.shape)
+  .extend(GrowthConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {

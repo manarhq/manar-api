@@ -116,6 +116,10 @@ model Tenant {
   nextProvisionAt   DateTime?
   /// COMPANY: the Entra tenant id (`tid`) it was created for (one per tid, partial unique index).
   entraTenantId     String?
+  /// COMPANY: anyone signing in with Microsoft from `entraTenantId` (verified `tid`) joins as a member.
+  autoJoinEntra Boolean @default(false)
+  /// Auto-join stops adding people once this many members are ACTIVE (the admin can raise it).
+  autoJoinSeatCap Int @default(25)
 
   residency              TenantResidency @default(UAE)
   allowExternalAi        Boolean         @default(false)
@@ -358,6 +362,14 @@ model Membership {
   displayName String?
   grantedBy   String?
 
+  /// Weekly "Your AI week" email (growth track). Opt-out; the unsubscribe link clears it.
+  weeklyDigest   Boolean @default(true)
+  /// IANA zone for "Monday 08:00"; null = Asia/Dubai. Locale `en` or `ar`; null = en.
+  timezone       String?
+  locale         String?
+  /// ISO week (`2026-W44`) of the last digest sent: one email per week, even if the job repeats.
+  digestSentWeek String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -427,6 +439,8 @@ model TenantEntitlement {
   billingInterval      String?
   /// Newest Stripe event applied; older subscription events are skipped.
   lastStripeEventAt    DateTime?
+  /// Granted by hand (pilot and demo tenants that pre-date plans), not by Stripe or a trial.
+  manual               Boolean           @default(false)
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
 
@@ -523,4 +537,104 @@ model TelegramApprovalMessage {
   @@unique([approvalId, chatId])
   @@index([closedAt, createdAt])
   @@map("telegram_approval_messages")
+}
+
+/// Launch offer: the first N personal sign-ups that add a device get Pro free for 3 months. A row
+/// is a claimed slot; the count of rows under an advisory lock is the counter. One per person and
+/// per device (hash of the machine id), enforced by the unique indexes as well as the service.
+model LaunchOfferClaim {
+  /// (claimedAt is indexed in the migration for the per-day caps)
+  id                   String   @id @default(uuid())
+  issuer               String
+  subject              String
+  tenantId             String   @unique
+  deviceHash           String   @unique
+  stripeSubscriptionId String?
+  claimedAt            DateTime @default(now())
+  /// When the free months end (the trial_end given to Stripe).
+  trialEndsAt          DateTime?
+  /// The person added a card, billing address and tax id ("Keep Pro"); automatic tax is on.
+  keptAt               DateTime?
+  /// The 7-days-before reminder email went out.
+  reminderSentAt       DateTime?
+  /// Anti-farming: domain of the verified contact email, hash of the registering IP, TPM EK hash.
+  emailDomain          String?
+  ipHash               String?
+  ekHash               String?  @unique
+
+  @@unique([issuer, subject])
+  @@index([claimedAt])
+  @@map("launch_offer_claims")
+}
+
+/// Opt-in "Protected by Manar" badge and public profile card. `slug` is unguessable; `stats` is a
+/// snapshot of aggregate numbers only (no device names), refreshed at most hourly.
+model PublicProfile {
+  tenantId  String    @id
+  slug      String    @unique
+  enabled   Boolean   @default(false)
+  stats     Json?
+  statsAt   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("public_profiles")
+}
+
+/// Email invite to a COMPANY workspace. The link carries a signed token naming this row; the row
+/// makes it single-use and revocable.
+model WorkspaceInvite {
+  id        String    @id @default(uuid())
+  tenantId  String
+  email     String
+  role      String
+  expiresAt DateTime
+  usedAt    DateTime?
+  usedBy    String?
+  revokedAt DateTime?
+  createdBy String
+  createdAt DateTime  @default(now())
+
+  @@index([tenantId])
+  @@map("workspace_invites")
+}
+
+/// "Delete my account": SCHEDULED rows are in their grace period (cancelling deletes the row). After
+/// the run the row stays as the record, with `subject` replaced by its hash and the counts in `summary`.
+model AccountDeletion {
+  id           String    @id @default(uuid())
+  issuer       String
+  subject      String
+  status       String    @default("SCHEDULED")
+  requestedAt  DateTime  @default(now())
+  executeAfter DateTime
+  doneAt       DateTime?
+  summary      Json?
+
+  @@unique([issuer, subject])
+  @@index([status, executeAfter])
+  @@map("account_deletions")
+}
+
+/// A person's own verified contact email (the shared realm stores a placeholder `@idp.invalid`
+/// for Microsoft and GitHub users). Receipts, alerts, the weekly email and Stripe use this and
+/// nothing else. `pending*` is an unconfirmed change: a 6-digit code, HMAC-stored, 10 minutes,
+/// 5 attempts. `idp` is how the person last signed in (microsoft, github or null for an email link).
+model ContactEmail {
+  issuer          String
+  subject         String
+  email           String?
+  verifiedAt      DateTime?
+  idp             String?
+  pendingEmail    String?
+  codeHash        String?
+  codeExpiresAt   DateTime?
+  attempts        Int       @default(0)
+  sendsInWindow   Int       @default(0)
+  windowStartedAt DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@id([issuer, subject])
+  @@map("contact_emails")
 }

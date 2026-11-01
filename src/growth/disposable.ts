@@ -1,0 +1,61 @@
+/** Throwaway mailbox services: not accepted as the identity behind a free-Pro claim. */
+const DISPOSABLE = new Set([
+  'mailinator.com',
+  'guerrillamail.com',
+  'guerrillamail.net',
+  'sharklasers.com',
+  '10minutemail.com',
+  '10minutemail.net',
+  'tempmail.com',
+  'temp-mail.org',
+  'temp-mail.io',
+  'yopmail.com',
+  'yopmail.fr',
+  'trashmail.com',
+  'getnada.com',
+  'dispostable.com',
+  'maildrop.cc',
+  'throwawaymail.com',
+  'fakeinbox.com',
+  'mailnesia.com',
+  'mintemail.com',
+  'mohmal.com',
+  'emailondeck.com',
+  'tempail.com',
+  'burnermail.io',
+  'spamgourmet.com',
+  'moakt.com',
+  'mytemp.email',
+  'tmpmail.org',
+  'tmail.ws',
+]);
+
+/** Big consumer mailbox providers: many unrelated people share the domain, so no per-domain cap. */
+const CONSUMER = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'outlook.com',
+  'hotmail.com',
+  'live.com',
+  'msn.com',
+  'yahoo.com',
+  'icloud.com',
+  'me.com',
+  'aol.com',
+  'proton.me',
+  'protonmail.com',
+  'gmx.com',
+  'gmx.net',
+  'mail.com',
+  'zoho.com',
+  'yandex.com',
+  'qq.com',
+  '163.com',
+  'hotmail.co.uk',
+  'outlook.sa',
+  'yahoo.co.uk',
+]);
+
+export const isDisposableDomain = (d: string) =>
+  DISPOSABLE.has(d.toLowerCase());
+export const isConsumerDomain = (d: string) => CONSUMER.has(d.toLowerCase());
