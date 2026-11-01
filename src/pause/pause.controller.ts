@@ -1,5 +1,10 @@
 import { Body, Controller, Get, Put, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiExcludeController,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { z } from 'zod';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { CurrentAuth } from '../auth/auth-context';
@@ -15,6 +20,9 @@ const SetPauseSchema = z.object({
 });
 
 /** `/workspace/pause`: the Home button and the phone use these two routes. */
+// Not in the generated console client yet (manar-web calls it through the BFF), so the committed
+// schema does not drift. Include it when a live regeneration is next run.
+@ApiExcludeController()
 @ApiTags('workspace')
 @ApiBearerAuth('jwt')
 @Controller('workspace/pause')
