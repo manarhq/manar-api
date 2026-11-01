@@ -49,6 +49,41 @@ describe('MCP inventory', () => {
     ).toBe(false);
   });
 
+  it('cuts every field down again, whatever the device says', () => {
+    const parse = (o: object) =>
+      McpServerReportSchema.parse({ ...server, ...o });
+    expect(
+      parse({ transport: 'http', url: 'https://h.example:8443/p?k=v#f' }).url,
+    ).toBe('https://h.example:8443');
+    expect(parse({ url: 'https://u:pw@h.example/x' }).url).toBeNull();
+    expect(parse({ url: 'https://u@h.example/x' }).url).toBeNull();
+    expect(parse({ url: 'not a url' }).url).toBeNull();
+    expect(parse({ url: 'file:///etc/passwd' }).url).toBeNull();
+    for (const command of [
+      '/usr/bin/npx',
+      'C:\\x\\npx.exe',
+      'npx -y x',
+      'sh -c "KEY=abc"',
+    ])
+      expect(parse({ command }).command).toBeNull();
+    expect(parse({ command: 'npx' }).command).toBe('npx');
+    for (const pkg of [
+      'git+https://u:tok@github.com/o/r',
+      'user:tok@host/x',
+      'a b',
+      'pkg@1.0.0',
+    ])
+      expect(parse({ package: pkg }).package).toBeNull();
+    expect(parse({ package: '@scope/name' }).package).toBe('@scope/name');
+    for (const version of ['1.0 beta', 'https://x', 'a@b', ''])
+      expect(parse({ version }).version).toBeNull();
+    expect(parse({ version: 'v1.2.3-rc.1' }).version).toBe('v1.2.3-rc.1');
+    expect(
+      parse({ envKeys: ['GOOD_1', 'bad key', 'A=b', '1X', 'ok'] }).envKeys,
+    ).toEqual(['GOOD_1', 'ok']);
+    expect(parse({ argCount: 3 })).not.toHaveProperty('args');
+  });
+
   it('replaces the device list, scoped to that host, and returns only new servers', async () => {
     const { client, ops } = fakeClient([
       { toolId: 'host.cursor', name: 'old' },
