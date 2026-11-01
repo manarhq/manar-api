@@ -14,6 +14,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { ContactEmailService } from '../contact/contact-email.service';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { CurrentAuth, type AuthContext } from '../auth/auth-context';
 import { CurrentIdentity, IdentityGuard } from '../auth/identity.guard';
@@ -51,7 +52,10 @@ import { WorkspacesService } from './workspaces.service';
 @Controller('workspaces')
 @UseGuards(IdentityGuard)
 export class WorkspacesController {
-  constructor(private readonly workspaces: WorkspacesService) {}
+  constructor(
+    private readonly workspaces: WorkspacesService,
+    private readonly contact: ContactEmailService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: "The caller's workspaces (switcher, setup state)" })
@@ -70,7 +74,9 @@ export class WorkspacesController {
       'QUEUED means capacity was low: the workspace is set up in the background.',
   })
   @ApiResponse({ status: 200, type: CreateWorkspaceResponseDto })
-  bootstrap(@CurrentIdentity() id: VerifiedIdentity) {
+  async bootstrap(@CurrentIdentity() id: VerifiedIdentity) {
+    // Records how the person signed in (and pre-verifies an email-link address) for the growth track.
+    await this.contact.noteSignIn(id).catch(() => undefined);
     return this.workspaces.ensurePersonal(id);
   }
 

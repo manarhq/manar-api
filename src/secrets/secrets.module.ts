@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { HostMtlsModule } from '../host-mtls/host-mtls.module';
 import { SecretAlertBus } from './secret-alert-bus';
 import { SecretsHostController } from './secrets-host.controller';
@@ -16,9 +16,13 @@ export class SecretsModule {}
 @Module({ imports: [SecretsModule], controllers: [SecretsController] })
 export class SecretsHttpModule {}
 
-/** Device routes (`/host/v1/events`, `/host/v1/secrets/*`) on the mTLS listener. */
+/**
+ * Device routes (`/host/v1/events`, `/host/v1/secrets/*`) on the mTLS listener. `forwardRef`:
+ * host-mtls.module.ts imports this file for `SecretsModule`, so `HostMtlsModule` can still be
+ * undefined while this decorator runs.
+ */
 @Module({
-  imports: [SecretsModule, HostMtlsModule],
+  imports: [SecretsModule, forwardRef(() => HostMtlsModule)],
   controllers: [SecretsHostController],
 })
 export class SecretsHostModule {}

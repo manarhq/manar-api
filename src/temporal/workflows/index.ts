@@ -9,3 +9,4 @@
 export { ApprovalWorkflow, decideSignal } from './approval.workflow';
 export { AuditRetentionWorkflow } from './audit-retention.workflow';
 export { WebhookDeliveryWorkflow } from './webhook-delivery.workflow';
+export { GrowthTickWorkflow } from './growth-tick.workflow';

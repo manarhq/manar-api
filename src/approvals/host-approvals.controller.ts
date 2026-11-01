@@ -7,16 +7,21 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { approvalMatchCode } from '../phone/phone-token';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { HostAuthGuard } from '../host-mtls/host-auth.guard';
 import { CurrentHost, type HostContext } from '../host-mtls/host-context';
+import { SITE_CONNECT_ACTION } from '../jail/jail-sites';
 import { ApproverDirectory } from './approver-directory';
 import {
   DecideHostApprovalSchema,
   VaultRequestSchema,
 } from './approvals.validation';
+import { dbNow } from '../common/db-clock';
+import { isWorkspacePaused } from '../pause/pause-state';
+import { explainRisk } from './risk-explain';
 import { HostApprovalsService } from './host-approvals.service';
 
 /**
@@ -40,6 +45,7 @@ export class HostApprovalsController {
     if (host.status !== 'APPROVED')
       return { items: [], ownerMayApprove: false };
     const client = await this.tenants.getClient(host.tenantId);
+    await this.approvals.expireDue(client, host.tenantId);
     const [ownerMayApprove, rows] = await Promise.all([
       this.approvers.canApprove(host.tenantId, client, host.ownerSubject),
       this.approvals.listPending(client, host.hostId),
@@ -52,9 +58,15 @@ export class HostApprovalsController {
         actionId: r.actionId,
         resource: r.resource,
         summary: r.summary,
+        matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,
+        explanation: explainRisk(r.actionId, r.resource, r.highRisk),
         // The prompt shows buttons only when this is true; otherwise "Open in console".
-        decidableHere: ownerMayApprove && !r.highRisk,
+        decidableHere:
+          ownerMayApprove &&
+          !r.highRisk &&
+          // a new site is answered in the console or on the phone
+          r.actionId !== SITE_CONNECT_ACTION,
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,
       })),
@@ -80,12 +92,19 @@ export class HostApprovalsController {
   @Get(':id')
   async status(@CurrentHost() host: HostContext, @Param('id') id: string) {
     const client = await this.tenants.getClient(host.tenantId);
+    await this.approvals.expireDue(client, host.tenantId);
     const row = await this.approvals.get(client, id, host.hostId);
-    const expired = row.status === 'PENDING' && row.expiresAt <= new Date();
+    const expired =
+      row.status === 'PENDING' && row.expiresAt <= (await dbNow(client));
+    const status = expired ? 'EXPIRED' : row.status;
     return {
       id: row.id,
-      status: expired ? 'EXPIRED' : row.status,
+      status,
       decision: row.decision,
+      // The hook tells the agent "denied: no answer".
+      reason: status === 'EXPIRED' ? 'no_answer' : null,
+      // "paused": AI is paused, so an APPROVED answer that landed anyway must not let the call run.
+      paused: await isWorkspacePaused(client),
     };
   }
 
@@ -111,6 +130,8 @@ export class HostApprovalsController {
     }
     const row = await this.approvals.get(client, id, host.hostId);
     if (row.highRisk) throw new ForbiddenException('high_risk_open_in_console');
+    if (row.actionId === SITE_CONNECT_ACTION && input.decision !== 'deny')
+      throw new ForbiddenException('site_in_console');
     const result = await this.approvals.decide(client, host.tenantId, {
       approvalId: id,
       hostId: host.hostId,

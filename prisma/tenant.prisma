@@ -1327,6 +1327,7 @@ model AuditEvent {
 
   @@unique([partition, partitionSeq])
   @@index([eventType])
+  @@index([eventType, timestamp])
   @@index([correlationId])
   /// Release 2026-11-11: `AuditService.verifyAuditChain` walks the chain in
   /// keyset-paginated batches (`WHERE sequence > ?` ordered by `sequence`)
@@ -2231,11 +2232,15 @@ model Host {
   /// device it waits for by this, never by time.
   installKeyId          String?
   certificates          HostCertificate[]
+  fileChanges           HostFileChange[]
   tools                 HostTool[]
+  mcpServers            HostMcpServer[]
   allowGrants           ApprovalAllowGrant[]
   hostApprovals         HostApproval[]
   createdAt             DateTime             @default(now())
   updatedAt             DateTime             @updatedAt
+  aiUsage               AiUsageDaily[]
+  siteRules             HostSiteRule[]
 
   @@unique([machineId])
   /// One computer identity, one host (lower-cased certificate DNS name; nulls repeat).
@@ -2271,6 +2276,44 @@ model HostTool {
   @@unique([hostId, toolId])
   @@index([toolId])
   @@map("host_tools")
+}
+
+enum FileChangeRestore {
+  NONE
+  REQUESTED
+  RESTORED
+  FAILED
+}
+
+/// A file an AI tool was about to edit OUTSIDE its project folder, snapshotted on the device
+/// (docs/hosts.md "Undo AI file changes"). Metadata only: the contents never leave the device.
+/// Kept 7 days. A restore is requested here and performed by the device.
+model HostFileChange {
+  id                 String            @id @default(uuid())
+  hostId             String
+  host               Host              @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  /// The device's own snapshot id (hex); unique per host so a re-sent report is idempotent.
+  snapshotId         String
+  tool               String
+  path               String
+  /// False when the file did not exist yet (a restore deletes what the agent created).
+  existed            Boolean
+  sizeBytes          Int
+  /// HMAC (keyed by a per-device secret) of the saved content hash: Manar never sees a hash of the user file.
+  sha256             String
+  takenAt            DateTime
+  expiresAt          DateTime
+  restoreStatus      FileChangeRestore @default(NONE)
+  restoreRequestedBy String?
+  restoreRequestedAt DateTime?
+  restoreDoneAt      DateTime?
+  restoreNote        String?
+  createdAt          DateTime          @default(now())
+
+  @@unique([hostId, snapshotId])
+  @@index([hostId, takenAt])
+  @@index([hostId, restoreStatus])
+  @@map("host_file_changes")
 }
 
 model HostCertificate {
@@ -2449,7 +2492,7 @@ model HostApproval {
   /// approve_once | approve_8h | deny
   decision   String?
   decidedBy  String?
-  /// device | console
+  /// device | console | push | telegram
   decidedVia String?
   decidedAt  DateTime?
   expiresAt  DateTime
@@ -2524,4 +2567,142 @@ model SecretVaultAccess {
   @@index([hostId, status])
   @@index([status, createdAt])
   @@map("secret_vault_access")
+}
+
+/// Single-use nonces of push action tokens (Approve once / Deny buttons). Written in the same
+/// transaction as the decision, so a token is spent only by a decision that took effect.
+model PhoneActionUse {
+  nonce     String   @id
+  expiresAt DateTime
+
+  @@index([expiresAt])
+  @@map("phone_action_uses")
+}
+
+/// "Pause all AI" (launch spec, wave 2): one row per workspace (id is always 'workspace'). While
+/// `paused` is true every protected tool on every device is denied with reason `paused`.
+model WorkspacePause {
+  id        String   @id @default("workspace")
+  paused    Boolean  @default(false)
+  pausedBy  String?
+  /// The highest role of the person who paused (TENANT_OWNER > SECURITY_ADMIN > APPROVER); resuming needs at least this.
+  pausedByRole String?
+  pausedAt  DateTime?
+  updatedAt DateTime @updatedAt
+
+  @@map("workspace_pause")
+}
+
+/// AI spend tracker (DOOR): token usage the device read from provider responses, summed per day,
+/// tool and model. `costMicros` is a list-price estimate in millionths of a US dollar.
+model AiUsageDaily {
+  id           String   @id @default(uuid())
+  hostId       String
+  host         Host     @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  day          DateTime @db.Date
+  toolId       String
+  /// The local OS user DOOR named for the caller (`uid:1000`, `sid:S-1-5-...`).
+  localUser    String   @default("")
+  provider     String
+  model        String
+  requests     Int      @default(0)
+  inputTokens  BigInt   @default(0)
+  outputTokens BigInt   @default(0)
+  costMicros   BigInt   @default(0)
+
+  @@unique([hostId, day, toolId, localUser, provider, model])
+  @@index([day])
+  @@map("ai_usage_daily")
+}
+
+/// Batch ids already counted, so a device resending after a lost reply does not count twice.
+model AiUsageBatch {
+  hostId    String
+  batchId   String
+  createdAt DateTime @default(now())
+
+  @@id([hostId, batchId])
+  @@map("ai_usage_batches")
+}
+
+/// One row per workspace (`id = default`): the owner's budget, cap and secrets-guard mode.
+model AiSpendSettings {
+  id                  String   @id @default("default")
+  monthlyBudgetMicros BigInt?
+  monthlyCapMicros    BigInt?
+  /// `mask` (default) or `block`: what DOOR does with a secret found in a prompt.
+  secretsMode         String   @default("mask")
+  /// `owner` (default): a tool's cap counts the spend of one device owner's devices and pauses it
+  /// only there. `workspace`: all devices count together (Company workspaces; an admin choice).
+  capScope            String   @default("owner")
+  updatedAt           DateTime @updatedAt
+  updatedBy           String?
+
+  @@map("ai_spend_settings")
+}
+
+/// One MCP server a tool on a device is configured to use, reported in `POST /host/v1/inventory`
+/// (`mcpServers`). The device masks env values and secret-looking args before sending, and we keep
+/// env NAMES only; arguments are not sent at all (allow-list: command base name, package, version,
+/// transport, URL scheme+host). Risk flags are not stored: they are computed from these columns on every read
+/// (`src/mcp-inventory/mcp-risk.ts`), so a rule change applies to old rows too.
+model HostMcpServer {
+  id         String   @id @default(uuid())
+  hostId     String
+  host       Host     @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  /// Catalogue id of the tool whose config holds it (`host.cursor`).
+  toolId     String
+  name       String
+  /// Short hash of transport, command, URL host and package: two servers with one name (a tool's
+  /// per-project entries) stay two rows.
+  fingerprint String
+  /// `stdio`, `http` or `sse`.
+  transport  String
+  command    String?
+  /// How many arguments the command has. The arguments themselves never leave the device.
+  argCount   Int      @default(0)
+  /// Worked out on the device: an argument names the disk root, a system folder or /home itself.
+  outsideHome Boolean @default(false)
+  url        String?
+  pkg        String?
+  pkgVersion String?
+  envKeys    String[] @default([])
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+
+  @@unique([hostId, toolId, name, fingerprint])
+  @@index([toolId])
+  @@map("host_mcp_servers")
+}
+
+/// One row per workspace: how far Linux secret blocking goes. No row means `keys`.
+model SecretSettings {
+  id        String   @id @default("default")
+  /// off | keys | all
+  blockMode String   @default("keys")
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+
+  @@map("secret_settings")
+}
+
+/// What a person allowed or blocked for one AI tool on one device (JAIL, "ask on new sites").
+/// `site` is an exact lower-case host, `*.suffix` or an IP literal. A null `expiresAt` is "always".
+model HostSiteRule {
+  id        String    @id @default(uuid())
+  hostId    String
+  host      Host      @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  toolId    String
+  site      String
+  /// ALLOW or DENY
+  mode      String
+  expiresAt DateTime?
+  /// approval (answered an ask) or console (added by hand)
+  source    String
+  createdBy String
+  createdAt DateTime  @default(now())
+
+  @@unique([hostId, toolId, site])
+  @@index([hostId])
+  @@map("host_site_rules")
 }

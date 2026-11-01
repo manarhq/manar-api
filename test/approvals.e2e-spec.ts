@@ -33,6 +33,7 @@ import {
   getUserToken,
 } from './support/keycloak-test-helpers';
 import { HttpFixtureServer } from './support/http-fixture-server';
+import { onCompanyPlan } from './support/free-entitlements';
 
 /**
  * Phase 8 (Approval Engine) — every mandatory scenario from the design
@@ -597,6 +598,7 @@ describe('Approval Engine (e2e)', () => {
       slug: shortSlug('t'),
       name: 'Approval Engine Test Tenant',
     });
+    await onCompanyPlan(control, tenant.id);
     if (!tenant.keycloakRealm) {
       throw new Error('Expected provisioned tenant to have a Keycloak realm');
     }

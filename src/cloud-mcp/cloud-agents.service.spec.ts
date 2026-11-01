@@ -89,6 +89,8 @@ function setup(
         : Promise.resolve({ uuid: 'client-uuid', secret: 'secret' }),
     ),
     updateDcrPolicy: vi.fn().mockResolvedValue([]),
+    updateClient: vi.fn().mockResolvedValue(undefined),
+    regenerateRegistrationAccessToken: vi.fn().mockResolvedValue(undefined),
     deleteById: vi.fn().mockResolvedValue(undefined),
   };
   const tasks = {
@@ -259,8 +261,11 @@ describe('CloudAgentsService on the shared realm', () => {
     expect(kc.createAgentClientScope).not.toHaveBeenCalled();
   });
 
-  it('keeps ChatGPT off until it is enabled, and Entra groups never apply', async () => {
-    const off = setup({ shared: true, env: SHARED });
+  it('refuses ChatGPT when MANAR_MCP_CHATGPT_ENABLED is false, and Entra groups never apply', async () => {
+    const off = setup({
+      shared: true,
+      env: { ...SHARED, MANAR_MCP_CHATGPT_ENABLED: 'false' },
+    });
     await expect(
       off.service.connect(AUTH, { ...input, platform: 'CHATGPT' }),
     ).rejects.toMatchObject({ response: { reason: 'chatgpt_not_enabled' } });
@@ -271,10 +276,8 @@ describe('CloudAgentsService on the shared realm', () => {
       }),
     ).rejects.toThrow(/shared realm/);
     expect(off.kc.updateDcrPolicy).not.toHaveBeenCalled();
-    const on = setup({
-      shared: true,
-      env: { ...SHARED, MANAR_MCP_CHATGPT_ENABLED: 'true' },
-    });
+    // On by default: unset means on.
+    const on = setup({ shared: true, env: SHARED });
     await expect(
       on.service.connect(AUTH, { ...input, platform: 'CHATGPT' }),
     ).resolves.toHaveProperty('registrationUrl');
@@ -341,6 +344,44 @@ describe('CloudAgentsService.proposeDcrClient on the shared realm', () => {
     ).resolves.toBe('pending');
   });
 
+  it('proposes a public client (ChatGPT registers with token_endpoint_auth_method none)', async () => {
+    const { service } = setup({
+      shared: true,
+      env,
+      binding,
+      foundClient: { ...client([SCOPE]), publicClient: true, attributes: {} },
+    });
+    await expect(
+      service.proposeDcrClient('t-acme', 'agent-1', 'dcr-1'),
+    ).resolves.toBe('pending');
+  });
+
+  it('refuses a public client with no registration time on a per-tenant realm', async () => {
+    const { service } = setup({
+      env,
+      binding,
+      foundClient: { ...client([]), publicClient: true, attributes: {} },
+    });
+    await expect(
+      service.proposeDcrClient('t-acme', 'agent-1', 'dcr-1'),
+    ).resolves.toBe('refused');
+  });
+
+  it('refuses a client with a protocol mapper (it could map an attribute onto sub)', async () => {
+    const { service } = setup({
+      shared: true,
+      env,
+      binding,
+      foundClient: {
+        ...client([SCOPE]),
+        protocolMappers: [{ name: 'sub-override' }],
+      },
+    });
+    await expect(
+      service.proposeDcrClient('t-acme', 'agent-1', 'dcr-1'),
+    ).resolves.toBe('refused');
+  });
+
   it("refuses a client that also carries another tenant's agent scope", async () => {
     const { service } = setup({
       shared: true,
@@ -400,5 +441,33 @@ describe('failed connects and lapsed workspaces', () => {
     await expect(
       service.isPaused('t-acme', {} as never, 'agent-1'),
     ).resolves.toBe(false);
+  });
+});
+
+describe('confirmedClientIsClean', () => {
+  const env = {
+    MANAR_MCP_SHARED_ISSUER: 'https://auth.manar.test/realms/manar',
+  };
+  it('is false once the client carries a mapper, and when it is gone', async () => {
+    const mapped = setup({
+      shared: true,
+      env,
+      foundClient: { id: 'u', clientId: 'c', protocolMappers: [{ name: 'm' }] },
+    });
+    await expect(
+      mapped.service.confirmedClientIsClean('t-acme', 'c'),
+    ).resolves.toBe(false);
+    const gone = setup({ shared: true, env });
+    await expect(
+      gone.service.confirmedClientIsClean('t-acme', 'c'),
+    ).resolves.toBe(false);
+    const clean = setup({
+      shared: true,
+      env,
+      foundClient: { id: 'u', clientId: 'c' },
+    });
+    await expect(
+      clean.service.confirmedClientIsClean('t-acme', 'c'),
+    ).resolves.toBe(true);
   });
 });

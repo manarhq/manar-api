@@ -198,6 +198,28 @@ describe('presets through the policy engine', () => {
     );
     expect(await decide('ask', 'edit', '/work/shop/src/a.ts')).toBe('ALLOW');
   });
+  it('Ask and Strict wait on risky git; Watch and ordinary git do not', async () => {
+    for (const c of [
+      'git push --force-with-lease origin feat',
+      'git -C /r push origin main',
+      'FOO=1 git push origin +feat',
+      'git reset --hard HEAD~2',
+      'git branch -D old',
+      'git push origin :old',
+      'git p',
+    ]) {
+      expect(await decide('ask', 'bash', c)).toBe('APPROVAL_REQUIRED');
+      expect(await decide('strict', 'bash', c)).toBe('APPROVAL_REQUIRED');
+      expect(await decide('watch', 'bash', c)).toBe('ALLOW');
+    }
+    for (const c of [
+      'git status',
+      'git push -u origin feat/x',
+      'git commit -m x',
+    ]) {
+      expect(await decide('ask', 'bash', c)).toBe('ALLOW');
+    }
+  });
   it('Strict asks outside the project; Watch allows everything', async () => {
     expect(await decide('strict', 'read', '/etc/hosts')).toBe(
       'APPROVAL_REQUIRED',

@@ -15,6 +15,7 @@ import {
 } from '../common/pagination/cursor-pagination';
 import { PlatformKillSwitchService } from './platform-kill-switch.service';
 import { EdgePeerService } from '../edge/edge-peer.service';
+import { PAUSED_REASON, isWorkspacePaused } from '../pause/pause-state';
 import { KillSwitchEpochService } from './kill-switch-epoch.service';
 
 /** The four tenant-scoped kill-switch levels — see `KillSwitch` in `prisma/tenant.prisma`. */
@@ -50,7 +51,7 @@ export interface KillSwitchCheckParams {
 export interface KillSwitchCheckResult {
   killed: boolean;
   /** Present only when `killed` is true. */
-  scope?: 'PLATFORM' | TenantKillSwitchScope | 'AI_SYSTEM';
+  scope?: 'PLATFORM' | TenantKillSwitchScope | 'AI_SYSTEM' | 'PAUSE';
   /** Present only when `killed` is true — a specific, non-leaky reason (app-layer deterministic state, safe to expose — same posture as `AuthorizationService`'s steps 1-4). */
   reason?: string;
 }
@@ -234,6 +235,11 @@ export class KillSwitchService {
     params: KillSwitchCheckParams,
     options?: { fresh?: boolean },
   ): Promise<KillSwitchCheckResult> {
+    // "Pause all AI" is read on every call, never from the epoch cache: pressing the button must
+    // take effect on the next action. One primary-key read; an error propagates (fail closed).
+    if (await isWorkspacePaused(tenantClient)) {
+      return { killed: true, scope: 'PAUSE', reason: PAUSED_REASON };
+    }
     const epochs = this.epochs;
     // `fresh`: stored state (edge peers) is recomputed from PostgreSQL, never from the cache.
     if (!epochs || epochs.maxAgeMs === 0 || options?.fresh) {

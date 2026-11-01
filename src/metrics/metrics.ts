@@ -107,6 +107,25 @@ export function recordCloudMcpPendingClient(): void {
   cloudMcpPendingClients.inc();
 }
 
+const cloudMcpDcrSeen = new Counter({
+  name: 'manar_cloud_mcp_dcr_registrations_seen_total',
+  help: 'Anonymous (self-registered) clients first seen on the shared realm by the 5-minute sweep: rate() over 5m is registrations per 5 minutes. Alert on a spike.',
+  registers: [registry],
+});
+const cloudMcpDcrUnconfirmed = new Gauge({
+  name: 'manar_cloud_mcp_dcr_unconfirmed_clients',
+  help: 'Unconfirmed self-registered clients holding a slot in the shared realm (cap 5000).',
+  registers: [registry],
+});
+
+export function recordCloudMcpDcrSweep(
+  seen: number,
+  unconfirmed: number,
+): void {
+  cloudMcpDcrSeen.inc(seen);
+  cloudMcpDcrUnconfirmed.set(unconfirmed);
+}
+
 const licenseStatus = new Gauge({
   name: 'manar_license_status',
   help: 'Licence status: 1 for the current status, 0 for the others. Soft limit, never enforced.',

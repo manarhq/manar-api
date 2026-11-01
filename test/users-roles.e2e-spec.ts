@@ -172,6 +172,8 @@ describe('Users & Roles (e2e)', () => {
       email: `${PLAIN_USERNAME}@example.test`,
       password: USER_PASSWORD,
     });
+    // Only members reach the tenant, and a Membership always holds a role.
+    await assignRealmRole(tenant.keycloakRealm, plainKeycloakId, 'READ_ONLY');
 
     ownerToken = await freshToken(OWNER_USERNAME);
     secAdminToken = await freshToken(SECADMIN_USERNAME);

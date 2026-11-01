@@ -278,3 +278,172 @@ describe('AccessRequestSchema', () => {
     expect(AccessRequestSchema.safeParse(noPath).success).toBe(false);
   });
 });
+
+describe('secret blocking settings', () => {
+  const settings = (row: { blockMode: string } | null) => {
+    const upsert = vi.fn().mockResolvedValue({});
+    const client = {
+      secretSettings: {
+        findUnique: vi.fn().mockResolvedValue(row),
+        upsert,
+      },
+    };
+    return { client, upsert };
+  };
+
+  it.each([
+    [null, ['secrets.block', 'secrets.vault.ssh']],
+    [{ blockMode: 'keys' }, ['secrets.block', 'secrets.vault.ssh']],
+    [
+      { blockMode: 'all' },
+      ['secrets.block', 'secrets.block.all', 'secrets.vault.ssh'],
+    ],
+    [{ blockMode: 'off' }, ['secrets.vault.ssh']],
+  ])('device features for %j', async (row, want) => {
+    const { client } = settings(row);
+    const { service } = setup();
+    expect(await service.features(client as never)).toEqual(want);
+  });
+
+  it('changing the mode is audited with the old and new value', async () => {
+    const { client, upsert } = settings({ blockMode: 'keys' });
+    const { service, audit } = setup();
+    await service.setBlockMode(
+      client as never,
+      't1',
+      { type: 'human', id: 'u1' },
+      'all',
+    );
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: { blockMode: 'all', updatedBy: 'u1' },
+      }),
+    );
+    expect(audit.recordSafely).toHaveBeenCalledWith(
+      client,
+      't1',
+      expect.objectContaining({
+        eventType: 'secret.settings.changed',
+        data: { from: 'keys', to: 'all' },
+      }),
+    );
+  });
+});
+
+describe('file access requests (the watcher asks once per program)', () => {
+  const body = (o: Record<string, unknown> = {}) => ({
+    kind: 'file',
+    ref: 'ssh',
+    program: 'cursor-agent',
+    programPath: '~/.local/share/cursor-agent/cursor-agent',
+    programSha: 'a'.repeat(64),
+    ...o,
+  });
+  it('accepts a file class and refuses an unknown one', () => {
+    expect(AccessRequestSchema.safeParse(body()).success).toBe(true);
+    expect(AccessRequestSchema.safeParse(body({ ref: 'x' })).success).toBe(
+      false,
+    );
+    expect(
+      AccessRequestSchema.safeParse(body({ kind: 'aws', ref: 'default' }))
+        .success,
+    ).toBe(true);
+  });
+  it('does not need a vault entry and folds a repeated open question', async () => {
+    const open = { id: 'a1', status: 'PENDING' };
+    const client = {
+      secretVault: { findUnique: vi.fn() },
+      secretVaultAccess: { findFirst: vi.fn().mockResolvedValue(open) },
+    };
+    const { service } = setup();
+    const r = await service.createAccess(client as never, 'h1', 'file', 'ssh', {
+      name: 'cursor-agent',
+      path: '~/x',
+      sha: 'a'.repeat(64),
+    });
+    expect(r).toEqual({ id: 'a1', status: 'PENDING' });
+    expect(client.secretVault.findUnique).not.toHaveBeenCalled();
+  });
+  it('an AI tool asking to restore a key is a question without a vault lookup', () => {
+    expect(
+      AccessRequestSchema.safeParse(body({ kind: 'ssh-restore', ref: '*' }))
+        .success,
+    ).toBe(true);
+  });
+  it('a vault secret still needs its entry', async () => {
+    const client = {
+      secretVault: { findUnique: vi.fn().mockResolvedValue(null) },
+    };
+    const { service } = setup();
+    await expect(
+      service.createAccess(client as never, 'h1', 'aws', 'default', {
+        name: 'x',
+        path: 'x',
+        sha: 'a'.repeat(64),
+      }),
+    ).rejects.toThrow('not in the vault');
+  });
+});
+
+describe('ssh key offers and device-initiated moves', () => {
+  const vaultClient = (row: { id: string; state: string } | null) => ({
+    secretVault: {
+      findUnique: vi.fn().mockResolvedValue(row),
+      create: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
+    },
+  });
+  it('a detected key is offered, not moved', async () => {
+    const c = vaultClient(null);
+    const { service } = setup();
+    await service.report(
+      c as never,
+      't',
+      'h',
+      'ssh',
+      'id_ed25519',
+      'AVAILABLE',
+    );
+    expect(c.secretVault.create).toHaveBeenCalledWith({
+      data: {
+        hostId: 'h',
+        kind: 'ssh',
+        ref: 'id_ed25519',
+        state: 'AVAILABLE',
+        requestedBy: 'device',
+      },
+    });
+  });
+  it('an offer never disturbs a key that is stored or being moved', async () => {
+    const c = vaultClient({ id: 'v1', state: 'STORED' });
+    const { service } = setup();
+    await service.report(c as never, 't', 'h', 'ssh', 'k', 'AVAILABLE');
+    expect(c.secretVault.update).not.toHaveBeenCalled();
+    expect(c.secretVault.create).not.toHaveBeenCalled();
+  });
+  it('the command line can store and restore without a console request', async () => {
+    const { service, audit } = setup();
+    const none = vaultClient(null);
+    expect(
+      await service.report(none as never, 't', 'h', 'ssh', 'k', 'STORED'),
+    ).toEqual({ state: 'STORED' });
+    expect(audit.recordSafely).toHaveBeenCalled();
+    const stored = vaultClient({ id: 'v1', state: 'STORED' });
+    expect(
+      await service.report(stored as never, 't', 'h', 'ssh', 'k', 'RESTORED'),
+    ).toEqual({ state: 'RESTORED' });
+  });
+  it('a restore report for a key never seen is refused', async () => {
+    const { service } = setup();
+    await expect(
+      service.report(
+        vaultClient(null) as never,
+        't',
+        'h',
+        'ssh',
+        'k',
+        'RESTORED',
+      ),
+    ).rejects.toThrow('No such vault entry');
+  });
+});

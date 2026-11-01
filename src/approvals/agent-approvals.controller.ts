@@ -3,12 +3,16 @@ import {
   Get,
   NotFoundException,
   Param,
+  Post,
   UseGuards,
 } from '@nestjs/common';
 import { CurrentAgent } from '../agent-mtls/agent-context';
 import type { AgentContext } from '../agent-mtls/agent-context';
 import { AgentMtlsGuard } from '../agent-mtls/agent-mtls.guard';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { AuditService } from '../audit/audit.service';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import { isWorkspacePaused } from '../pause/pause-state';
 import { ApprovalRequestNotFoundError } from './approvals.errors';
 import { ApprovalRequestService } from './approval-request.service';
 import { GrantService } from './grant.service';
@@ -37,6 +41,7 @@ export class AgentApprovalsController {
     private readonly approvalRequestService: ApprovalRequestService,
     private readonly grantService: GrantService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly audit: AuditService,
   ) {}
 
   @Get('approvals/:id')
@@ -77,6 +82,14 @@ export class AgentApprovalsController {
       expiresAt: approvalRequest.expiresAt,
     };
 
+    // While AI is paused an approval that landed does not hand out a grant.
+    if (
+      approvalRequest.status === 'APPROVED' &&
+      (await isWorkspacePaused(tenantClient))
+    ) {
+      return { ...base, status: 'PAUSED' };
+    }
+
     const grant = approvalRequest.grant;
     if (
       approvalRequest.status !== 'APPROVED' ||
@@ -97,5 +110,51 @@ export class AgentApprovalsController {
     );
 
     return { ...base, grantToken, grantExpiresAt: grant.expiresAt };
+  }
+
+  /**
+   * The agent's hook gave up waiting (2 minutes with no answer) and told the agent "denied: no
+   * answer". It says so here, so the console cannot approve after that. Only the agent the request
+   * was assigned to may do this, only while it is PENDING, and the only effect is EXPIRED (a deny).
+   */
+  @Post('approvals/:id/expire')
+  @UseGuards(AgentMtlsGuard)
+  async expire(@CurrentAgent() agent: AgentContext, @Param('id') id: string) {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      agent.tenant.id,
+    );
+    let approvalRequest;
+    try {
+      approvalRequest = await this.approvalRequestService.getOrThrow(
+        tenantClient,
+        id,
+      );
+    } catch (error) {
+      if (error instanceof ApprovalRequestNotFoundError) {
+        throw new NotFoundException(`ApprovalRequest "${id}" was not found`);
+      }
+      throw error;
+    }
+    if (approvalRequest.agentId !== agent.agent.id) {
+      throw new NotFoundException(`ApprovalRequest "${id}" was not found`);
+    }
+    const r = await this.approvalRequestService.expireIfPending(
+      tenantClient,
+      id,
+    );
+    if (r.expired) {
+      await this.audit.recordSafely(tenantClient, agent.tenant.id, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_EXPIRED,
+        actor: { type: 'system', id: agent.agent.id },
+        data: {
+          approvalRequestId: id,
+          agentId: agent.agent.id,
+          toolId: approvalRequest.toolId,
+          actionId: approvalRequest.actionId,
+          reason: 'no_answer',
+        },
+      });
+    }
+    return { id, status: r.status };
   }
 }

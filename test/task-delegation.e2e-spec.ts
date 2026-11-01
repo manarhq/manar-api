@@ -40,6 +40,7 @@ import {
   getUserToken,
 } from './support/keycloak-test-helpers';
 import { allowAllCatalog } from '../src/platform/catalog.fakes';
+import { onCompanyPlan } from './support/free-entitlements';
 
 /**
  * Mandatory Phase 5 (Tasks, Delegation & OpenFGA) scenarios — design
@@ -229,6 +230,7 @@ describe('Tasks, delegation & OpenFGA (e2e)', () => {
       slug: uniqueSlug('tenant'),
       name: 'Task Delegation Test Tenant',
     });
+    await onCompanyPlan(control, tenant.id);
     if (!tenant.keycloakRealm) {
       throw new Error('Expected provisioned tenant to have a Keycloak realm');
     }

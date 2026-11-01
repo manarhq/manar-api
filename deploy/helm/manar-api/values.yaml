@@ -226,6 +226,8 @@ config:
   MANAR_MCP_ENABLED: 'false'
   MANAR_MCP_HOST: ''
   MANAR_MCP_DCR_TRUSTED_HOSTS: chatgpt.com
+  # ChatGPT (dynamic client registration) on the shared realm; 'false' turns it off.
+  MANAR_MCP_CHATGPT_ENABLED: 'true'
   MANAR_MCP_RATE_LIMIT_PER_MINUTE: '60'
   MANAR_MCP_MAX_BODY_BYTES: '262144'
   # cloudflared and Traefik pod ranges (comma-separated CIDRs) so request.ip is the real caller
@@ -247,6 +249,10 @@ config:
   LLM_ANTHROPIC_MODELS: ''
   # Whether that upstream processes prompts in the UAE (a UAE tenant is refused otherwise).
   LLM_ANTHROPIC_UAE_RESIDENT: 'false'
+  # Telegram approvals bot. Off until TELEGRAM_BOT_TOKEN (secret, below) is set. Bot name without @;
+  # the webhook URL is the public https URL of POST /telegram/webhook (registered at start).
+  TELEGRAM_BOT_USERNAME: ''
+  TELEGRAM_WEBHOOK_URL: ''
 
 # Secret application configuration (credentials, connection strings that
 # embed a password, signing keys, static tokens). templates/secret.yaml
@@ -276,6 +282,10 @@ secrets:
     VAPID_PUBLIC_KEY: ''
     VAPID_PRIVATE_KEY: ''
     VAPID_SUBJECT: ''
+    # Telegram approvals bot (optional, both or none). ExternalSecret keys. The webhook secret is 32+
+    # random characters of A-Z a-z 0-9 _ -.
+    TELEGRAM_BOT_TOKEN: ''
+    TELEGRAM_WEBHOOK_SECRET: ''
     # REQUIRED — `MANAR_BFF_SERVICE_TOKEN` has no default and a `min(16)`
     # constraint (src/tenants/tenants.config.ts), so `validate()` rejects the
     # environment and the process exits before listening if it is missing.

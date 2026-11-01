@@ -20,6 +20,7 @@ import { ToolInvocationService } from '../tools/tool-invocation.service';
 import { ToolsModule } from '../tools/tools.module';
 import { CloudAgentsController } from './cloud-agents.controller';
 import { CloudAgentsService } from './cloud-agents.service';
+import { DcrCleanupService } from './dcr-cleanup.service';
 import { CloudMcpAuthGuard } from './cloud-mcp-auth.guard';
 import { CloudMcpController } from './cloud-mcp.controller';
 
@@ -47,6 +48,7 @@ import { CloudMcpController } from './cloud-mcp.controller';
   providers: [
     CloudMcpAuthGuard,
     CloudAgentsService,
+    DcrCleanupService,
     AuthorizationService,
     ToolInvocationService,
     AgentTaskAccessService,

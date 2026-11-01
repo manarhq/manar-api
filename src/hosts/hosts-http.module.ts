@@ -6,10 +6,11 @@ import {
 } from './hosts-admin.controller';
 import { AdcsAdminController } from './adcs/adcs-admin.controller';
 import { HostRegisterController } from './host-register.controller';
+import { FileChangesModule } from './changes/file-changes.module';
 import { HostsModule } from './hosts.module';
 
 @Module({
-  imports: [HostsModule],
+  imports: [HostsModule, FileChangesModule],
   controllers: [
     HostRegisterController,
     HostsController,

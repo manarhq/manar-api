@@ -41,7 +41,7 @@ approval both check it inside their own transaction under `pg_advisory_xact_lock
 tenant's database and requires the exact certificate serial to be issued to it and unrevoked.
 REJECTED and REVOKED hosts are refused; a PENDING host may call. Handlers read `@CurrentHost()`
 (`hostId`, `tenantId`, `machineId`, `ownerSubject`, `status`). `GET /host/v1/config` returns
-`{ hostId, status, startMode, features }`.
+`{ hostId, status, startMode, features, paused, tools }`. `paused` is the workspace's "Pause all AI": while true every protect and hook path answers deny with reason `paused` (the API also denies in the kill-switch check, so devices that miss the flag are still stopped).
 
 ## Registration: `POST /hosts/register` (public)
 
@@ -257,3 +257,40 @@ Console: `GET /secrets/timeline`, `GET /secrets/overview`, `POST /secrets/vault/
 `SecretAlertBus` (src/secrets/secret-alert-bus.ts) emits one alert per `secret.touched` for the
 approvals/notifications track. Device feature flags read from `/host/v1/config`: `secrets.block`
 (Linux deny, default off) and `secrets.vault.ssh` (ssh vault, default off).
+
+## Undo AI file changes (device routes under `/host/v1/undo`)
+
+Feature flag: `undo` in `GET /host/v1/config` `features` (`HOST_UNDO_ENABLED=false` removes it).
+Records are metadata only (path, size, time, tool, and an HMAC of the content hash keyed by a per-device secret, never a hash of the file); file contents never reach Manar.
+
+| Route                                       | Who                                   | What                                                                                           |
+| ------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `POST /host/v1/undo/changes`                | approved device (mTLS)                | up to 50 records; idempotent per `(host, snapshotId)`; 7 day retention, 2000 newest per device |
+| `GET /host/v1/undo/restores`                | approved device                       | restores an admin requested for this device                                                    |
+| `POST /host/v1/undo/restores/:id/result`    | approved device                       | `{ status: RESTORED \| FAILED, error?, note? }`, only for a `REQUESTED` restore of this device |
+| `GET /hosts/:id/changes`                    | AUDITOR, SECURITY_ADMIN, TENANT_OWNER | unexpired records                                                                              |
+| `POST /hosts/:id/changes/:changeId/restore` | SECURITY_ADMIN, TENANT_OWNER          | sets `REQUESTED`; the device acts on its next poll                                             |
+
+The restore path is never sent to the device by the console: the device gets the path it reported
+itself and refuses a request whose path differs from the snapshot's. Audit events:
+`host.file_change.restore_requested`, `host.file_change.restored`, `host.file_change.restore_failed`.
+
+Git safety rules (`ask` / Balanced and `strict` start modes): an allow-list in
+`src/policy/git-allowlist.ts`. A command that touches git (or runs a shell, interpreter or runner)
+does not ask only if all of it is understood: no expansion of any kind (`~` and `@{u}` are fine),
+no redirection into `.git`, no `GIT_*`, `*EDITOR`, `*PAGER`, `*_COMMAND` or `*DIFF` variable set
+anywhere, every git call a literal `git`/`git.exe` first word with a subcommand and options from the
+tables (status, diff, log, show, add, commit without `--amend`, pull, fetch without refspecs or
+`--upload-pack`, checkout/switch without `-B`/`-C`/`--orphan`, stash without clear/drop, branch and
+tag list/create, remote -v, rev-parse, ls-files, blame, describe, config get/list, and
+`git push [-u] <remote> <non-default branch>`), and every other command either a plain data command
+(grep, echo, ls, ...), free of any mention of git/gh/hub/refs/push, or a shell whose `-c` script is
+itself git-safe. Everything else asks: other options or subcommands, wrappers (`sudo`, `env`,
+`command`, `xargs`, `find -exec`, ...), `sh -c` or an interpreter with an inline script, `gh`,
+`hub`, `source`, renamed git binaries. The prompt names a danger category when it is recognisable
+(force push, push to the default branch, history rewrite, branch delete) and otherwise says the
+command could not be fully read. Aliases are computed once per request, and a git command longer
+than 2048 characters asks. Honest ceiling: these rules ask before likely-dangerous git; a determined
+agent can still reach git through scripts or other programs. Protect branches on the git server, and
+JAIL limits what a tool can reach. Workspaces that already published `ask` show as `custom` until
+the owner picks Ask me again.

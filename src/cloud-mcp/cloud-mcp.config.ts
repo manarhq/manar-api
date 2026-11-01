@@ -52,9 +52,9 @@ export const CloudMcpConfigSchema = z.object({
     z.string().url().optional(),
   ),
   /**
-   * ChatGPT (dynamic client registration) on the shared realm. Off until the DCR security review;
-   * Claude and Copilot Studio use pre-registered clients and do not need it. Per-tenant realms
-   * are not affected.
+   * ChatGPT (dynamic client registration) on the shared realm. On by default (hardening proven in
+   * test/cloud-mcp-shared-chatgpt.e2e-spec.ts); `false` closes it. Per-tenant realms are not
+   * affected.
    */
   MANAR_MCP_CHATGPT_ENABLED: z.enum(['true', 'false']).optional(),
   /** Requests per cloud agent per minute, all MCP methods (default 60). */
@@ -106,7 +106,7 @@ export function cloudMcpSettings(
       .map((host) => host.trim().toLowerCase())
       .filter(Boolean),
     sharedIssuer: get('MANAR_MCP_SHARED_ISSUER')?.replace(/\/+$/, '') ?? null,
-    chatGptOnSharedRealm: get('MANAR_MCP_CHATGPT_ENABLED') === 'true',
+    chatGptOnSharedRealm: get('MANAR_MCP_CHATGPT_ENABLED') !== 'false',
     ratePerMinute: get('MANAR_MCP_RATE_LIMIT_PER_MINUTE') ?? 60,
     maxBodyBytes: get('MANAR_MCP_MAX_BODY_BYTES') ?? 262_144,
   };
@@ -162,3 +162,8 @@ export function isCloudMcpPath(url: string): boolean {
     url.startsWith('/.well-known/oauth-protected-resource/mcp/')
   );
 }
+
+/** Client attribute: 'pending' (waiting for an admin) or 'confirmed'. The sweep never touches either. */
+export const DCR_STATE_ATTRIBUTE = 'manar.dcr.state';
+/** Client attribute: epoch ms the sweep first saw an unconfirmed self-registered client. */
+export const DCR_FIRST_SEEN_ATTRIBUTE = 'manar.dcr.first_seen';

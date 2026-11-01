@@ -21,6 +21,7 @@ type Row = {
 
 function world(opts: {
   approverSubjects: string[];
+  paused?: boolean;
   highRisk?: boolean;
   recent?: number;
 }) {
@@ -40,7 +41,12 @@ function world(opts: {
     },
   ];
   const grants: Record<string, unknown>[] = [];
+  const nonces = new Set<string>();
   const client: Record<string, unknown> = {
+    $queryRaw: () => Promise.resolve([{ now: new Date() }]),
+    workspacePause: {
+      findUnique: () => Promise.resolve(opts.paused ? { paused: true } : null),
+    },
     roleBinding: {
       findFirst: ({
         where,
@@ -79,12 +85,18 @@ function world(opts: {
           ) ?? null,
         ),
       count: () => Promise.resolve(opts.recent ?? 0),
-      findMany: ({ where }: { where: { hostId?: string } }) =>
+      findMany: ({
+        where,
+      }: {
+        where: { hostId?: string; expiresAt?: { gt?: Date; lte?: Date } };
+      }) =>
         Promise.resolve(
           rows.filter(
             (r) =>
               r.status === 'PENDING' &&
-              (!where.hostId || r.hostId === where.hostId),
+              (!where.hostId || r.hostId === where.hostId) &&
+              (!where.expiresAt?.gt || r.expiresAt > where.expiresAt.gt) &&
+              (!where.expiresAt?.lte || r.expiresAt <= where.expiresAt.lte),
           ),
         ),
       updateMany: ({
@@ -98,6 +110,13 @@ function world(opts: {
         if (!r) return Promise.resolve({ count: 0 });
         Object.assign(r, data);
         return Promise.resolve({ count: 1 });
+      },
+    },
+    phoneActionUse: {
+      create: ({ data }: { data: { nonce: string } }) => {
+        if (nonces.has(data.nonce)) return Promise.reject(new Error('unique'));
+        nonces.add(data.nonce);
+        return Promise.resolve({});
       },
     },
     approvalAllowGrant: {
@@ -123,7 +142,7 @@ function world(opts: {
     { getClient: () => Promise.resolve(client) } as never,
     approvers as never,
   );
-  return { controller, service, rows, grants, audit, push, client };
+  return { controller, service, rows, grants, audit, push, client, nonces };
 }
 
 const host = (over: Partial<HostContext> = {}): HostContext => ({
@@ -158,6 +177,60 @@ describe('device decisions (spec 4.6)', () => {
     ).rejects.toThrow('eight_hours_in_console');
     expect(w.grants).toHaveLength(0);
     expect(w.rows[0]!.status).toBe('PENDING');
+  });
+
+  it('a push decision spends its token in the decision, once, and refuses 8 hours', async () => {
+    const w = world({ approverSubjects: ['owner'] });
+    const nonce = { value: 'n1', expiresAt: new Date(Date.now() + 60_000) };
+    await w.service.decide(w.client as never, 't1', {
+      approvalId: 'ap1',
+      subject: 'owner',
+      decision: 'approve_once',
+      via: 'push',
+      nonce,
+    });
+    expect(w.nonces.has('n1')).toBe(true);
+    expect(w.rows[0]).toMatchObject({ decidedVia: 'push' });
+    const again = world({ approverSubjects: ['owner'] });
+    again.nonces.add('n1');
+    await expect(
+      again.service.decide(again.client as never, 't1', {
+        approvalId: 'ap1',
+        subject: 'owner',
+        decision: 'deny',
+        via: 'push',
+        nonce,
+      }),
+    ).rejects.toThrow('action_already_used');
+    await expect(
+      w.service.decide(w.client as never, 't1', {
+        approvalId: 'ap1',
+        subject: 'owner',
+        decision: 'approve_8h',
+        via: 'push',
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('opens with a match code in the stored summary, one tag per approval, and no resource in the push', async () => {
+    const w = world({ approverSubjects: ['owner'] });
+    const row = await w.service.open(w.client as never, 't1', {
+      hostId: 'h1',
+      toolId: 'host.cursor',
+      actionId: 'file.write',
+      resource: '/u/.ssh/id_rsa',
+      summary: 'Cursor: file.write',
+      highRisk: false,
+      toolName: 'Cursor',
+    });
+    expect(row.summary).toMatch(/ #[0-9A-F]{4}$/);
+    const payload = w.push.notifyApprovers.mock.calls.at(-1)![2] as {
+      tag: string;
+      body: string;
+    };
+    expect(payload.tag).toBe(`approval-${row.id}`);
+    expect(payload.body).toMatch(/^Cursor: file\.write #[0-9A-F]{4}$/);
+    expect(payload.body).not.toContain('id_rsa');
   });
 
   it('approve_8h from the console creates a grant scoped to this host, tool, action and resource', async () => {
@@ -317,9 +390,9 @@ describe('device decisions (spec 4.6)', () => {
     ).rejects.toMatchObject({ status: 429 });
   });
 
-  it('pushes with one stable tag per device', async () => {
+  it('pushes with one tag per approval, so two requests never replace each other', async () => {
     const w = world({ approverSubjects: ['owner'] });
-    await w.service.open(w.client as never, 't1', {
+    const row = await w.service.open(w.client as never, 't1', {
       hostId: 'h1',
       toolId: 'host.cursor',
       actionId: 'shell',
@@ -331,7 +404,7 @@ describe('device decisions (spec 4.6)', () => {
     expect(w.push.notifyApprovers).toHaveBeenCalledWith(
       w.client,
       't1',
-      expect.objectContaining({ tag: 'approval-host-h1' }),
+      expect.objectContaining({ tag: `approval-${row.id}` }),
     );
   });
 
@@ -363,5 +436,42 @@ describe('device decisions (spec 4.6)', () => {
     expect(
       buildRuleDraft({ toolId: 't', actionId: 'a', resource: 'repo/x' }),
     ).not.toBeNull();
+  });
+});
+
+describe('during a pause', () => {
+  it('refuses to approve inside the transaction, but a deny still goes through', async () => {
+    const w = world({ approverSubjects: ['alice'], paused: true });
+    await expect(
+      w.service.decide(w.client as never, 't1', {
+        approvalId: 'ap1',
+        subject: 'alice',
+        decision: 'approve_once',
+        via: 'console',
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(w.rows[0]?.status).toBe('PENDING');
+    const r = await w.service.decide(w.client as never, 't1', {
+      approvalId: 'ap1',
+      subject: 'alice',
+      decision: 'deny',
+      via: 'console',
+    });
+    expect(r.status).toBe('DENIED');
+  });
+
+  it('opens nothing new', async () => {
+    const w = world({ approverSubjects: [], paused: true });
+    await expect(
+      w.service.open(w.client as never, 't1', {
+        hostId: 'h9',
+        toolId: 'host.cursor',
+        actionId: 'edit',
+        resource: '/x',
+        summary: 's',
+        highRisk: false,
+        toolName: 'Cursor',
+      }),
+    ).rejects.toMatchObject({ status: 403 });
   });
 });

@@ -8,6 +8,9 @@ import { WorkerAppModule } from './temporal/worker-app.module';
 import { ApprovalActivitiesFactory } from './temporal/activities/approval.activities';
 import { AuditRetentionActivitiesFactory } from './temporal/activities/audit-retention.activities';
 import { WebhookDeliveryActivitiesFactory } from './temporal/activities/webhook-delivery.activities';
+import { GrowthActivitiesFactory } from './temporal/activities/growth.activities';
+import { ensureGrowthSchedule } from './growth/growth-schedule';
+import { Connection } from '@temporalio/client';
 import type { AppConfig } from './config/env.validation';
 
 /**
@@ -98,6 +101,7 @@ async function bootstrap(): Promise<void> {
     ...appContext.get(ApprovalActivitiesFactory).build(),
     ...appContext.get(AuditRetentionActivitiesFactory).build(),
     ...appContext.get(WebhookDeliveryActivitiesFactory).build(),
+    ...appContext.get(GrowthActivitiesFactory).build(),
   };
 
   installWorkerMetrics(
@@ -106,6 +110,19 @@ async function bootstrap(): Promise<void> {
   );
 
   const connection = await NativeConnection.connect({ address });
+  // The hourly Growth tick (weekly digest, account deletions). Created once; failing to create it
+  // must not stop approvals, so it is logged and retried at the next start.
+  await Connection.connect({ address })
+    .then(async (c) => {
+      try {
+        await ensureGrowthSchedule(c, namespace, taskQueue);
+      } finally {
+        await c.close();
+      }
+    })
+    .catch((e: unknown) =>
+      logger.error(`Growth schedule not ensured: ${String(e)}`),
+    );
 
   // Resolves to this same directory's compiled workflow *bundle*
   // (`dist/temporal/workflows/index.js` in a built image, the tsc-compiled

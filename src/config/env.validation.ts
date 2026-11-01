@@ -1,3 +1,4 @@
+import { GrowthConfigSchema } from '../growth/growth.config';
 import { z } from 'zod';
 import { BillingConfigSchema } from '../billing/billing.config';
 import { DatabaseConfigSchema } from '../database/database.config';
@@ -40,6 +41,10 @@ import {
   devicesConfigIssues,
 } from '../devices/devices.config';
 import { PushConfigSchema, pushConfigIssues } from '../push/push.config';
+import {
+  TelegramConfigSchema,
+  telegramConfigIssues,
+} from '../telegram/telegram.config';
 import { EdgeConfigSchema, edgeConfigIssues } from '../edge/edge.config';
 
 /**
@@ -95,6 +100,8 @@ export const AppConfigSchema = z
   .extend(BillingConfigSchema.shape)
   .extend(DevicesConfigSchema.shape)
   .extend(PushConfigSchema.shape)
+  .extend(TelegramConfigSchema.shape)
+  .extend(GrowthConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {
@@ -107,6 +114,7 @@ export const AppConfigSchema = z
       ...devicesConfigIssues(c),
       ...edgeConfigIssues(c),
       ...pushConfigIssues(c),
+      ...telegramConfigIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });
   });

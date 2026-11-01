@@ -42,6 +42,11 @@ import {
   UnverifiedRuleError,
   type HostDecision,
 } from './hosts-admin.service';
+import {
+  FileChangeNotFoundError,
+  FileChangeStateError,
+  FileChangesService,
+} from './changes/file-changes.service';
 import { InstallCodesService } from './install-codes.service';
 import {
   HostGroupNotFoundError,
@@ -103,6 +108,7 @@ export class HostsController {
   constructor(
     private readonly tenants: TenantDatabaseManager,
     private readonly admin: HostsAdminService,
+    private readonly fileChanges: FileChangesService,
   ) {}
 
   @Get()
@@ -144,6 +150,62 @@ export class HostsController {
       .remove(client, auth.tenant.id, actorOf(auth), id)
       .catch(http);
     return { removed: true };
+  }
+
+  @Get(':id/changes')
+  @RequireRole(...READ)
+  @ApiOperation({
+    summary:
+      'Files an AI tool changed outside its project on this device (last 7 days)',
+    description:
+      'Metadata only: path, size and time. File contents stay on the device.',
+  })
+  @ApiResponse({ status: 200, description: '{ items }' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async changes(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    const client = await this.tenants.getClient(auth.tenant.id);
+    if (
+      !(await client.host.findUnique({ where: { id }, select: { id: true } }))
+    )
+      throw new NotFoundException('Host not found');
+    return { items: await this.fileChanges.list(client, id) };
+  }
+
+  @Post(':id/changes/:changeId/restore')
+  @RequireRole(...WRITE)
+  @ApiOperation({
+    summary:
+      'Ask the device to put a file back as it was before the AI tool changed it',
+    description:
+      'The device performs the restore on its next poll and reports the result. Audited.',
+  })
+  @ApiResponse({ status: 201, description: '{ id, restoreStatus }' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  @ApiResponse({ status: 409, type: ErrorResponseDto })
+  async restoreChange(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('changeId', new ParseUUIDPipe()) changeId: string,
+  ) {
+    const client = await this.tenants.getClient(auth.tenant.id);
+    try {
+      return await this.fileChanges.requestRestore(
+        client,
+        auth.tenant.id,
+        actorOf(auth),
+        id,
+        changeId,
+      );
+    } catch (e) {
+      if (e instanceof FileChangeNotFoundError)
+        throw new NotFoundException('Change not found or expired');
+      if (e instanceof FileChangeStateError)
+        throw new ConflictException(e.message);
+      throw e;
+    }
   }
 
   @Post(':id/approve')

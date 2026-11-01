@@ -250,10 +250,11 @@ describe('Platform API for manar-fleet (e2e)', () => {
       expect(
         await killSwitches.checkAll(otherClient, tenantId!, { agentId }),
       ).toMatchObject({ killed: true, scope: 'TENANT' });
+      // The realm still signs the token; the Membership lookup refuses a tenant that is not ACTIVE.
       await http()
         .get('/users')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .expect(401);
+        .expect(403);
       await http()
         .post(`/platform/v1/tenants/${tenantId}/suspend`)
         .set('Authorization', `Bearer ${platformToken}`)
@@ -390,7 +391,7 @@ describe('Platform API for manar-fleet (e2e)', () => {
     await http()
       .get('/users')
       .set('Authorization', `Bearer ${ownerToken}`)
-      .expect(401);
+      .expect(403);
     await http()
       .post(`/platform/v1/tenants/${tenantId}/resume`)
       .set('Authorization', `Bearer ${platformToken}`)

@@ -1,25 +1,50 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   HttpException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { PushService } from '../push/push.service';
-import { createAllowGrant } from './allow-grants';
+import { TelegramService } from '../telegram/telegram.service';
+import { approvalMatchCode } from '../phone/phone-token';
+import { dbNow } from '../common/db-clock';
+import { PAUSED_REASON, isWorkspacePaused } from '../pause/pause-state';
+import { SITE_CONNECT_ACTION } from '../jail/jail-sites';
+import {
+  siteRuleBlocksRemember,
+  upsertSiteRule,
+} from '../jail/jail-sites.service';
+import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
 
-export type HostDecision = 'approve_once' | 'approve_8h' | 'deny';
+/** `approve_always` exists for a new site only (JAIL): it makes a permanent site rule. */
+export type HostDecision =
+  'approve_once' | 'approve_8h' | 'approve_always' | 'deny';
 
-/** How long a device approval waits for a person. */
-export const HOST_APPROVAL_TTL_MS = 10 * 60 * 1000;
+/**
+ * How long a device approval waits for a person (founder decision, 1 Nov 2026): the prompt shows
+ * and the phone is pushed at the same moment; with no answer in 2 minutes it is denied, logged,
+ * and the agent is told "denied: no answer".
+ */
+export const HOST_APPROVAL_TTL_MS = 2 * 60 * 1000;
 
 /** A host that opens more approvals than this in the window is refused (a looping tool, or a flood). */
 export const HOST_APPROVALS_PER_WINDOW = 20;
 export const HOST_APPROVAL_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * New-site asks from protected tools (JAIL) have their own budget, so a tool that reaches for many
+ * sites cannot use up the device's other prompts, and its own queue is capped.
+ */
+export const HOST_SITE_ASKS_PER_WINDOW = 30;
+export const HOST_SITE_PENDING_PER_TOOL = 10;
 
 export interface OpenHostApprovalInput {
   hostId: string;
@@ -39,8 +64,16 @@ export interface DecideHostApprovalInput {
   hostId?: string;
   subject: string;
   decision: HostDecision;
-  via: 'device' | 'console';
+  /** push and telegram are the phone: like the device, they never give a standing 8-hour permission. */
+  via: 'device' | 'console' | 'push' | 'telegram';
   makeRule?: boolean;
+  /**
+   * Single-use push token nonce: recorded in the same transaction as the decision, so a token is
+   * spent only by a decision that took effect, and never twice.
+   */
+  nonce?: { value: string; expiresAt: Date };
+  /** Console only: the caller may write site rules (owner / security admin). Absent means no. */
+  canWriteSiteRules?: boolean;
 }
 
 @Injectable()
@@ -48,6 +81,7 @@ export class HostApprovalsService {
   constructor(
     private readonly audit: AuditService,
     private readonly push: PushService,
+    @Optional() private readonly telegram?: TelegramService,
   ) {}
 
   /** Called by the host authorize path when the answer is "ask". Pushes to the workspace's approvers. */
@@ -55,8 +89,12 @@ export class HostApprovalsService {
     client: TenantPrismaClient,
     tenantId: string,
     input: OpenHostApprovalInput,
-    now: Date = new Date(),
+    at?: Date,
   ) {
+    const now = at ?? (await dbNow(client));
+    // Nothing new is asked while AI is paused (the authorize path has already denied it).
+    if (await isWorkspacePaused(client))
+      throw new ForbiddenException(PAUSED_REASON);
     // The same host asking again for the same thing while it is still pending is the same
     // question: reuse it (no second prompt, no second push, no second audit event).
     const existing = await client.hostApproval.findFirst({
@@ -70,21 +108,46 @@ export class HostApprovalsService {
       },
     });
     if (existing) return existing;
+    const isSite = input.actionId === SITE_CONNECT_ACTION;
     const recent = await client.hostApproval.count({
       where: {
         hostId: input.hostId,
         createdAt: { gt: new Date(now.getTime() - HOST_APPROVAL_WINDOW_MS) },
+        actionId: isSite ? SITE_CONNECT_ACTION : { not: SITE_CONNECT_ACTION },
       },
     });
-    if (recent >= HOST_APPROVALS_PER_WINDOW)
+    if (
+      recent >= (isSite ? HOST_SITE_ASKS_PER_WINDOW : HOST_APPROVALS_PER_WINDOW)
+    )
       throw new HttpException('too many approvals opened by this device', 429);
+    if (isSite) {
+      const waiting = await client.hostApproval.count({
+        where: {
+          hostId: input.hostId,
+          toolId: input.toolId,
+          actionId: SITE_CONNECT_ACTION,
+          status: 'PENDING',
+          expiresAt: { gt: now },
+        },
+      });
+      if (waiting >= HOST_SITE_PENDING_PER_TOOL)
+        throw new HttpException(
+          'too many sites are waiting for this tool',
+          429,
+        );
+    }
+    // The id is made here so the short match code (shown on the device prompt, the push and
+    // Telegram) can be part of the stored summary.
+    const id = randomUUID();
+    const matchCode = approvalMatchCode(id);
     const row = await client.hostApproval.create({
       data: {
+        id,
         hostId: input.hostId,
         toolId: input.toolId,
         actionId: input.actionId,
         resource: input.resource,
-        summary: input.summary.slice(0, 300),
+        summary: `${input.summary.slice(0, 280)} #${matchCode}`,
         highRisk: input.highRisk,
         expiresAt: new Date(now.getTime() + HOST_APPROVAL_TTL_MS),
       },
@@ -102,10 +165,23 @@ export class HostApprovalsService {
     void this.push.notifyApprovers(client, tenantId, {
       kind: 'approval',
       title: 'WARDEN',
-      body: `${input.toolName} is waiting for your decision`,
+      // Tool, action type and match code. Never the resource.
+      body: `${input.toolName}: ${input.actionId} #${matchCode}`,
       url: '/approvals',
-      // One tag per device: a burst of requests collapses into one notification.
-      tag: `approval-host-${input.hostId}`,
+      // One tag per approval: two requests never replace each other on the phone.
+      tag: `approval-${row.id}`,
+      approvalId: row.id,
+      // High-risk approvals are decided in the console only: no buttons on the phone.
+      actionable: !input.highRisk,
+      expiresAt: row.expiresAt.getTime(),
+    });
+    void this.telegram?.notifyApproval(client, tenantId, {
+      approvalId: row.id,
+      toolName: input.toolName,
+      actionId: input.actionId,
+      matchCode,
+      highRisk: input.highRisk,
+      expiresAt: row.expiresAt,
     });
     return row;
   }
@@ -130,11 +206,51 @@ export class HostApprovalsService {
     });
   }
 
-  listPending(
+  /**
+   * Denies what nobody answered in time: PENDING rows past `expiresAt` become EXPIRED (one
+   * conditional update, so concurrent readers log it once) and each gets an `approval.expired`
+   * audit event. Called on every read a device or console makes, so no scheduler is needed.
+   */
+  async expireDue(
+    client: TenantPrismaClient,
+    tenantId: string,
+    at?: Date,
+  ): Promise<number> {
+    const now = at ?? (await dbNow(client));
+    const due = await client.hostApproval.findMany({
+      where: { status: 'PENDING', expiresAt: { lte: now } },
+      select: { id: true, hostId: true, toolId: true, actionId: true },
+      take: 50,
+    });
+    let n = 0;
+    for (const row of due) {
+      const won = await client.hostApproval.updateMany({
+        where: { id: row.id, status: 'PENDING' },
+        data: { status: 'EXPIRED' },
+      });
+      if (won.count === 0) continue;
+      n++;
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_EXPIRED,
+        actor: { type: 'system', id: row.hostId },
+        data: {
+          hostApprovalId: row.id,
+          hostId: row.hostId,
+          toolId: row.toolId,
+          actionId: row.actionId,
+          reason: 'no_answer',
+        },
+      });
+    }
+    return n;
+  }
+
+  async listPending(
     client: TenantPrismaClient,
     hostId: string | undefined,
-    now: Date = new Date(),
+    at?: Date,
   ) {
+    const now = at ?? (await dbNow(client));
     return client.hostApproval.findMany({
       where: {
         ...(hostId ? { hostId } : {}),
@@ -161,19 +277,66 @@ export class HostApprovalsService {
     client: TenantPrismaClient,
     tenantId: string,
     input: DecideHostApprovalInput,
-    now: Date = new Date(),
+    at?: Date,
   ) {
     // 8 hours is a standing permission: it is given in the console, in a browser session, never
     // from a prompt on the device (a process on the device could answer that prompt).
-    if (input.via === 'device' && input.decision === 'approve_8h')
+    if (
+      input.via !== 'console' &&
+      (input.decision === 'approve_8h' || input.decision === 'approve_always')
+    )
       throw new ForbiddenException('eight_hours_in_console');
     const row = await this.get(client, input.approvalId, input.hostId);
+    const isSite = row.actionId === SITE_CONNECT_ACTION;
+    // A prompt on the desktop is not consent for a new site: a protected tool can answer it itself
+    // (it can run its own copy of the prompt helper). From a device only "deny" is taken, which is
+    // what withdraws a prompt nobody answered.
+    if (input.via === 'device' && isSite && input.decision !== 'deny')
+      throw new ForbiddenException('site_in_console');
+    if (input.decision === 'approve_always' && !isSite)
+      throw new BadRequestException('always is for a new site only');
+    // A permanent site rule needs the role that may write site rules; an approver without it
+    // gets "once" (fail closed: an absent flag is "no").
+    let decision: HostDecision = input.decision;
+    let note: 'needs_owner' | 'site_rule_exists' | null = null;
+    if (
+      isSite &&
+      (decision === 'approve_always' || decision === 'approve_8h') &&
+      !input.canWriteSiteRules
+    ) {
+      decision = 'approve_once';
+      note = 'needs_owner';
+    }
+    const wantsRemember =
+      isSite && (decision === 'approve_8h' || decision === 'approve_always');
+    let remember = false;
     const result = await client.$transaction(async (tx) => {
+      // Inside the transaction, so a pause that lands between the check and the write cannot be
+      // missed. A deny is always allowed; an approval is refused while AI is paused.
+      if (input.decision !== 'deny' && (await isWorkspacePaused(tx)))
+        throw new ConflictException(PAUSED_REASON);
+      const now = at ?? (await dbNow(tx));
+      // A person's answer to "may this tool connect to this site?" is remembered per device and
+      // tool, unless a DENY or a rule made by hand already speaks for this site: then it is
+      // "once", and the stored decision says so (the device reads it).
+      if (
+        wantsRemember &&
+        (await siteRuleBlocksRemember(
+          tx,
+          row.hostId,
+          row.toolId,
+          row.resource,
+          now,
+        ))
+      ) {
+        decision = 'approve_once';
+        note = 'site_rule_exists';
+      }
       const won = await tx.hostApproval.updateMany({
         where: { id: row.id, status: 'PENDING', expiresAt: { gt: now } },
         data: {
-          status: input.decision === 'deny' ? 'DENIED' : 'APPROVED',
-          decision: input.decision,
+          status: decision === 'deny' ? 'DENIED' : 'APPROVED',
+          decision,
           decidedBy: input.subject,
           decidedVia: input.via,
           decidedAt: now,
@@ -181,7 +344,37 @@ export class HostApprovalsService {
       });
       if (won.count === 0)
         throw new ConflictException('already decided or expired');
-      if (input.decision !== 'approve_8h')
+      if (input.nonce) {
+        try {
+          await tx.phoneActionUse.create({
+            data: {
+              nonce: input.nonce.value,
+              expiresAt: input.nonce.expiresAt,
+            },
+          });
+        } catch {
+          // Unique violation: the token was spent. This aborts the transaction, so the decision
+          // above is rolled back with it.
+          throw new ConflictException('action_already_used');
+        }
+      }
+      if (wantsRemember && note !== 'site_rule_exists') {
+        await upsertSiteRule(tx, {
+          hostId: row.hostId,
+          toolId: row.toolId,
+          site: row.resource,
+          mode: 'ALLOW',
+          expiresAt:
+            decision === 'approve_always'
+              ? null
+              : new Date(now.getTime() + ALLOW_GRANT_TTL_MS),
+          source: 'approval',
+          createdBy: input.subject,
+        });
+        remember = true;
+      }
+      // A site prompt is answered by the site rule, never by an 8-hour action grant.
+      if (decision !== 'approve_8h' || isSite)
         return { grantId: null as string | null };
       const grant = await createAllowGrant(tx, {
         scope: { hostId: row.hostId },
@@ -198,19 +391,43 @@ export class HostApprovalsService {
     });
     await this.audit.recordSafely(client, tenantId, {
       eventType:
-        input.decision === 'deny'
+        decision === 'deny'
           ? AUDIT_EVENT_TYPES.APPROVAL_DENIED
           : AUDIT_EVENT_TYPES.APPROVAL_APPROVED,
       actor: { type: 'human', id: input.subject },
       data: {
         hostApprovalId: row.id,
         hostId: row.hostId,
-        decision: input.decision,
+        decision,
         via: input.via,
         toolId: row.toolId,
         actionId: row.actionId,
       },
     });
+    // Close the phone's buttons and notification, whichever channel decided.
+    void this.telegram?.closeApproval(tenantId, row.id, decision);
+    void this.push.notifyApprovers(client, tenantId, {
+      kind: 'approval_closed',
+      title: 'WARDEN',
+      body: '',
+      url: '/approvals',
+      tag: `approval-closed-${row.id}`,
+      approvalId: row.id,
+    });
+    if (remember) {
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.JAIL_SITE_RULE_CREATED,
+        actor: { type: 'human', id: input.subject },
+        data: {
+          hostId: row.hostId,
+          toolId: row.toolId,
+          site: row.resource,
+          mode: 'ALLOW',
+          via: input.via,
+          decision,
+        },
+      });
+    }
     if (result.grantId) {
       await this.audit.recordSafely(client, tenantId, {
         eventType: AUDIT_EVENT_TYPES.APPROVAL_GRANT_CREATED,
@@ -226,12 +443,14 @@ export class HostApprovalsService {
     }
     return {
       id: row.id,
-      status:
-        input.decision === 'deny' ? ('DENIED' as const) : ('APPROVED' as const),
-      decision: input.decision,
+      status: decision === 'deny' ? ('DENIED' as const) : ('APPROVED' as const),
+      decision,
       grantId: result.grantId,
+      /** True when a site rule was made; `note` says why not ("once" only). */
+      remembered: remember,
+      note,
       ruleDraft:
-        input.makeRule && input.decision !== 'deny'
+        input.makeRule && decision !== 'deny'
           ? buildRuleDraft({
               toolId: row.toolId,
               actionId: row.actionId,

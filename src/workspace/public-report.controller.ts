@@ -14,7 +14,8 @@ export class PublicReportController {
   constructor(private readonly shares: ReportShareService) {}
 
   @Get(':shareId')
-  @Header('Cache-Control', 'public, max-age=60')
+  // no-store: a revoked link must stop working at once, not after a cache expires.
+  @Header('Cache-Control', 'no-store')
   @Header('X-Robots-Tag', 'noindex')
   @ApiOperation({
     summary: 'Public report card totals',

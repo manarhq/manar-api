@@ -5,6 +5,8 @@ import { AGENT_ROLE_CLAIM, TENANT_CLAIM } from '../cloud-mcp/cloud-mcp.config';
 
 /** Alias of the Entra ID identity provider in a tenant realm (docs/cloud-agents.md). */
 export const ENTRA_IDP_ALIAS = 'entra';
+/** Anonymous registrations a realm holds at most (Keycloak's default 200 is easy to fill). */
+export const DCR_MAX_CLIENTS = 5000;
 /** First broker login flow Manar creates: new users only, never linking by email. */
 export const CREATE_ONLY_BROKER_FLOW = 'manar first broker login';
 
@@ -22,6 +24,7 @@ export interface KeycloakClientRepresentation {
   serviceAccountsEnabled?: boolean;
   defaultClientScopes?: string[];
   optionalClientScopes?: string[];
+  protocolMappers?: Array<{ name?: string; protocolMapper?: string }>;
   [key: string]: unknown;
 }
 
@@ -81,6 +84,21 @@ export class KeycloakAdminClient {
       realm: realmName,
       enabled: true,
     });
+  }
+
+  /**
+   * Removes a realm user by its id (the token `sub`). A user that is already gone counts as done,
+   * so a retried account deletion converges.
+   */
+  async deleteUser(realmName: string, userId: string): Promise<void> {
+    try {
+      await this.adminRequest(
+        'DELETE',
+        `/admin/realms/${encodeURIComponent(realmName)}/users/${encodeURIComponent(userId)}`,
+      );
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
   }
 
   async createRealmRole(realmName: string, roleName: string): Promise<void> {
@@ -529,6 +547,17 @@ export class KeycloakAdminClient {
     );
   }
 
+  /** Invalidates the registration access token a self-registered client got (it can edit itself with it). */
+  async regenerateRegistrationAccessToken(
+    realmName: string,
+    clientUuid: string,
+  ): Promise<void> {
+    await this.adminRequest(
+      'POST',
+      `/admin/realms/${encodeURIComponent(realmName)}/clients/${clientUuid}/registration-access-token`,
+    );
+  }
+
   /** Deletes a client by clientId; a missing one is ignored. */
   async deleteClient(realmName: string, clientId: string): Promise<void> {
     const client = await this.findClient(realmName, clientId);
@@ -621,6 +650,29 @@ export class KeycloakAdminClient {
     };
     const scopesPolicy = find('allowed-client-templates');
     const trusted = find('trusted-hosts');
+    const mappers = find('allowed-protocol-mappers');
+    const maxClients = find('max-clients');
+    // A self-registered client may carry no protocol mappers at all: one that maps a user
+    // attribute onto `sub` would impersonate any member (docs/cloud-agents.md).
+    await this.adminRequest(
+      'PUT',
+      `/admin/realms/${realm}/components/${mappers.id}`,
+      {
+        ...mappers,
+        config: { ...mappers.config, 'allowed-protocol-mapper-types': [] },
+      },
+    );
+    await this.adminRequest(
+      'PUT',
+      `/admin/realms/${realm}/components/${maxClients.id}`,
+      {
+        ...maxClients,
+        config: {
+          ...maxClients.config,
+          'max-clients': [String(DCR_MAX_CLIENTS)],
+        },
+      },
+    );
     const current = scopesPolicy.config?.['allowed-client-scopes'] ?? [];
     const agentScopes = update(
       current.filter((s) => s.startsWith('manar-mcp-')),

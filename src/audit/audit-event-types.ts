@@ -34,6 +34,15 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_GRANT_CREATED: 'approval.grant.created',
   APPROVAL_GRANT_USED: 'approval.grant.used',
   APPROVAL_HANDOVER_COLLECTED: 'approval.handover_collected',
+  /** A device approval got no answer in time and was denied ("denied: no answer"). */
+  APPROVAL_EXPIRED: 'approval.expired',
+  /** "Pause all AI" was turned on / off for the workspace. */
+  WORKSPACE_AI_PAUSED: 'workspace.ai.paused',
+  WORKSPACE_AI_RESUMED: 'workspace.ai.resumed',
+
+  /** Phone track: a Telegram chat was linked to / unlinked from a person. No chat id in the event. */
+  TELEGRAM_LINK_CREATED: 'telegram.link.created',
+  TELEGRAM_LINK_REMOVED: 'telegram.link.removed',
 
   TOOL_INVOCATION_STARTED: 'tool.invocation.started',
   TOOL_INVOCATION_COMPLETED: 'tool.invocation.completed',
@@ -177,6 +186,53 @@ export const AUDIT_EVENT_TYPES = {
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
+
+  // AI spend tracker and secrets-in-prompt guard (DOOR).
+  /** DOOR replaced a secret in an outbound prompt with a mask. Data: tool, kind, count, masked sample; never the prompt. */
+  DOOR_SECRET_MASKED: 'door.secret.masked',
+  /** DOOR refused an outbound prompt that contained a secret (block mode). */
+  DOOR_SECRET_BLOCKED: 'door.secret.blocked',
+  /** The workspace's AI budget, cap or secrets-guard mode changed (before and after). */
+  AI_SPEND_SETTINGS_CHANGED: 'ai_spend.settings_changed',
+  /** Month spend crossed the budget (alert) or a tool's cap (the tool is paused on its devices). */
+  AI_SPEND_LIMIT_REACHED: 'ai_spend.limit_reached',
+  /** A device's usage report was refused (unknown tool, out-of-bound counts). Data: host and reason, never the payload. */
+  DOOR_USAGE_REJECTED: 'door.usage.rejected',
+  /** DOOR turned requests away because their body could not be checked (unsupported encoding). Data: host and count. */
+  DOOR_REQUEST_REFUSED: 'door.request.refused',
+  /** One device's spend today is far above the workspace's other devices. Data: host, today's spend, threshold. */
+  AI_SPEND_HOST_OUTLIER: 'ai_spend.host_outlier',
+
+  /** Insight: a device reported an MCP server of one of its AI tools for the first time (name, tool, flags; never args or env). */
+  MCP_SERVER_DISCOVERED: 'mcp.server.discovered',
+  /** Insight: an owner shared a redacted agent session as a public report. */
+  SESSION_SHARED: 'session.report.shared',
+
+  /** The workspace changed how far secret blocking goes (off, keys, all). */
+  SECRET_SETTINGS_CHANGED: 'secret.settings.changed',
+
+  /** Undo AI file changes: an admin asked a device to put a file back; the device reported the result. */
+  HOST_FILE_CHANGE_RESTORE_REQUESTED: 'host.file_change.restore_requested',
+  HOST_FILE_CHANGE_RESTORED: 'host.file_change.restored',
+  HOST_FILE_CHANGE_RESTORE_FAILED: 'host.file_change.restore_failed',
+
+  /** A launch-offer slot was claimed and Pro was started for 3 months. Data: slot count, months. */
+  LAUNCH_OFFER_CLAIMED: 'launch.offer.claimed',
+  /** The owner turned the public "Protected by Manar" badge on or off. */
+  PROFILE_BADGE_CHANGED: 'profile.badge.changed',
+  WORKSPACE_INVITE_CREATED: 'workspace.invite.created',
+  WORKSPACE_INVITE_ACCEPTED: 'workspace.invite.accepted',
+  WORKSPACE_INVITE_REVOKED: 'workspace.invite.revoked',
+  /** Microsoft auto-join was turned on or off by an admin. */
+  WORKSPACE_AUTOJOIN_CHANGED: 'workspace.autojoin.changed',
+  /** A person joined through the Entra auto-join setting (matched on the verified tid). */
+  WORKSPACE_MEMBER_AUTOJOINED: 'workspace.member.autojoined',
+
+  // JAIL (per-site decisions for protected AI tools).
+  /** A person allowed or blocked a site for one tool on one device (an answer to a prompt, or by hand). */
+  JAIL_SITE_RULE_CREATED: 'jail.site_rule.created',
+  /** A person removed a site rule. */
+  JAIL_SITE_RULE_REMOVED: 'jail.site_rule.removed',
 } as const;
 
 export type AuditEventType =

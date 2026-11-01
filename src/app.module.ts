@@ -1,4 +1,6 @@
+import { AiSpendHttpModule } from './ai-spend/ai-spend.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { JailHttpModule } from './jail/jail.module';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -22,12 +24,14 @@ import { PolicyHttpModule } from './policy/policy-http.module';
 import { TemporalModule } from './temporal/temporal.module';
 import { ApprovalsHttpModule } from './approvals/approvals-http.module';
 import { PushHttpModule } from './push/push-http.module';
+import { TelegramHttpModule } from './telegram/telegram-http.module';
 import { AuditModule } from './audit/audit.module';
 import { AuditHttpModule } from './audit/audit-http.module';
 import { AuditIndexerModule } from './audit/opensearch/audit-indexer.module';
 import { LiveEventsHttpModule } from './audit/live/live-events-http.module';
 import { EvidenceHttpModule } from './evidence/evidence-http.module';
 import { KillSwitchesHttpModule } from './kill-switches/kill-switches-http.module';
+import { PauseHttpModule } from './pause/pause-http.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { WebhooksHttpModule } from './webhooks/webhooks-http.module';
 import { WebhookDeliveryConsumerModule } from './webhooks/webhook-delivery-consumer.module';
@@ -43,6 +47,8 @@ import { UsersModule } from './users/users.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
 import { WorkspaceModule } from './workspace/workspace.module';
+import { ContactModule } from './contact/contact.module';
+import { GrowthModule } from './growth/growth.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { IncidentsModule } from './incidents/incidents.module';
@@ -66,6 +72,8 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     DevicesHttpModule,
     AiToolsHttpModule,
     SecretsHttpModule,
+    AiSpendHttpModule,
+    JailHttpModule,
     AuthorizationModule,
     TasksModule,
     TasksHttpModule,
@@ -73,11 +81,13 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     TemporalModule,
     ApprovalsHttpModule,
     PushHttpModule,
+    TelegramHttpModule,
     AuditHttpModule,
     AuditIndexerModule,
     LiveEventsHttpModule,
     EvidenceHttpModule,
     KillSwitchesHttpModule,
+    PauseHttpModule,
     RateLimitModule,
     WebhooksHttpModule,
     WebhookDeliveryConsumerModule,
@@ -99,6 +109,8 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     WorkspacesModule,
     TenantSettingsModule,
     WorkspaceModule,
+    ContactModule,
+    GrowthModule,
     // Phase 15a: Data Classification, Compliance Mapping & Incidents.
     ComplianceModule,
     IncidentsModule,

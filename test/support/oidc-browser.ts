@@ -145,7 +145,8 @@ export async function authorizationCode(input: {
 export async function exchangeCode(input: {
   issuer: string;
   clientId: string;
-  clientSecret: string;
+  /** Omit for a public client (token_endpoint_auth_method none). */
+  clientSecret?: string;
   redirectUri: string;
   code: string;
   verifier: string;
@@ -156,11 +157,18 @@ export async function exchangeCode(input: {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: `Basic ${Buffer.from(
-          `${encodeURIComponent(input.clientId)}:${encodeURIComponent(input.clientSecret)}`,
-        ).toString('base64')}`,
+        ...(input.clientSecret === undefined
+          ? {}
+          : {
+              Authorization: `Basic ${Buffer.from(
+                `${encodeURIComponent(input.clientId)}:${encodeURIComponent(input.clientSecret)}`,
+              ).toString('base64')}`,
+            }),
       },
       body: new URLSearchParams({
+        ...(input.clientSecret === undefined
+          ? { client_id: input.clientId }
+          : {}),
         grant_type: 'authorization_code',
         code: input.code,
         redirect_uri: input.redirectUri,
