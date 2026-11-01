@@ -52,8 +52,8 @@ export const CloudMcpConfigSchema = z.object({
     z.string().url().optional(),
   ),
   /**
-   * ChatGPT (dynamic client registration) on the shared realm. On by default (tested end to end in
-   * test/cloud-mcp-shared-chatgpt.e2e-spec.ts); `false` closes it. Per-tenant realms are not
+   * ChatGPT (dynamic client registration) on the shared realm. Off by default until the DCR hardening
+   * is proven (test/cloud-mcp-shared-chatgpt.e2e-spec.ts); `true` opens it. Per-tenant realms are not
    * affected.
    */
   MANAR_MCP_CHATGPT_ENABLED: z.enum(['true', 'false']).optional(),
@@ -106,7 +106,7 @@ export function cloudMcpSettings(
       .map((host) => host.trim().toLowerCase())
       .filter(Boolean),
     sharedIssuer: get('MANAR_MCP_SHARED_ISSUER')?.replace(/\/+$/, '') ?? null,
-    chatGptOnSharedRealm: get('MANAR_MCP_CHATGPT_ENABLED') !== 'false',
+    chatGptOnSharedRealm: get('MANAR_MCP_CHATGPT_ENABLED') === 'true',
     ratePerMinute: get('MANAR_MCP_RATE_LIMIT_PER_MINUTE') ?? 60,
     maxBodyBytes: get('MANAR_MCP_MAX_BODY_BYTES') ?? 262_144,
   };

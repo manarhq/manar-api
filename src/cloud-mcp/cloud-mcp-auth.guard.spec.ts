@@ -764,12 +764,9 @@ describe('CloudMcpAuthGuard on the shared realm', () => {
     expect(g.unknownSlugs.size).toBeLessThanOrEqual(1_000);
   });
 
-  it('an existing ChatGPT binding is refused when ChatGPT is switched off on the shared realm', async () => {
+  it('an existing ChatGPT binding is refused when ChatGPT is off on the shared realm', async () => {
     const chat = { platform: 'CHATGPT', oauthClientId: T_CLIENT };
-    const off = shared({
-      agent: sharedAgent(chat),
-      env: { MANAR_MCP_CHATGPT_ENABLED: 'false' },
-    });
+    const off = shared({ agent: sharedAgent(chat) });
     const refused = await refusal(
       off.guard.canActivate(context(`Bearer ${await sharedToken()}`).ctx),
     );
@@ -777,7 +774,10 @@ describe('CloudMcpAuthGuard on the shared realm', () => {
       403,
       'chatgpt_not_enabled',
     ]);
-    const on = shared({ agent: sharedAgent(chat) });
+    const on = shared({
+      agent: sharedAgent(chat),
+      env: { MANAR_MCP_CHATGPT_ENABLED: 'true' },
+    });
     await expect(
       on.guard.canActivate(context(`Bearer ${await sharedToken()}`).ctx),
     ).resolves.toBe(true);

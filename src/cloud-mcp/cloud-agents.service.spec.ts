@@ -259,11 +259,8 @@ describe('CloudAgentsService on the shared realm', () => {
     expect(kc.createAgentClientScope).not.toHaveBeenCalled();
   });
 
-  it('refuses ChatGPT when MANAR_MCP_CHATGPT_ENABLED is false, and Entra groups never apply', async () => {
-    const off = setup({
-      shared: true,
-      env: { ...SHARED, MANAR_MCP_CHATGPT_ENABLED: 'false' },
-    });
+  it('keeps ChatGPT off unless MANAR_MCP_CHATGPT_ENABLED is true, and Entra groups never apply', async () => {
+    const off = setup({ shared: true, env: SHARED });
     await expect(
       off.service.connect(AUTH, { ...input, platform: 'CHATGPT' }),
     ).rejects.toMatchObject({ response: { reason: 'chatgpt_not_enabled' } });
@@ -274,8 +271,10 @@ describe('CloudAgentsService on the shared realm', () => {
       }),
     ).rejects.toThrow(/shared realm/);
     expect(off.kc.updateDcrPolicy).not.toHaveBeenCalled();
-    // On by default: unset means on.
-    const on = setup({ shared: true, env: SHARED });
+    const on = setup({
+      shared: true,
+      env: { ...SHARED, MANAR_MCP_CHATGPT_ENABLED: 'true' },
+    });
     await expect(
       on.service.connect(AUTH, { ...input, platform: 'CHATGPT' }),
     ).resolves.toHaveProperty('registrationUrl');

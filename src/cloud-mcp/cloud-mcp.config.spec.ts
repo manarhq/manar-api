@@ -55,12 +55,12 @@ describe('CloudMcpConfigSchema', () => {
 });
 
 describe('ChatGPT on the shared realm', () => {
-  it('is on unless MANAR_MCP_CHATGPT_ENABLED is false', () => {
+  it('is off unless MANAR_MCP_CHATGPT_ENABLED is true', () => {
     const on = (v?: string) =>
       cloudMcpSettings({
         get: (k: string) => (k === 'MANAR_MCP_CHATGPT_ENABLED' ? v : undefined),
       } as never).chatGptOnSharedRealm;
-    expect(on(undefined)).toBe(true);
+    expect(on(undefined)).toBe(false);
     expect(on('true')).toBe(true);
     expect(on('false')).toBe(false);
   });
