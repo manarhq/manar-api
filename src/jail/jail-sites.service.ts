@@ -126,14 +126,27 @@ export class JailSitesService {
         },
         select: { toolId: true },
       }),
-      client.hostSiteRule.findMany({
-        where: {
-          hostId: host.hostId,
-          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-        },
-        orderBy: { createdAt: 'asc' },
-        take: 1000,
-      }),
+      // Every DENY rule is sent (none is ever dropped at a cap); ALLOW rules newest first.
+      Promise.all([
+        client.hostSiteRule.findMany({
+          where: {
+            hostId: host.hostId,
+            mode: 'DENY',
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 5000,
+        }),
+        client.hostSiteRule.findMany({
+          where: {
+            hostId: host.hostId,
+            mode: 'ALLOW',
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 1000,
+        }),
+      ]).then(([deny, allow]) => [...deny, ...allow]),
     ]);
     return {
       enabled: true,

@@ -29,6 +29,13 @@ export const HOST_APPROVAL_TTL_MS = 10 * 60 * 1000;
 export const HOST_APPROVALS_PER_WINDOW = 20;
 export const HOST_APPROVAL_WINDOW_MS = 10 * 60 * 1000;
 
+/**
+ * New-site asks from protected tools (JAIL) have their own budget, so a tool that reaches for many
+ * sites cannot use up the device's other prompts, and its own queue is capped.
+ */
+export const HOST_SITE_ASKS_PER_WINDOW = 30;
+export const HOST_SITE_PENDING_PER_TOOL = 10;
+
 export interface OpenHostApprovalInput {
   hostId: string;
   toolId: string;
@@ -80,14 +87,34 @@ export class HostApprovalsService {
       },
     });
     if (existing) return existing;
+    const isSite = input.actionId === SITE_CONNECT_ACTION;
     const recent = await client.hostApproval.count({
       where: {
         hostId: input.hostId,
         createdAt: { gt: new Date(now.getTime() - HOST_APPROVAL_WINDOW_MS) },
+        actionId: isSite ? SITE_CONNECT_ACTION : { not: SITE_CONNECT_ACTION },
       },
     });
-    if (recent >= HOST_APPROVALS_PER_WINDOW)
+    if (
+      recent >= (isSite ? HOST_SITE_ASKS_PER_WINDOW : HOST_APPROVALS_PER_WINDOW)
+    )
       throw new HttpException('too many approvals opened by this device', 429);
+    if (isSite) {
+      const waiting = await client.hostApproval.count({
+        where: {
+          hostId: input.hostId,
+          toolId: input.toolId,
+          actionId: SITE_CONNECT_ACTION,
+          status: 'PENDING',
+          expiresAt: { gt: now },
+        },
+      });
+      if (waiting >= HOST_SITE_PENDING_PER_TOOL)
+        throw new HttpException(
+          'too many sites are waiting for this tool',
+          429,
+        );
+    }
     const row = await client.hostApproval.create({
       data: {
         hostId: input.hostId,
@@ -182,15 +209,24 @@ export class HostApprovalsService {
       throw new ForbiddenException('eight_hours_in_console');
     const row = await this.get(client, input.approvalId, input.hostId);
     const isSite = row.actionId === SITE_CONNECT_ACTION;
+    // A prompt on the desktop is not consent for a new site: a protected tool can answer it itself
+    // (it can run its own copy of the prompt helper). From a device only "deny" is taken, which is
+    // what withdraws a prompt nobody answered.
+    if (input.via === 'device' && isSite && input.decision !== 'deny')
+      throw new ForbiddenException('site_in_console');
     if (input.decision === 'approve_always' && !isSite)
       throw new BadRequestException('always is for a new site only');
     // A permanent site rule needs the role that may write site rules; an approver without it
     // gets "once" (fail closed: an absent flag is "no").
     let decision: HostDecision = input.decision;
-    let note: 'always_needs_owner' | 'site_rule_exists' | null = null;
-    if (decision === 'approve_always' && !input.canWriteSiteRules) {
+    let note: 'needs_owner' | 'site_rule_exists' | null = null;
+    if (
+      isSite &&
+      (decision === 'approve_always' || decision === 'approve_8h') &&
+      !input.canWriteSiteRules
+    ) {
       decision = 'approve_once';
-      note = 'always_needs_owner';
+      note = 'needs_owner';
     }
     const wantsRemember =
       isSite && (decision === 'approve_8h' || decision === 'approve_always');

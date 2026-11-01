@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HostApprovalsService } from '../approvals/host-approvals.service';
 import type { HostContext } from '../host-mtls/host-context';
+import { HostApprovalsController } from '../approvals/host-approvals.controller';
 import { JailHostController } from './jail-host.controller';
 import {
   jailFlags,
@@ -29,6 +30,7 @@ type Rule = {
 };
 
 const osLabel = { value: 'Ubuntu 24.04 (linux)' };
+const extraCount = { value: 0 };
 
 function world() {
   const rules: Rule[] = [];
@@ -87,15 +89,22 @@ function world() {
     },
     findMany: ({
       where,
+      orderBy,
+      take,
     }: {
-      where?: { hostId?: string; toolId?: string };
+      where?: { hostId?: string; toolId?: string; mode?: string };
+      orderBy?: { createdAt: string };
+      take?: number;
     } = {}) =>
       Promise.resolve(
-        rules.filter(
-          (r) =>
-            (!where?.hostId || r.hostId === where.hostId) &&
-            (!where?.toolId || r.toolId === where.toolId),
-        ),
+        (orderBy?.createdAt === 'desc' ? [...rules].reverse() : rules)
+          .filter(
+            (r) =>
+              (!where?.hostId || r.hostId === where.hostId) &&
+              (!where?.toolId || r.toolId === where.toolId) &&
+              (!where?.mode || r.mode === where.mode),
+          )
+          .slice(0, take ?? Infinity),
       ),
   };
   const client: Record<string, unknown> = {
@@ -114,7 +123,34 @@ function world() {
       findUnique: ({ where }: { where: { id: string } }) =>
         Promise.resolve(approvalRows.find((r) => r.id === where.id) ?? null),
       findFirst: () => Promise.resolve(null),
-      count: () => Promise.resolve(0),
+      findMany: ({ where }: { where: { hostId?: string } }) =>
+        Promise.resolve(
+          approvalRows.filter(
+            (r) =>
+              r.status === 'PENDING' &&
+              (!where.hostId || r.hostId === where.hostId),
+          ),
+        ),
+      count: ({
+        where,
+      }: {
+        where: {
+          toolId?: string;
+          status?: string;
+          actionId?: string | { not: string };
+        };
+      }) =>
+        Promise.resolve(
+          approvalRows.filter((r) => {
+            const a = where.actionId;
+            if (typeof a === 'string' && r.actionId !== a) return false;
+            if (a && typeof a === 'object' && r.actionId === a.not)
+              return false;
+            if (where.toolId && r.toolId !== where.toolId) return false;
+            if (where.status && r.status !== where.status) return false;
+            return true;
+          }).length + extraCount.value,
+        ),
       create: ({ data }: { data: Record<string, unknown> }) => {
         const r = { id: 'new', status: 'PENDING', ...data };
         approvalRows.push(r);
@@ -259,6 +295,7 @@ describe('deciding a new-site prompt', () => {
       ...base,
       decision: 'approve_8h',
       via: 'console',
+      canWriteSiteRules: true,
     });
     expect(w.rules).toHaveLength(1);
     expect(w.rules[0]).toMatchObject({ site: 'example.org', mode: 'ALLOW' });
@@ -355,6 +392,7 @@ describe("an approval never overrides a person's rule", () => {
       ...base,
       decision: 'approve_8h',
       via: 'console',
+      canWriteSiteRules: true,
     });
     expect(w.rules).toHaveLength(1);
     expect(w.rules[0]!.mode).toBe('DENY');
@@ -367,6 +405,7 @@ describe("an approval never overrides a person's rule", () => {
       ...base,
       decision: 'approve_8h',
       via: 'console',
+      canWriteSiteRules: true,
     });
     expect(w.rules).toEqual([mine]);
     expect(r.remembered).toBe(false);
@@ -400,18 +439,22 @@ describe("an approval never overrides a person's rule", () => {
     expect(r).toMatchObject({
       decision: 'approve_once',
       remembered: false,
-      note: 'always_needs_owner',
+      note: 'needs_owner',
     });
   });
-  it('lets that approver still give 8 hours', async () => {
+  it('gives that approver "once" for 8 hours too', async () => {
     const w = world();
     const r = await w.approvals.decide(w.client as never, 't1', {
       ...base,
       decision: 'approve_8h',
       via: 'console',
     });
-    expect(r.remembered).toBe(true);
-    expect(w.rules).toHaveLength(1);
+    expect(r).toMatchObject({
+      decision: 'approve_once',
+      remembered: false,
+      note: 'needs_owner',
+    });
+    expect(w.rules).toHaveLength(0);
   });
   it('answers an ask from an exact or wildcard DENY without opening a prompt', async () => {
     const w = world();
@@ -490,5 +533,127 @@ describe('jail key by operating system', () => {
     process.env.MANAR_JAIL_WINDOWS = 'true';
     const c = await world().sites.config(HOST);
     expect(c).toMatchObject({ windows: true, tools: ['host.claude-code'] });
+  });
+});
+
+describe('site prompts are answered in the console or on the phone', () => {
+  const base = { approvalId: 'ap1', hostId: 'h1', subject: 'sub1' };
+  it('refuses once and the longer answers from the device but accepts a withdrawal', async () => {
+    const w = world();
+    for (const decision of [
+      'approve_once',
+      'approve_8h',
+      'approve_always',
+    ] as const)
+      await expect(
+        w.approvals.decide(w.client as never, 't1', {
+          ...base,
+          decision,
+          via: 'device',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      w.approvals.decide(w.client as never, 't1', {
+        ...base,
+        decision: 'deny',
+        via: 'device',
+      }),
+    ).resolves.toMatchObject({ status: 'DENIED' });
+  });
+  it('is not shown to the desktop as something it can decide', async () => {
+    const w = world();
+    const ctrl = new HostApprovalsController(
+      w.approvals,
+      { getClient: () => Promise.resolve(w.client) } as never,
+      { canApprove: () => Promise.resolve(true) } as never,
+    );
+    const r = await ctrl.pending(HOST);
+    const site = r.items.find((i) => i.actionId === 'site.connect');
+    const other = r.items.find((i) => i.actionId === 'file.read');
+    expect(site?.decidableHere).toBe(false);
+    expect(other?.decidableHere).toBe(true);
+    await expect(
+      ctrl.decide(HOST, 'ap1', { decision: 'approve_once' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('asks have their own budget', () => {
+  const open = (
+    w: ReturnType<typeof world>,
+    site: string,
+    tool = 'host.claude-code',
+  ) =>
+    w.approvals.open(w.client as never, 't1', {
+      hostId: 'h1',
+      toolId: tool,
+      actionId: 'site.connect',
+      resource: site,
+      summary: 'x',
+      highRisk: false,
+      toolName: 'x',
+    });
+  it('caps what one tool can keep waiting, without touching another tool or other prompts', async () => {
+    const w = world();
+    for (let i = 0; i < 9; i++) await open(w, `s${i}.example`); // ap1 already waits: 10 in all
+    await expect(open(w, 'one-more.example')).rejects.toMatchObject({
+      status: 429,
+    });
+    await expect(
+      open(w, 'ok.example', 'host.codex-cli'),
+    ).resolves.toBeDefined();
+  });
+  it('a flood of asks does not use up the budget of other prompts', async () => {
+    const w = world();
+    extraCount.value = 0;
+    const many = Array.from({ length: 30 }, (_, i) => i);
+    for (const i of many)
+      w.approvalRows.push({
+        id: `x${i}`,
+        hostId: 'h1',
+        toolId: `host.t${i % 5}`,
+        actionId: 'site.connect',
+        resource: `h${i}`,
+        status: 'DENIED',
+        expiresAt: new Date(Date.now() + 1000),
+      });
+    await expect(open(w, 'late.example', 'host.fresh')).rejects.toMatchObject({
+      status: 429,
+    });
+    await expect(
+      w.approvals.open(w.client as never, 't1', {
+        hostId: 'h1',
+        toolId: 'host.cursor',
+        actionId: 'file.read',
+        resource: '/x/y',
+        summary: 'x',
+        highRisk: false,
+        toolName: 'Cursor',
+      }),
+    ).resolves.toBeDefined();
+  });
+});
+
+describe('rules sent to the device', () => {
+  it('sends every DENY and the newest ALLOW rules first', async () => {
+    const w = world();
+    for (let i = 0; i < 1200; i++)
+      w.rules.push({
+        hostId: 'h1',
+        toolId: 'host.claude-code',
+        site: `a${i}.example`,
+        mode: 'ALLOW',
+        expiresAt: null,
+      });
+    w.rules.push({
+      hostId: 'h1',
+      toolId: 'host.claude-code',
+      site: 'blocked.example',
+      mode: 'DENY',
+      expiresAt: null,
+    });
+    const c = await w.sites.config(HOST);
+    expect(c.rules.length).toBe(1001);
+    expect(c.rules[0]).toMatchObject({ site: 'blocked.example', mode: 'DENY' });
   });
 });
