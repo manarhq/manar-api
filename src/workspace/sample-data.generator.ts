@@ -262,7 +262,7 @@ export async function generateSampleData(
         [6, 2, '~/.ssh/id_ed25519'],
       ] as const) {
         events.push({
-          eventType: 'secret.touched' as RecordAuditEventInput['eventType'],
+          eventType: 'secret.touched',
           actor: { type: 'agent', id: agentIds[ti]! },
           timestamp: at(day, 0.45),
           data: {
