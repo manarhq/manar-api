@@ -7,6 +7,7 @@ import {
 } from './billing.controller';
 import { BillingService } from './billing.service';
 import { CompanyQuantityService } from './company-quantity.service';
+import { KeepProService } from './keep-pro.service';
 import { EntitlementsService } from './entitlements.service';
 import { ReadOnlyInterceptor } from './read-only.interceptor';
 import { StripeWebhookService } from './stripe-webhook.service';
@@ -28,6 +29,7 @@ export class BillingModule {}
     BillableUsageService,
     StripeGateway,
     StripeWebhookService,
+    KeepProService,
     { provide: APP_INTERCEPTOR, useClass: ReadOnlyInterceptor },
   ],
   exports: [BillingService, StripeGateway],

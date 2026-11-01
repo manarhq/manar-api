@@ -38,7 +38,21 @@ export class BillingService {
       interval: row?.billingInterval ?? null,
       billingEnabled: this.stripe.configured,
       hasSubscription: !!row?.stripeSubscriptionId,
+      keepPro: await this.keepProOffer(tenantId),
     };
+  }
+
+  /** Launch offer: free months still running and no card yet, so the console shows "Keep Pro". */
+  private async keepProOffer(tenantId: string) {
+    const claim = await this.control.launchOfferClaim.findUnique({
+      where: { tenantId },
+    });
+    return claim?.stripeSubscriptionId &&
+      !claim.keptAt &&
+      claim.trialEndsAt &&
+      claim.trialEndsAt > new Date()
+      ? { trialEndsAt: claim.trialEndsAt.toISOString() }
+      : null;
   }
 
   async checkout(tenantId: string, email: string, plan: CheckoutPlan) {

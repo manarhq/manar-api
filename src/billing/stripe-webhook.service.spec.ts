@@ -11,7 +11,10 @@ const PRICES: Record<string, string> = {
   EXTRA_DEVICE: 'price_ed',
 };
 
-function make(rows: Record<string, Record<string, unknown>>) {
+function make(
+  rows: Record<string, Record<string, unknown>>,
+  keepPro?: { complete: (...a: unknown[]) => Promise<void> },
+) {
   const events = new Set<string>();
   const find = (where: { tenantId?: string; stripeCustomerId?: string }) =>
     Object.values(rows).find(
@@ -80,6 +83,7 @@ function make(rows: Record<string, Record<string, unknown>>) {
     control as never,
     entitlements,
     gateway as never,
+    keepPro as never,
   );
   const send = (event: unknown) => {
     next = event;
@@ -353,5 +357,49 @@ describe('CompanyQuantityService', () => {
     process.off('unhandledRejection', unhandled);
     svc.onModuleDestroy();
     vi.useRealTimers();
+  });
+});
+
+describe('setup-mode checkout (launch offer, Keep Pro)', () => {
+  it('hands the session to KeepProService for the tenant of the customer', async () => {
+    const keepPro = { complete: vi.fn(() => Promise.resolve()) };
+    const f = make(
+      { t1: { tenantId: 't1', stripeCustomerId: 'cus_1', plan: 'pro' } },
+      keepPro,
+    );
+    const session = {
+      id: 'cs_1',
+      mode: 'setup',
+      customer: 'cus_1',
+      metadata: { tenantId: 't1' },
+    };
+    await f.send({
+      id: 'evt_keep',
+      type: 'checkout.session.completed',
+      data: { object: session },
+    });
+    expect(keepPro.complete).toHaveBeenCalledWith('t1', session);
+  });
+
+  it('refuses a session whose metadata names another tenant', async () => {
+    const keepPro = { complete: vi.fn(() => Promise.resolve()) };
+    const f = make(
+      { t1: { tenantId: 't1', stripeCustomerId: 'cus_1', plan: 'pro' } },
+      keepPro,
+    );
+    const session = {
+      id: 'cs_2',
+      mode: 'setup',
+      customer: 'cus_1',
+      metadata: { tenantId: 'other' },
+    };
+    await expect(
+      f.send({
+        id: 'evt_spoof',
+        type: 'checkout.session.completed',
+        data: { object: session },
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(keepPro.complete).not.toHaveBeenCalled();
   });
 });

@@ -23,6 +23,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { BillingService } from './billing.service';
+import { KeepProService } from './keep-pro.service';
 import { StripeWebhookService } from './stripe-webhook.service';
 
 const CheckoutSchema = z.object({
@@ -33,7 +34,10 @@ const CheckoutSchema = z.object({
 @ApiBearerAuth('jwt')
 @Controller('billing')
 export class BillingController {
-  constructor(private readonly billing: BillingService) {}
+  constructor(
+    private readonly billing: BillingService,
+    private readonly keepPro: KeepProService,
+  ) {}
 
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -56,6 +60,19 @@ export class BillingController {
   checkout(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const { plan } = parseBodyOrThrow(CheckoutSchema, body);
     return this.billing.checkout(auth.tenant.id, auth.user.email, plan);
+  }
+
+  @Post('keep-pro')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequireRole('TENANT_OWNER')
+  @ApiOperation({
+    summary: 'Keep Pro after the launch-offer free months',
+    description:
+      'Stripe Checkout (setup mode) URL collecting a card, billing address and tax id. On completion automatic tax is turned on for the subscription.',
+  })
+  keepProSession(@CurrentAuth() auth: AuthContext) {
+    return this.keepPro.createSession(auth.tenant.id);
   }
 
   @Post('portal')
