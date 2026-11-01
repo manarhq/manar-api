@@ -21,6 +21,7 @@ type Row = {
 
 function world(opts: {
   approverSubjects: string[];
+  paused?: boolean;
   highRisk?: boolean;
   recent?: number;
 }) {
@@ -41,6 +42,10 @@ function world(opts: {
   ];
   const grants: Record<string, unknown>[] = [];
   const client: Record<string, unknown> = {
+    $queryRaw: () => Promise.resolve([{ now: new Date() }]),
+    workspacePause: {
+      findUnique: () => Promise.resolve(opts.paused ? { paused: true } : null),
+    },
     roleBinding: {
       findFirst: ({
         where,
@@ -369,5 +374,42 @@ describe('device decisions (spec 4.6)', () => {
     expect(
       buildRuleDraft({ toolId: 't', actionId: 'a', resource: 'repo/x' }),
     ).not.toBeNull();
+  });
+});
+
+describe('during a pause', () => {
+  it('refuses to approve inside the transaction, but a deny still goes through', async () => {
+    const w = world({ approverSubjects: ['alice'], paused: true });
+    await expect(
+      w.service.decide(w.client as never, 't1', {
+        approvalId: 'ap1',
+        subject: 'alice',
+        decision: 'approve_once',
+        via: 'console',
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(w.rows[0]?.status).toBe('PENDING');
+    const r = await w.service.decide(w.client as never, 't1', {
+      approvalId: 'ap1',
+      subject: 'alice',
+      decision: 'deny',
+      via: 'console',
+    });
+    expect(r.status).toBe('DENIED');
+  });
+
+  it('opens nothing new', async () => {
+    const w = world({ approverSubjects: [], paused: true });
+    await expect(
+      w.service.open(w.client as never, 't1', {
+        hostId: 'h9',
+        toolId: 'host.cursor',
+        actionId: 'edit',
+        resource: '/x',
+        summary: 's',
+        highRisk: false,
+        toolName: 'Cursor',
+      }),
+    ).rejects.toMatchObject({ status: 403 });
   });
 });

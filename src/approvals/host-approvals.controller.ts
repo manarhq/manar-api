@@ -17,6 +17,8 @@ import {
   DecideHostApprovalSchema,
   VaultRequestSchema,
 } from './approvals.validation';
+import { dbNow } from '../common/db-clock';
+import { isWorkspacePaused } from '../pause/pause-state';
 import { explainRisk } from './risk-explain';
 import { HostApprovalsService } from './host-approvals.service';
 
@@ -85,7 +87,8 @@ export class HostApprovalsController {
     const client = await this.tenants.getClient(host.tenantId);
     await this.approvals.expireDue(client, host.tenantId);
     const row = await this.approvals.get(client, id, host.hostId);
-    const expired = row.status === 'PENDING' && row.expiresAt <= new Date();
+    const expired =
+      row.status === 'PENDING' && row.expiresAt <= (await dbNow(client));
     const status = expired ? 'EXPIRED' : row.status;
     return {
       id: row.id,
@@ -93,6 +96,8 @@ export class HostApprovalsController {
       decision: row.decision,
       // The hook tells the agent "denied: no answer".
       reason: status === 'EXPIRED' ? 'no_answer' : null,
+      // "paused": AI is paused, so an APPROVED answer that landed anyway must not let the call run.
+      paused: await isWorkspacePaused(client),
     };
   }
 

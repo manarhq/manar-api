@@ -9,6 +9,8 @@ import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-cli
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { PushService } from '../push/push.service';
+import { dbNow } from '../common/db-clock';
+import { PAUSED_REASON, isWorkspacePaused } from '../pause/pause-state';
 import { createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
 
@@ -59,8 +61,12 @@ export class HostApprovalsService {
     client: TenantPrismaClient,
     tenantId: string,
     input: OpenHostApprovalInput,
-    now: Date = new Date(),
+    at?: Date,
   ) {
+    const now = at ?? (await dbNow(client));
+    // Nothing new is asked while AI is paused (the authorize path has already denied it).
+    if (await isWorkspacePaused(client))
+      throw new ForbiddenException(PAUSED_REASON);
     // The same host asking again for the same thing while it is still pending is the same
     // question: reuse it (no second prompt, no second push, no second audit event).
     const existing = await client.hostApproval.findFirst({
@@ -142,8 +148,9 @@ export class HostApprovalsService {
   async expireDue(
     client: TenantPrismaClient,
     tenantId: string,
-    now: Date = new Date(),
+    at?: Date,
   ): Promise<number> {
+    const now = at ?? (await dbNow(client));
     const due = await client.hostApproval.findMany({
       where: { status: 'PENDING', expiresAt: { lte: now } },
       select: { id: true, hostId: true, toolId: true, actionId: true },
@@ -172,11 +179,12 @@ export class HostApprovalsService {
     return n;
   }
 
-  listPending(
+  async listPending(
     client: TenantPrismaClient,
     hostId: string | undefined,
-    now: Date = new Date(),
+    at?: Date,
   ) {
+    const now = at ?? (await dbNow(client));
     return client.hostApproval.findMany({
       where: {
         ...(hostId ? { hostId } : {}),
@@ -203,7 +211,7 @@ export class HostApprovalsService {
     client: TenantPrismaClient,
     tenantId: string,
     input: DecideHostApprovalInput,
-    now: Date = new Date(),
+    at?: Date,
   ) {
     // 8 hours is a standing permission: it is given in the console, in a browser session, never
     // from a prompt on the device (a process on the device could answer that prompt).
@@ -211,6 +219,11 @@ export class HostApprovalsService {
       throw new ForbiddenException('eight_hours_in_console');
     const row = await this.get(client, input.approvalId, input.hostId);
     const result = await client.$transaction(async (tx) => {
+      // Inside the transaction, so a pause that lands between the check and the write cannot be
+      // missed. A deny is always allowed; an approval is refused while AI is paused.
+      if (input.decision !== 'deny' && (await isWorkspacePaused(tx)))
+        throw new ConflictException(PAUSED_REASON);
+      const now = at ?? (await dbNow(tx));
       const won = await tx.hostApproval.updateMany({
         where: { id: row.id, status: 'PENDING', expiresAt: { gt: now } },
         data: {

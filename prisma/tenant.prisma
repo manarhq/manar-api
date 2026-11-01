@@ -2533,6 +2533,8 @@ model WorkspacePause {
   id        String   @id @default("workspace")
   paused    Boolean  @default(false)
   pausedBy  String?
+  /// The highest role of the person who paused (TENANT_OWNER > SECURITY_ADMIN > APPROVER); resuming needs at least this.
+  pausedByRole String?
   pausedAt  DateTime?
   updatedAt DateTime @updatedAt
 

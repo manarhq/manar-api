@@ -5,7 +5,7 @@ export const PAUSED_REASON = 'paused';
 
 /** True while the workspace's "Pause all AI" is on. A read error propagates (callers fail closed). */
 export async function isWorkspacePaused(
-  client: TenantPrismaClient,
+  client: Pick<TenantPrismaClient, 'workspacePause'>,
 ): Promise<boolean> {
   const row = await client.workspacePause.findUnique({
     where: { id: 'workspace' },

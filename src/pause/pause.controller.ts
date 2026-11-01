@@ -33,7 +33,7 @@ export class PauseController {
   @ApiOperation({
     summary: 'Pause all AI, or resume',
     description:
-      'While paused every protected tool on every device is denied with reason `paused`.',
+      'While paused every protected tool on every device is denied with reason `paused`, and nothing can be approved. Pending approvals are expired. Resuming needs a role at least as high as the one that paused.',
   })
   set(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const input = parseBodyOrThrow(SetPauseSchema, body);
@@ -41,6 +41,7 @@ export class PauseController {
       auth.tenant.id,
       input.paused,
       auth.user.keycloakSubject,
+      auth.roles,
       input.via,
     );
   }
