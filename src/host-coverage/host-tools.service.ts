@@ -11,6 +11,10 @@ import type { AuditActor } from '../audit/audit-event-types';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { ensureHostTools, hostTool } from '../tools/host-actions';
 import type { ProtectMode } from '../tools/host-actions';
+import {
+  McpServerReportSchema,
+  replaceHostMcpServers,
+} from '../mcp-inventory/mcp-inventory';
 
 /** A device that has not reported for this long is shown as `monitoring unavailable`. */
 export const MONITORING_STALE_MS = 30 * 60 * 1000;
@@ -32,6 +36,8 @@ export const InventoryRequestSchema = z.object({
       }),
     )
     .max(MAX_TOOLS),
+  /** The device's whole MCP list. Absent from an older device: the stored list is left as it is. */
+  mcpServers: z.array(McpServerReportSchema).max(200).optional(),
 });
 export type InventoryRequest = z.infer<typeof InventoryRequestSchema>;
 
@@ -159,6 +165,28 @@ export class HostToolsService {
       where: { id: host.hostId },
       data: { lastSeenAt: now },
     });
+    if (input.mcpServers) {
+      try {
+        const fresh = await replaceHostMcpServers(
+          client,
+          host.hostId,
+          input.mcpServers,
+          now,
+        );
+        for (const f of fresh.slice(0, 20)) {
+          await this.audit.recordSafely(client, host.tenantId, {
+            eventType: AUDIT_EVENT_TYPES.MCP_SERVER_DISCOVERED,
+            actor,
+            data: { hostId: host.hostId, ...f },
+          });
+        }
+      } catch (error) {
+        // The tool list is already stored; the MCP list is picked up by the next report.
+        this.logger.warn(
+          `host ${host.hostId} MCP list not stored: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     for (const e of events) {
       await this.audit.recordSafely(client, host.tenantId, {
         eventType:

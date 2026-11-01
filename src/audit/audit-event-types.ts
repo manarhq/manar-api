@@ -177,6 +177,10 @@ export const AUDIT_EVENT_TYPES = {
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
+  /** Insight: a device reported an MCP server of one of its AI tools for the first time (name, tool, flags; never args or env). */
+  MCP_SERVER_DISCOVERED: 'mcp.server.discovered',
+  /** Insight: an owner shared a redacted agent session as a public report. */
+  SESSION_SHARED: 'session.report.shared',
 } as const;
 
 export type AuditEventType =

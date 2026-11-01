@@ -385,6 +385,9 @@ model ReportShare {
   id        String    @id
   tenantId  String
   totals    Json
+  /// Insight track: a redacted agent session (`SharedSession`), when the link shares one session
+  /// instead of the weekly card. Stored as a snapshot; never read back from the tenant database.
+  session   Json?
   createdBy String
   createdAt DateTime  @default(now())
   revokedAt DateTime?
