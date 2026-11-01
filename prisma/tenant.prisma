@@ -2236,6 +2236,7 @@ model Host {
   hostApprovals         HostApproval[]
   createdAt             DateTime             @default(now())
   updatedAt             DateTime             @updatedAt
+  aiUsage               AiUsageDaily[]
 
   @@unique([machineId])
   /// One computer identity, one host (lower-cased certificate DNS name; nulls repeat).
@@ -2524,4 +2525,47 @@ model SecretVaultAccess {
   @@index([hostId, status])
   @@index([status, createdAt])
   @@map("secret_vault_access")
+}
+
+/// AI spend tracker (DOOR): token usage the device read from provider responses, summed per day,
+/// tool and model. `costMicros` is a list-price estimate in millionths of a US dollar.
+model AiUsageDaily {
+  id           String   @id @default(uuid())
+  hostId       String
+  host         Host     @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  day          DateTime @db.Date
+  toolId       String
+  provider     String
+  model        String
+  requests     Int      @default(0)
+  inputTokens  BigInt   @default(0)
+  outputTokens BigInt   @default(0)
+  costMicros   BigInt   @default(0)
+
+  @@unique([hostId, day, toolId, provider, model])
+  @@index([day])
+  @@map("ai_usage_daily")
+}
+
+/// Batch ids already counted, so a device resending after a lost reply does not count twice.
+model AiUsageBatch {
+  hostId    String
+  batchId   String
+  createdAt DateTime @default(now())
+
+  @@id([hostId, batchId])
+  @@map("ai_usage_batches")
+}
+
+/// One row per workspace (`id = default`): the owner's budget, cap and secrets-guard mode.
+model AiSpendSettings {
+  id                  String   @id @default("default")
+  monthlyBudgetMicros BigInt?
+  monthlyCapMicros    BigInt?
+  /// `mask` (default) or `block`: what DOOR does with a secret found in a prompt.
+  secretsMode         String   @default("mask")
+  updatedAt           DateTime @updatedAt
+  updatedBy           String?
+
+  @@map("ai_spend_settings")
 }

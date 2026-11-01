@@ -1,4 +1,5 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
+import { AiSpendService } from '../ai-spend/ai-spend.service';
 import { HostToolsService } from '../host-coverage/host-tools.service';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ApiExcludeController } from '@nestjs/swagger';
@@ -15,7 +16,10 @@ export const DEFAULT_START_MODE: StartMode = 'ask';
 @Controller('host/v1')
 @UseGuards(HostAuthGuard)
 export class HostConfigController {
-  constructor(private readonly tools: HostToolsService) {}
+  constructor(
+    private readonly tools: HostToolsService,
+    private readonly spend: AiSpendService,
+  ) {}
 
   @Get('config')
   @ApiOperation({
@@ -31,6 +35,8 @@ export class HostConfigController {
       features: [] as string[],
       // Tools whose owner turned protection off; the device restores their backups.
       tools: await this.tools.instructions(host),
+      // DOOR: secrets guard mode and tools paused by the monthly spend cap.
+      door: await this.spend.doorConfig(host),
     };
   }
 }
