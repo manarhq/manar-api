@@ -253,7 +253,7 @@ A tenant with no realm of its own connects its cloud agents on the shared realm
   tenant of the path slug and of the binding, the exact audience, `azp` equal to the binding's
   client, and an ACTIVE Membership (owner, security admin, AI governance manager or developer)
   read on every call. Removing the membership revokes at once.
-- ChatGPT (dynamic client registration) is off unless `MANAR_MCP_CHATGPT_ENABLED=true`. Proved by
+- ChatGPT (dynamic client registration) is on unless `MANAR_MCP_CHATGPT_ENABLED=false`. Proved by
   `test/cloud-mcp-shared-chatgpt.e2e-spec.ts` (needs manar-infra next to this repo: it imports
   `platform/keycloak/realm-manar.yaml` into a throwaway realm): metadata, registration, code flow with
   PKCE, MCP calls. ChatGPT registers a public client (`token_endpoint_auth_method: none`); a public
@@ -270,7 +270,7 @@ A tenant with no realm of its own connects its cloud agents on the shared realm
   agent scope in Keycloak, so `DcrCleanupService` sweeps every 5 minutes: an unconfirmed client with no
   agent scope lives 15 minutes, with one 6 hours (age from the sweep's first sighting,
   attribute `manar.dcr.first_seen`); waiting and confirmed clients (`manar.dcr.state`) are never swept.
-  Traefik rate-limits `POST /realms/*/clients-registrations/*` per address (manar-infra). Residual
+  Traefik rate-limits `POST /realms/*/clients-registrations/*` per address (manar-infra). Metrics: `manar_cloud_mcp_pending_clients_total`, `manar_cloud_mcp_dcr_registrations_seen_total` (rate over 5 minutes = anonymous registrations per 5 minutes) and `manar_cloud_mcp_dcr_unconfirmed_clients`; alerts in manar-infra `observability/alerts.yaml`. Residual
   risk: a botnet could still hold slots for up to ~20 minutes each; a registration proxy in front of
   Keycloak that requires one existing agent scope is the next step. When on: the realm-wide Trusted Hosts policy lists only `MANAR_MCP_DCR_TRUSTED_HOSTS`, a
   registered client is unusable until a tenant admin confirms it, and it is only proposed from a
@@ -279,3 +279,4 @@ A tenant with no realm of its own connects its cloud agents on the shared realm
   (403 `agent_paused`, `paused: true` in `GET /cloud-agents`), never deleted. The oldest agents run;
   they resume on their own when the cap rises or an agent is disconnected.
 - Listing clients to delete a disconnected ChatGPT agent's clients scans up to 5000 clients.
+- On-prem: `realm-manar.yaml` is imported with "ignore existing", so an already-running realm keeps its old policies and profile until a ChatGPT connect applies the mapper ban and the 5000 cap; make firstName and lastName admin-edit only by hand there. A fresh import (Azure) has everything.

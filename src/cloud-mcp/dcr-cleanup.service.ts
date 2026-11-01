@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
+import { recordCloudMcpDcrSweep } from '../metrics/metrics';
 import { KeycloakAdminClient } from '../keycloak/keycloak-admin.client';
 import type { KeycloakClientRepresentation } from '../keycloak/keycloak-admin.client';
 import {
@@ -97,6 +98,7 @@ export class DcrCleanupService implements OnModuleInit, OnModuleDestroy {
     );
     const deleted: string[] = [];
     let writes = 0;
+    let seenNow = 0;
     for (const client of candidates) {
       if (writes >= WRITES_PER_SWEEP) break;
       const seen = Number(client.attributes?.[DCR_FIRST_SEEN_ATTRIBUTE]);
@@ -105,6 +107,7 @@ export class DcrCleanupService implements OnModuleInit, OnModuleDestroy {
           attributes: { [DCR_FIRST_SEEN_ATTRIBUTE]: String(now) },
         });
         writes += 1;
+        seenNow += 1;
         continue;
       }
       const scoped = [
@@ -117,6 +120,7 @@ export class DcrCleanupService implements OnModuleInit, OnModuleDestroy {
         writes += 1;
       }
     }
+    recordCloudMcpDcrSweep(seenNow, candidates.length - deleted.length);
     if (deleted.length) {
       this.logger.log(
         `Deleted ${deleted.length} unconfirmed self-registered clients`,
