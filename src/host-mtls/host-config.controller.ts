@@ -1,5 +1,6 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
 import { HostToolsService } from '../host-coverage/host-tools.service';
+import { JailSitesService } from '../jail/jail-sites.service';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { CurrentHost, type HostContext } from './host-context';
@@ -15,7 +16,10 @@ export const DEFAULT_START_MODE: StartMode = 'ask';
 @Controller('host/v1')
 @UseGuards(HostAuthGuard)
 export class HostConfigController {
-  constructor(private readonly tools: HostToolsService) {}
+  constructor(
+    private readonly tools: HostToolsService,
+    private readonly jail: JailSitesService,
+  ) {}
 
   @Get('config')
   @ApiOperation({
@@ -31,6 +35,8 @@ export class HostConfigController {
       features: [] as string[],
       // Tools whose owner turned protection off; the device restores their backups.
       tools: await this.tools.instructions(host),
+      // JAIL: which tools the device filters and the remembered site decisions (owned by the jail track).
+      jail: await this.jail.config(host),
     };
   }
 }

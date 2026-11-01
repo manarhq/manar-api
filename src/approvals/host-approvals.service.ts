@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   HttpException,
@@ -9,10 +10,14 @@ import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-cli
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { PushService } from '../push/push.service';
-import { createAllowGrant } from './allow-grants';
+import { SITE_CONNECT_ACTION } from '../jail/jail-sites';
+import { upsertSiteRule } from '../jail/jail-sites.service';
+import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
 
-export type HostDecision = 'approve_once' | 'approve_8h' | 'deny';
+/** `approve_always` exists for a new site only (JAIL): it makes a permanent site rule. */
+export type HostDecision =
+  'approve_once' | 'approve_8h' | 'approve_always' | 'deny';
 
 /** How long a device approval waits for a person. */
 export const HOST_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -165,9 +170,18 @@ export class HostApprovalsService {
   ) {
     // 8 hours is a standing permission: it is given in the console, in a browser session, never
     // from a prompt on the device (a process on the device could answer that prompt).
-    if (input.via === 'device' && input.decision === 'approve_8h')
+    if (
+      input.via === 'device' &&
+      (input.decision === 'approve_8h' || input.decision === 'approve_always')
+    )
       throw new ForbiddenException('eight_hours_in_console');
     const row = await this.get(client, input.approvalId, input.hostId);
+    const isSite = row.actionId === SITE_CONNECT_ACTION;
+    if (input.decision === 'approve_always' && !isSite)
+      throw new BadRequestException('always is for a new site only');
+    const remember =
+      isSite &&
+      (input.decision === 'approve_8h' || input.decision === 'approve_always');
     const result = await client.$transaction(async (tx) => {
       const won = await tx.hostApproval.updateMany({
         where: { id: row.id, status: 'PENDING', expiresAt: { gt: now } },
@@ -181,6 +195,21 @@ export class HostApprovalsService {
       });
       if (won.count === 0)
         throw new ConflictException('already decided or expired');
+      if (remember) {
+        // A person's answer to "may this tool connect to this site?" is remembered per device and tool.
+        await upsertSiteRule(tx, {
+          hostId: row.hostId,
+          toolId: row.toolId,
+          site: row.resource,
+          mode: 'ALLOW',
+          expiresAt:
+            input.decision === 'approve_always'
+              ? null
+              : new Date(now.getTime() + ALLOW_GRANT_TTL_MS),
+          source: 'approval',
+          createdBy: input.subject,
+        });
+      }
       if (input.decision !== 'approve_8h')
         return { grantId: null as string | null };
       const grant = await createAllowGrant(tx, {
@@ -211,6 +240,20 @@ export class HostApprovalsService {
         actionId: row.actionId,
       },
     });
+    if (remember) {
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.JAIL_SITE_RULE_CREATED,
+        actor: { type: 'human', id: input.subject },
+        data: {
+          hostId: row.hostId,
+          toolId: row.toolId,
+          site: row.resource,
+          mode: 'ALLOW',
+          via: input.via,
+          decision: input.decision,
+        },
+      });
+    }
     if (result.grantId) {
       await this.audit.recordSafely(client, tenantId, {
         eventType: AUDIT_EVENT_TYPES.APPROVAL_GRANT_CREATED,

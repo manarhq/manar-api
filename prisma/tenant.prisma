@@ -2236,6 +2236,7 @@ model Host {
   hostApprovals         HostApproval[]
   createdAt             DateTime             @default(now())
   updatedAt             DateTime             @updatedAt
+  siteRules        HostSiteRule[]
 
   @@unique([machineId])
   /// One computer identity, one host (lower-cased certificate DNS name; nulls repeat).
@@ -2525,3 +2526,21 @@ model SecretVaultAccess {
   @@index([status, createdAt])
   @@map("secret_vault_access")
 }
+/// What a person allowed or blocked for one AI tool on one device (JAIL, "ask on new sites").
+/// `site` is an exact lower-case host, `*.suffix` or an IP literal. A null `expiresAt` is "always".
+model HostSiteRule {
+  id        String    @id @default(uuid())
+  hostId    String
+  host      Host      @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  toolId    String
+  site      String
+  /// ALLOW or DENY
+  mode      String
+  expiresAt DateTime?
+  /// approval (answered an ask) or console (added by hand)
+  source    String
+  createdBy String
+  createdAt DateTime  @default(now())
+  @@unique([hostId, toolId, site])
+  @@index([hostId])
+  @@map("host_site_rules")

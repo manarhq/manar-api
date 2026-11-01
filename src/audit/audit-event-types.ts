@@ -177,6 +177,11 @@ export const AUDIT_EVENT_TYPES = {
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
+  // JAIL (per-site decisions for protected AI tools).
+  /** A person allowed or blocked a site for one tool on one device (an answer to a prompt, or by hand). */
+  JAIL_SITE_RULE_CREATED: 'jail.site_rule.created',
+  /** A person removed a site rule. */
+  JAIL_SITE_RULE_REMOVED: 'jail.site_rule.removed',
 } as const;
 
 export type AuditEventType =
