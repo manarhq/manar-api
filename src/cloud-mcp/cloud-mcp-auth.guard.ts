@@ -494,6 +494,17 @@ export class CloudMcpAuthGuard implements CanActivate {
     if (binding.oauthClientId) {
       if (clientId !== binding.oauthClientId)
         return forbidden('unknown_client');
+      // A self-registered (ChatGPT) client on the shared realm must still be free of protocol
+      // mappers: a mapper onto `sub` would let it act as any member.
+      if (
+        isShared &&
+        binding.platform === 'CHATGPT' &&
+        !(await failClosed('keycloak-admin', () =>
+          this.cloudAgents.confirmedClientIsClean(known.tenantId, clientId),
+        ))
+      ) {
+        return forbidden('unknown_client');
+      }
     } else {
       // ChatGPT: the first eligible self-registered client waits for a tenant admin.
       const proposal =

@@ -120,6 +120,8 @@ function setup(
     proposal?: 'pending' | 'refused';
     auditHits?: number;
     paused?: boolean;
+    /** The confirmed self-registered client is free of protocol mappers (default true). */
+    clientClean?: boolean;
     /** Roles the person holds in the workspace right now; `null` = no ACTIVE membership. */
     membershipRoles?: string[] | null;
     /** Tenant rows by slug (shared realm). */
@@ -164,8 +166,12 @@ function setup(
     .fn()
     .mockResolvedValue(options.proposal ?? 'pending');
   const isPaused = vi.fn().mockResolvedValue(options.paused ?? false);
+  const confirmedClientIsClean = vi
+    .fn()
+    .mockResolvedValue(options.clientClean ?? true);
   const cloudAgents = {
     proposeDcrClient,
+    confirmedClientIsClean,
     isPaused,
   } as unknown as CloudAgentsService;
   const resolveActive = vi.fn(() =>
@@ -762,6 +768,22 @@ describe('CloudMcpAuthGuard on the shared realm', () => {
     for (let i = 0; i < 1_100; i++) await g.tenantBySlug(`nobody-${i}`);
     expect(g.tenantsBySlug.has('acme')).toBe(true);
     expect(g.unknownSlugs.size).toBeLessThanOrEqual(1_000);
+  });
+
+  it('a confirmed ChatGPT client that gained a protocol mapper is refused', async () => {
+    const chat = { platform: 'CHATGPT', oauthClientId: T_CLIENT };
+    const dirty = shared({
+      agent: sharedAgent(chat),
+      env: { MANAR_MCP_CHATGPT_ENABLED: 'true' },
+      clientClean: false,
+    });
+    const refused = await refusal(
+      dirty.guard.canActivate(context(`Bearer ${await sharedToken()}`).ctx),
+    );
+    expect([refused.status, refused.body.reason]).toEqual([
+      403,
+      'unknown_client',
+    ]);
   });
 
   it('an existing ChatGPT binding is refused when ChatGPT is off on the shared realm', async () => {

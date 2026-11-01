@@ -89,6 +89,8 @@ function setup(
         : Promise.resolve({ uuid: 'client-uuid', secret: 'secret' }),
     ),
     updateDcrPolicy: vi.fn().mockResolvedValue([]),
+    updateClient: vi.fn().mockResolvedValue(undefined),
+    regenerateRegistrationAccessToken: vi.fn().mockResolvedValue(undefined),
     deleteById: vi.fn().mockResolvedValue(undefined),
   };
   const tasks = {
@@ -364,6 +366,21 @@ describe('CloudAgentsService.proposeDcrClient on the shared realm', () => {
     ).resolves.toBe('refused');
   });
 
+  it('refuses a client with a protocol mapper (it could map an attribute onto sub)', async () => {
+    const { service } = setup({
+      shared: true,
+      env,
+      binding,
+      foundClient: {
+        ...client([SCOPE]),
+        protocolMappers: [{ name: 'sub-override' }],
+      },
+    });
+    await expect(
+      service.proposeDcrClient('t-acme', 'agent-1', 'dcr-1'),
+    ).resolves.toBe('refused');
+  });
+
   it("refuses a client that also carries another tenant's agent scope", async () => {
     const { service } = setup({
       shared: true,
@@ -423,5 +440,33 @@ describe('failed connects and lapsed workspaces', () => {
     await expect(
       service.isPaused('t-acme', {} as never, 'agent-1'),
     ).resolves.toBe(false);
+  });
+});
+
+describe('confirmedClientIsClean', () => {
+  const env = {
+    MANAR_MCP_SHARED_ISSUER: 'https://auth.manar.test/realms/manar',
+  };
+  it('is false once the client carries a mapper, and when it is gone', async () => {
+    const mapped = setup({
+      shared: true,
+      env,
+      foundClient: { id: 'u', clientId: 'c', protocolMappers: [{ name: 'm' }] },
+    });
+    await expect(
+      mapped.service.confirmedClientIsClean('t-acme', 'c'),
+    ).resolves.toBe(false);
+    const gone = setup({ shared: true, env });
+    await expect(
+      gone.service.confirmedClientIsClean('t-acme', 'c'),
+    ).resolves.toBe(false);
+    const clean = setup({
+      shared: true,
+      env,
+      foundClient: { id: 'u', clientId: 'c' },
+    });
+    await expect(
+      clean.service.confirmedClientIsClean('t-acme', 'c'),
+    ).resolves.toBe(true);
   });
 });

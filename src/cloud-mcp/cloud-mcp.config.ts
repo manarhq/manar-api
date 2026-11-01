@@ -162,3 +162,8 @@ export function isCloudMcpPath(url: string): boolean {
     url.startsWith('/.well-known/oauth-protected-resource/mcp/')
   );
 }
+
+/** Client attribute: 'pending' (waiting for an admin) or 'confirmed'. The sweep never touches either. */
+export const DCR_STATE_ATTRIBUTE = 'manar.dcr.state';
+/** Client attribute: epoch ms the sweep first saw an unconfirmed self-registered client. */
+export const DCR_FIRST_SEEN_ATTRIBUTE = 'manar.dcr.first_seen';

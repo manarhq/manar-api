@@ -38,6 +38,7 @@ import { httpAdapterOptions } from '../src/config/trusted-proxy';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
+import { DcrCleanupService } from '../src/cloud-mcp/dcr-cleanup.service';
 import { WorkspaceProvisioningService } from '../src/workspaces/workspace-provisioning.service';
 import { OpenBaoKvClient } from '../src/openbao/openbao-kv.client';
 import { AiAdvisoryClient } from '../src/ai-advisory/ai-advisory-client.service';
@@ -412,6 +413,8 @@ describe.skipIf(!existsSync(REALM_YAML))(
       let path: string;
       let client: Registered;
       let token: string;
+      let agentB: Connected;
+      let clientB: Registered;
 
       beforeAll(async () => {
         const res = await connect(wsA);
@@ -567,9 +570,9 @@ describe.skipIf(!existsSync(REALM_YAML))(
         // B's own agent, its own client; the token is for B's MCP URL, not A's.
         const resB = await connect(wsB, 'b');
         expect(resB.status).toBe(201);
-        const agentB = resB.body as Connected;
+        agentB = resB.body as Connected;
         const foundB = await discover(agentB);
-        const clientB = (await (
+        clientB = (await (
           await register(
             foundB.metadata.registration_endpoint,
             foundB.scopes[0],
@@ -584,7 +587,7 @@ describe.skipIf(!existsSync(REALM_YAML))(
         expect(await outcome(path, tokenB)).toMatch(/^401 /);
       });
 
-      it('a client asking for two agents scopes is never proposed (one scope per client)', async () => {
+      it('the Free plan allows one cloud agent per workspace', async () => {
         const second = await connect(wsB, 'c');
         // Free plan: one cloud agent per workspace.
         expect(second.status).toBeGreaterThanOrEqual(400);
@@ -597,6 +600,288 @@ describe.skipIf(!existsSync(REALM_YAML))(
           data: { status: 'REMOVED' },
         });
         expect(await outcome(path, token)).toMatch(/^403 /);
+        await control.membership.updateMany({
+          where: { tenantId: wsA.tenantId, subject: wsA.owner.id },
+          data: { status: 'ACTIVE' },
+        });
+      });
+
+      const policyConfig = async (providerId: string) => {
+        const policies = (await (
+          await adminFetch(
+            `/admin/realms/${realm}/components?type=org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy`,
+          )
+        ).json()) as Array<{
+          providerId: string;
+          subType: string;
+          config: Record<string, string[]>;
+        }>;
+        return policies.find(
+          (p) => p.providerId === providerId && p.subType === 'anonymous',
+        )!.config;
+      };
+
+      it('anonymous registration is capped at 5000 and allows no protocol mapper type', async () => {
+        expect((await policyConfig('max-clients'))['max-clients']).toEqual([
+          '5000',
+        ]);
+        expect(
+          (await policyConfig('allowed-protocol-mappers'))[
+            'allowed-protocol-mapper-types'
+          ] ?? [],
+        ).toEqual([]);
+      });
+
+      it('a client registered with a protocol mapper (firstName onto sub) is refused, at registration and by update', async () => {
+        const base = `${issuer}/clients-registrations`;
+        const attack = (name: string) => ({
+          clientId: name,
+          publicClient: true,
+          redirectUris: [CHATGPT_CALLBACK],
+          standardFlowEnabled: true,
+          defaultClientScopes: [agent.scopes[0]],
+          protocolMappers: [
+            {
+              name: 'sub-override',
+              protocol: 'openid-connect',
+              protocolMapper: 'oidc-usermodel-property-mapper',
+              config: {
+                'user.attribute': 'firstName',
+                'claim.name': 'sub',
+                'access.token.claim': 'true',
+                'jsonType.label': 'String',
+              },
+            },
+          ],
+        });
+        const post = (url: string, body: unknown) =>
+          fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+        expect(
+          (await post(`${base}/default`, attack(`evil-${slug('m')}`))).status,
+        ).toBe(403);
+        // Registered clean, then edited with its registration access token.
+        const ok = (await (
+          await post(`${base}/default`, {
+            ...attack(`evil-${slug('u')}`),
+            protocolMappers: [],
+          })
+        ).json()) as {
+          clientId: string;
+          registrationAccessToken: string;
+        };
+        const edit = await fetch(`${base}/default/${ok.clientId}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${ok.registrationAccessToken}`,
+          },
+          body: JSON.stringify(attack(ok.clientId)),
+        });
+        expect(edit.status).toBe(403);
+      });
+
+      it('a mapped client that got past the policy (made by an admin) is never proposed; a client mapped while waiting is never confirmed', async () => {
+        const adminCall = (method: 'POST' | 'DELETE', suffix: string) =>
+          http()
+            [method === 'POST' ? 'post' : 'delete'](
+              `/cloud-agents/${agent.agent.id}/${suffix}`,
+            )
+            .set('Authorization', `Bearer ${wsA.adminToken}`)
+            .set('X-Manar-Workspace', wsA.tenantId);
+        const clientRows = async (id: string) =>
+          (await (
+            await adminFetch(`/admin/realms/${realm}/clients?clientId=${id}`)
+          ).json()) as Array<{
+            id: string;
+            attributes: Record<string, string>;
+          }>;
+        const mapper = (
+          name: string,
+          protocolMapper: string,
+          config: object,
+        ) => ({
+          name,
+          protocol: 'openid-connect',
+          protocolMapper,
+          config,
+        });
+        const subFromFirstName = mapper(
+          'sub-override',
+          'oidc-usermodel-property-mapper',
+          {
+            'user.attribute': 'firstName',
+            'claim.name': 'sub',
+            'access.token.claim': 'true',
+            'jsonType.label': 'String',
+          },
+        );
+        const adminClient = (clientId: string, protocolMappers: object[]) =>
+          adminFetch(`/admin/realms/${realm}/clients`, {
+            method: 'POST',
+            body: JSON.stringify({
+              clientId,
+              publicClient: true,
+              redirectUris: [CHATGPT_CALLBACK],
+              standardFlowEnabled: true,
+              fullScopeAllowed: false,
+              // `basic` is what puts `sub` in a token; a registered client gets it by default.
+              defaultClientScopes: protocolMappers.length
+                ? [agent.scopes[0]]
+                : ['basic', agent.scopes[0]],
+              protocolMappers,
+            }),
+          });
+
+        // Free the binding (reject the confirmed client) so the next client is judged on its own.
+        await adminCall('DELETE', 'oauth-client').expect(200);
+        expect(await clientRows(client.client_id)).toEqual([]);
+
+        // The attacker edits their own firstName to the victim's id; the client maps it onto sub.
+        const attacker = await person();
+        await adminFetch(`/admin/realms/${realm}/users/${attacker.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ firstName: wsA.owner.id }),
+        });
+        const evilId = `evil-${slug('a')}`;
+        await adminClient(evilId, [subFromFirstName]);
+        const evilToken = await chatGptToken(
+          { client_id: evilId },
+          attacker,
+          agent.scopes[0]!,
+        );
+        // The token really does say sub = the victim member; the client check is the control.
+        expect(decodeJwt(evilToken).sub).toBe(wsA.owner.id);
+        expect(await outcome(path, evilToken)).toBe('403 unknown_client');
+        const shown = await http()
+          .get(`/cloud-agents/${agent.agent.id}`)
+          .set('Authorization', `Bearer ${wsA.adminToken}`)
+          .set('X-Manar-Workspace', wsA.tenantId)
+          .expect(200);
+        expect(shown.body).toMatchObject({ pendingClient: null });
+
+        // A clean client is proposed; a mapper added while it waits blocks the confirmation.
+        const waitingId = `waiting-${slug('w')}`;
+        await adminClient(waitingId, []);
+        const waitingToken = await chatGptToken(
+          { client_id: waitingId },
+          wsA.owner,
+          agent.scopes[0]!,
+        );
+        expect(await outcome(path, waitingToken)).toBe(
+          '403 cloud_client_pending_approval',
+        );
+        const [row] = await clientRows(waitingId);
+        expect(row!.attributes['manar.dcr.state']).toBe('pending');
+        await adminFetch(
+          `/admin/realms/${realm}/clients/${row!.id}/protocol-mappers/models`,
+          {
+            method: 'POST',
+            body: JSON.stringify(
+              mapper('late', 'oidc-hardcoded-claim-mapper', {
+                'claim.name': 'x',
+                'claim.value': 'y',
+              }),
+            ),
+          },
+        );
+        await adminCall('POST', 'oauth-client/confirm')
+          .send({ clientId: waitingId })
+          .expect(409);
+
+        // Reset deletes every client carrying the agent's scope, public ones included.
+        await adminCall('DELETE', 'oauth-client').expect(200);
+        for (const id of [evilId, waitingId]) {
+          expect(await clientRows(id)).toEqual([]);
+        }
+
+        // The real connector registers again and is confirmed; service is restored.
+        client = (await (
+          await register(agent.registrationUrl, agent.scopes[0])
+        ).json()) as Registered;
+        token = await chatGptToken(client, wsA.owner, agent.scopes[0]!);
+        expect(await outcome(path, token)).toBe(
+          '403 cloud_client_pending_approval',
+        );
+        await adminCall('POST', 'oauth-client/confirm')
+          .send({ clientId: client.client_id })
+          .expect(201);
+        expect(await outcome(path, token)).toBe('ok');
+        const [confirmed] = await clientRows(client.client_id);
+        expect(confirmed!.attributes['manar.dcr.state']).toBe('confirmed');
+      });
+
+      it('registrations that ask for no agent scope are swept after 15 minutes, waiting and confirmed clients never', async () => {
+        const stray = (await (
+          await register(agent.registrationUrl, undefined)
+        ).json()) as Registered;
+        const clientsNow = async () =>
+          (await (
+            await adminFetch(`/admin/realms/${realm}/clients?max=5000`)
+          ).json()) as Array<{
+            clientId: string;
+            attributes: Record<string, string>;
+          }>;
+        expect(
+          (await clientsNow()).some((c) => c.clientId === stray.client_id),
+        ).toBe(true);
+        const sweeper = app.get(DcrCleanupService);
+        const t0 = Date.now();
+        await sweeper.sweep(t0);
+        expect(await sweeper.sweep(t0 + 14 * 60_000)).toEqual([]);
+        expect(await sweeper.sweep(t0 + 16 * 60_000)).toEqual([
+          stray.client_id,
+        ]);
+        const left = (await clientsNow()).map((c) => c.clientId);
+        expect(left).not.toContain(stray.client_id);
+        expect(left).toContain(client.client_id);
+        expect(
+          (await clientsNow()).find((c) => c.clientId === client.client_id)!
+            .attributes['manar.dcr.state'],
+        ).toBe('confirmed');
+      });
+
+      it('rejecting and disconnecting delete public clients too; the last disconnect closes registration', async () => {
+        const gone = async (id: string) =>
+          (await (
+            await adminFetch(`/admin/realms/${realm}/clients?clientId=${id}`)
+          ).json()) as unknown[];
+        // B's connector registered a public client earlier.
+        expect(await gone(clientB.client_id)).toHaveLength(1);
+        await http()
+          .delete(`/cloud-agents/${agentB.agent.id}/oauth-client`)
+          .set('Authorization', `Bearer ${wsB.adminToken}`)
+          .set('X-Manar-Workspace', wsB.tenantId)
+          .expect(200);
+        expect(await gone(clientB.client_id)).toEqual([]);
+        const foundB = (await (
+          await register(agentB.registrationUrl, agentB.scopes[0])
+        ).json()) as Registered;
+        expect(await gone(foundB.client_id)).toHaveLength(1);
+        await http()
+          .delete(`/cloud-agents/${agentB.agent.id}`)
+          .set('Authorization', `Bearer ${wsB.adminToken}`)
+          .set('X-Manar-Workspace', wsB.tenantId)
+          .send({ reason: 'e2e' })
+          .expect(200);
+        expect(await gone(foundB.client_id)).toEqual([]);
+        // A's agent is still connected, so registration stays open for it; disconnecting it closes it.
+        expect(
+          (await register(agent.registrationUrl, agent.scopes[0])).status,
+        ).toBe(201);
+        await http()
+          .delete(`/cloud-agents/${agent.agent.id}`)
+          .set('Authorization', `Bearer ${wsA.adminToken}`)
+          .set('X-Manar-Workspace', wsA.tenantId)
+          .send({ reason: 'e2e' })
+          .expect(200);
+        expect(await gone(client.client_id)).toEqual([]);
+        expect((await register(agent.registrationUrl, undefined)).status).toBe(
+          403,
+        );
       });
     });
   },

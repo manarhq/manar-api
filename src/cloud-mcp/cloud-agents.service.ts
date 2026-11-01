@@ -29,6 +29,7 @@ import { CatalogService, catalogGate } from '../platform/catalog.service';
 import { CreateTaskRequestSchema } from '../tasks/tasks.validation';
 import { TasksService } from '../tasks/tasks.service';
 import {
+  DCR_STATE_ATTRIBUTE,
   PRE_REGISTERED_CLIENT_PREFIX,
   cloudMcpClientId,
   cloudMcpMetadataUrl,
@@ -121,7 +122,7 @@ function keycloakNames(slug: string, platform: Platform, tenantId?: string) {
 }
 
 /** Realm name of an issuer URL `https://host/realms/<realm>`. */
-function realmOfIssuer(issuer: string): string | null {
+export function realmOfIssuer(issuer: string): string | null {
   const m = /\/realms\/([^/]+)\/?$/.exec(issuer);
   return m?.[1] ? decodeURIComponent(m[1]) : null;
 }
@@ -630,6 +631,10 @@ export class CloudAgentsService {
         serviceAccount: client.serviceAccountsEnabled === true,
       },
     };
+    // The cleanup sweep (DcrCleanupService) never deletes a waiting client.
+    await this.keycloak.updateClient(realm, clientId, {
+      attributes: { [DCR_STATE_ATTRIBUTE]: 'pending' },
+    });
     const { count } = await tenantClient.cloudAgentBinding.updateMany({
       where: { agentId, oauthClientId: null, pendingClientId: null },
       data: {
@@ -669,12 +674,24 @@ export class CloudAgentsService {
         'That client is not the one waiting for this agent',
       );
     }
+    const waiting = await this.keycloak.findClient(realm, clientId);
+    if (!waiting) throw new ConflictException('That client no longer exists');
+    // A mapper added since it was proposed (it could rewrite `sub`): never confirm such a client.
+    if ((waiting.protocolMappers?.length ?? 0) > 0) {
+      throw new ConflictException(
+        'That client carries protocol mappers; reject it and let the connector register again',
+      );
+    }
+    await this.keycloak.regenerateRegistrationAccessToken(realm, waiting.id);
     await this.keycloak.updateClient(realm, clientId, {
       fullScopeAllowed: false,
       directAccessGrantsEnabled: false,
       implicitFlowEnabled: false,
       serviceAccountsEnabled: false,
-      attributes: { 'pkce.code.challenge.method': 'S256' },
+      attributes: {
+        'pkce.code.challenge.method': 'S256',
+        [DCR_STATE_ATTRIBUTE]: 'confirmed',
+      },
     });
     try {
       await tenantClient.cloudAgentBinding.update({
@@ -894,6 +911,8 @@ export class CloudAgentsService {
     return (
       tenantScoped &&
       client.enabled !== false &&
+      // No protocol mappers: one that maps a user attribute onto `sub` impersonates a member.
+      (client.protocolMappers?.length ?? 0) === 0 &&
       // A public client (token_endpoint_auth_method none, PKCE) is how ChatGPT registers; PKCE S256
       // is enforced on confirmation, and nothing is served before that.
       client.clientId !==
@@ -914,6 +933,27 @@ export class CloudAgentsService {
     );
   }
 
+  // ponytail: per-replica, one minute: a confirmed client is re-read from Keycloak at most this often.
+  private readonly cleanClients = new Map<string, number>();
+
+  /**
+   * Belt for a confirmed self-registered client: it must still carry no protocol mappers (the
+   * policy forbids adding them; this catches a change made any other way). Fails closed.
+   */
+  async confirmedClientIsClean(
+    tenantId: string,
+    clientId: string,
+  ): Promise<boolean> {
+    const key = `${tenantId}:${clientId}`;
+    if ((this.cleanClients.get(key) ?? 0) > Date.now()) return true;
+    const { realm } = await this.realmOf(tenantId);
+    const client = await this.keycloak.findClient(realm, clientId);
+    if (!client || (client.protocolMappers?.length ?? 0) > 0) return false;
+    if (this.cleanClients.size > 10_000) this.cleanClients.clear();
+    this.cleanClients.set(key, Date.now() + 60_000);
+    return true;
+  }
+
   /** Self-registered clients registered after `since` that carry `scope`; returns their ids. */
   private async deleteSelfRegisteredClients(
     realm: string,
@@ -932,7 +972,9 @@ export class CloudAgentsService {
         ].includes(scope) &&
         c.clientId !== consoleClient &&
         !c.clientId.startsWith(PRE_REGISTERED_CLIENT_PREFIX) &&
-        registeredAt(c) >= sinceMs,
+        // A public client has no registration time; the agent's scope (created at connect, so
+        // no older client carries it) identifies its clients.
+        (!Number.isFinite(registeredAt(c)) || registeredAt(c) >= sinceMs),
     );
     for (const client of doomed) {
       await this.keycloak.deleteById(realm, `clients/${client.id}`);

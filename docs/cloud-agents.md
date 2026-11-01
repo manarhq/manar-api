@@ -258,8 +258,21 @@ A tenant with no realm of its own connects its cloud agents on the shared realm
   `platform/keycloak/realm-manar.yaml` into a throwaway realm): metadata, registration, code flow with
   PKCE, MCP calls. ChatGPT registers a public client (`token_endpoint_auth_method: none`); a public
   client has no registration time in Keycloak, so on the shared realm the unique agent scope
-  stands in for it. PKCE S256 is enforced when the admin confirms. The realm's anonymous
-  `max-clients` policy (200) also limits how many registrations can wait; disconnecting deletes them. When on: the realm-wide Trusted Hosts policy lists only `MANAR_MCP_DCR_TRUSTED_HOSTS`, a
+  stands in for it, and disconnecting or rejecting deletes public clients by that scope. PKCE S256 is
+  enforced when the admin confirms.
+  DCR hardening (all proved in that e2e): the anonymous policies allow **no protocol mapper types**, so a
+  registered client cannot map a user attribute onto `sub` (reviewer attack: firstName onto `sub` made
+  a token that said "victim member"; also refused on update with the registration access token);
+  a client with any protocol mapper is never proposed, never confirmed, and a confirmed one that gains
+  a mapper is refused by the guard (re-read at most once a minute); confirming also regenerates the
+  registration access token; firstName and lastName are admin-edit only in `realm-manar.yaml`.
+  The anonymous `max-clients` is 5000 (was 200). A registration request cannot be made to require an
+  agent scope in Keycloak, so `DcrCleanupService` sweeps every 5 minutes: an unconfirmed client with no
+  agent scope lives 15 minutes, with one 6 hours (age from the sweep's first sighting,
+  attribute `manar.dcr.first_seen`); waiting and confirmed clients (`manar.dcr.state`) are never swept.
+  Traefik rate-limits `POST /realms/*/clients-registrations/*` per address (manar-infra). Residual
+  risk: a botnet could still hold slots for up to ~20 minutes each; a registration proxy in front of
+  Keycloak that requires one existing agent scope is the next step. When on: the realm-wide Trusted Hosts policy lists only `MANAR_MCP_DCR_TRUSTED_HOSTS`, a
   registered client is unusable until a tenant admin confirms it, and it is only proposed from a
   member's token when it carries exactly this agent's scope and no other agent's.
 - Plan cap: `cloudAgents` (Free 1, Pro 5). Agents over the cap after a downgrade are paused
