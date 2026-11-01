@@ -15,3 +15,11 @@ claimed under `pg_advisory_xact_lock` (one per person and per device hash; uniqu
 then a Pro monthly subscription is created with `trial_end` and `missing_payment_method: cancel`, so
 it ends cleanly into the free plan unless a card is added in the portal. A Stripe failure gives the
 slot back. Counter: `GET /public/launch-offer` (cached 15 s, rate limited). Off: `LAUNCH_OFFER_ENABLED=false`.
+
+## Existing tenants (pilot and demo)
+
+Without an entitlement row a tenant reads as Free. Migration `20261101140000_manual_company_entitlements`
+adds `tenant_entitlements.manual` and gives every existing COMPANY tenant that has no row a `company`
+plan, `active`, no Stripe ids, `manual = true`. It is idempotent (re-run the INSERT any time), skips
+PERSONAL and SAMPLE tenants and any tenant that already has a row, and Stripe events never touch these
+rows (they find tenants by Stripe customer id). Rollback: `DELETE FROM tenant_entitlements WHERE manual;`.
