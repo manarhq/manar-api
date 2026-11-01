@@ -52,7 +52,10 @@ describe.skipIf(!url)('launch offer slots (postgres)', () => {
         configured: true,
         price: () => 'price_x',
         client: () => ({
-          subscriptions: { create: () => Promise.resolve({ id: 'sub_x' }) },
+          subscriptions: {
+            create: () => Promise.resolve({ id: 'sub_x' }),
+            list: () => Promise.resolve({ data: [] }),
+          },
         }),
       } as never,
       { ensureCustomer: () => Promise.resolve('cus_x') } as never,
