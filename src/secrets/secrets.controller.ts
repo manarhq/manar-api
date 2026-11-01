@@ -8,6 +8,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -38,6 +39,7 @@ import {
 import {
   AccessDecisionSchema,
   SECRET_EVENT_TYPES,
+  SecretSettingsSchema,
   VaultRequestSchema,
 } from './secrets.validation';
 
@@ -194,6 +196,34 @@ export class SecretsController {
         b.ref,
       )
       .catch(http);
+  }
+
+  @Get('settings')
+  @RequireRole(...READ)
+  @ApiOperation({
+    summary: 'How far secret blocking goes: off, keys (default) or all',
+  })
+  async settings(@CurrentAuth() auth: AuthContext) {
+    const client = await this.tenants.getClient(auth.tenant.id);
+    return { blockMode: await this.secrets.blockMode(client) };
+  }
+
+  @Put('settings')
+  @RequireRole(...WRITE)
+  @ApiOperation({
+    summary: 'Set secret blocking',
+    description:
+      'Body { blockMode: "off"|"keys"|"all" }. Devices follow within minutes. Audited as secret.settings.changed.',
+  })
+  async setSettings(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
+    const b = parseBodyOrThrow(SecretSettingsSchema, body);
+    const client = await this.tenants.getClient(auth.tenant.id);
+    return this.secrets.setBlockMode(
+      client,
+      auth.tenant.id,
+      actorOf(auth),
+      b.blockMode,
+    );
   }
 
   @Get('access')

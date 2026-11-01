@@ -19,6 +19,9 @@ export const PATH_CLASSES = [
   'docker',
   'browser',
   'env',
+  'npm',
+  'pypi',
+  'github',
 ] as const;
 
 const text = (max: number) =>
@@ -64,9 +67,26 @@ export const VaultReportSchema = z
   })
   .strict();
 
+/** `file`: a program was refused a secret file by the watcher; `ref` is the path class. */
+export const ACCESS_KINDS = [...VAULT_KINDS, 'file'] as const;
+
+export const BLOCK_MODES = ['off', 'keys', 'all'] as const;
+export type BlockMode = (typeof BLOCK_MODES)[number];
+export const DEFAULT_BLOCK_MODE: BlockMode = 'keys';
+
+export const SecretSettingsSchema = z
+  .object({ blockMode: z.enum(BLOCK_MODES) })
+  .strict();
+
+/** The device feature flags for a mode (`GET /host/v1/config`). */
+export function blockFeatures(mode: BlockMode): string[] {
+  if (mode === 'all') return ['secrets.block', 'secrets.block.all'];
+  return mode === 'keys' ? ['secrets.block'] : [];
+}
+
 export const AccessRequestSchema = z
   .object({
-    kind: z.enum(VAULT_KINDS),
+    kind: z.enum(ACCESS_KINDS),
     ref,
     program: text(128).min(1),
     /** Full path of the requesting binary, home directory masked. */
@@ -74,7 +94,12 @@ export const AccessRequestSchema = z
     /** SHA-256 of the binary the device pinned and read. */
     programSha: z.string().regex(/^[0-9a-f]{64}$/),
   })
-  .strict();
+  .strict()
+  .refine(
+    (b) =>
+      b.kind !== 'file' || (PATH_CLASSES as readonly string[]).includes(b.ref),
+    { message: 'Unknown file class' },
+  );
 
 export const AccessDecisionSchema = z
   .object({

@@ -177,6 +177,8 @@ export const AUDIT_EVENT_TYPES = {
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
+  /** The workspace changed how far secret blocking goes (off, keys, all). */
+  SECRET_SETTINGS_CHANGED: 'secret.settings.changed',
 } as const;
 
 export type AuditEventType =

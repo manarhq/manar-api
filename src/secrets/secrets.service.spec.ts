@@ -278,3 +278,100 @@ describe('AccessRequestSchema', () => {
     expect(AccessRequestSchema.safeParse(noPath).success).toBe(false);
   });
 });
+
+describe('secret blocking settings', () => {
+  const settings = (row: { blockMode: string } | null) => {
+    const upsert = vi.fn().mockResolvedValue({});
+    const client = {
+      secretSettings: {
+        findUnique: vi.fn().mockResolvedValue(row),
+        upsert,
+      },
+    };
+    return { client, upsert };
+  };
+
+  it.each([
+    [null, ['secrets.block']],
+    [{ blockMode: 'keys' }, ['secrets.block']],
+    [{ blockMode: 'all' }, ['secrets.block', 'secrets.block.all']],
+    [{ blockMode: 'off' }, []],
+  ])('device features for %j', async (row, want) => {
+    const { client } = settings(row);
+    const { service } = setup();
+    expect(await service.features(client as never)).toEqual(want);
+  });
+
+  it('changing the mode is audited with the old and new value', async () => {
+    const { client, upsert } = settings({ blockMode: 'keys' });
+    const { service, audit } = setup();
+    await service.setBlockMode(
+      client as never,
+      't1',
+      { type: 'human', id: 'u1' },
+      'all',
+    );
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: { blockMode: 'all', updatedBy: 'u1' },
+      }),
+    );
+    expect(audit.recordSafely).toHaveBeenCalledWith(
+      client,
+      't1',
+      expect.objectContaining({
+        eventType: 'secret.settings.changed',
+        data: { from: 'keys', to: 'all' },
+      }),
+    );
+  });
+});
+
+describe('file access requests (the watcher asks once per program)', () => {
+  const body = (o: Record<string, unknown> = {}) => ({
+    kind: 'file',
+    ref: 'ssh',
+    program: 'cursor-agent',
+    programPath: '~/.local/share/cursor-agent/cursor-agent',
+    programSha: 'a'.repeat(64),
+    ...o,
+  });
+  it('accepts a file class and refuses an unknown one', () => {
+    expect(AccessRequestSchema.safeParse(body()).success).toBe(true);
+    expect(AccessRequestSchema.safeParse(body({ ref: 'x' })).success).toBe(
+      false,
+    );
+    expect(
+      AccessRequestSchema.safeParse(body({ kind: 'aws', ref: 'default' }))
+        .success,
+    ).toBe(true);
+  });
+  it('does not need a vault entry and folds a repeated open question', async () => {
+    const open = { id: 'a1', status: 'PENDING' };
+    const client = {
+      secretVault: { findUnique: vi.fn() },
+      secretVaultAccess: { findFirst: vi.fn().mockResolvedValue(open) },
+    };
+    const { service } = setup();
+    const r = await service.createAccess(client as never, 'h1', 'file', 'ssh', {
+      name: 'cursor-agent',
+      path: '~/x',
+      sha: 'a'.repeat(64),
+    });
+    expect(r).toEqual({ id: 'a1', status: 'PENDING' });
+    expect(client.secretVault.findUnique).not.toHaveBeenCalled();
+  });
+  it('a vault secret still needs its entry', async () => {
+    const client = {
+      secretVault: { findUnique: vi.fn().mockResolvedValue(null) },
+    };
+    const { service } = setup();
+    await expect(
+      service.createAccess(client as never, 'h1', 'aws', 'default', {
+        name: 'x',
+        path: 'x',
+        sha: 'a'.repeat(64),
+      }),
+    ).rejects.toThrow('not in the vault');
+  });
+});

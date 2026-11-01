@@ -13,7 +13,13 @@ import type {
   SecretEvent,
 } from '../generated/tenant-client/client';
 import { SecretAlertBus } from './secret-alert-bus';
-import { maskHome, type HostEvent } from './secrets.validation';
+import {
+  blockFeatures,
+  DEFAULT_BLOCK_MODE,
+  maskHome,
+  type BlockMode,
+  type HostEvent,
+} from './secrets.validation';
 
 export class SecretsNotFoundError extends Error {}
 export class SecretsConflictError extends Error {}
@@ -378,11 +384,13 @@ export class SecretsService {
     ref: string,
     program: { name: string; path: string; sha: string },
   ) {
-    const vault = await client.secretVault.findUnique({
-      where: { hostId_kind_ref: { hostId, kind, ref } },
-    });
-    if (!vault || vault.state !== 'STORED') {
-      throw new SecretsNotFoundError('That secret is not in the vault');
+    if (kind !== 'file') {
+      const vault = await client.secretVault.findUnique({
+        where: { hostId_kind_ref: { hostId, kind, ref } },
+      });
+      if (!vault || vault.state !== 'STORED') {
+        throw new SecretsNotFoundError('That secret is not in the vault');
+      }
     }
     const fresh = new Date(Date.now() - ACCESS_TTL_MS);
     const open = await client.secretVaultAccess.findFirst({
@@ -426,6 +434,39 @@ export class SecretsService {
       row.status === 'PENDING' &&
       row.createdAt.getTime() < Date.now() - ACCESS_TTL_MS;
     return { id: row.id, status: expired ? 'DENY' : row.status };
+  }
+
+  /** The workspace's blocking mode (`keys` until the owner picks another). */
+  async blockMode(client: TenantPrismaClient): Promise<BlockMode> {
+    const row = await client.secretSettings.findUnique({
+      where: { id: 'default' },
+    });
+    return (row?.blockMode as BlockMode | undefined) ?? DEFAULT_BLOCK_MODE;
+  }
+
+  /** Device feature flags for the workspace's mode. */
+  async features(client: TenantPrismaClient): Promise<string[]> {
+    return blockFeatures(await this.blockMode(client));
+  }
+
+  async setBlockMode(
+    client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
+    blockMode: BlockMode,
+  ) {
+    const before = await this.blockMode(client);
+    await client.secretSettings.upsert({
+      where: { id: 'default' },
+      create: { id: 'default', blockMode, updatedBy: actor.id },
+      update: { blockMode, updatedBy: actor.id },
+    });
+    await this.audit.recordSafely(client, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.SECRET_SETTINGS_CHANGED,
+      actor,
+      data: { from: before, to: blockMode },
+    });
+    return { blockMode };
   }
 
   /** Console: open requests (newest first). */

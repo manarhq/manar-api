@@ -2525,3 +2525,14 @@ model SecretVaultAccess {
   @@index([status, createdAt])
   @@map("secret_vault_access")
 }
+
+/// One row per workspace: how far Linux secret blocking goes. No row means `keys`.
+model SecretSettings {
+  id        String   @id @default("default")
+  /// off | keys | all
+  blockMode String   @default("keys")
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+
+  @@map("secret_settings")
+}
