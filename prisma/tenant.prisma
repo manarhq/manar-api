@@ -2525,3 +2525,13 @@ model SecretVaultAccess {
   @@index([status, createdAt])
   @@map("secret_vault_access")
 }
+
+/// Single-use nonces of push action tokens (Approve once / Deny buttons). Written in the same
+/// transaction as the decision, so a token is spent only by a decision that took effect.
+model PhoneActionUse {
+  nonce     String   @id
+  expiresAt DateTime
+
+  @@index([expiresAt])
+  @@map("phone_action_uses")
+}

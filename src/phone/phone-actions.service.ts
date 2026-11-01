@@ -1,5 +1,4 @@
 import {
-  ConflictException,
   ForbiddenException,
   Injectable,
   UnauthorizedException,
@@ -9,7 +8,6 @@ import { ApproverDirectory } from '../approvals/approver-directory';
 import { HostApprovalsService } from '../approvals/host-approvals.service';
 import type { AuthContext } from '../auth/auth-context';
 import type { AppConfig } from '../config/env.validation';
-import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { verifyPushAction } from './phone-token';
 
@@ -22,7 +20,6 @@ export class PhoneActionsService {
   private readonly secret: string;
 
   constructor(
-    private readonly control: ControlPrismaService,
     private readonly tenants: TenantDatabaseManager,
     private readonly approvers: ApproverDirectory,
     private readonly approvals: HostApprovalsService,
@@ -45,17 +42,6 @@ export class PhoneActionsService {
       claims.t !== auth.tenant.id
     )
       throw new UnauthorizedException('invalid_action');
-    // Single use: the first press spends the token, whichever button it was.
-    try {
-      await this.control.phoneActionUse.create({
-        data: { nonce: claims.n, expiresAt: new Date(claims.e) },
-      });
-    } catch {
-      throw new ConflictException('action_already_used');
-    }
-    void this.control.phoneActionUse
-      .deleteMany({ where: { expiresAt: { lt: now } } })
-      .catch(() => undefined);
     const client = await this.tenants.getClient(auth.tenant.id);
     if (
       !(await this.approvers.canApprove(
@@ -67,11 +53,18 @@ export class PhoneActionsService {
       throw new ForbiddenException('not_an_approver');
     const row = await this.approvals.get(client, claims.a);
     if (row.highRisk) throw new ForbiddenException('high_risk_open_in_console');
-    return this.approvals.decide(client, auth.tenant.id, {
+    const result = await this.approvals.decide(client, auth.tenant.id, {
       approvalId: claims.a,
       subject: auth.user.keycloakSubject,
       decision,
       via: 'push',
+      // Single use: spent in the same transaction as the decision, after every check above, so a
+      // refused press never burns the token and an accepted one cannot be replayed.
+      nonce: { value: claims.n, expiresAt: new Date(claims.e) },
     });
+    void client.phoneActionUse
+      .deleteMany({ where: { expiresAt: { lt: now } } })
+      .catch(() => undefined);
+    return result;
   }
 }

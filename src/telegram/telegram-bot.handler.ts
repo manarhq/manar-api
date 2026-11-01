@@ -16,11 +16,12 @@ interface Chat {
 export interface TelegramUpdate {
   message?: {
     chat?: Chat;
-    from?: { language_code?: string };
+    from?: { id?: number; language_code?: string };
     text?: string;
   };
   callback_query?: {
     id: string;
+    from?: { id?: number };
     data?: string;
     message?: { chat?: Chat };
   };
@@ -60,7 +61,13 @@ export class TelegramBotHandler {
     const chatId = String(m.chat.id);
     const locale = tgLocale(m.from?.language_code);
     const t = tgText(locale);
-    if (!this.perChat.allow(chatId)) return;
+    // Limits are per Telegram chat and user, checked after the webhook secret (the route's own
+    // limit per address is only a generous global cap).
+    if (
+      !this.perChat.allow(chatId) ||
+      !this.perChat.allow(`u${m.from?.id ?? ''}`)
+    )
+      return;
     const [cmd, ...rest] = m.text.trim().split(/\s+/);
     const command = cmd?.split('@')[0]?.toLowerCase();
     if (command === '/stop' || command === '/unlink') {
@@ -79,9 +86,20 @@ export class TelegramBotHandler {
     const client = await this.tenants.getClient(code.tenantId);
     if (!(await this.approvers.canApprove(code.tenantId, client, code.subject)))
       return this.telegram.say(chatId, t.badCode);
-    await this.telegram.link(code.tenantId, code.subject, chatId, locale);
+    const linked = await this.telegram.link(
+      code.tenantId,
+      code.subject,
+      chatId,
+      locale,
+    );
+    // The chat belongs to someone else: they must /stop first (the code is spent either way).
+    if (!linked) return this.telegram.say(chatId, t.linkedElsewhere);
     await this.auditLink(code.tenantId, code.subject, 'created');
-    await this.telegram.say(chatId, t.linked);
+    const workspace = await this.telegram.workspaceName(code.tenantId);
+    await this.telegram.say(chatId, t.linked(workspace));
+    // Tell the person's other chats that one was added.
+    for (const o of linked.others)
+      await this.telegram.say(o.chatId, tgText(o.locale).relinked(workspace));
   }
 
   private async onCallback(q: NonNullable<TelegramUpdate['callback_query']>) {
@@ -97,17 +115,20 @@ export class TelegramBotHandler {
         })
         .catch(() => undefined);
     const link = await this.telegram.findLink(chatId);
-    if (!this.perChat.allow(chatId))
+    if (
+      !this.perChat.allow(chatId) ||
+      !this.perChat.allow(`u${q.from?.id ?? ''}`)
+    )
       return void (await answer(tgText(link?.locale).tooMany));
     const t = tgText(link?.locale);
     // The signature binds the approval, the choice and this chat.
-    const v = verifyTelegramCallback(
-      this.telegram.callbackSecret,
-      q.data,
-      chatId,
-    );
-    if (!v) return void (await answer(t.gone));
     if (!link) return void (await answer(t.notLinked));
+    const v = verifyTelegramCallback(this.telegram.callbackSecret, q.data, {
+      chatId,
+      tenantId: link.tenantId,
+      subject: link.subject,
+    });
+    if (!v) return void (await answer(t.gone));
     const client = await this.tenants.getClient(link.tenantId);
     if (!(await this.approvers.canApprove(link.tenantId, client, link.subject)))
       return void (await answer(t.notApprover));

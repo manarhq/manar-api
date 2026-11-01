@@ -1,8 +1,8 @@
--- Phone track: Telegram links, link codes, approval messages, and single-use push action nonces.
--- Additive: four tables.
+-- Phone track: Telegram links, link codes and approval messages.
+-- Additive: three tables.
 --
 -- Rollback (after rolling back the code):
---   DROP TABLE "telegram_links", "telegram_link_codes", "telegram_approval_messages", "phone_action_uses";
+--   DROP TABLE "telegram_links", "telegram_link_codes", "telegram_approval_messages";
 
 -- CreateTable
 CREATE TABLE "telegram_links" (
@@ -41,14 +41,6 @@ CREATE TABLE "telegram_approval_messages" (
     CONSTRAINT "telegram_approval_messages_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
-CREATE TABLE "phone_action_uses" (
-    "nonce" TEXT NOT NULL,
-    "expiresAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "phone_action_uses_pkey" PRIMARY KEY ("nonce")
-);
-
 -- CreateIndex
 CREATE UNIQUE INDEX "telegram_links_chatId_key" ON "telegram_links"("chatId");
 
@@ -63,6 +55,3 @@ CREATE UNIQUE INDEX "telegram_approval_messages_approvalId_chatId_key" ON "teleg
 
 -- CreateIndex
 CREATE INDEX "telegram_approval_messages_closedAt_createdAt_idx" ON "telegram_approval_messages"("closedAt", "createdAt");
-
--- CreateIndex
-CREATE INDEX "phone_action_uses_expiresAt_idx" ON "phone_action_uses"("expiresAt");

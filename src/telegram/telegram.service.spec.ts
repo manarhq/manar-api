@@ -7,6 +7,7 @@ import {
   verifyTelegramCallback,
 } from '../phone/phone-token';
 
+const B1 = { chatId: '111', tenantId: 't1', subject: 'u1' };
 const SECRET = 'unit-test-signing-secret-0123456789';
 const WEBHOOK = 'w'.repeat(40);
 const ID = '3f2b1c9e-8d7a-4b6c-9e5d-1a2b3c4d5e6f';
@@ -26,6 +27,7 @@ function world() {
   const codes = new Map<string, any>();
   const msgs: any[] = [];
   const control: any = {
+    tenant: { findUnique: () => Promise.resolve({ name: 'Acme Security' }) },
     telegramLink: {
       findMany: ({ where }: any) =>
         Promise.resolve(
@@ -217,6 +219,40 @@ describe('link flow', () => {
     expect(w2.links).toHaveLength(0);
   });
 
+  it('names the workspace on success', async () => {
+    const w = world();
+    const { code } = await w.tg.createLinkCode('t1', 'u1');
+    await w.start(111, `/start ${code}`);
+    expect(sent(w, 'sendMessage').at(-1)!.body.text).toMatch(/Acme Security/);
+  });
+
+  it('refuses a chat that belongs to another person, and keeps the old link', async () => {
+    const w = world();
+    const a = await w.tg.createLinkCode('t1', 'u1');
+    await w.start(111, `/start ${a.code}`);
+    const b = await w.tg.createLinkCode('t1', 'u2');
+    await w.start(111, `/start ${b.code}`);
+    expect(w.links).toHaveLength(1);
+    expect(w.links[0]).toMatchObject({ subject: 'u1' });
+    expect(sent(w, 'sendMessage').at(-1)!.body.text).toMatch(
+      /linked to another account/,
+    );
+  });
+
+  it('tells the person s other chats when a new chat is linked', async () => {
+    const w = world();
+    const a = await w.tg.createLinkCode('t1', 'u1');
+    await w.start(111, `/start ${a.code}`);
+    const b = await w.tg.createLinkCode('t1', 'u1');
+    await w.start(222, `/start ${b.code}`);
+    const toOld = sent(w, 'sendMessage').filter(
+      (c) => c.body.chat_id === '111',
+    );
+    expect(toOld.at(-1)!.body.text).toMatch(
+      /Another Telegram chat was just linked/,
+    );
+  });
+
   it('/stop unlinks', async () => {
     const w = world();
     const { code } = await w.tg.createLinkCode('t1', 'u1');
@@ -235,7 +271,8 @@ describe('approvals over Telegram', () => {
     await w.tg.notifyApproval({} as never, 't1', {
       approvalId: ID,
       toolName: 'Cursor',
-      summary: 'Cursor: file.write',
+      actionId: 'file.write',
+      matchCode: '3F2B',
       highRisk: false,
       expiresAt: new Date(Date.now() + 120_000),
     });
@@ -245,7 +282,7 @@ describe('approvals over Telegram', () => {
   it('sends two signed buttons that approve or deny once, and the click closes the message', async () => {
     const w = await linked();
     const a = button(w, 0);
-    expect(verifyTelegramCallback(SECRET, a, '111')).toEqual({
+    expect(verifyTelegramCallback(SECRET, a, B1)).toEqual({
       approvalId: ID,
       choice: 'y',
     });
@@ -265,6 +302,37 @@ describe('approvals over Telegram', () => {
     expect(edit.text).toMatch(/Approved once/);
   });
 
+  it('the message shows the tool, action type, match code and the approval own time, never the resource', async () => {
+    const w = await linked();
+    const text = sent(w, 'sendMessage')[0]!.body.text as string;
+    expect(text).toMatch(/Cursor/);
+    expect(text).toMatch(/file\.write/);
+    expect(text).toMatch(/3F2B/);
+    expect(text).toMatch(/within 2 min/);
+    expect(text).not.toMatch(/credentials|\/u\//);
+    const w2 = world();
+    const { code } = await w2.tg.createLinkCode('t1', 'u1');
+    await w2.start(111, `/start ${code}`);
+    w2.calls.length = 0;
+    await w2.tg.notifyApproval({} as never, 't1', {
+      approvalId: ID,
+      toolName: 'Cursor',
+      actionId: 'file.write',
+      matchCode: '3F2B',
+      highRisk: false,
+      expiresAt: new Date(Date.now() + 5 * 60_000),
+    });
+    expect(sent(w2, 'sendMessage')[0]!.body.text).toMatch(/within 5 min/);
+  });
+
+  it('buttons are void after the chat is linked to another person', async () => {
+    const w = await linked();
+    const a = button(w, 0);
+    w.links[0].subject = 'u9';
+    await w.press(111, a);
+    expect(w.decide).not.toHaveBeenCalled();
+  });
+
   it('a button pressed in another chat, or a forged one, does nothing', async () => {
     const w = await linked();
     const a = button(w, 1);
@@ -281,13 +349,14 @@ describe('approvals over Telegram', () => {
     await w.tg.notifyApproval({} as never, 't1', {
       approvalId: ID,
       toolName: 'Cursor',
-      summary: 's',
+      actionId: 'file.write',
+      matchCode: '3F2B',
       highRisk: true,
       expiresAt: new Date(Date.now() + 120_000),
     });
     expect(sent(w, 'sendMessage')[0]!.body.reply_markup).toBeUndefined();
     w.approval.highRisk = true;
-    await w.press(111, signTelegramCallback(SECRET, ID, 'y', '111'));
+    await w.press(111, signTelegramCallback(SECRET, ID, 'y', B1));
     expect(w.decide).not.toHaveBeenCalled();
   });
 

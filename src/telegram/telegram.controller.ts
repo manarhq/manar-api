@@ -41,7 +41,9 @@ import { TelegramService } from './telegram.service';
  */
 @ApiExcludeController()
 @Controller('telegram')
-@Throttle({ human: { limit: 300, ttl: 60_000 } })
+// A generous global cap per address (Telegram's servers are shared by every bot); the real limits
+// are per chat and user in TelegramBotHandler, after the secret check.
+@Throttle({ human: { limit: 3000, ttl: 60_000 } })
 export class TelegramWebhookController
   implements OnModuleInit, OnModuleDestroy
 {

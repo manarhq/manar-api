@@ -521,12 +521,3 @@ model TelegramApprovalMessage {
   @@index([closedAt, createdAt])
   @@map("telegram_approval_messages")
 }
-
-/// Single-use nonces of push action tokens (Approve once / Deny buttons).
-model PhoneActionUse {
-  nonce     String   @id
-  expiresAt DateTime
-
-  @@index([expiresAt])
-  @@map("phone_action_uses")
-}

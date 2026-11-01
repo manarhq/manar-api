@@ -6,7 +6,7 @@ import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
-import { signTelegramCallback } from '../phone/phone-token';
+import { linkCodeHash, signTelegramCallback } from '../phone/phone-token';
 import { RateWindow } from '../phone/rate-window';
 import { tgText, type Outcome } from './telegram.messages';
 
@@ -21,15 +21,12 @@ const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export interface ApprovalMessageInput {
   approvalId: string;
   toolName: string;
-  summary: string;
+  /** The action type (e.g. file.write). Never the resource. */
+  actionId: string;
+  matchCode: string;
   highRisk: boolean;
   expiresAt: Date;
 }
-
-export const hashCode = (code: string) =>
-  createHash('sha256')
-    .update(code.toUpperCase().replace(/[^A-Z0-9]/g, ''))
-    .digest('hex');
 
 @Injectable()
 export class TelegramService {
@@ -68,6 +65,10 @@ export class TelegramService {
 
   get callbackSecret(): string {
     return this.signingSecret;
+  }
+
+  hashCode(code: string): string {
+    return linkCodeHash(this.signingSecret, code);
   }
 
   /** Constant-time check of Telegram's `X-Telegram-Bot-Api-Secret-Token` header. */
@@ -128,9 +129,11 @@ export class TelegramService {
       code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
     const expiresAt = new Date(now.getTime() + LINK_CODE_TTL_MS);
     await this.control.$transaction([
-      this.control.telegramLinkCode.deleteMany({ where: { subject } }),
+      this.control.telegramLinkCode.deleteMany({
+        where: { tenantId, subject },
+      }),
       this.control.telegramLinkCode.create({
-        data: { codeHash: hashCode(code), tenantId, subject, expiresAt },
+        data: { codeHash: this.hashCode(code), tenantId, subject, expiresAt },
       }),
     ]);
     return {
@@ -142,7 +145,7 @@ export class TelegramService {
 
   /** Spends a code once. Null when unknown, expired or already used. */
   async consumeLinkCode(code: string, now = new Date()) {
-    const codeHash = hashCode(code);
+    const codeHash = this.hashCode(code);
     const row = await this.control.telegramLinkCode.findUnique({
       where: { codeHash },
     });
@@ -153,27 +156,51 @@ export class TelegramService {
     return spent.count === 1 ? row : null;
   }
 
+  /**
+   * Links the chat. Refused (null) when the chat already belongs to another person or workspace:
+   * that person must `/stop` first. Otherwise returns the person's other chats, so they can be told.
+   */
   async link(
     tenantId: string,
     subject: string,
     chatId: string,
     locale: string,
-  ) {
+  ): Promise<{ others: { chatId: string; locale: string }[] } | null> {
+    const existing = await this.control.telegramLink.findUnique({
+      where: { chatId },
+    });
+    if (
+      existing &&
+      (existing.tenantId !== tenantId || existing.subject !== subject)
+    )
+      return null;
     await this.control.telegramLink.upsert({
       where: { chatId },
-      update: { tenantId, subject, locale },
+      update: { locale },
       create: { tenantId, subject, chatId, locale },
     });
     const mine = await this.control.telegramLink.findMany({
       where: { tenantId, subject },
       orderBy: { createdAt: 'desc' },
-      select: { id: true },
     });
     const extra = mine.slice(MAX_LINKS_PER_PERSON).map((m) => m.id);
     if (extra.length)
       await this.control.telegramLink.deleteMany({
         where: { id: { in: extra } },
       });
+    return {
+      others: mine
+        .slice(0, MAX_LINKS_PER_PERSON)
+        .filter((m) => m.chatId !== chatId),
+    };
+  }
+
+  async workspaceName(tenantId: string): Promise<string> {
+    const t = await this.control.tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true },
+    });
+    return t?.name ?? '';
   }
 
   async linksFor(tenantId: string, subject: string) {
@@ -244,7 +271,8 @@ export class TelegramService {
           const t = tgText(l.locale);
           const text = [
             t.waiting(input.toolName.slice(0, 40)),
-            input.summary.slice(0, 200),
+            input.actionId.slice(0, 80),
+            t.matchCode(input.matchCode),
             input.highRisk ? t.highRisk : t.answerIn(minutes),
           ].join('\n');
           const reply_markup = input.highRisk
@@ -258,7 +286,7 @@ export class TelegramService {
                         this.signingSecret,
                         input.approvalId,
                         'y',
-                        l.chatId,
+                        l,
                       ),
                     },
                     {
@@ -267,7 +295,7 @@ export class TelegramService {
                         this.signingSecret,
                         input.approvalId,
                         'n',
-                        l.chatId,
+                        l,
                       ),
                     },
                   ],

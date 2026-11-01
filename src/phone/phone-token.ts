@@ -72,17 +72,39 @@ export function verifyPushAction(
   }
 }
 
+/** Short code both the device prompt and the phone show, so a person can tell requests apart. */
+export function approvalMatchCode(approvalId: string): string {
+  return approvalId.replace(/-/g, '').slice(0, 4).toUpperCase();
+}
+
+/** Keyed hash of a link code: a leaked table of hashes cannot be brute-forced without the server secret. */
+export function linkCodeHash(secret: string, code: string): string {
+  return createHmac('sha256', key(secret, 'phone.telegram.code.v1'))
+    .update(code.toUpperCase().replace(/[^A-Z0-9]/g, ''))
+    .digest('hex');
+}
+
 export type TelegramChoice = 'y' | 'n';
 
+export interface TelegramBinding {
+  chatId: string;
+  tenantId: string;
+  subject: string;
+}
+
+// The workspace and person are signed but not carried in callback_data (64-byte limit): the
+// verifier supplies them from the link row, so a chat re-linked to someone else voids old buttons.
 const tgSig = (
   secret: string,
   approvalId: string,
   choice: string,
-  chatId: string,
+  b: TelegramBinding,
 ) =>
   b64(
     createHmac('sha256', key(secret, 'phone.telegram.v1'))
-      .update(`${approvalId}|${choice}|${chatId}`)
+      .update(
+        JSON.stringify([approvalId, choice, b.chatId, b.tenantId, b.subject]),
+      )
       .digest()
       .subarray(0, 16),
   );
@@ -92,16 +114,16 @@ export function signTelegramCallback(
   secret: string,
   approvalId: string,
   choice: TelegramChoice,
-  chatId: string,
+  binding: TelegramBinding,
 ): string {
-  return `a.${approvalId}.${choice}.${tgSig(secret, approvalId, choice, chatId)}`;
+  return `a.${approvalId}.${choice}.${tgSig(secret, approvalId, choice, binding)}`;
 }
 
-/** The signature binds the approval, the choice and the chat that pressed the button. */
+/** The signature binds the approval, the choice, the chat, the workspace and the person. */
 export function verifyTelegramCallback(
   secret: string,
   data: string,
-  chatId: string,
+  binding: TelegramBinding,
 ): { approvalId: string; choice: TelegramChoice } | null {
   const m = /^a\.([0-9a-f-]{36})\.([yn])\.([A-Za-z0-9_-]{22})$/.exec(data);
   if (!m) return null;
@@ -111,7 +133,7 @@ export function verifyTelegramCallback(
     TelegramChoice,
     string,
   ];
-  return same(sig, tgSig(secret, approvalId, choice, chatId))
+  return same(sig, tgSig(secret, approvalId, choice, binding))
     ? { approvalId, choice }
     : null;
 }

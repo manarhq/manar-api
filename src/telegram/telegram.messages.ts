@@ -9,7 +9,10 @@ interface Strings {
   answerIn: (minutes: number) => string;
   highRisk: string;
   outcome: Record<Outcome, string>;
-  linked: string;
+  matchCode: (code: string) => string;
+  linked: (workspace: string) => string;
+  linkedElsewhere: string;
+  relinked: (workspace: string) => string;
   badCode: string;
   unlinked: string;
   help: string;
@@ -32,7 +35,13 @@ const en: Strings = {
     deny: 'Denied.',
     expired: 'No answer in time. Denied.',
   },
-  linked: 'Linked. Approvals for your workspace will arrive here.',
+  matchCode: (c) => `Match code ${c}. It is the same on your computer.`,
+  linked: (w) =>
+    `Linked to ${w}. Approvals for this workspace will arrive here.`,
+  linkedElsewhere:
+    'This chat is linked to another account. Send /stop first, then link again.',
+  relinked: (w) =>
+    `Another Telegram chat was just linked to your ${w} account. If that was not you, unlink in the console.`,
   badCode:
     'That code is not valid or has expired. Make a new one in the console under Settings, Notifications.',
   unlinked: 'Unlinked. You will not get approvals here any more.',
@@ -56,7 +65,12 @@ const ar: Strings = {
     deny: 'تم الرفض.',
     expired: 'انتهت المهلة دون إجابة. تم الرفض.',
   },
-  linked: 'تم الربط. ستصل موافقات مساحة عملك إلى هنا.',
+  matchCode: (c) => `رمز المطابقة ${c}. هو نفسه على حاسوبك.`,
+  linked: (w) => `تم الربط مع ${w}. ستصل موافقات مساحة العمل هذه إلى هنا.`,
+  linkedElsewhere:
+    'هذه المحادثة مرتبطة بحساب آخر. أرسل /stop أولا ثم اربط من جديد.',
+  relinked: (w) =>
+    `تم للتو ربط محادثة تيليغرام أخرى بحسابك في ${w}. إن لم تكن أنت، ألغِ الربط من لوحة التحكم.`,
   badCode:
     'الرمز غير صالح أو انتهت صلاحيته. أنشئ رمزا جديدا في لوحة التحكم من الإعدادات ثم الإشعارات.',
   unlinked: 'تم إلغاء الربط. لن تصلك الموافقات هنا بعد الآن.',

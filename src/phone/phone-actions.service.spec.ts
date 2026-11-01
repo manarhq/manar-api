@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest matchers (expect.any) */
 import { describe, expect, it, vi } from 'vitest';
 import { PhoneActionsService } from './phone-actions.service';
 import { signPushAction } from './phone-token';
@@ -6,25 +7,18 @@ const SECRET = 'unit-test-signing-secret-0123456789';
 const ID = '3f2b1c9e-8d7a-4b6c-9e5d-1a2b3c4d5e6f';
 
 function setup(opts: { approver?: boolean; highRisk?: boolean } = {}) {
-  const used = new Set<string>();
-  const control = {
-    phoneActionUse: {
-      create: vi.fn(({ data }: { data: { nonce: string } }) => {
-        if (used.has(data.nonce)) return Promise.reject(new Error('unique'));
-        used.add(data.nonce);
-        return Promise.resolve({});
-      }),
-      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
-    },
-  };
   const decide = vi.fn().mockResolvedValue({
     id: ID,
     status: 'APPROVED',
     decision: 'approve_once',
   });
   const svc = new PhoneActionsService(
-    control as never,
-    { getClient: () => Promise.resolve({}) } as never,
+    {
+      getClient: () =>
+        Promise.resolve({
+          phoneActionUse: { deleteMany: () => Promise.resolve({ count: 0 }) },
+        }),
+    } as never,
     { canApprove: () => Promise.resolve(opts.approver ?? true) } as never,
     {
       get: () => Promise.resolve({ highRisk: opts.highRisk ?? false }),
@@ -40,10 +34,9 @@ function setup(opts: { approver?: boolean; highRisk?: boolean } = {}) {
 }
 
 describe('PhoneActionsService.decideFromPush', () => {
-  it('decides once for the right person and workspace, via push', async () => {
+  it('decides for the right person and workspace, via push, passing the nonce to the decision transaction', async () => {
     const { svc, decide, auth, token } = setup();
-    const tk = token();
-    await svc.decideFromPush(auth(), tk, 'approve_once');
+    await svc.decideFromPush(auth(), token(), 'approve_once');
     expect(decide).toHaveBeenCalledWith(
       expect.anything(),
       't1',
@@ -52,13 +45,17 @@ describe('PhoneActionsService.decideFromPush', () => {
         subject: 'u1',
         via: 'push',
         decision: 'approve_once',
+        nonce: expect.objectContaining({ value: expect.any(String) }),
       }),
     );
-    // The same token again, with either button, is refused.
-    await expect(svc.decideFromPush(auth(), tk, 'deny')).rejects.toThrow(
+  });
+
+  it('a replayed token is refused by the decision itself', async () => {
+    const { svc, decide, auth, token } = setup();
+    decide.mockRejectedValueOnce(new Error('action_already_used'));
+    await expect(svc.decideFromPush(auth(), token(), 'deny')).rejects.toThrow(
       'action_already_used',
     );
-    expect(decide).toHaveBeenCalledTimes(1);
   });
 
   it('refuses a token that belongs to another person, workspace or is expired', async () => {
@@ -78,7 +75,7 @@ describe('PhoneActionsService.decideFromPush', () => {
     expect(decide).not.toHaveBeenCalled();
   });
 
-  it('refuses when the person is no longer an approver, and for high-risk approvals', async () => {
+  it('refuses when the person is no longer an approver, and for high-risk approvals, without reaching the decision (so nothing is spent)', async () => {
     const a = setup({ approver: false });
     await expect(
       a.svc.decideFromPush(a.auth(), a.token(), 'approve_once'),
