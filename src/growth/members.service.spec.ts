@@ -19,6 +19,7 @@ const identity = (over: Record<string, unknown> = {}) =>
 function setup(
   over: {
     verified?: string | null;
+    members?: number;
     tenant?: object | null;
     plan?: string;
     status?: string;
@@ -64,6 +65,7 @@ function setup(
     },
     membership: {
       findUnique: async () => over.membership ?? null,
+      count: async () => over.members ?? 3,
       ...memberships,
     },
     workspaceInvite: {
@@ -111,6 +113,28 @@ describe('Microsoft auto-join', () => {
       expect((await svc.autoJoin(identity(over))).tenantId).toBeNull();
       expect(memberships.create).not.toHaveBeenCalled();
     }
+  });
+  it('only offers a prompt; joining needs the explicit call', async () => {
+    const { svc, memberships } = setup();
+    expect((await svc.autoJoinOffer(identity())).offer).toMatchObject({
+      tenantId: 't',
+    });
+    expect(memberships.create).not.toHaveBeenCalled();
+    expect(
+      (
+        await setup({ membership: { status: 'REMOVED' } }).svc.autoJoinOffer(
+          identity(),
+        )
+      ).offer,
+    ).toBeNull();
+  });
+  it('stops at the seat cap', async () => {
+    const full = setup({ members: 25 });
+    expect((await full.svc.autoJoinOffer(identity())).offer).toBeNull();
+    await expect(full.svc.autoJoin(identity())).rejects.toThrow(
+      'seat_cap_reached',
+    );
+    expect(full.memberships.create).not.toHaveBeenCalled();
   });
   it('does nothing when off, for a lapsed workspace, or for someone removed', async () => {
     expect(

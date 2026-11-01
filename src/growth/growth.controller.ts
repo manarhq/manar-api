@@ -44,6 +44,10 @@ import { ProfileService } from './profile.service';
 import { verifyToken } from './signed-token';
 
 const Toggle = z.object({ enabled: z.boolean() });
+const AutoJoinBody = z.object({
+  enabled: z.boolean(),
+  seatCap: z.number().int().min(1).max(10_000).optional(),
+});
 const InviteBody = z.object({
   email: z.string().trim().email().max(254),
   role: z.enum(ROLES).default('DEVELOPER'),
@@ -211,18 +215,19 @@ export class GrowthWorkspaceController {
   }
 
   @Put('auto-join')
+  @RequireRole('TENANT_OWNER') // owner only: it lets people into the workspace
   @ApiOperation({
-    summary:
-      'Let anyone signing in with Microsoft from our Entra tenant join automatically',
+    summary: 'Offer people from our Entra tenant a "Join" prompt at sign-in',
     description:
-      'Matches the verified tenant id of the sign-in, never an email domain. New members get the Developer role.',
+      'Matches the verified tenant id of the sign-in, never an email domain. The person still confirms. New members get the Developer role; joining stops at the seat cap.',
   })
   setAutoJoin(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
-    const { enabled } = parseBodyOrThrow(Toggle, body);
+    const b = parseBodyOrThrow(AutoJoinBody, body);
     return this.members.setAutoJoin(
       auth.tenant.id,
-      enabled,
+      b.enabled,
       auth.user.keycloakSubject,
+      b.seatCap,
     );
   }
 }
@@ -282,12 +287,18 @@ export class GrowthIdentityController {
     );
   }
 
-  @Post('workspaces/auto-join')
-  @HttpCode(200)
+  @Get('workspaces/auto-join')
   @ApiOperation({
     summary:
-      'After sign-in: join the company workspace if its admin turned auto-join on',
+      'The company workspace this sign-in may join (for a "Join?" prompt)',
   })
+  autoJoinOffer(@CurrentIdentity() id: VerifiedIdentity) {
+    return this.members.autoJoinOffer(id);
+  }
+
+  @Post('workspaces/auto-join')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Say yes to the join prompt' })
   autoJoin(@CurrentIdentity() id: VerifiedIdentity) {
     return this.members.autoJoin(id);
   }

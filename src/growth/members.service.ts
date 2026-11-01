@@ -244,59 +244,66 @@ export class MembersService {
     return {
       available: t?.kind === 'COMPANY' && !!t.entraTenantId,
       enabled: !!t?.autoJoinEntra,
+      seatCap: t?.autoJoinSeatCap ?? 25,
     };
   }
 
-  async setAutoJoin(tenantId: string, enabled: boolean, by: string) {
+  async setAutoJoin(
+    tenantId: string,
+    enabled: boolean,
+    by: string,
+    seatCap?: number,
+  ) {
     const t = await this.control.tenant.findUnique({ where: { id: tenantId } });
     if (t?.kind !== 'COMPANY' || !t.entraTenantId)
       throw new ForbiddenException('entra_company_required');
     await this.control.tenant.update({
       where: { id: tenantId },
-      data: { autoJoinEntra: enabled },
+      data: {
+        autoJoinEntra: enabled,
+        ...(seatCap === undefined ? {} : { autoJoinSeatCap: seatCap }),
+      },
     });
     await this.audit.record(
       tenantId,
       AUDIT_EVENT_TYPES.WORKSPACE_AUTOJOIN_CHANGED,
       { type: 'human', id: by },
-      { enabled },
+      { enabled, seatCap: seatCap ?? t.autoJoinSeatCap },
     );
-    return { available: true, enabled };
+    return this.autoJoinSetting(tenantId);
   }
 
   /**
-   * Called after sign-in. Joins the caller to the COMPANY workspace of their Entra tenant when the
-   * admin turned auto-join on. The match is the verified `tid` of THIS Microsoft sign-in
-   * (`organisationTid`), never an email domain; a consumer account, GitHub or an email link carry
-   * no tid and never match. Someone an admin removed is not re-added.
+   * The company workspace this sign-in could join, for a "Join <workspace>?" prompt. The match is
+   * the verified `tid` of THIS Microsoft sign-in (`organisationTid`), never an email domain; a
+   * consumer account, GitHub or an email link carry no tid and never match. Someone an admin
+   * removed is not offered it, and a workspace at its seat cap offers nothing.
    */
+  async autoJoinOffer(
+    identity: VerifiedIdentity,
+  ): Promise<{ offer: { tenantId: string; name: string } | null }> {
+    const tenant = await this.matchingTenant(identity);
+    if (!tenant) return { offer: null };
+    const existing = await this.control.membership.findUnique({
+      where: this.key(identity, tenant.id),
+    });
+    if (existing) return { offer: null }; // already in, pending, or removed by an admin
+    if (!(await this.hasSeat(tenant))) return { offer: null };
+    return { offer: { tenantId: tenant.id, name: tenant.name } };
+  }
+
+  /** The person said yes to the prompt. Same checks again; joins as DEVELOPER. */
   async autoJoin(
     identity: VerifiedIdentity,
   ): Promise<{ tenantId: string | null }> {
-    const tid = organisationTid(identity);
-    if (!tid) return { tenantId: null };
-    const tenant = await this.control.tenant.findFirst({
-      where: {
-        kind: 'COMPANY',
-        entraTenantId: tid,
-        autoJoinEntra: true,
-        status: 'ACTIVE',
-      },
-    });
+    const tenant = await this.matchingTenant(identity);
     if (!tenant) return { tenantId: null };
-    const e = await this.entitlements.get(tenant.id);
-    if (!TEAM_PLANS.has(e.plan) || e.status === 'read_only')
-      return { tenantId: null };
-    const key = {
-      issuer_subject_tenantId: {
-        issuer: identity.issuer,
-        subject: identity.subject,
-        tenantId: tenant.id,
-      },
-    };
+    const key = this.key(identity, tenant.id);
     const existing = await this.control.membership.findUnique({ where: key });
     if (existing?.status === 'ACTIVE') return { tenantId: tenant.id };
     if (existing?.status === 'REMOVED') return { tenantId: null };
+    if (!(await this.hasSeat(tenant)))
+      throw new ConflictException('seat_cap_reached');
     const split = splitRoles([DEFAULT_MEMBER_ROLE])!;
     const data = {
       status: 'ACTIVE' as const,
@@ -323,6 +330,39 @@ export class MembersService {
       {},
     );
     return { tenantId: tenant.id };
+  }
+
+  private key(identity: VerifiedIdentity, tenantId: string) {
+    return {
+      issuer_subject_tenantId: {
+        issuer: identity.issuer,
+        subject: identity.subject,
+        tenantId,
+      },
+    };
+  }
+
+  private async matchingTenant(identity: VerifiedIdentity) {
+    const tid = organisationTid(identity);
+    if (!tid) return null;
+    const tenant = await this.control.tenant.findFirst({
+      where: {
+        kind: 'COMPANY',
+        entraTenantId: tid,
+        autoJoinEntra: true,
+        status: 'ACTIVE',
+      },
+    });
+    if (!tenant) return null;
+    const e = await this.entitlements.get(tenant.id);
+    return TEAM_PLANS.has(e.plan) && e.status !== 'read_only' ? tenant : null;
+  }
+
+  private async hasSeat(tenant: { id: string; autoJoinSeatCap?: number }) {
+    const members = await this.control.membership.count({
+      where: { tenantId: tenant.id, status: 'ACTIVE' },
+    });
+    return members < (tenant.autoJoinSeatCap ?? 25);
   }
 
   // ---- email preferences (the caller's personal membership) ----
