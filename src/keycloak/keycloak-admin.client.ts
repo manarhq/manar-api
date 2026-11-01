@@ -83,6 +83,21 @@ export class KeycloakAdminClient {
     });
   }
 
+  /**
+   * Removes a realm user by its id (the token `sub`). A user that is already gone counts as done,
+   * so a retried account deletion converges.
+   */
+  async deleteUser(realmName: string, userId: string): Promise<void> {
+    try {
+      await this.adminRequest(
+        'DELETE',
+        `/admin/realms/${encodeURIComponent(realmName)}/users/${encodeURIComponent(userId)}`,
+      );
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+  }
+
   async createRealmRole(realmName: string, roleName: string): Promise<void> {
     await this.adminRequest(
       'POST',

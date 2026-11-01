@@ -30,6 +30,7 @@ export class BillingModule {}
     StripeWebhookService,
     { provide: APP_INTERCEPTOR, useClass: ReadOnlyInterceptor },
   ],
+  exports: [BillingService, StripeGateway],
 })
 export class BillingHttpModule {}
 

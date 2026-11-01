@@ -1,3 +1,5 @@
+import { ModuleRef } from '@nestjs/core';
+import { LaunchOfferService } from '../growth/launch-offer.service';
 import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import * as x509 from '@peculiar/x509';
@@ -111,6 +113,8 @@ export class HostsService {
     private readonly tpm: TpmAttestationService,
     private readonly entitlements: EntitlementsService,
     private readonly codes: InstallCodesService,
+    /** Optional: only the HTTP app has the launch offer (looked up lazily, never required). */
+    private readonly moduleRef?: ModuleRef,
   ) {}
 
   async register(input: RegisterHostInput): Promise<RegisterHostResult> {
@@ -192,7 +196,19 @@ export class HostsService {
       throw error;
     });
     if (code) await this.codes.deleteByCode(code); // used: one registration per code
+    if (result.status === 'APPROVED')
+      this.offerLaunchPro(tenant.id, input.machineId);
     return result;
+  }
+
+  /** Launch offer: a personal workspace adding a device may earn Pro. Detached; it cannot fail the install. */
+  private offerLaunchPro(tenantId: string, machineId: string): void {
+    try {
+      const offer = this.moduleRef?.get(LaunchOfferService, { strict: false });
+      void offer?.onDeviceRegistered(tenantId, machineId);
+    } catch {
+      // not in this app (worker, tests): no launch offer here
+    }
   }
 
   private async ownerSubjectOf(

@@ -333,6 +333,11 @@ describe('SAMPLE workspaces', () => {
     for (const k of [
       'auditSealMark',
       'secretReference',
+      'reportShare',
+      'weeklyReportCard',
+      'installCode',
+      'publicProfile',
+      'workspaceInvite',
       'tenantDatabaseBinding',
     ])
       (control as any)[k] = { deleteMany: vi.fn() };

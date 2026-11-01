@@ -1,0 +1,165 @@
+/* eslint-disable @typescript-eslint/require-await -- in-memory fakes of async Prisma calls */
+import { describe, expect, it, vi } from 'vitest';
+import { MembersService } from './members.service';
+import { signToken } from './signed-token';
+
+const SECRET = 's'.repeat(32);
+const MS_TENANT = '11111111-2222-3333-4444-555555555555';
+const identity = (over: Record<string, unknown> = {}) =>
+  ({
+    issuer: 'iss',
+    subject: 'u1',
+    email: 'a@corp.com',
+    wids: [],
+    idp: 'microsoft',
+    tid: MS_TENANT,
+    ...over,
+  }) as never;
+
+function setup(
+  over: {
+    tenant?: object | null;
+    plan?: string;
+    status?: string;
+    membership?: object | null;
+  } = {},
+) {
+  const memberships = { create: vi.fn(), update: vi.fn() };
+  const invites = new Map<
+    string,
+    {
+      id: string;
+      tenantId: string;
+      email: string;
+      role: string;
+      usedAt: Date | null;
+      revokedAt: Date | null;
+      expiresAt: Date;
+      createdBy: string;
+    }
+  >();
+  const control = {
+    tenant: {
+      findUnique: async () =>
+        over.tenant === undefined
+          ? {
+              id: 't',
+              kind: 'COMPANY',
+              status: 'ACTIVE',
+              name: 'Co',
+              entraTenantId: MS_TENANT,
+            }
+          : over.tenant,
+      findFirst: async () =>
+        over.tenant === undefined
+          ? {
+              id: 't',
+              kind: 'COMPANY',
+              status: 'ACTIVE',
+              entraTenantId: MS_TENANT,
+              autoJoinEntra: true,
+            }
+          : over.tenant,
+    },
+    membership: {
+      findUnique: async () => over.membership ?? null,
+      ...memberships,
+    },
+    workspaceInvite: {
+      findUnique: async ({ where }: { where: { id: string } }) =>
+        invites.get(where.id) ?? null,
+      updateMany: async ({ where }: { where: { id: string } }) => {
+        const i = invites.get(where.id);
+        if (!i || i.usedAt || i.revokedAt) return { count: 0 };
+        i.usedAt = new Date();
+        return { count: 1 };
+      },
+    },
+  };
+  const svc = new MembersService(
+    control as never,
+    {
+      get: async () => ({
+        plan: over.plan ?? 'company_trial',
+        status: over.status ?? 'active',
+      }),
+    } as never,
+    { send: async () => true } as never,
+    { record: vi.fn() } as never,
+    {
+      get: (k: string) => (k === 'MANAR_LINK_SECRET' ? SECRET : undefined),
+    } as never,
+  );
+  return { svc, memberships, invites };
+}
+
+describe('Microsoft auto-join', () => {
+  it('joins on the verified tid of a Microsoft sign-in', async () => {
+    const { svc, memberships } = setup();
+    expect((await svc.autoJoin(identity())).tenantId).toBe('t');
+    expect(memberships.create).toHaveBeenCalledOnce();
+  });
+  it('never matches on email domain, other sign-in methods or the consumer tenant', async () => {
+    for (const over of [
+      { idp: 'github' },
+      { tid: undefined },
+      { tid: '9188040d-6c67-4c5b-b112-36a304b66dad' },
+    ]) {
+      const { svc, memberships } = setup();
+      expect((await svc.autoJoin(identity(over))).tenantId).toBeNull();
+      expect(memberships.create).not.toHaveBeenCalled();
+    }
+  });
+  it('does nothing when off, for a lapsed workspace, or for someone removed', async () => {
+    expect(
+      (await setup({ tenant: null }).svc.autoJoin(identity())).tenantId,
+    ).toBeNull();
+    expect(
+      (await setup({ status: 'read_only' }).svc.autoJoin(identity())).tenantId,
+    ).toBeNull();
+    const removed = setup({ membership: { status: 'REMOVED' } });
+    expect((await removed.svc.autoJoin(identity())).tenantId).toBeNull();
+    expect(removed.memberships.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('invites', () => {
+  const seed = (s: ReturnType<typeof setup>) => {
+    const row = {
+      id: 'i1',
+      tenantId: 't',
+      email: 'a@corp.com',
+      role: 'DEVELOPER',
+      usedAt: null,
+      revokedAt: null,
+      expiresAt: new Date(Date.now() + 1e6),
+      createdBy: 'admin',
+    };
+    s.invites.set('i1', row);
+    return signToken(SECRET, 'invite', 'i1', row.expiresAt);
+  };
+  it('is single use and bound to the invited address', async () => {
+    const s = setup();
+    const token = seed(s);
+    await expect(
+      s.svc.acceptInvite(identity({ email: 'evil@x.com' }), token),
+    ).rejects.toThrow('invite_email_mismatch');
+    await s.svc.acceptInvite(identity(), token);
+    expect(s.memberships.create).toHaveBeenCalledOnce();
+    await expect(s.svc.acceptInvite(identity(), token)).rejects.toThrow(
+      'invite_unavailable',
+    );
+  });
+  it('refuses a forged token and a lapsed workspace', async () => {
+    const s = setup();
+    seed(s);
+    await expect(s.svc.acceptInvite(identity(), 'x.y')).rejects.toThrow(
+      'invite_invalid',
+    );
+    const lapsed = setup({ status: 'read_only' });
+    const t = seed(lapsed);
+    await expect(lapsed.svc.acceptInvite(identity(), t)).rejects.toThrow(
+      'workspace_read_only',
+    );
+  });
+});
