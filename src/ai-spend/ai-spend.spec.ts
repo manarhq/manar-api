@@ -372,6 +372,7 @@ describe('device config', () => {
   it('still answers when the DOOR settings cannot be read, marking door unavailable', async () => {
     const c = new HostConfigController(
       { instructions: () => Promise.resolve({ unprotect: [] }) } as never,
+      { isPaused: () => Promise.resolve(false) } as never,
       { doorConfig: () => Promise.reject(new Error('db down')) } as never,
     );
     const cfg = await c.config(host('h1') as never);
