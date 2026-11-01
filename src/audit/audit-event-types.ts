@@ -147,6 +147,8 @@ export const AUDIT_EVENT_TYPES = {
   ADCS_RESYNC_RUN: 'adcs.resync_run',
   /** A host's TPM attestation passed or a challenge was failed. */
   HOST_TPM_VERIFIED: 'host.tpm_verified',
+  /** A tenant's plan changed (Stripe, trial start or end). Data: from, to, source. */
+  BILLING_PLAN_CHANGED: 'billing.plan.changed',
 } as const;
 
 export type AuditEventType =

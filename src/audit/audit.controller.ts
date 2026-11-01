@@ -28,6 +28,7 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
 import { parseLimit } from '../common/pagination/cursor-pagination';
+import { EntitlementsService } from '../billing/entitlements.service';
 import { AuditSearchService } from './audit-search.service';
 import { AuditService } from './audit.service';
 import {
@@ -100,7 +101,18 @@ export class AuditController {
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly auditProofService: AuditProofService,
     private readonly checkpointSigner: CheckpointSigner,
+    private readonly entitlements: EntitlementsService,
   ) {}
+
+  /** Events older than the plan's window are hidden (never deleted): the lower bound moves up to it. */
+  private async clampFrom(
+    tenantId: string,
+    from?: Date,
+  ): Promise<Date | undefined> {
+    const floor = await this.entitlements.auditSearchFloor(tenantId);
+    if (!floor) return from;
+    return from && from > floor ? from : floor;
+  }
 
   @Get()
   @ApiOperation({
@@ -184,7 +196,10 @@ export class AuditController {
         decision,
         riskMin: parseRiskParam(riskMin, 'riskMin'),
         riskMax: parseRiskParam(riskMax, 'riskMax'),
-        from: parseDateParam(from, 'from'),
+        from: await this.clampFrom(
+          auth.tenant.id,
+          parseDateParam(from, 'from'),
+        ),
         to: parseDateParam(to, 'to'),
       },
       limit: parseLimit(limit),
@@ -230,7 +245,10 @@ export class AuditController {
         decision: input.decision,
         riskMin: input.riskMin,
         riskMax: input.riskMax,
-        from: parseDateParam(input.from, 'from'),
+        from: await this.clampFrom(
+          auth.tenant.id,
+          parseDateParam(input.from, 'from'),
+        ),
         to: parseDateParam(input.to, 'to'),
       },
       contextLimit: input.contextLimit ?? 10,
