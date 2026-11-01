@@ -1,0 +1,332 @@
+# manar-api: lint, typecheck, unit and e2e tests, build, the three images (PRs) and the usual
+# security and Kubernetes manifest checks. Releases are not built here: manar-infra picks up new
+# commits on main, rebuilds, scans, signs and publishes them on the release runner (decision 72),
+# and fleet upgrades move to manar-infra's pull model, so this repo holds no secrets.
+# deploy/ci/fleet-deploy.gitlab-ci.yml stays for the GitLab pipeline until cutover; only its
+# plain shell check (fleet-inputs) is ported.
+#
+# Private repo: jobs run on the self-hosted `manar` runner. Public repo: GitHub-hosted runners, so
+# code from a fork never reaches our machines.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.14.1' # same as the GitLab image; pnpm comes from package.json's packageManager
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Workspace packages resolve through their gitignored dist/, so lint, nest build and vitest
+      # all see unresolved imports until they are compiled.
+      - run: pnpm packages:build
+      - run: pnpm lint
+
+  typecheck:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.14.1' # same as the GitLab image; pnpm comes from package.json's packageManager
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Workspace packages resolve through their gitignored dist/, so lint, nest build and vitest
+      # all see unresolved imports until they are compiled.
+      - run: pnpm packages:build
+      - run: pnpm typecheck
+
+  # Shell test of the manar-fleet input checks: newline, comma, space and overlong values are rejected.
+  fleet-inputs:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sh deploy/ci/validate-fleet-inputs.test.sh
+
+  unit:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.14.1' # same as the GitLab image; pnpm comes from package.json's packageManager
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Workspace packages resolve through their gitignored dist/, so lint, nest build and vitest
+      # all see unresolved imports until they are compiled.
+      - run: pnpm packages:build
+      # Tenant-isolation tests run against a real Postgres (never mocked) and the rate-limit
+      # storage spec against a real Redis; both start on random loopback ports.
+      - run: .github/scripts/ci-deps.sh unit
+      - run: pnpm db:migrate:control:deploy
+      - run: pnpm test:cov
+      - if: always()
+        run: .github/scripts/ci-deps-stop.sh unit
+
+  e2e:
+    env:
+      # Config the app refuses to boot without. CI-only placeholders, the same kind as
+      # .env.example's dev values; nothing real is signed here.
+      APPROVAL_GRANT_SIGNING_SECRET: ci-only-approval-grant-signing-secret
+      PLATFORM_KILL_SWITCH_OPERATOR_TOKEN: ci-only-platform-kill-switch-operator-token
+      MANAR_BFF_SERVICE_TOKEN: ci-only-manar-bff-service-token
+      # demo-soc-tools and the specs' webhook receivers listen on loopback in this job. The app
+      # refuses SSRF_ALLOW_LOOPBACK under NODE_ENV=production.
+      SSRF_ALLOWED_HOSTS: 127.0.0.1,localhost
+      SSRF_ALLOW_LOOPBACK: 'true'
+      TEMPORAL_CLI_VERSION: 1.5.1
+      MANAR_AI_REF: 257372b92bc9cbc76ed19736318b0525debd8cac
+      KEYCLOAK_ADMIN_USERNAME: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KEYCLOAK_ADMIN_CLIENT_ID: admin-cli
+      KEYCLOAK_CLIENT_ID: manar-api
+      OPENBAO_TOKEN: manar-dev-root-token
+      OPENBAO_PKI_ROOT_PATH: pki
+      OPENBAO_PKI_INTERMEDIATE_PATH: pki_int
+      OPENBAO_PKI_AGENT_ROLE: manar-agent
+      OPENBAO_KV_MOUNT_PATH: secret
+      AGENT_MTLS_PORT: '3443'
+      AGENT_MTLS_SERVER_CERT_PATH: deploy/openbao/server-cert.pem
+      AGENT_MTLS_SERVER_KEY_PATH: deploy/openbao/server-key.pem
+      AGENT_MTLS_CLIENT_CA_PATH: deploy/openbao/ca-chain.pem
+      AGENT_MTLS_CA_CHAIN_PATH: deploy/openbao/ca-chain.pem
+      OPENFGA_STORE_NAME: manar
+      OPENFGA_MODEL_FILE_PATH: src/authorization/model/manar.fga
+      OPENFGA_VERSION: v1.18.3
+      DEMO_TOOLS_API_KEY: manar-dev-demo-tools-key
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.14.1' # same as the GitLab image; pnpm comes from package.json's packageManager
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Workspace packages resolve through their gitignored dist/, so lint, nest build and vitest
+      # all see unresolved imports until they are compiled.
+      - run: pnpm packages:build
+      # Postgres, Keycloak, OpenBao, Redis, Kafka (KRaft) and OpenSearch start on random loopback
+      # ports; ci-deps.sh exports their addresses (CONTROL_DATABASE_URL, KEYCLOAK_BASE_URL, ...).
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: 0.11.33
+          enable-cache: false
+      - run: .github/scripts/ci-deps.sh e2e
+      - name: Ports for the in-job services
+        run: |
+          freeport() { node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})'; }
+          {
+            echo "FGA_HTTP=$(freeport)"
+            echo "FGA_GRPC=$(freeport)"
+            echo "DEMO_PORT=$(freeport)"
+            echo "TEMPORAL_PORT=$(freeport)"
+            echo "AI_GRPC_PORT=$(freeport)"
+            echo "AI_HTTP_PORT=$(freeport)"
+          } >>"$GITHUB_ENV"
+      - run: pnpm db:migrate:control:deploy
+      - run: pnpm infra:openbao-init
+      # OpenFGA, Temporal and demo-soc-tools run as plain processes in this job.
+      - name: OpenFGA
+        run: |
+          set -e
+          export OPENFGA_DATASTORE_URI="postgres://manar:manar@localhost:$POSTGRES_PORT/openfga?sslmode=disable"
+          node -e "
+          const { Client } = require('pg');
+          const c = new Client({ connectionString: process.env.CONTROL_DATABASE_URL });
+          c.connect().then(() => c.query('CREATE DATABASE openfga')).then(() => c.end())
+            .catch((e) => { console.error(e); process.exit(1); });
+          "
+          curl -fsSL -o "$RUNNER_TEMP/openfga.tar.gz" "https://github.com/openfga/openfga/releases/download/$OPENFGA_VERSION/openfga_${OPENFGA_VERSION#v}_linux_amd64.tar.gz"
+          tar xzf "$RUNNER_TEMP/openfga.tar.gz" -C "$RUNNER_TEMP" openfga
+          "$RUNNER_TEMP/openfga" migrate --datastore-engine postgres --datastore-uri "$OPENFGA_DATASTORE_URI"
+          nohup "$RUNNER_TEMP/openfga" run --datastore-engine postgres --datastore-uri "$OPENFGA_DATASTORE_URI" \
+            --http-addr "127.0.0.1:$FGA_HTTP" --grpc-addr "127.0.0.1:$FGA_GRPC" \
+            --playground-enabled=false --metrics-enabled=false >"$RUNNER_TEMP/openfga.log" 2>&1 &
+          echo "OPENFGA_API_URL=http://127.0.0.1:$FGA_HTTP" >>"$GITHUB_ENV"
+          timeout 60 bash -c "until curl -fs http://127.0.0.1:$FGA_HTTP/healthz >/dev/null; do sleep 1; done"
+      # The real packages/demo-soc-tools service, for test/tool-gateway-demo-integration.e2e-spec.ts.
+      - name: demo-soc-tools
+        run: |
+          set -e
+          pnpm --filter @manar/demo-soc-tools build
+          PORT="$DEMO_PORT" nohup node packages/demo-soc-tools/dist/main.js >"$RUNNER_TEMP/demo-soc-tools.log" 2>&1 &
+          echo "DEMO_SOC_TOOLS_BASE_URL=http://localhost:$DEMO_PORT" >>"$GITHUB_ENV"
+          timeout 30 bash -c "until curl -fs http://localhost:$DEMO_PORT/health/ready >/dev/null; do sleep 1; done"
+      # Temporal: the CLI's single-binary dev server (in-memory, namespace `default`). The specs
+      # start their own workers.
+      - name: Temporal
+        run: |
+          set -e
+          curl -fsSL -o "$RUNNER_TEMP/temporal.tar.gz" "https://github.com/temporalio/cli/releases/download/v$TEMPORAL_CLI_VERSION/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          tar xzf "$RUNNER_TEMP/temporal.tar.gz" -C "$RUNNER_TEMP" temporal
+          nohup "$RUNNER_TEMP/temporal" server start-dev --headless --ip 127.0.0.1 --port "$TEMPORAL_PORT" >"$RUNNER_TEMP/temporal.log" 2>&1 &
+          echo "TEMPORAL_ADDRESS=127.0.0.1:$TEMPORAL_PORT" >>"$GITHUB_ENV"
+          timeout 60 bash -c "until $RUNNER_TEMP/temporal operator cluster health --address 127.0.0.1:$TEMPORAL_PORT >/dev/null 2>&1; do sleep 1; done"
+      # manar-ai: ai-advisory.e2e-spec.ts runs its DLP scenarios against the real service (no
+      # image is published), so run its gRPC server from source at a pinned commit, outside the
+      # checkout and with a clean env. While manar-ai is private, MANAR_AI_READ_TOKEN (read-only,
+      # contents:read on manarhq/manar-ai) is needed; once it is public the anonymous download works.
+      - name: manar-ai
+        env:
+          MANAR_AI_READ_TOKEN: ${{ secrets.MANAR_AI_READ_TOKEN }}
+        run: |
+          set -e
+          auth=(); [ -z "$MANAR_AI_READ_TOKEN" ] || auth=(-H "Authorization: Bearer $MANAR_AI_READ_TOKEN")
+          mkdir -p "$RUNNER_TEMP/manar-ai"
+          curl -fsSL "${auth[@]}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/manarhq/manar-ai/tarball/$MANAR_AI_REF" \
+            | tar xz -C "$RUNNER_TEMP/manar-ai" --strip-components=1
+          uv sync --project "$RUNNER_TEMP/manar-ai" --locked --no-dev --quiet
+          (cd "$RUNNER_TEMP/manar-ai" && env -i PATH="$PATH" HOME="$HOME" \
+            PORT="$AI_HTTP_PORT" ENVIRONMENT=local LOG_LEVEL=INFO GRPC_PORT="$AI_GRPC_PORT" AI_PROVIDER=ollama \
+            OLLAMA_HOST=http://ollama-not-configured.invalid:11434 OLLAMA_TIMEOUT_SECONDS=5 \
+            OLLAMA_MODEL=qwen3:8b EMBEDDING_MODEL=qwen3-embedding:0.6b \
+            nohup .venv/bin/python -m app.grpc.server >"$RUNNER_TEMP/manar-ai.log" 2>&1 &)
+          echo "AI_ADVISORY_GRPC_TARGET=127.0.0.1:$AI_GRPC_PORT" >>"$GITHUB_ENV"
+          timeout 60 bash -c "until exec 3<>/dev/tcp/127.0.0.1/$AI_GRPC_PORT 2>/dev/null; do sleep 1; done"
+      - run: pnpm test:e2e
+      - if: always()
+        run: .github/scripts/ci-deps-stop.sh e2e
+
+  build:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.14.1' # same as the GitLab image; pnpm comes from package.json's packageManager
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Workspace packages resolve through their gitignored dist/, so lint, nest build and vitest
+      # all see unresolved imports until they are compiled.
+      - run: pnpm packages:build
+      - run: pnpm build
+
+  # The three images (the HTTP app, the Temporal worker - same Dockerfile, different target - and
+  # demo-soc-tools) on every PR, so a broken Dockerfile, a missing runtime file or a fixable
+  # HIGH/CRITICAL CVE fails before merge. Nothing is pushed; SBOMs are generated as a check.
+  images:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build, scan and SBOM
+        run: |
+          set -eu
+          sha="${GITHUB_SHA::8}"
+          docker build --build-arg "MANAR_GIT_SHA=$sha" --target runtime -t "manar-api:ci-$GITHUB_RUN_ID" .
+          docker build --build-arg "MANAR_GIT_SHA=$sha" --target worker -t "manar-api-worker:ci-$GITHUB_RUN_ID" .
+          docker build -t "demo-soc-tools:ci-$GITHUB_RUN_ID" -f packages/demo-soc-tools/Dockerfile .
+          # Files the app opens by path at runtime must be in the image, not only in the repo.
+          for img in manar-api manar-api-worker; do
+            docker run --rm --entrypoint sh "$img:ci-$GITHUB_RUN_ID" -c 'test -f src/authorization/model/manar.fga' \
+              || { echo "$img has no src/authorization/model/manar.fga"; exit 1; }
+          done
+          failed=
+          for img in manar-api manar-api-worker demo-soc-tools; do
+            docker save "$img:ci-$GITHUB_RUN_ID" -o "$img.tar"
+            docker run --rm -v "$PWD:$PWD" -w "$PWD" anchore/syft@sha256:7b980ab125ee77c58ef89622672e2176a6d82722d709362fa1bb6bc12d50e786 \
+              "docker-archive:$img.tar" -o "cyclonedx-json=sbom-$img.json"
+            docker run --rm -v "$PWD:$PWD" -w "$PWD" aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+              image --input "$img.tar" --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed --no-progress || failed=1
+          done
+          [ -z "$failed" ]
+      - if: always()
+        run: |
+          for img in manar-api manar-api-worker demo-soc-tools; do docker rmi "$img:ci-$GITHUB_RUN_ID" || true; done
+          rm -f ./*.tar sbom-*.json
+
+  # Secret scanning over the full git history, not just the diff. Fails on any finding not
+  # allowlisted in .gitleaks.toml.
+  gitleaks:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: >-
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:$PWD" -w "$PWD"
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git --log-opts="--all" -c .gitleaks.toml --exit-code 1 --redact -v .
+
+  # SAST. Fails only on ERROR-severity findings; lower tiers of the `auto` ruleset are too noisy to gate on.
+  semgrep:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD"
+          semgrep/semgrep:1.172.0@sha256:65dcd4408adda7c183a6b4550cb1e9b19f7f627a6fbb7e0559bd466bedc44d7b
+          semgrep scan --config auto --severity ERROR --error .
+
+  # Dependencies plus Dockerfile and Helm misconfigurations; HIGH/CRITICAL fail. Secrets are
+  # gitleaks' job here: the DLP specs carry synthetic credential-shaped fixtures.
+  trivy-fs:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+          fs --scanners vuln,misconfig --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed .
+
+  # Renders every chart (none assume a live cluster), then kubeconform (schema validity, -strict
+  # rejects unknown fields) and kube-linter (best-practice/security lint, default checks).
+  k8s-manifests:
+    runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.3
+      - run: |
+          mkdir -p rendered
+          helm template manar-api deploy/helm/manar-api --set image.tag=ci > rendered/manar-api.yaml
+          helm template manar-api-worker deploy/helm/manar-api-worker --set image.tag=ci > rendered/manar-api-worker.yaml
+          helm template demo-soc-tools deploy/helm/demo-soc-tools --set image.tag=ci --set secrets.data.DEMO_TOOLS_API_KEY=ci-placeholder > rendered/demo-soc-tools.yaml
+      - run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD"
+          ghcr.io/yannh/kubeconform:v0.8.0-alpine@sha256:6b90a5f23d846140ce0194fe050b1995e546eba938f3a6bf10c039dd5e24588f
+          -strict -summary rendered/manar-api.yaml rendered/manar-api-worker.yaml rendered/demo-soc-tools.yaml
+      - run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD"
+          stackrox/kube-linter:v0.8.3-alpine@sha256:b8311611c27032d4922bc67719225e373e4a0ab0c767bbdcf5f20a9306b1a3bb
+          lint rendered/
