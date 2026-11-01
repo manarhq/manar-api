@@ -1,3 +1,5 @@
+import { isGitWord } from './git-safety';
+
 /**
  * Git safety as an allow-list. A command that touches git (or could run it) is "git-safe", and
  * does not ask, only when every part of it is understood:
@@ -24,7 +26,7 @@ export type Parse = (s: string) => {
 /** Longest command we classify; longer ones that touch git ask. */
 export const MAX_COMMAND = 2048;
 
-const NAME = '(?:git|gh|hub)(?:\\.exe)?';
+const NAME = '(?:git|gh|hub)(?:\\.(?:exe|cmd|bat|py|sh))?';
 /** Whether a piece of text touches git. Linear: no nested quantifiers. */
 const MENTION = new RegExp(
   `(?:^|[\\s/\\\\"'=:;|&(])${NAME}(?:$|[\\s"';|&)])` + // git as a word or path end
@@ -440,6 +442,8 @@ function segmentSafe(seg: string[], parse: Parse, depth: number): boolean {
 /** True if the command should be judged at all: it mentions git, or runs something that might. */
 function relevant(raw: string, p: ReturnType<Parse>): boolean {
   if (MENTION.test(raw) || MENTION.test(p.words.join(' '))) return true;
+  // Any word the deny-list parser would read as git (git.cmd, /usr/bin/git, git-push.sh, ...).
+  if (p.words.some(isGitWord)) return true;
   return p.segments.some((seg) => {
     let i = 0;
     while (i < seg.length && ASSIGN.test(seg[i]!)) i++;

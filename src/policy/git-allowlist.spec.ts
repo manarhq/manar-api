@@ -269,3 +269,16 @@ describe('git allow-list: bounds and speed', () => {
     expect(resourceAliases('git push -f', 'command')).toBe(a);
   });
 });
+
+describe('relevance covers every git name the parser accepts', () => {
+  it.each([
+    'git.cmd push -f origin HEAD:main',
+    'git.bat push -f origin HEAD:main',
+    'C:\\Git\\cmd\\git.cmd push --force origin main',
+    './git-push.sh -f origin main',
+    'git-push.py origin +main',
+    '/opt/git/bin/GIT.EXE push -f origin main',
+  ])('%s asks', (cmd) => {
+    expect(gitAsks(cmd)).toBe(true);
+  });
+});
