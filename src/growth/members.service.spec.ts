@@ -18,6 +18,7 @@ const identity = (over: Record<string, unknown> = {}) =>
 
 function setup(
   over: {
+    verified?: string | null;
     tenant?: object | null;
     plan?: string;
     status?: string;
@@ -86,6 +87,7 @@ function setup(
     } as never,
     { send: async () => true } as never,
     { record: vi.fn() } as never,
+    { verified: async () => over.verified ?? null } as never,
     {
       get: (k: string) => (k === 'MANAR_LINK_SECRET' ? SECRET : undefined),
     } as never,
@@ -138,12 +140,38 @@ describe('invites', () => {
     s.invites.set('i1', row);
     return signToken(SECRET, 'invite', 'i1', row.expiresAt);
   };
-  it('is single use and bound to the invited address', async () => {
+  it('needs the invited address as a VERIFIED contact email, not the token email', async () => {
+    const s = setup(); // no verified contact email
+    const token = seed(s);
+    // the token says a@corp.com, but a Microsoft/GitHub token email is not proof
+    await expect(s.svc.acceptInvite(identity(), token)).rejects.toThrow(
+      'invite_email_mismatch',
+    );
+    const other = setup({ verified: 'evil@x.com' });
+    const t2 = seed(other);
+    await expect(other.svc.acceptInvite(identity(), t2)).rejects.toThrow(
+      'invite_email_mismatch',
+    );
+    expect(s.memberships.create).not.toHaveBeenCalled();
+  });
+  it('accepts an email-link sign-in to the invited address', async () => {
     const s = setup();
     const token = seed(s);
+    await s.svc.acceptInvite(
+      identity({ idp: undefined, tid: undefined }),
+      token,
+    );
+    expect(s.memberships.create).toHaveBeenCalledOnce();
+  });
+  it('refuses to invite a placeholder address', async () => {
+    const s = setup();
     await expect(
-      s.svc.acceptInvite(identity({ email: 'evil@x.com' }), token),
-    ).rejects.toThrow('invite_email_mismatch');
+      s.svc.createInvite('t', 'admin', 'abc@idp.invalid', 'DEVELOPER'),
+    ).rejects.toThrow('invite_email_invalid');
+  });
+  it('is single use', async () => {
+    const s = setup({ verified: 'a@corp.com' });
+    const token = seed(s);
     await s.svc.acceptInvite(identity(), token);
     expect(s.memberships.create).toHaveBeenCalledOnce();
     await expect(s.svc.acceptInvite(identity(), token)).rejects.toThrow(
@@ -156,7 +184,7 @@ describe('invites', () => {
     await expect(s.svc.acceptInvite(identity(), 'x.y')).rejects.toThrow(
       'invite_invalid',
     );
-    const lapsed = setup({ status: 'read_only' });
+    const lapsed = setup({ status: 'read_only', verified: 'a@corp.com' });
     const t = seed(lapsed);
     await expect(lapsed.svc.acceptInvite(identity(), t)).rejects.toThrow(
       'workspace_read_only',

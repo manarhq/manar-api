@@ -12,6 +12,10 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { splitRoles } from '../auth/membership.service';
 import type { RoleName } from '../auth/roles';
 import type { VerifiedIdentity } from '../auth/token-verifier.service';
+import {
+  ContactEmailService,
+  isPlaceholderEmail,
+} from '../contact/contact-email.service';
 import { EntitlementsService } from '../billing/entitlements.service';
 import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
@@ -43,6 +47,7 @@ export class MembersService {
     private readonly entitlements: EntitlementsService,
     private readonly mailer: MailerService,
     private readonly audit: GrowthAuditService,
+    private readonly contact: ContactEmailService,
     private readonly config: ConfigService<AppConfig, true>,
   ) {}
 
@@ -77,6 +82,8 @@ export class MembersService {
     const secret = this.secret();
     const tenant = await this.assertTeamWorkspace(tenantId);
     const address = email.trim().toLowerCase();
+    if (isPlaceholderEmail(address))
+      throw new BadRequestException('invite_email_invalid');
     const open = await this.control.workspaceInvite.count({
       where: {
         tenantId,
@@ -164,8 +171,21 @@ export class MembersService {
       invite.expiresAt <= new Date()
     )
       throw new GoneException('invite_unavailable');
-    // The link is a bearer token, so it is also bound to the invited address.
-    if (!identity.email || identity.email.trim().toLowerCase() !== invite.email)
+    // The link is a bearer token, so it is also bound to the invited address: the accepter must
+    // hold it as a VERIFIED contact email, or have signed in by an email link to that address.
+    // The token's own email is not enough (the shared realm uses placeholders for Microsoft and
+    // GitHub users), and a placeholder never matches.
+    if (isPlaceholderEmail(invite.email))
+      throw new ForbiddenException('invite_email_mismatch');
+    const verified = await this.contact.verified(
+      identity.issuer,
+      identity.subject,
+    );
+    const linkEmail =
+      !identity.idp && identity.email && !isPlaceholderEmail(identity.email)
+        ? identity.email.trim().toLowerCase()
+        : null;
+    if (verified !== invite.email && linkEmail !== invite.email)
       throw new ForbiddenException('invite_email_mismatch');
     await this.assertTeamWorkspace(invite.tenantId);
     const used = await this.control.workspaceInvite.updateMany({
@@ -194,7 +214,7 @@ export class MembersService {
         role: split.role,
         extraRoles: split.extraRoles,
         grantedBy: `invite:${invite.createdBy}`,
-        email: identity.email,
+        email: invite.email,
         displayName: identity.displayName,
       };
       if (existing) await this.control.membership.update({ where: key, data });
