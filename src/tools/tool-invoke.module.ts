@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AgentAuthorizeModule } from '../authorization/agent-authorize.module';
 import { AgentMtlsGuardModule } from '../agent-mtls/agent-mtls-guard.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
+import { PushModule } from '../push/push.module';
 import { TemporalModule } from '../temporal/temporal.module';
 import { ToolInvokeController } from './tool-invoke.controller';
 import { AuthorizeController } from '../authorization/authorize.controller';
@@ -24,6 +25,7 @@ import { ToolsModule } from './tools.module';
     AgentAuthorizeModule,
     ToolsModule,
     ApprovalsModule,
+    PushModule,
     TemporalModule,
   ],
   // AuthorizeController lives here (not in AgentAuthorizeModule) because its

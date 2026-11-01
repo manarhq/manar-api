@@ -11,7 +11,9 @@ import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
 import { OpenBaoModule } from './openbao/openbao.module';
 import { AgentsHttpModule } from './agents/agents-http.module';
+import { AiToolsHttpModule } from './host-coverage/host-coverage.module';
 import { DevicesHttpModule } from './devices/devices-http.module';
+import { SecretsHttpModule } from './secrets/secrets.module';
 import { HostsHttpModule } from './hosts/hosts-http.module';
 import { AuthorizationModule } from './authorization/authorization.module';
 import { TasksModule } from './tasks/tasks.module';
@@ -19,6 +21,7 @@ import { TasksHttpModule } from './tasks/tasks-http.module';
 import { PolicyHttpModule } from './policy/policy-http.module';
 import { TemporalModule } from './temporal/temporal.module';
 import { ApprovalsHttpModule } from './approvals/approvals-http.module';
+import { PushHttpModule } from './push/push-http.module';
 import { AuditModule } from './audit/audit.module';
 import { AuditHttpModule } from './audit/audit-http.module';
 import { AuditIndexerModule } from './audit/opensearch/audit-indexer.module';
@@ -39,6 +42,7 @@ import { LicensingModule } from './licensing/licensing.module';
 import { UsersModule } from './users/users.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
+import { WorkspaceModule } from './workspace/workspace.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { IncidentsModule } from './incidents/incidents.module';
@@ -60,12 +64,15 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     AgentsHttpModule,
     HostsHttpModule,
     DevicesHttpModule,
+    AiToolsHttpModule,
+    SecretsHttpModule,
     AuthorizationModule,
     TasksModule,
     TasksHttpModule,
     PolicyHttpModule,
     TemporalModule,
     ApprovalsHttpModule,
+    PushHttpModule,
     AuditHttpModule,
     AuditIndexerModule,
     LiveEventsHttpModule,
@@ -91,6 +98,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     UsersModule,
     WorkspacesModule,
     TenantSettingsModule,
+    WorkspaceModule,
     // Phase 15a: Data Classification, Compliance Mapping & Incidents.
     ComplianceModule,
     IncidentsModule,

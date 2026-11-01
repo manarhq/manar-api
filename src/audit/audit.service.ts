@@ -49,6 +49,8 @@ export interface RecordAuditEventInput {
    * freshly generated UUID if neither is available.
    */
   correlationId?: string;
+  /** Only the sample-workspace generator sets this (back-dated synthetic history in a SAMPLE tenant). Everyone else: now. */
+  timestamp?: Date;
 }
 
 export interface AuditEventRecord {
@@ -199,7 +201,7 @@ export class AuditService implements OnModuleDestroy {
       input,
       id: randomUUID(),
       correlationId: input.correlationId ?? getCorrelationId() ?? randomUUID(),
-      timestamp: new Date(),
+      timestamp: input.timestamp ?? new Date(),
       partition: partitionFor(input.actor, input.data),
     };
   }

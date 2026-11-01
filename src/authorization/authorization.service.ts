@@ -24,6 +24,10 @@ import {
 import { OpenFgaClientService } from './openfga-client.service';
 import type { AuthorizeRequest } from './authorize-request.validation';
 import { recordDecision } from '../metrics/metrics';
+import {
+  findLiveAllowGrant,
+  markAllowGrantUsed,
+} from '../approvals/allow-grants';
 
 type Verdict =
   | { decision: 'ALLOW' }
@@ -73,6 +77,11 @@ export type DecisionChannel = 'REST' | 'MCP' | 'AUTHORIZE';
 
 export interface DecisionContext {
   channel: DecisionChannel;
+  /**
+   * Set by the host authorize path (`/host/v1/authorize`): the device the request comes from. An
+   * "Approve for 8 hours" grant is then looked up for the device, otherwise for the agent.
+   */
+  hostId?: string;
   /** The action's parameters: hashed into `Decision.inputsHash`, never stored. */
   params?: unknown;
 }
@@ -214,6 +223,7 @@ export class AuthorizationService {
       authenticatedAgentId,
       request,
       'REQUEST',
+      context.hostId,
     );
     return this.commit(
       tenantClient,
@@ -286,6 +296,7 @@ export class AuthorizationService {
     authenticatedAgentId: string,
     request: AuthorizeRequest,
     stage: DecisionStage,
+    hostId?: string,
   ): Promise<Evaluation> {
     try {
       return await this.evaluate(
@@ -294,6 +305,7 @@ export class AuthorizationService {
         authenticatedAgentId,
         request,
         stage,
+        hostId,
       );
     } catch (error) {
       if (error instanceof HttpException) throw error;
@@ -408,7 +420,39 @@ export class AuthorizationService {
         ...final.audit,
       },
     });
+    const usedGrantId = final.audit['allowGrantId'];
+    if (final.verdict.decision === 'ALLOW' && typeof usedGrantId === 'string') {
+      await this.recordGrantUse(tenantClient, tenantId, agentId, usedGrantId, {
+        decisionId,
+        toolId: request.toolId,
+        actionId: request.actionId,
+        resource: request.resource,
+        ...(context.hostId ? { hostId: context.hostId } : {}),
+      });
+    }
     return { ...final.verdict, decisionId };
+  }
+
+  /** `approval.grant.used`; a failure here is logged, never turned into a different decision. */
+  private async recordGrantUse(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    agentId: string,
+    grantId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await markAllowGrantUsed(tenantClient, grantId);
+    } catch (error) {
+      this.logger.error(
+        `could not count use of allow grant "${grantId}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    await this.auditService.recordSafely(tenantClient, tenantId, {
+      eventType: AUDIT_EVENT_TYPES.APPROVAL_GRANT_USED,
+      actor: { type: 'agent', id: agentId },
+      data: { grantId, ...data },
+    });
   }
 
   /** Single use, enforced in the database: only one redemption can win. */
@@ -476,6 +520,7 @@ export class AuthorizationService {
     authenticatedAgentId: string,
     request: AuthorizeRequest,
     stage: DecisionStage,
+    hostId?: string,
   ): Promise<Evaluation> {
     const redemption = stage === 'GRANT_REDEMPTION';
 
@@ -594,6 +639,22 @@ export class AuthorizationService {
       return deny('not_authorized', { openFgaResult });
     }
 
+    // Step 5b (spec 4.6): a live "Approve for 8 hours" grant for this device (or agent), tool,
+    // action and exact resource. Looked up before policy evaluation, but it only satisfies an
+    // approval requirement below: a policy DENY, a kill switch, OpenFGA and the task's limits are
+    // all decided without it. A lookup failure throws and `evaluateFailClosed` denies.
+    const allowGrant = redemption
+      ? null
+      : await findLiveAllowGrant(
+          tenantClient,
+          hostId ? { hostId } : { agentId: authenticatedAgentId },
+          {
+            toolId: request.toolId,
+            actionId: request.actionId,
+            resource: request.resource,
+          },
+        );
+
     // Step 6 (Phase 6): PolicyEngine — an extra, org-defined restriction
     // on top of the already-OpenFGA-permitted action above, never a
     // re-decision of it. See PolicyEngine's own doc comment for why "no
@@ -661,10 +722,10 @@ export class AuthorizationService {
       riskReasonCodes: riskResult.reasonCodes,
     };
 
-    if (
+    const needsApproval =
       policyResult.effect === 'APPROVAL_REQUIRED' ||
-      riskResult.riskScore > task.riskCeiling
-    ) {
+      riskResult.riskScore > task.riskCeiling;
+    if (needsApproval && !allowGrant) {
       const reason =
         policyResult.effect === 'APPROVAL_REQUIRED'
           ? 'policy_requires_approval'
@@ -690,7 +751,7 @@ export class AuthorizationService {
       };
     }
 
-    // Step 8: ALLOW. The atomic, race-closing `executionCount` increment
+    // Step 8: ALLOW (a live grant counts as the approval). The atomic, race-closing `executionCount` increment
     // (`TasksService.incrementExecutionCount`) happens in `commit`, in the
     // same transaction as the `Decision` insert.
     return {
@@ -700,6 +761,7 @@ export class AuthorizationService {
         policyVersionId: policyResult.policyVersionId ?? null,
         matchedRule: policyResult.matchedRule ?? null,
         openFgaResult,
+        ...(needsApproval && allowGrant ? { allowGrantId: allowGrant.id } : {}),
       },
       ...scored,
       task,

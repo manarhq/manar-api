@@ -272,6 +272,10 @@ secrets:
     # device" short codes are stored under (src/hosts/install-key.util.ts). Deliver it by
     # ExternalSecret (remote key manar/api/install-key-hmac) into this Secret; never commit a value.
     MANAR_INSTALL_KEY_HMAC_SECRET: ''
+    # Web Push (optional, all three or none): the VAPID key pair and contact. ExternalSecret keys.
+    VAPID_PUBLIC_KEY: ''
+    VAPID_PRIVATE_KEY: ''
+    VAPID_SUBJECT: ''
     # REQUIRED — `MANAR_BFF_SERVICE_TOKEN` has no default and a `min(16)`
     # constraint (src/tenants/tenants.config.ts), so `validate()` rejects the
     # environment and the process exits before listening if it is missing.

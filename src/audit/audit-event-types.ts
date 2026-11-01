@@ -30,6 +30,9 @@ export const AUDIT_EVENT_TYPES = {
   /** ADR-0007: an open approval was expired because a fresh decision scored higher or changed policy version or reason. */
   APPROVAL_SUPERSEDED: 'approval.superseded',
   /** ADR-0011: the approver collected the value an approved action produced for them (field names only). */
+  /** "Approve for 8 hours": a time-boxed allow was created / used (spec 4.6). */
+  APPROVAL_GRANT_CREATED: 'approval.grant.created',
+  APPROVAL_GRANT_USED: 'approval.grant.used',
   APPROVAL_HANDOVER_COLLECTED: 'approval.handover_collected',
 
   TOOL_INVOCATION_STARTED: 'tool.invocation.started',
@@ -41,6 +44,8 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_BINDING_VIOLATED: 'tool.invocation.approval_binding_violated',
 
   POLICY_PUBLISHED: 'policy.published',
+  /** Features track: the workspace's start mode (policy preset) was switched; data holds from, to and the new version. */
+  START_MODE_CHANGED: 'start_mode.changed',
 
   /** Phase 9b (Retention, Section 48) — written by `AuditRetentionWorkflow`'s Activity; see `src/audit/retention/`. */
   AUDIT_RETENTION_EXECUTED: 'audit.retention_executed',
@@ -151,6 +156,27 @@ export const AUDIT_EVENT_TYPES = {
   BILLING_PLAN_CHANGED: 'billing.plan.changed',
   /** The owner removed a device (console "Remove device"): its record and certificates are gone, so it can be installed again. */
   HOST_REMOVED: 'host.removed',
+
+  // AI tool coverage (launch spec 4.5).
+  /** A device reported an AI tool for the first time. */
+  TOOL_DISCOVERED: 'tool.discovered',
+  /** Protection (hooks, MCP wrap, routing) was installed on a device's tool, or turned off by its owner. */
+  TOOL_PROTECTED: 'tool.protected',
+  TOOL_UNPROTECTED: 'tool.unprotected',
+  /** A non-Claude tool's action was decided through `POST /host/v1/authorize`. */
+  HOST_ACTION_DECIDED: 'host.action_decided',
+
+  /** Secrets (spec 4.5): a device reported a secret file opened by an AI tool (masked path, no content). */
+  SECRET_TOUCHED: 'secret.touched',
+  /** A secret was moved into the device's vault and the device verified it (kind and ref, never the secret). */
+  /** A person asked a device to protect a secret in its vault, or to restore it to its file. */
+  SECRET_VAULT_REQUESTED: 'secret.vault.requested',
+  SECRET_VAULT_RESTORE_REQUESTED: 'secret.vault.restore_requested',
+  SECRET_VAULT_STORED: 'secret.vault.stored',
+  SECRET_VAULT_RESTORED: 'secret.vault.restored',
+  /** A program was let have a vaulted secret (the decision and its scope are in the data). */
+  SECRET_VAULT_RELEASED: 'secret.vault.released',
+  SECRET_VAULT_DENIED: 'secret.vault.denied',
 } as const;
 
 export type AuditEventType =

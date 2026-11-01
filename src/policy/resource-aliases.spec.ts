@@ -1,0 +1,163 @@
+import { describe, expect, it } from 'vitest';
+import {
+  resourceAliases,
+  resourceKindFor,
+  shellWords,
+} from './resource-aliases';
+
+const secret = (r: string, kind: 'path' | 'command' = 'path') =>
+  resourceAliases(r, kind).some((a) => a.startsWith('secret-file:'));
+
+describe('resourceAliases', () => {
+  it('finds secrets whatever the whitespace in a file path', () => {
+    expect(secret('/home/u/my keys/.aws/credentials')).toBe(true);
+    expect(secret('/home/u/.aws/credentials ')).toBe(true);
+    expect(secret('/work/my shop/.env')).toBe(true);
+    expect(secret('C:\\Users\\Sam Lee\\.ssh\\id_rsa')).toBe(true);
+  });
+  it('sees through //, /./ and .. variants', () => {
+    expect(secret('/home/u//.ssh///id_rsa')).toBe(true);
+    expect(secret('/home/u/./.ssh/./id_rsa')).toBe(true);
+    expect(secret('/home/u/proj/../.ssh/id_rsa')).toBe(true);
+    expect(secret('~/proj/../.ssh/id_rsa')).toBe(true);
+    expect(secret('~//.ssh/id_rsa')).toBe(true);
+  });
+  it('marks a path that climbs out of its root as unsafe', () => {
+    expect(resourceAliases('../../.ssh/id_rsa')).toContain(
+      'unsafe-path:traversal',
+    );
+    expect(resourceAliases('~/../other/x')).toContain('unsafe-path:traversal');
+    expect(resourceAliases('~/a/../../../etc/passwd')).toContain(
+      'unsafe-path:traversal',
+    );
+    expect(resourceAliases('/work/shop/src/a.ts')).toEqual([]);
+    expect(resourceAliases('~/a/../../../etc/passwd')).toContain(
+      'unsafe-path:traversal',
+    );
+  });
+  it('normalises Windows paths', () => {
+    expect(resourceAliases('C:\\Users\\x\\.aws\\credentials')).toEqual(
+      expect.arrayContaining(['~/.aws/credentials', 'secret-file:credentials']),
+    );
+    expect(resourceAliases('C:\\Windows\\System32\\x.dll')).toContain(
+      'c:/windows/system32/x.dll',
+    );
+  });
+  it('finds secret paths inside commands, and ignores plain words', () => {
+    expect(secret('cat ~/.ssh/id_rsa', 'command')).toBe(true);
+    expect(secret('cat "/home/u/.aws/credentials"', 'command')).toBe(true);
+    expect(secret('cat credentials', 'command')).toBe(true); // run inside ~/.aws
+    expect(secret('cat id_ed25519', 'command')).toBe(true);
+    expect(secret('grep password src', 'command')).toBe(false);
+  });
+  it('reads commands like a shell: escapes, quotes, globs and substitution', () => {
+    expect(secret('cat ~/.a\\ws/credentials', 'command')).toBe(true);
+    expect(secret("cat '/home/u/.aws/credentials'", 'command')).toBe(true);
+    expect(resourceAliases('cat ~/.ssh/*', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat $(echo ~/.ssh/id_rsa)', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat `echo x`', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat ~/.ssh/{id_rsa,x}', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases("echo '*' '$HOME'", 'command')).toEqual([]);
+    expect(resourceAliases('echo "a b" c', 'command')).toEqual([]);
+    expect(shellWords('a "b c" d\\ e;f').words).toEqual([
+      'a',
+      'b c',
+      'd e',
+      'f',
+    ]);
+  });
+  it('keeps traversal markers in commands', () => {
+    expect(resourceAliases('cat ../../etc/passwd', 'command')).toContain(
+      'unsafe-path:traversal',
+    );
+    expect(resourceAliases('cat ../../.ssh/id_rsa', 'command')).toEqual(
+      expect.arrayContaining(['unsafe-path:traversal', 'secret-file:id_rsa']),
+    );
+  });
+  it('fails closed on line continuations, control characters and odd quoting', () => {
+    expect(secret('cat ~/.ssh/id_\\\nrsa', 'command')).toBe(true); // continuation vanishes
+    expect(resourceAliases('cat a\nb', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat a\rb', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat "a\u0001b"', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases("cat 'unterminated", 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+    expect(resourceAliases('cat <(echo x)', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+  });
+  it('fails closed on tilde forms the parser does not expand', () => {
+    for (const c of [
+      'cat ~root/.ssh/id_rsa',
+      'cd ~+',
+      'cd ~-',
+      'X=~/.aws/config',
+      'PATH=a:~/b',
+    ]) {
+      expect(resourceAliases(c, 'command')).toContain(
+        'unsafe-command:expansion',
+      );
+    }
+    expect(resourceAliases('cat ~/notes.txt', 'command')).toEqual([]);
+    expect(resourceAliases('cd ~', 'command')).toEqual([]);
+  });
+  it('keeps Windows shell paths (backslashes) and fails closed on their expansions', () => {
+    expect(secret('type C:\\Users\\x\\.aws\\credentials', 'command')).toBe(
+      true,
+    );
+    const ps = resourceAliases(
+      'Get-Content $env:USERPROFILE\\.ssh\\id_ed25519',
+      'command',
+    );
+    expect(ps).toContain('secret-file:id_ed25519');
+    expect(ps).toContain('unsafe-command:expansion');
+    const cmd = resourceAliases(
+      'type %USERPROFILE%\\.aws\\credentials',
+      'command',
+    );
+    expect(cmd).toContain('secret-file:credentials');
+    expect(cmd).toContain('unsafe-command:expansion');
+    expect(resourceAliases('dir C:\\work\\shop', 'command')).toEqual([]);
+    expect(resourceAliases('dir sub\\dir', 'command')).toContain(
+      'unsafe-command:expansion',
+    );
+  });
+  it('resolves Windows drive paths as rooted and flags clamped ..', () => {
+    expect(resourceAliases('C:\\Users\\x\\..\\..\\..\\Windows')).toContain(
+      'unsafe-path:traversal',
+    );
+    expect(resourceAliases('c:/Users/x/../y/.aws/credentials')).toEqual(
+      expect.arrayContaining(['~/.aws/credentials', 'secret-file:credentials']),
+    );
+    expect(resourceAliases('/../etc/passwd')).toContain(
+      'unsafe-path:traversal',
+    );
+  });
+  it('kind is scoped to the tool; unknown means path', () => {
+    expect(resourceKindFor('host.claude-code', 'bash')).toBe('command');
+    expect(resourceKindFor('host.claude-code', 'webfetch')).toBe('other');
+    expect(resourceKindFor('host.claude-code', 'read')).toBe('path');
+    expect(resourceKindFor('host.cursor', 'bash')).toBe('command');
+    expect(resourceKindFor('evil.tool', 'bash')).toBe('path');
+    expect(resourceKindFor('evil.tool', 'webfetch')).toBe('path');
+    expect(resourceKindFor('host.claude-code', 'mystery')).toBe('path');
+    expect(resourceKindFor('host.cursor', 'mystery')).toBe('path');
+  });
+  it('gives URLs and tool names no aliases', () => {
+    expect(resourceAliases('https://example.com/.env', 'other')).toEqual([]);
+  });
+});
