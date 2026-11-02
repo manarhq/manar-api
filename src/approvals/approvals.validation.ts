@@ -30,6 +30,13 @@ export type DecideApprovalRequest = z.output<
 export const DecideHostApprovalSchema = z.object({
   decision: z.enum(['approve_once', 'approve_8h', 'approve_always', 'deny']),
   makeRule: z.boolean().optional(),
+  /** Device only: "I stopped waiting" (with `deny`), recorded as EXPIRED, not as a person's deny. */
+  withdraw: z.boolean().optional(),
+});
+
+/** `POST /approvals/:id/revoke` and `POST /host-approvals/:id/revoke`. */
+export const RevokeApprovalSchema = z.object({
+  note: z.string().trim().max(500).optional(),
 });
 
 /** `POST /host/v1/approvals/vault`: which program asks for which secret (names only). */

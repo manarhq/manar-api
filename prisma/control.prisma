@@ -125,6 +125,8 @@ model Tenant {
   allowExternalAi        Boolean         @default(false)
   allowOutboundTelemetry Boolean         @default(false)
   allowCloudStorage      Boolean         @default(false)
+  /// COMPANY: only approver roles decide approvals; a device owner can no longer decide their own.
+  approvalsAdminsOnly    Boolean         @default(false)
 
   /// Product improvement data, workspace switches (COMPANY only; default on). Org off overrides every member.
   dataImproveManar Boolean @default(true)

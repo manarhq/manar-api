@@ -26,6 +26,7 @@ import type { AuthorizeRequest } from './authorize-request.validation';
 import { recordDecision } from '../metrics/metrics';
 import {
   findLiveAllowGrant,
+  findLiveBlock,
   markAllowGrantUsed,
 } from '../approvals/allow-grants';
 
@@ -643,6 +644,19 @@ export class AuthorizationService {
     // action and exact resource. Looked up before policy evaluation, but it only satisfies an
     // approval requirement below: a policy DENY, a kill switch, OpenFGA and the task's limits are
     // all decided without it. A lookup failure throws and `evaluateFailClosed` denies.
+    // Revoked after use (3 Nov 2026): a person revoked an approval of this exact action after the
+    // agent had it, so the next request is refused until someone lifts the block. Redemption too.
+    const block = await findLiveBlock(
+      tenantClient,
+      { agentId: authenticatedAgentId },
+      {
+        toolId: request.toolId,
+        actionId: request.actionId,
+        resource: request.resource,
+      },
+    );
+    if (block) return deny('revoked_after_use', { blockId: block.id });
+
     const allowGrant = redemption
       ? null
       : await findLiveAllowGrant(

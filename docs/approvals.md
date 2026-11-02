@@ -362,3 +362,38 @@ already boots both Nest apps in-process), and the real
   itself, a postinstall script) shares that desktop and is not fully isolated from it. Mitigations:
   only the installed, root-owned binary may connect as the helper; the device can only approve
   once; anything standing or touching secrets is decided in the console.
+
+## History, revoke and who decides (3 Nov 2026)
+
+**Who decides.** An approver role (`TENANT_OWNER`, `SECURITY_ADMIN`, `APPROVER`) decides any
+request. The owner of a device, or the creator of an agent, may approve once or deny that
+device's or agent's own requests, unless the company workspace turned on "admins only"
+(`PATCH /tenant/settings {"approvalsAdminsOnly": true}`). Longer approvals (8 hours, always) and
+"make rule" stay with approvers. `HostApprovalsService.decide` checks this for every channel
+(console, device, phone, Telegram); `ApprovalsController` checks it for agent requests. Lists,
+history and detail show a person who is not an approver only their own devices and agents, and
+each item carries `allowedDecisions` / `canRevoke` so the console shows only what the person may do.
+
+**History.** `GET /approvals/history`: agent and device approvals in one cursor, every state
+(`PENDING`, `APPROVED`, `DENIED`, `EXPIRED`, `REVOKED`), with who decided, when, through which
+channel, the end reason (`no_answer`, `paused`, `withdrawn`, `superseded`, or a re-evaluation
+reason), when the device or agent received it, and what it created (8-hour grant, site rule, block).
+A device that stops waiting now withdraws its prompt (`withdraw: true`); it is recorded as
+EXPIRED `withdrawn`, not as a person's deny; older rows written as a device deny of a new site
+are shown the same way (the rows are not rewritten).
+
+**Revoke.** `POST /approvals/:id/revoke`, `POST /host-approvals/:id/revoke`:
+
+| State when revoked                                                | Result                                                                                                                                                                                                                |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Not yet received (`releasedAt` / `usedAt` null, grant unconsumed) | `REVOKED`, `usedBeforeRevoke: false`. The grant is revoked; the device or agent reads `REVOKED` and refuses. Nothing ran.                                                                                             |
+| Already received                                                  | `REVOKED`, `usedBeforeRevoke: true`. An incident (HIGH) and a push to approvers; this exact action is blocked (`ApprovalAllowGrant.effect = BLOCK`, 30 days, or a DENY site rule for a site) until a person lifts it. |
+| Either                                                            | Any 8-hour grant or remembered site rule it created is withdrawn.                                                                                                                                                     |
+
+"Received" is one conditional update racing the device's or agent's own read, so a revoke is never
+reported as "cancelled" for an approval the device already saw. `POST
+/approvals/allow-grants/:id/revoke` withdraws an 8-hour grant or lifts a block at any time; both
+authorize paths read grants and blocks live, so it applies on the next request.
+
+409 responses carry a `reason` (`paused`, `already_decided`, `expired`, `revoked`, `not_approved`,
+`action_already_used`, `not_signaled`) next to a plain `message`.

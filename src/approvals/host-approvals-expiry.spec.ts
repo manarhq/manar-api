@@ -31,7 +31,7 @@ describe('device approvals with no answer', () => {
         (c: unknown, t: string, e: object) => Promise<boolean>
       >(() => Promise.resolve(true)),
     };
-    const svc = new HostApprovalsService(audit as any, {} as any);
+    const svc = new HostApprovalsService(audit as any, {} as any, {} as any);
     expect(await svc.expireDue(client as any, 't1', now)).toBe(1);
     expect(await svc.expireDue(client as any, 't1', now)).toBe(0);
     expect(audit.recordSafely).toHaveBeenCalledTimes(1);

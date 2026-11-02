@@ -90,6 +90,21 @@ export class AgentApprovalsController {
       return { ...base, status: 'PAUSED' };
     }
 
+    // The first APPROVED read is the release: from then on the agent may act, so a revoke is
+    // recorded as after use. Conditional, so it races a revoke cleanly (whichever lands first).
+    if (approvalRequest.status === 'APPROVED' && !approvalRequest.releasedAt) {
+      await tenantClient.approvalRequest.updateMany({
+        where: { id, status: 'APPROVED', releasedAt: null },
+        data: { releasedAt: new Date() },
+      });
+      approvalRequest = await this.approvalRequestService.getOrThrow(
+        tenantClient,
+        id,
+      );
+      if (approvalRequest.status !== 'APPROVED')
+        return { ...base, status: approvalRequest.status };
+    }
+
     const grant = approvalRequest.grant;
     if (
       approvalRequest.status !== 'APPROVED' ||
@@ -141,6 +156,7 @@ export class AgentApprovalsController {
     const r = await this.approvalRequestService.expireIfPending(
       tenantClient,
       id,
+      'no_answer',
     );
     if (r.expired) {
       await this.audit.recordSafely(tenantClient, agent.tenant.id, {

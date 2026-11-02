@@ -169,11 +169,15 @@ describe('ApprovalRequestService.expireIfPending (ADR-0007)', () => {
     } as unknown as TenantPrismaClient;
 
     await expect(
-      new ApprovalRequestService().expireIfPending(tenantClient, 'a-1'),
+      new ApprovalRequestService().expireIfPending(
+        tenantClient,
+        'a-1',
+        'superseded',
+      ),
     ).resolves.toEqual({ expired: false, status: 'APPROVED' });
     expect(updateMany).toHaveBeenCalledWith({
       where: { id: 'a-1', status: 'PENDING' },
-      data: { status: 'EXPIRED' },
+      data: { status: 'EXPIRED', endReason: 'superseded' },
     });
   });
 });

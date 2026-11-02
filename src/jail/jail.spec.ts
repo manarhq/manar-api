@@ -171,7 +171,16 @@ function world() {
   };
   const tenants = { getClient: () => Promise.resolve(client) };
   const push = { notifyApprovers: vi.fn() };
-  const approvals = new HostApprovalsService(auditSvc as never, push as never);
+  // Every decider here is an approver (who may decide is covered in host-approvals.spec.ts).
+  const approvers = {
+    deciderKind: () => Promise.resolve('admin'),
+    canApprove: () => Promise.resolve(true),
+  };
+  const approvals = new HostApprovalsService(
+    auditSvc as never,
+    push as never,
+    approvers as never,
+  );
   const sites = new JailSitesService(tenants as never, auditSvc as never);
   const ctrl = new JailHostController(sites, approvals, tenants as never);
   return { rules, audit, approvalRows, client, approvals, sites, ctrl };
@@ -563,14 +572,14 @@ describe('site prompts are answered in the console or on the phone', () => {
         decision: 'deny',
         via: 'device',
       }),
-    ).resolves.toMatchObject({ status: 'DENIED' });
+    ).resolves.toMatchObject({ status: 'EXPIRED' }); // withdrawn: nobody denied it
   });
   it('is not shown to the desktop as something it can decide', async () => {
     const w = world();
     const ctrl = new HostApprovalsController(
       w.approvals,
       { getClient: () => Promise.resolve(w.client) } as never,
-      { canApprove: () => Promise.resolve(true) } as never,
+      { deciderKind: () => Promise.resolve('admin') } as never,
     );
     const r = await ctrl.pending(HOST);
     const site = r.items.find((i) => i.actionId === 'site.connect');

@@ -357,6 +357,7 @@ describe('ToolInvocationService: the MCP door completes an approved action (ADR-
     expect(expireIfPending).toHaveBeenCalledWith(
       expect.anything(),
       'approval-open',
+      'superseded',
     );
     expect(createApproval).toHaveBeenCalledWith(
       expect.anything(),
@@ -416,6 +417,7 @@ describe('ToolInvocationService: the MCP door completes an approved action (ADR-
     expect(expireIfPending).toHaveBeenCalledWith(
       expect.anything(),
       'approval-open',
+      'superseded',
     );
     expect(createApproval).toHaveBeenCalledOnce();
   });
@@ -432,6 +434,7 @@ describe('ToolInvocationService: the MCP door completes an approved action (ADR-
     expect(expireIfPending).toHaveBeenCalledWith(
       expect.anything(),
       'approval-1',
+      'no_workflow',
     );
   });
 

@@ -196,7 +196,7 @@ describe('GrantService.expire: conditional', () => {
 
     expect(client.approvalRequest.updateMany).toHaveBeenCalledWith({
       where: { id: 'approval-1', status: 'PENDING' },
-      data: { status: 'EXPIRED' },
+      data: { status: 'EXPIRED', endReason: 'no_answer' },
     });
     expect(client.approvalRequest.update).not.toHaveBeenCalled();
   });

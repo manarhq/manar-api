@@ -76,6 +76,12 @@ export class TenantSettingsResponseDto {
   @ApiProperty()
   allowCloudStorage!: boolean;
 
+  @ApiProperty({
+    description:
+      'Company workspaces: when true only approver roles decide approvals; a device owner or agent creator can no longer decide their own. Always false for a personal workspace.',
+  })
+  approvalsAdminsOnly!: boolean;
+
   @ApiProperty({ format: 'date-time' })
   updatedAt!: Date;
 
@@ -109,4 +115,7 @@ export class UpdateTenantSettingsRequestDto {
 
   @ApiProperty({ required: false })
   allowCloudStorage?: boolean;
+
+  @ApiProperty({ required: false, description: 'Company workspaces only.' })
+  approvalsAdminsOnly?: boolean;
 }

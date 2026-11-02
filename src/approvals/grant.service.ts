@@ -138,7 +138,12 @@ export class GrantService {
     );
     const issued = await tenantClient.$transaction(async (tx) => {
       if (!reevaluation.ok) {
-        const claimed = await this.claimPending(tx, existing.id, 'DENIED');
+        const claimed = await this.claimPending(
+          tx,
+          existing.id,
+          'DENIED',
+          reevaluation.failureReason ?? 'reevaluation_failed',
+        );
         return claimed
           ? {
               lost: false as const,
@@ -161,7 +166,7 @@ export class GrantService {
       if (!incremented) {
         await tx.approvalRequest.update({
           where: { id: existing.id },
-          data: { status: 'DENIED' },
+          data: { status: 'DENIED', endReason: 'task_execution_limit_reached' },
         });
         return {
           lost: false as const,
@@ -217,10 +222,12 @@ export class GrantService {
     client: Pick<TenantPrismaClient, 'approvalRequest'>,
     id: string,
     status: 'APPROVED' | 'DENIED',
+    /** Why Manar, not the person, decided: a re-evaluation failure. */
+    endReason?: string,
   ): Promise<boolean> {
     const { count } = await client.approvalRequest.updateMany({
       where: { id, status: 'PENDING' },
-      data: { status },
+      data: endReason ? { status, endReason } : { status },
     });
     return count === 1;
   }
@@ -259,7 +266,7 @@ export class GrantService {
     // Conditional: a decision that landed after the read above wins.
     await tenantClient.approvalRequest.updateMany({
       where: { id: existing.id, status: 'PENDING' },
-      data: { status: 'EXPIRED' },
+      data: { status: 'EXPIRED', endReason: 'no_answer' },
     });
   }
 

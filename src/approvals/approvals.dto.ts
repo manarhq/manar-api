@@ -95,7 +95,9 @@ export class ApprovalRequestSummaryDto {
   @ApiProperty({ type: String, nullable: true, format: 'uuid' })
   policyVersionId!: string | null;
 
-  @ApiProperty({ enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED'] })
+  @ApiProperty({
+    enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED', 'REVOKED'],
+  })
   status!: string;
 
   @ApiProperty({ format: 'date-time' })
@@ -103,6 +105,15 @@ export class ApprovalRequestSummaryDto {
 
   @ApiProperty({ format: 'date-time' })
   expiresAt!: Date;
+
+  @ApiProperty({
+    type: [String],
+    enum: ['approve_once', 'approve_8h', 'deny'],
+    isArray: true,
+    description:
+      'What the signed-in person may answer (empty when it is not PENDING or they may not decide it). An approver may do all; the agent creator may approve once or deny unless the workspace is "admins only".',
+  })
+  allowedDecisions!: string[];
 }
 
 /**
@@ -133,7 +144,9 @@ export class ApprovalRequestDetailDto {
   @ApiProperty()
   resource!: string;
 
-  @ApiProperty({ enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED'] })
+  @ApiProperty({
+    enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED', 'REVOKED'],
+  })
   status!: string;
 
   @ApiProperty({ format: 'date-time' })
@@ -247,6 +260,50 @@ export class ApprovalRequestDetailDto {
     description: 'When the single-use grant was redeemed, if it was.',
   })
   grantConsumedAt!: Date | null;
+
+  @ApiProperty({ type: [String], isArray: true })
+  allowedDecisions!: string[];
+
+  @ApiProperty({
+    description: 'Whether the signed-in person may revoke it now.',
+  })
+  canRevoke!: boolean;
+
+  @ApiProperty({
+    type: Date,
+    nullable: true,
+    format: 'date-time',
+    description: 'The first time the agent read it as approved.',
+  })
+  releasedAt!: Date | null;
+
+  @ApiProperty({ type: Date, nullable: true, format: 'date-time' })
+  revokedAt!: Date | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'Name of the person who revoked it.',
+  })
+  revokedByName!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  revokeNote!: string | null;
+
+  @ApiProperty({
+    type: Boolean,
+    nullable: true,
+    description: 'True: revoked after the agent had it (it may have run).',
+  })
+  usedBeforeRevoke!: boolean | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Why it ended without a person: no_answer, paused, superseded, or a re-evaluation reason.',
+  })
+  endReason!: string | null;
 }
 
 /** `GET /approvals`'s response envelope — see `AgentListResponseDto`'s identical shape/doc comment. */
@@ -256,4 +313,103 @@ export class ApprovalRequestListResponseDto {
 
   @ApiProperty({ nullable: true })
   nextCursor!: string | null;
+}
+
+export class RevokeApprovalRequestDto {
+  @ApiProperty({
+    required: false,
+    maxLength: 500,
+    description: 'Why, for the record.',
+  })
+  note?: string;
+}
+
+export class RevokeApprovalResponseDto {
+  @ApiProperty() id!: string;
+  @ApiProperty({ enum: ['REVOKED'] }) status!: 'REVOKED';
+  @ApiProperty({
+    description:
+      'False: cancelled before use, nothing ran. True: it may have run; the action is now blocked and the admins were alerted.',
+  })
+  usedBeforeRevoke!: boolean;
+  @ApiProperty({
+    description: '8-hour grants and remembered site rules withdrawn with it.',
+  })
+  withdrawn!: number;
+  @ApiProperty({ type: String, nullable: true }) blockId!: string | null;
+  @ApiProperty({ type: String, nullable: true }) incidentId!: string | null;
+}
+
+/** One row of `GET /approvals/history`: an agent or a device approval, every state. */
+export class ApprovalHistoryItemDto {
+  @ApiProperty({ enum: ['agent', 'host'] }) kind!: 'agent' | 'host';
+  @ApiProperty() id!: string;
+  @ApiProperty({ format: 'date-time' }) requestedAt!: Date;
+  @ApiProperty({
+    enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED', 'REVOKED'],
+  })
+  status!: string;
+  @ApiProperty() toolId!: string;
+  @ApiProperty() actionId!: string;
+  @ApiProperty() resource!: string;
+  @ApiProperty({
+    type: Object,
+    additionalProperties: true,
+    description:
+      '{ type: "device", hostId, name } or { type: "agent", agentId, name, taskId }',
+  })
+  source!: Record<string, unknown>;
+  @ApiProperty({ type: Number, nullable: true }) riskScore!: number | null;
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['approve_once', 'approve_8h', 'approve_always', 'deny', null],
+  })
+  decision!: string | null;
+  @ApiProperty({ type: String, nullable: true }) decidedByName!: string | null;
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'console, device, push, telegram',
+  })
+  decidedVia!: string | null;
+  @ApiProperty({ type: Date, nullable: true, format: 'date-time' })
+  decidedAt!: Date | null;
+  @ApiProperty({ type: String, nullable: true }) reason!: string | null;
+  @ApiProperty({ type: String, nullable: true }) endReason!: string | null;
+  @ApiProperty({ format: 'date-time' }) expiresAt!: Date;
+  @ApiProperty({
+    type: Date,
+    nullable: true,
+    format: 'date-time',
+    description:
+      'When the device or agent received the approval (from then on it may have run).',
+  })
+  usedAt!: Date | null;
+  @ApiProperty({ type: Date, nullable: true, format: 'date-time' })
+  revokedAt!: Date | null;
+  @ApiProperty({ type: String, nullable: true }) revokedByName!: string | null;
+  @ApiProperty({ type: String, nullable: true }) revokeNote!: string | null;
+  @ApiProperty({ type: Boolean, nullable: true }) usedBeforeRevoke!:
+    boolean | null;
+  @ApiProperty({
+    type: 'array',
+    items: { type: 'object', additionalProperties: true },
+    description:
+      '8-hour grants, blocks and the site rule this approval created: { kind: "grant"|"block"|"site_rule", id, mode?, expiresAt, revokedAt, useCount? }',
+  })
+  standing!: Record<string, unknown>[];
+  @ApiProperty({ type: [String], isArray: true }) allowedDecisions!: string[];
+  @ApiProperty() canRevoke!: boolean;
+}
+
+export class ApprovalHistoryResponseDto {
+  @ApiProperty({ type: () => ApprovalHistoryItemDto, isArray: true })
+  items!: ApprovalHistoryItemDto[];
+  @ApiProperty({ type: String, nullable: true }) nextCursor!: string | null;
+  @ApiProperty({
+    description:
+      'True when the person sees every approval in the workspace; false: only their own devices and agents.',
+  })
+  seesAll!: boolean;
 }

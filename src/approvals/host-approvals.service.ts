@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   HttpException,
   Injectable,
@@ -23,6 +22,12 @@ import {
 } from '../jail/jail-sites.service';
 import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
+import { ApproverDirectory, choicesFor } from './approver-directory';
+import {
+  PAUSED_CONFLICT_MESSAGE,
+  approvalConflict,
+  notPendingConflict,
+} from './approvals.errors';
 
 /** `approve_always` exists for a new site only (JAIL): it makes a permanent site rule. */
 export type HostDecision =
@@ -74,6 +79,13 @@ export interface DecideHostApprovalInput {
   nonce?: { value: string; expiresAt: Date };
   /** Console only: the caller may write site rules (owner / security admin). Absent means no. */
   canWriteSiteRules?: boolean;
+  /**
+   * Device only: the device stopped waiting (its 2 minutes ran out). Recorded as EXPIRED
+   * `withdrawn`, never as a person's deny. A device `deny` of a new site is always this: WARDEN
+   * never shows buttons for sites, so only JAIL's own timeout sends it (edges before 3 Nov 2026
+   * do not set the flag).
+   */
+  withdraw?: boolean;
 }
 
 @Injectable()
@@ -81,6 +93,7 @@ export class HostApprovalsService {
   constructor(
     private readonly audit: AuditService,
     private readonly push: PushService,
+    private readonly approvers: ApproverDirectory,
     @Optional() private readonly telegram?: TelegramService,
   ) {}
 
@@ -226,7 +239,7 @@ export class HostApprovalsService {
     for (const row of due) {
       const won = await client.hostApproval.updateMany({
         where: { id: row.id, status: 'PENDING' },
-        data: { status: 'EXPIRED' },
+        data: { status: 'EXPIRED', endReason: 'no_answer' },
       });
       if (won.count === 0) continue;
       n++;
@@ -249,14 +262,20 @@ export class HostApprovalsService {
     client: TenantPrismaClient,
     hostId: string | undefined,
     at?: Date,
+    /** Only devices this Keycloak subject owns (a person who is not an approver). */
+    opts: { ownerSubject?: string } = {},
   ) {
     const now = at ?? (await dbNow(client));
     return client.hostApproval.findMany({
       where: {
         ...(hostId ? { hostId } : {}),
+        ...(opts.ownerSubject
+          ? { host: { ownerSubject: opts.ownerSubject } }
+          : {}),
         status: 'PENDING',
         expiresAt: { gt: now },
       },
+      include: { host: { select: { hostname: true } } },
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
@@ -267,6 +286,52 @@ export class HostApprovalsService {
     if (!row || (hostId && row.hostId !== hostId))
       throw new NotFoundException('no such approval');
     return row;
+  }
+
+  /** The device stopped waiting: EXPIRED `withdrawn`, so a late answer cannot allow anything. */
+  private async withdraw(
+    client: TenantPrismaClient,
+    tenantId: string,
+    row: { id: string; hostId: string; toolId: string; actionId: string },
+  ) {
+    const won = await client.hostApproval.updateMany({
+      where: { id: row.id, status: 'PENDING' },
+      data: { status: 'EXPIRED', endReason: 'withdrawn' },
+    });
+    if (won.count === 1)
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_EXPIRED,
+        actor: { type: 'system', id: row.hostId },
+        data: {
+          hostApprovalId: row.id,
+          hostId: row.hostId,
+          toolId: row.toolId,
+          actionId: row.actionId,
+          reason: 'withdrawn',
+        },
+      });
+    return {
+      id: row.id,
+      status: 'EXPIRED' as const,
+      decision: null,
+      grantId: null,
+      remembered: false,
+      note: null,
+      ruleDraft: null,
+    };
+  }
+
+  /**
+   * The device read this approval. The first read of an APPROVED one marks it used: from then on
+   * the action may have run, so a revoke can only flag it. Conditional, so it races a revoke
+   * cleanly: whichever lands first decides whether the device sees APPROVED or REVOKED.
+   */
+  async readForDevice(client: TenantPrismaClient, id: string, hostId: string) {
+    await client.hostApproval.updateMany({
+      where: { id, hostId, status: 'APPROVED', usedAt: null },
+      data: { usedAt: await dbNow(client) },
+    });
+    return this.get(client, id, hostId);
   }
 
   /**
@@ -295,6 +360,33 @@ export class HostApprovalsService {
       throw new ForbiddenException('site_in_console');
     if (input.decision === 'approve_always' && !isSite)
       throw new BadRequestException('always is for a new site only');
+    if (
+      input.via === 'device' &&
+      input.decision === 'deny' &&
+      (input.withdraw || isSite)
+    )
+      return this.withdraw(client, tenantId, row);
+    // Founder decision, 3 Nov 2026: an approver decides anything; the device's owner decides
+    // their own device's requests unless the workspace is "admins only". Checked here, where every
+    // channel (console, device, phone, Telegram) arrives, so no caller can skip it.
+    const owner = await client.host.findUnique({
+      where: { id: row.hostId },
+      select: { ownerSubject: true },
+    });
+    const kind = await this.approvers.deciderKind(
+      tenantId,
+      client,
+      input.subject,
+      owner?.ownerSubject,
+    );
+    if (!kind)
+      throw new ForbiddenException(
+        'Only a workspace approver or the owner of this device can answer this request. Nothing was changed.',
+      );
+    if (!choicesFor(kind, row).includes(input.decision))
+      throw new ForbiddenException(
+        'As the owner of this device you can approve once or deny. Longer approvals need a workspace approver. Nothing was changed.',
+      );
     // A permanent site rule needs the role that may write site rules; an approver without it
     // gets "once" (fail closed: an absent flag is "no").
     let decision: HostDecision = input.decision;
@@ -314,7 +406,7 @@ export class HostApprovalsService {
       // Inside the transaction, so a pause that lands between the check and the write cannot be
       // missed. A deny is always allowed; an approval is refused while AI is paused.
       if (input.decision !== 'deny' && (await isWorkspacePaused(tx)))
-        throw new ConflictException(PAUSED_REASON);
+        throw approvalConflict('paused', PAUSED_CONFLICT_MESSAGE);
       const now = at ?? (await dbNow(tx));
       // A person's answer to "may this tool connect to this site?" is remembered per device and
       // tool, unless a DENY or a rule made by hand already speaks for this site: then it is
@@ -342,8 +434,16 @@ export class HostApprovalsService {
           decidedAt: now,
         },
       });
-      if (won.count === 0)
-        throw new ConflictException('already decided or expired');
+      if (won.count === 0) {
+        const current = await tx.hostApproval.findUnique({
+          where: { id: row.id },
+          select: { status: true },
+        });
+        // PENDING past its expiry is expired; the sweeper has not written it yet.
+        throw notPendingConflict(
+          !current || current.status === 'PENDING' ? 'EXPIRED' : current.status,
+        );
+      }
       if (input.nonce) {
         try {
           await tx.phoneActionUse.create({
@@ -355,7 +455,10 @@ export class HostApprovalsService {
         } catch {
           // Unique violation: the token was spent. This aborts the transaction, so the decision
           // above is rolled back with it.
-          throw new ConflictException('action_already_used');
+          throw approvalConflict(
+            'action_already_used',
+            'This button was already used. Nothing was changed.',
+          );
         }
       }
       if (wantsRemember && note !== 'site_rule_exists') {
