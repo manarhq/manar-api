@@ -72,7 +72,8 @@ export class HostsAdminService {
     return client.host
       .findMany({
         where: {
-          ...(input.status ? { status: input.status } : {}),
+          // Removed devices only when asked for by status.
+          status: input.status ?? { not: 'REMOVED' },
           ...(input.hostGroupId ? { hostGroupId: input.hostGroupId } : {}),
           ...cursorWhereClause('createdAt', input.cursor),
         },
@@ -189,9 +190,14 @@ export class HostsAdminService {
   }
 
   /**
-   * "Remove device": revokes the host's certificates, then deletes its record, so the machine
-   * can be installed again from scratch (a REJECTED or REVOKED machineId is otherwise refused
-   * for good). Audited in the same transaction as the delete.
+   * "Remove device" (unenrol): revokes the host's certificates and retires its record (status
+   * REMOVED). The row is kept, not deleted: sessions, approvals, events and AI usage point at it
+   * and stay readable under "Removed devices". The device is told on its next call (410
+   * device_removed) and stops protecting. Re-installing the machine enrols it again: within
+   * RESTORE_WINDOW_MS as this same record, later as a new one (HostsService). Open approvals
+   * expire and "approve for 8 hours" grants are revoked. Removing an already-removed host only
+   * retries the certificate revocation (a double click, or OpenBao was down). Audited in the
+   * same transaction.
    */
   async remove(
     client: TenantPrismaClient,
@@ -201,17 +207,56 @@ export class HostsAdminService {
   ): Promise<void> {
     const host = await client.host.findUnique({ where: { id: hostId } });
     if (!host) throw new HostNotFoundError(hostId);
+    if (host.status !== 'REMOVED') {
+      await this.retire(client, tenantId, actor, host);
+    }
+    // After the status change, so a certificate issued meanwhile is caught too (registration
+    // re-reads the host after signing). Marked revoked locally first; OpenBao follows.
     await this.ca.revokeHostCertificates(client, hostId);
+  }
+
+  private async retire(
+    client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
+    host: Host,
+  ): Promise<void> {
+    const hostId = host.id;
+    const now = new Date();
     const publish = await client.$transaction(async (tx) => {
-      await tx.hostCertificate.deleteMany({ where: { hostId } });
-      await tx.host.delete({ where: { id: hostId } });
+      // The same row lock registration takes: the two never interleave for one machine.
+      await tx.$queryRaw`SELECT 1 FROM "hosts" WHERE "id" = ${hostId} FOR UPDATE`;
+      const { count } = await tx.host.updateMany({
+        where: { id: hostId, status: { not: 'REMOVED' } },
+        data: {
+          status: 'REMOVED',
+          removedAt: now,
+          adcsDnsName: null,
+          pendingKeyFingerprint: null,
+          pendingHostGroupId: null,
+        },
+      });
+      if (count === 0) return null; // a concurrent remove won
+      // Revoked in the same transaction as the status change; OpenBao follows after commit.
+      await tx.hostCertificate.updateMany({
+        where: { hostId, revokedAt: null },
+        data: { revokedAt: now },
+      });
+      await tx.hostApproval.updateMany({
+        where: { hostId, status: 'PENDING' },
+        data: { status: 'EXPIRED' },
+      });
+      await tx.approvalAllowGrant.updateMany({
+        where: { hostId, revokedAt: null },
+        data: { revokedAt: now },
+      });
       return this.audit.recordInTransaction(tx, tenantId, {
         eventType: AUDIT_EVENT_TYPES.HOST_REMOVED,
         actor,
         data: { hostId, machineId: host.machineId, from: host.status },
       });
     });
-    publish();
+    publish?.();
   }
 
   /**

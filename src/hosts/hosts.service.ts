@@ -8,6 +8,7 @@ import { Injectable } from '@nestjs/common';
 import * as x509 from '@peculiar/x509';
 import type {
   Host,
+  Prisma,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
@@ -100,6 +101,9 @@ export interface RegisterHostResult {
 
 /** `approvedBy` and audit actor for a personal workspace's device approved by its owner's code. */
 const OWNER_APPROVER = 'system:personal-install-code';
+
+/** A removed device that enrols again within this window comes back as the same record. */
+export const RESTORE_WINDOW_MS = 30 * 24 * 3_600_000;
 
 /**
  * Host registration (docs/hosts.md). Order matters:
@@ -254,9 +258,40 @@ export class HostsService {
 
     const { host, publish, rekeyPending, reenrolled } =
       await client.$transaction(async (tx) => {
-        const existing = await tx.host.findUnique({
+        // Serialises with "Remove device" (HostsAdminService.retire takes the same row lock), so a
+        // removal and a registration of one machine never interleave.
+        await tx.$queryRaw`SELECT 1 FROM "hosts" WHERE "machineId" = ${input.machineId} FOR UPDATE`;
+        const found = await tx.host.findUnique({
           where: { machineId: input.machineId },
         });
+        // A removed machine enrols as a new device would. Its owner re-installing it with an
+        // install key within RESTORE_WINDOW_MS revives the old record (history continues), and
+        // it waits PENDING for an admin. Anyone else, another enrolment method, or a later
+        // install gets a new record; the old one keeps the history and gives up the machineId.
+        let revive: Host | null = null;
+        if (found?.status === 'REMOVED') {
+          const removedAt = found.removedAt?.getTime() ?? 0;
+          if (
+            Date.now() - removedAt < RESTORE_WINDOW_MS &&
+            ctx.method === 'INSTALL_KEY' &&
+            found.enrolmentMethod === 'INSTALL_KEY' &&
+            !!ctx.ownerSubject &&
+            found.ownerSubject === ctx.ownerSubject
+          ) {
+            revive = found;
+            // Certificates of the removed record never come back to life with it.
+            await tx.hostCertificate.updateMany({
+              where: { hostId: found.id, revokedAt: null },
+              data: { revokedAt: new Date() },
+            });
+          } else {
+            await tx.host.update({
+              where: { id: found.id },
+              data: { machineId: `removed:${found.id}` },
+            });
+          }
+        }
+        const existing = found?.status === 'REMOVED' ? null : found;
         if (
           existing &&
           (existing.status === 'REVOKED' || existing.status === 'REJECTED')
@@ -366,10 +401,11 @@ export class HostsService {
         }
         // A personal owner's own code approves a NEW device only. machineId is the installer's
         // claim, so a re-install of a known machine (new key) waits for the owner to confirm it.
+        // A revived record always waits for an admin: no owner or rule approval.
         const ownerApproved =
-          !!ctx.ownerApproves && ctx.autoApprove && !existing;
+          !!ctx.ownerApproves && ctx.autoApprove && !existing && !revive;
         const rule =
-          existing || !ctx.autoApprove || ownerApproved
+          existing || revive || !ctx.autoApprove || ownerApproved
             ? null
             : matchApprovalRule(
                 await tx.hostApprovalRule.findMany({
@@ -400,6 +436,26 @@ export class HostsService {
           : {};
         const moved =
           existing !== null && existing.hostGroupId !== targetGroupId;
+        const fresh: Omit<Prisma.HostUncheckedCreateInput, 'machineId'> = {
+          hostGroupId: targetGroupId,
+          hostname: input.hostname,
+          os: input.os,
+          keyType,
+          keyFingerprint,
+          registeredFromIp: input.ip,
+          lastSeenAt: new Date(),
+          ownerSubject: ctx.ownerSubject ?? null,
+          installKeyId: ctx.installKeyId,
+          ...adFacts,
+          ...tpmFacts,
+          ...(rule || ownerApproved
+            ? {
+                status: 'APPROVED' as const,
+                approvedBy: rule ? `rule:${rule.id}` : OWNER_APPROVER,
+                approvedAt: new Date(),
+              }
+            : {}),
+        };
         const saved = existing
           ? await tx.host.update({
               where: { id: existing.id },
@@ -427,29 +483,29 @@ export class HostsService {
                 ...tpmFacts,
               },
             })
-          : await tx.host.create({
-              data: {
-                hostGroupId: targetGroupId,
-                machineId: input.machineId,
-                hostname: input.hostname,
-                os: input.os,
-                keyType,
-                keyFingerprint,
-                registeredFromIp: input.ip,
-                lastSeenAt: new Date(),
-                ownerSubject: ctx.ownerSubject ?? null,
-                installKeyId: ctx.installKeyId,
-                ...adFacts,
-                ...tpmFacts,
-                ...(rule || ownerApproved
-                  ? {
-                      status: 'APPROVED' as const,
-                      approvedBy: rule ? `rule:${rule.id}` : OWNER_APPROVER,
-                      approvedAt: new Date(),
-                    }
-                  : {}),
-              },
-            });
+          : revive
+            ? await tx.host.update({
+                where: { id: revive.id },
+                // Everything a new host would start with; the id (and so the history) stays.
+                data: {
+                  status: 'PENDING',
+                  approvedBy: null,
+                  approvedAt: null,
+                  removedAt: null,
+                  pendingKeyFingerprint: null,
+                  pendingHostGroupId: null,
+                  enrolmentMethod: 'INSTALL_KEY',
+                  adcsDnsName: null,
+                  adDn: null,
+                  adDnCheckedAt: null,
+                  tpmVerified: false,
+                  tpmEkFingerprint: null,
+                  ...fresh,
+                },
+              })
+            : await tx.host.create({
+                data: { machineId: input.machineId, ...fresh },
+              });
         const registered = await this.audit.recordInTransaction(tx, tenant.id, {
           eventType: AUDIT_EVENT_TYPES.HOST_REGISTERED,
           actor: { type: 'system', id: 'system:host-registration' },
@@ -459,7 +515,8 @@ export class HostsService {
             installKeyId: ctx.installKeyId,
             enrolmentMethod: ctx.method,
             merged: existing !== null,
-            reenrolled: reenrol,
+            restored: revive !== null,
+            reenrolled: reenrol || revive !== null,
             status: saved.status,
             approvalRuleId: rule?.id ?? null,
             keyType: saved.keyType,
@@ -519,14 +576,14 @@ export class HostsService {
               groupMoved();
             },
             rekeyPending: false,
-            reenrolled: reenrol,
+            reenrolled: reenrol || revive !== null,
           };
         }
         return {
           host: saved,
           publish: done,
           rekeyPending: false,
-          reenrolled: reenrol,
+          reenrolled: reenrol || revive !== null,
         };
       });
     publish();
@@ -536,20 +593,20 @@ export class HostsService {
       );
     }
 
-    // A re-install replaced the key: the old key's certificates stop now.
+    // A re-install replaced the key (or revived a removed record): the old certificates stop now.
     if (reenrolled) await this.ca.revokeHostCertificates(client, host.id);
     const issued = await this.ca.issueHostCertificate(
       client,
       { id: host.id, identifier },
       input.csr,
     );
-    // The host may have been revoked, rejected or rekeyed while the CA was
+    // The host may have been revoked, rejected, removed or rekeyed while the CA was
     // signing: a certificate that no longer matches is revoked at once.
     const now = await client.host.findUnique({ where: { id: host.id } });
     if (
       !now ||
-      now.status === 'REVOKED' ||
-      now.status === 'REJECTED' ||
+      (now.status !== 'PENDING' && now.status !== 'APPROVED') ||
+      now.removedAt !== null ||
       now.keyFingerprint !== keyFingerprint
     ) {
       await this.ca.revokeHostCertificateSerial(client, issued.serialNumber);

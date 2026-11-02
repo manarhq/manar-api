@@ -39,7 +39,9 @@ approval both check it inside their own transaction under `pg_advisory_xact_lock
 
 `HostAuthGuard` resolves the certificate SAN `host://<tenantSlug>/<machineId>` to a host in that
 tenant's database and requires the exact certificate serial to be issued to it and unrevoked.
-REJECTED and REVOKED hosts are refused; a PENDING host may call. Handlers read `@CurrentHost()`
+REJECTED and REVOKED hosts are refused; a PENDING host may call. A certificate issued to a host the
+workspace removed gets `410 { code: "device_removed" }` (revoked or not): the device stops
+protecting, restores what it changed, and stays installed until someone uninstalls it. Handlers read `@CurrentHost()`
 (`hostId`, `tenantId`, `machineId`, `ownerSubject`, `status`). `GET /host/v1/config` returns
 `{ hostId, status, startMode, features, paused, tools }`. `paused` is the workspace's "Pause all AI": while true every protect and hook path answers deny with reason `paused` (the API also denies in the kill-switch check, so devices that miss the flag are still stopped).
 
@@ -230,6 +232,14 @@ Writes need `TENANT_OWNER` or `SECURITY_ADMIN`; reads also allow `AUDITOR`.
 
 - `GET /hosts?status=&hostGroupId=&limit=&cursor=` (newest first, cursor-paginated)
 - `POST /hosts/:id/approve|reject|revoke`
+- `DELETE /hosts/:id` ("Remove device", unenrol): revokes the certificates and marks the host
+  `REMOVED`. The record and everything pointing at it (sessions, approvals, events, tools, AI
+  usage) are kept and listed with `GET /hosts?status=REMOVED`; the plain list leaves it out. Open
+  device approvals expire and "approve for 8 hours" grants are revoked. Repeating it is harmless.
+  Its owner re-installing it with an install key within 30 days brings it back as the same record,
+  PENDING for an admin (no owner or rule approval; old certificates stay revoked). Anyone else, AD
+  CS enrolment, or a later install gets a new host; the old record keeps the history. Removal and
+  registration lock the host row, so they never interleave.
 - `GET /install-keys`, `POST /install-keys`, `POST /install-keys/:id/revoke`
 - `GET/POST/PATCH /host-groups`
 - `GET/POST/PATCH /org-units` (a move under its own subtree is refused with `400`)
