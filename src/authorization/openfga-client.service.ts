@@ -234,6 +234,19 @@ export class OpenFgaClientService implements OnModuleInit {
 
     this.logger.log(`Creating OpenFGA store "${storeName}" (none found)`);
     const created = await client.createStore({ name: storeName });
+    // Replicas starting together can each create a store with this name. All of them settle on
+    // the oldest, so every replica reads and writes the same tuples.
+    const sameName = await listStoresNamed(client, storeName);
+    const winner = sameName.sort(
+      (a, b) =>
+        a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+    )[0];
+    if (winner && winner.id !== created.id) {
+      this.logger.warn(
+        `Another replica created OpenFGA store "${storeName}" first; using ${winner.id}, leaving the unused ${created.id}`,
+      );
+      return winner.id;
+    }
     return created.id;
   }
 
@@ -281,6 +294,24 @@ export class OpenFgaClientService implements OnModuleInit {
     const written = await client.writeAuthorizationModel(desired);
     return written.authorization_model_id;
   }
+}
+
+async function listStoresNamed(
+  client: OpenFgaClient,
+  name: string,
+): Promise<{ id: string; created_at: string }[]> {
+  const found: { id: string; created_at: string }[] = [];
+  let continuationToken: string | undefined;
+  do {
+    const page = await client.listStores({ pageSize: 100, continuationToken });
+    found.push(
+      ...page.stores
+        .filter((store) => store.name === name)
+        .map((store) => ({ id: store.id, created_at: store.created_at })),
+    );
+    continuationToken = page.continuation_token || undefined;
+  } while (continuationToken);
+  return found;
 }
 
 /** Order-insensitive deep comparison of two type-definition arrays — good enough to detect "the DSL file changed" without pulling in a generic deep-equal dependency. */

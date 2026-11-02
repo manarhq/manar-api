@@ -12,10 +12,15 @@ import { AgentMtlsAppModule } from './agent-mtls/agent-mtls-app.module';
 import { allowLargeLlmBodies } from './agent-runtime/llm-proxy.controller';
 import { validate } from './config/env.validation';
 import { httpAdapterOptions } from './config/trusted-proxy';
+import { HTTP_SERVER_OPTIONS } from './config/http-server-options';
 import type { AppConfig } from './config/env.validation';
 import { setupOpenApiDocs } from './openapi/setup-openapi-docs';
 import { setupCors, setupHelmet } from './security/setup-security';
 import { instrumentHttp, startMetricsServer } from './metrics/metrics';
+import {
+  agentListenerBound,
+  expectAgentListener,
+} from './health/agent-listener-state';
 
 async function bootstrap(): Promise<void> {
   // Validated once, directly against process.env, before either Nest
@@ -25,11 +30,15 @@ async function bootstrap(): Promise<void> {
   // ConfigService) is available. Same bootstrap-time constraint
   // agent-mtls.config.ts's doc comment describes.
   const bootstrapConfig = validate(process.env);
+  expectAgentListener();
 
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     // MANAR_TRUSTED_PROXY_CIDRS: request.ip is the real caller behind cloudflared and Traefik.
-    new FastifyAdapter(httpAdapterOptions(bootstrapConfig)),
+    new FastifyAdapter({
+      ...httpAdapterOptions(bootstrapConfig),
+      ...HTTP_SERVER_OPTIONS,
+    }),
     // rawBody: the Stripe webhook verifies its signature over the exact bytes.
     { bufferLogs: true, rawBody: true },
   );
@@ -71,6 +80,7 @@ async function bootstrap(): Promise<void> {
   const agentMtlsApp = await NestFactory.create<NestFastifyApplication>(
     AgentMtlsAppModule,
     new FastifyAdapter({
+      ...HTTP_SERVER_OPTIONS,
       https: {
         cert: readFileSync(bootstrapConfig.AGENT_MTLS_SERVER_CERT_PATH),
         key: readFileSync(bootstrapConfig.AGENT_MTLS_SERVER_KEY_PATH),
@@ -93,6 +103,7 @@ async function bootstrap(): Promise<void> {
   setupHelmet(agentMtlsApp);
   enableGracefulShutdown(agentMtlsApp);
   await agentMtlsApp.listen(bootstrapConfig.AGENT_MTLS_PORT, '0.0.0.0');
+  agentListenerBound();
   startMetricsServer(bootstrapConfig.METRICS_PORT);
 }
 
