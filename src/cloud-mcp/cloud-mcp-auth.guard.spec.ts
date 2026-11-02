@@ -577,6 +577,84 @@ describe('CloudMcpAuthGuard', () => {
   });
 });
 
+describe('legacy MCP hosts (domain move)', () => {
+  const LEGACY = 'mcp.old.test';
+  const OLD_URL = `https://${LEGACY}/mcp/acme/copilot-1`;
+  const env = { MANAR_MCP_LEGACY_HOSTS: LEGACY };
+  const onHost = (hostname: string, authorization?: string) => {
+    const c = context(authorization);
+    (c.request as unknown as { hostname: string }).hostname = hostname;
+    return c;
+  };
+
+  it('accepts a token whose audience is the old host URL, on either host', async () => {
+    const { guard } = setup({ env });
+    for (const host of [HOST, LEGACY]) {
+      const { ctx } = onHost(
+        host,
+        `Bearer ${await token({}, { aud: OLD_URL })}`,
+      );
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
+    }
+  });
+
+  it('refuses another agent or tenant on the old host, and a token naming two agents', async () => {
+    const { guard } = setup({ env });
+    for (const [aud, reason] of [
+      [`https://${LEGACY}/mcp/acme/other`, 'wrong_audience'],
+      [`https://${LEGACY}/mcp/globex/copilot-1`, 'wrong_audience'],
+      [[OLD_URL, `https://${LEGACY}/mcp/acme/other`], 'foreign_audience'],
+    ] as const) {
+      const { ctx } = onHost(
+        LEGACY,
+        `Bearer ${await token({}, { aud: [...[aud].flat()] })}`,
+      );
+      const { body } = await refusal(guard.canActivate(ctx));
+      expect(body.reason).toBe(reason);
+    }
+  });
+
+  it('challenges with the metadata URL of the host used; an unknown host gets the primary', async () => {
+    const { guard } = setup({ env });
+    const legacy = onHost(LEGACY);
+    await refusal(guard.canActivate(legacy.ctx));
+    expect(legacy.replyHeaders['WWW-Authenticate']).toContain(
+      `https://${LEGACY}/.well-known/oauth-protected-resource/mcp/acme/copilot-1`,
+    );
+    const evil = onHost('evil.example');
+    await refusal(guard.canActivate(evil.ctx));
+    expect(evil.replyHeaders['WWW-Authenticate']).toContain(METADATA_URL);
+    expect(evil.replyHeaders['WWW-Authenticate']).not.toContain('evil');
+  });
+
+  it('metadata carries the resource URL of the host used, never an unlisted host', async () => {
+    const { config } = setup({ env });
+    const controller = new CloudMcpController(
+      config,
+      {
+        tenant: {
+          findUnique: () =>
+            Promise.resolve({ status: 'ACTIVE', keycloakIssuerUrl: ISSUER }),
+        },
+      } as never,
+      {} as never,
+      {
+        increment: () => Promise.resolve({ isBlocked: false }),
+      } as unknown as ThrottlerStorage,
+    );
+    const resourceOn = async (hostname: string) =>
+      (
+        await controller.protectedResourceMetadata('acme', 'copilot-1', {
+          ip: '203.0.113.7',
+          hostname,
+        } as never)
+      ).resource;
+    expect(await resourceOn(LEGACY)).toBe(OLD_URL);
+    expect(await resourceOn(HOST)).toBe(MCP_URL);
+    expect(await resourceOn('evil.example')).toBe(MCP_URL);
+  });
+});
+
 describe('CloudMcpController protected resource metadata', () => {
   const request = { ip: '203.0.113.7' } as never;
   const limits = (blocked = false) =>

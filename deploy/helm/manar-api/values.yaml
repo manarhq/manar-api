@@ -225,6 +225,8 @@ config:
   # /.well-known/oauth-protected-resource/ on that host to `httpPort` (manar-infra ingress).
   MANAR_MCP_ENABLED: 'false'
   MANAR_MCP_HOST: ''
+  # Older MCP hosts that keep answering after the host moved (comma-separated; 90-day overlap).
+  MANAR_MCP_LEGACY_HOSTS: ''
   MANAR_MCP_DCR_TRUSTED_HOSTS: chatgpt.com
   # ChatGPT (dynamic client registration) on the shared realm; 'false' turns it off.
   MANAR_MCP_CHATGPT_ENABLED: 'true'
@@ -582,7 +584,7 @@ networkPolicy:
     # public addresses only, and only TCP 443: an upstream on another port
     # (a self-hosted GitLab on :8443, say) needs its own entry. Narrow the CIDR to the providers' published ranges
     # or route through an egress proxy where the platform has one.
-    # Keycloak through its public issuer (https://auth.manar.vax.sh). manar-infra's
+    # Keycloak through its public issuer (https://auth-manar.fixio.ae). manar-infra's
     # CoreDNS rewrite sends that name to traefik-internal (Traefik websecure, pod
     # port 8443), which serves keycloak-internal-tls from manar-internal-ca: set
     # backingServiceTls.caSecretName so the pods trust it. Without the rewrite the

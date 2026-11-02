@@ -5,6 +5,14 @@ import type { AppConfig } from '../config/env.validation';
 const DNS_NAME =
   /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
+const HOST_LIST =
+  'comma-separated plain host names (no scheme, port, path or wildcard)';
+const isHostList = (value: string) =>
+  value
+    .split(',')
+    .map((host) => host.trim())
+    .every((host) => host === '' || DNS_NAME.test(host));
+
 /** Client ids Manar gives pre-registered (Copilot Studio) clients. */
 export const PRE_REGISTERED_CLIENT_PREFIX = 'manar-cloud-';
 /** Token claim the agent scope's role mapper writes the user's agent role into. */
@@ -34,17 +42,17 @@ export const CloudMcpConfigSchema = z.object({
    */
   MANAR_MCP_DCR_TRUSTED_HOSTS: z
     .string()
-    .refine(
-      (value) =>
-        value
-          .split(',')
-          .map((host) => host.trim())
-          .every((host) => host === '' || DNS_NAME.test(host)),
-      'comma-separated plain host names (no scheme, port, path or wildcard)',
-    )
+    .refine(isHostList, HOST_LIST)
     .optional(),
   /**
-   * Issuer of the shared hosted realm (`https://auth-manar.vax.sh/realms/manar`). Tenants with no
+   * Older public hosts that keep answering for this endpoint after the primary host moved (a
+   * domain change: installed connectors and tokens still name the old host). Comma-separated plain
+   * host names. Each serves the MCP routes and its own protected resource metadata; a token whose
+   * audience names the same agent on any of these hosts or the primary is accepted. Unset: none.
+   */
+  MANAR_MCP_LEGACY_HOSTS: z.string().refine(isHostList, HOST_LIST).optional(),
+  /**
+   * Issuer of the shared hosted realm (`https://auth-manar.fixio.ae/realms/manar`). Tenants with no
    * realm of their own connect their cloud agents there. Unset: such tenants cannot connect any.
    */
   MANAR_MCP_SHARED_ISSUER: z.preprocess(
@@ -84,6 +92,8 @@ export interface CloudMcpSettings {
   /** Null when the endpoint is off. */
   host: string | null;
   dcrTrustedHosts: string[];
+  /** Older hosts that still answer (`MANAR_MCP_LEGACY_HOSTS`), lower case; empty when off. */
+  legacyHosts: string[];
   /** Shared realm issuer without a trailing slash, or null. */
   sharedIssuer: string | null;
   chatGptOnSharedRealm: boolean;
@@ -105,11 +115,38 @@ export function cloudMcpSettings(
       .split(',')
       .map((host) => host.trim().toLowerCase())
       .filter(Boolean),
+    legacyHosts: (get('MANAR_MCP_LEGACY_HOSTS') ?? '')
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
     sharedIssuer: get('MANAR_MCP_SHARED_ISSUER')?.replace(/\/+$/, '') ?? null,
     chatGptOnSharedRealm: get('MANAR_MCP_CHATGPT_ENABLED') !== 'false',
     ratePerMinute: get('MANAR_MCP_RATE_LIMIT_PER_MINUTE') ?? 60,
     maxBodyBytes: get('MANAR_MCP_MAX_BODY_BYTES') ?? 262_144,
   };
+}
+
+/** Primary host first, then the legacy hosts: every host the endpoint answers for. */
+export function cloudMcpHosts(settings: CloudMcpSettings): string[] {
+  return settings.host ? [settings.host, ...settings.legacyHosts] : [];
+}
+
+/**
+ * The host the client used: the request's host if it is the primary or a legacy host, else the
+ * primary. Never reflects an unlisted name, so a forged Host / X-Forwarded-Host cannot put a
+ * foreign host into metadata or a challenge. `request.hostname` is the Host header, or
+ * X-Forwarded-Host only when the peer is a trusted proxy (`MANAR_TRUSTED_PROXY_CIDRS`).
+ */
+export function cloudMcpRequestHost(
+  settings: CloudMcpSettings,
+  request: { hostname?: string },
+): string {
+  const used = (request.hostname ?? '').toLowerCase().replace(/:\d+$/, '');
+  return (
+    cloudMcpHosts(settings).find((h) => h.replace(/:\d+$/, '') === used) ??
+    settings.host ??
+    ''
+  );
 }
 
 /** The canonical MCP URL of one cloud agent: the token audience and the protected resource. */

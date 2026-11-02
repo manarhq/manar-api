@@ -86,6 +86,15 @@ The public endpoint is not counted in the human API's per-tenant rate limit.
 
 1. Set `MANAR_MCP_ENABLED=true` and `MANAR_MCP_HOST=mcp.<domain>` (chart `config`, off by default).
    `MANAR_MCP_DCR_TRUSTED_HOSTS` takes plain host names only.
+   Moving to a new public domain: set `MANAR_MCP_HOST` to the new host and list the old one(s) in
+   `MANAR_MCP_LEGACY_HOSTS` (comma-separated plain host names, default none) for the overlap, and
+   route the old host to the same service without a redirect. A legacy host serves the MCP routes
+   and protected resource metadata under its own URL (RFC 9728: `resource` is the URL the client
+   used; a host that is neither primary nor legacy gets the primary's). A token is accepted when
+   its audience is the agent's URL on the primary or any legacy host, so agents created before the
+   move (their Keycloak audience holds the old URL) keep working and the connector can be re-added
+   with the new URL. The console and new agents show the primary URL only. Remove the legacy host
+   when no connector uses it any more.
 2. Route `https://mcp.<domain>` to manar-api's HTTP port for the paths `/mcp/` and
    `/.well-known/oauth-protected-resource/` only (manar-infra ingress and the tunnel).
 3. Keycloak must be reachable by the vendors at the realm issuer URL, and that URL must be the `iss`
