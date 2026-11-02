@@ -11,6 +11,8 @@ import type { AuditActor } from '../audit/audit-event-types';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { ensureHostTools, hostTool } from '../tools/host-actions';
 import type { ProtectMode } from '../tools/host-actions';
+import { protectionStatus } from './protection-status';
+import type { ProtectionStatus } from './protection-status';
 import {
   parseMcpServers,
   replaceHostMcpServers,
@@ -39,6 +41,17 @@ export const InventoryRequestSchema = z.object({
   /** The device's whole MCP list. Absent from an older device: the stored list is left as it is. */
   // Entries are checked one by one in `parseMcpServers`: a bad one is dropped, never a 400.
   mcpServers: z.array(z.unknown()).optional(),
+  /** The device service's modules and their state. Absent from an older device: left as stored. */
+  modules: z
+    .record(
+      z.string().regex(/^[a-z][a-z0-9-]{0,39}$/),
+      z.object({
+        state: z.enum(['ok', 'off', 'problem']),
+        detail: z.string().max(200).optional(),
+      }),
+    )
+    .refine((m) => Object.keys(m).length <= 32, 'too many modules')
+    .optional(),
 });
 export type InventoryRequest = z.infer<typeof InventoryRequestSchema>;
 
@@ -164,7 +177,10 @@ export class HostToolsService {
     });
     await client.host.update({
       where: { id: host.hostId },
-      data: { lastSeenAt: now },
+      data: {
+        lastSeenAt: now,
+        ...(input.modules ? { modules: input.modules } : {}),
+      },
     });
     if (input.mcpServers) {
       try {
@@ -255,6 +271,35 @@ export class HostToolsService {
         };
       }),
     };
+  }
+
+  /** `GET /ai-tools/protection`: the workspace's "am I protected?" answer (see protection-status.ts). */
+  async protection(tenantId: string): Promise<ProtectionStatus> {
+    const client = await this.tenants.getClient(tenantId);
+    const hosts = await client.host.findMany({
+      where: { status: { in: ['PENDING', 'APPROVED'] } },
+      select: {
+        id: true,
+        hostname: true,
+        os: true,
+        status: true,
+        lastSeenAt: true,
+        modules: true,
+        tools: {
+          where: { missing: false },
+          orderBy: { name: 'asc' },
+          select: {
+            toolId: true,
+            name: true,
+            protected: true,
+            desiredProtection: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    return protectionStatus(hosts, new Date(), MONITORING_STALE_MS);
   }
 
   /** `POST /ai-tools/:hostId/:toolId/protect|unprotect`: the owner's choice; the device applies it. */
