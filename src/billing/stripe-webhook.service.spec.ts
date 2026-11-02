@@ -46,6 +46,9 @@ function make(
       ),
     },
     stripeEvent: {
+      findUnique: vi.fn(({ where }: { where: { id: string } }) =>
+        Promise.resolve(events.has(where.id) ? { id: where.id } : null),
+      ),
       create: vi.fn(({ data }: { data: { id: string } }) => {
         if (events.has(data.id))
           return Promise.reject(
@@ -169,6 +172,21 @@ describe('StripeWebhookService', () => {
     });
     expect(rows.t1!.plan).toBe('free');
     expect(audit.recordSafely).toHaveBeenCalledTimes(1);
+  });
+
+  it("an event whose apply failed is applied on Stripe's retry, even if the database blipped", async () => {
+    const { send, rows, control, sub } = make(row());
+    // The first delivery dies mid-apply, and the control DB cannot clean anything up.
+    sub.mockRejectedValueOnce(new Error('process stopped'));
+    control.stripeEvent.delete.mockRejectedValue(new Error('db blip'));
+    await expect(send(subEvent('evt_9'))).rejects.toThrow();
+    expect(rows.t1!.plan).toBe('free');
+
+    expect(await send(subEvent('evt_9'))).toEqual({ received: true });
+    expect(rows.t1).toMatchObject({
+      plan: 'pro',
+      stripeSubscriptionId: 'sub_1',
+    });
   });
 
   it('rejects a cross-tenant spoof: metadata names another tenant than the customer', async () => {
