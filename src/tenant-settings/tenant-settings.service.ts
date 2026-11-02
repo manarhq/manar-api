@@ -7,7 +7,11 @@ import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
-import { isExternalAiProvider } from '../ai-advisory/ai-advisory.config';
+import {
+  aiAdvisoryProvider,
+  isExternalAiProvider,
+  type AiAdvisoryProvider,
+} from '../ai-advisory/ai-advisory.config';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { UpdateTenantSettingsRequest } from './tenant-settings.validation';
@@ -32,7 +36,7 @@ export interface TenantSettings {
     jwksUri: string;
   } | null;
   aiProvider: {
-    provider: 'anthropic' | 'ollama' | 'vllm';
+    provider: AiAdvisoryProvider;
     isExternal: boolean;
   };
   rateLimit: {
@@ -174,9 +178,10 @@ export class TenantSettingsService {
     keycloakIssuerUrl: string | null;
     keycloakClientId: string | null;
   }): TenantSettings {
-    const provider = this.configService.get('AI_ADVISORY_PROVIDER', {
-      infer: true,
-    });
+    const provider = aiAdvisoryProvider(
+      this.configService.get('AI_ADVISORY_PROVIDER', { infer: true }),
+      this.configService.get('NODE_ENV', { infer: true }),
+    );
     const rateLimitLimit = this.configService.get('RATE_LIMIT_HUMAN_LIMIT', {
       infer: true,
     });

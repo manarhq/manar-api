@@ -332,8 +332,11 @@ any call that could reach an external provider:
   side's own declaration of which provider `manar-ai` is _currently
   configured_ to use (there is no "describe yourself" RPC on the
   `AnalysisService` contract for `manar-api` to introspect this over the
-  wire) — only `'anthropic'` counts as external; `'ollama'`/`'vllm'` are
-  self-hosted and never gated by this check regardless of the flag.
+  wire). Everything except the self-hosted `'ollama'`/`'vllm'` counts as
+  external (`'anthropic'`, `'azure_openai'`); unset in production resolves to
+  `'undeclared'`, also external. Self-hosted providers are never gated by
+  this check. An `AIR_GAPPED` tenant never reaches an external provider,
+  even with `allowExternalAi = true`.
 - `residencyAllows(tenantId, rpcName)` — the gate every one of
   `analyzeRisk`/`analyzePromptInjection`/`analyzeDlp` calls **before**
   the circuit-breaker check and before any RPC is attempted. For an
