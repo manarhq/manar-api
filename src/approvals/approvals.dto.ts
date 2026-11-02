@@ -111,9 +111,23 @@ export class ApprovalRequestSummaryDto {
     enum: ['approve_once', 'approve_8h', 'deny'],
     isArray: true,
     description:
-      'What the signed-in person may answer (empty when it is not PENDING or they may not decide it). An approver may do all; the agent creator may approve once or deny unless the workspace is "admins only".',
+      'What the signed-in person may answer (empty when it is not PENDING or they may not decide it). An approver may do all except approve a sensitive request from their own agent; the agent creator may approve once or deny routine requests unless the workspace is "admins only".',
   })
   allowedDecisions!: string[];
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['admins_only', 'needs_admin', 'needs_another_admin', null],
+  })
+  needs!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['high_risk', 'handover', null],
+  })
+  why!: string | null;
 }
 
 /**
@@ -265,6 +279,23 @@ export class ApprovalRequestDetailDto {
   allowedDecisions!: string[];
 
   @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['admins_only', 'needs_admin', 'needs_another_admin', null],
+    description: 'Why the person cannot approve it.',
+  })
+  needs!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['high_risk', 'handover', null],
+    description:
+      'What makes it sensitive: an approver decides, never the requester.',
+  })
+  why!: string | null;
+
+  @ApiProperty({
     description: 'Whether the signed-in person may revoke it now.',
   })
   canRevoke!: boolean;
@@ -400,6 +431,8 @@ export class ApprovalHistoryItemDto {
   })
   standing!: Record<string, unknown>[];
   @ApiProperty({ type: [String], isArray: true }) allowedDecisions!: string[];
+  @ApiProperty({ type: String, nullable: true }) needs!: string | null;
+  @ApiProperty({ type: String, nullable: true }) why!: string | null;
   @ApiProperty() canRevoke!: boolean;
 }
 

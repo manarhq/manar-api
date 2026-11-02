@@ -25,11 +25,15 @@ import { explainRisk } from './risk-explain';
 import { HostApprovalsService } from './host-approvals.service';
 import { ApprovalRevokeService } from './approval-revoke.service';
 import {
-  APPROVER_ROLES,
   ApproverDirectory,
-  choicesFor,
-  type DeciderKind,
+  isApproverRole,
+  isOperatorRole,
 } from './approver-directory';
+import {
+  decisionRights,
+  sensitiveReason,
+  type DecisionRights,
+} from './decision-rights';
 
 /**
  * Device approvals in the console: the same queue as WARDEN, plus the high-risk ones. Every member
@@ -49,35 +53,52 @@ export class HostApprovalsConsoleController {
     private readonly revokeService: ApprovalRevokeService,
   ) {}
 
-  private isAdmin(auth: AuthContext): boolean {
-    return auth.roles.some((r) =>
-      (APPROVER_ROLES as readonly string[]).includes(r),
-    );
-  }
-
-  /** What the person may do with their own devices' requests (admins: with any). */
-  private async viewer(auth: AuthContext): Promise<DeciderKind | null> {
-    if (this.isAdmin(auth)) return 'admin';
-    return (await this.approvers.adminsOnly(auth.tenant.id)) ? null : 'owner';
+  /**
+   * What the person may do with one device's request. The owner path needs a role that may operate
+   * devices now (a demoted or removed owner has none), and covers routine requests only.
+   */
+  private async rights(
+    auth: AuthContext,
+    row: {
+      actionId: string;
+      highRisk: boolean;
+      host: { ownerSubject: string | null };
+    },
+    ws?: { adminsOnly: boolean; company: boolean },
+  ): Promise<DecisionRights> {
+    const w = ws ?? (await this.approvers.workspace(auth.tenant.id));
+    return decisionRights({
+      admin: isApproverRole(auth.roles),
+      owner:
+        row.host.ownerSubject === auth.user.keycloakSubject &&
+        isOperatorRole(auth.roles),
+      adminsOnly: w.adminsOnly,
+      company: w.company,
+      sensitive: sensitiveReason(row),
+      actionId: row.actionId,
+    });
   }
 
   @Get()
   @ApiOperation({ summary: 'Pending approvals opened by devices' })
   async list(@CurrentAuth() auth: AuthContext) {
+    const admin = isApproverRole(auth.roles);
+    // Not an approver and no role that operates devices: nothing to see.
+    if (!admin && !isOperatorRole(auth.roles)) return { items: [] };
     const client = await this.tenants.getClient(auth.tenant.id);
     await this.approvals.expireDue(client, auth.tenant.id);
-    const viewer = await this.viewer(auth);
     const rows = await this.approvals.listPending(
       client,
       undefined,
       undefined,
       {
-        ownerSubject:
-          viewer === 'admin' ? undefined : auth.user.keycloakSubject,
+        ownerSubject: admin ? undefined : auth.user.keycloakSubject,
       },
     );
+    const ws = await this.approvers.workspace(auth.tenant.id);
+    const rights = await Promise.all(rows.map((r) => this.rights(auth, r, ws)));
     return {
-      items: rows.map((r) => ({
+      items: rows.map((r, i) => ({
         id: r.id,
         hostId: r.hostId,
         hostName: r.host.hostname,
@@ -90,7 +111,9 @@ export class HostApprovalsConsoleController {
         explanation: explainRisk(r.actionId, r.resource, r.highRisk),
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,
-        allowedDecisions: choicesFor(viewer, r),
+        allowedDecisions: rights[i]!.choices,
+        needs: rights[i]!.needs,
+        why: rights[i]!.why,
       })),
     };
   }
@@ -99,7 +122,7 @@ export class HostApprovalsConsoleController {
   @ApiOperation({
     summary: 'Decide a device approval: approve_once, approve_8h or deny',
     description:
-      '`makeRule` returns a pre-filled policy rule for the rule editor. Approvers decide anything; the device owner may approve once or deny their own device\'s requests unless the workspace is "admins only".',
+      '`makeRule` returns a pre-filled policy rule for the rule editor (approvers only). Approvers decide anything except a sensitive request from their own device; the device owner approves once or denies their own routine requests unless the workspace is "admins only".',
   })
   async decide(
     @CurrentAuth() auth: AuthContext,
@@ -114,7 +137,8 @@ export class HostApprovalsConsoleController {
       decision: input.decision,
       via: 'console',
       // makeRule pre-fills a policy rule: an approver's call.
-      makeRule: input.makeRule && this.isAdmin(auth),
+      makeRule: input.makeRule && isApproverRole(auth.roles),
+      ownerMayOperate: isOperatorRole(auth.roles),
       // A permanent site rule needs the role that may write site rules in the console.
       canWriteSiteRules: auth.roles.some(
         (r) => r === 'TENANT_OWNER' || r === 'SECURITY_ADMIN',
@@ -138,12 +162,20 @@ export class HostApprovalsConsoleController {
     const client = await this.tenants.getClient(auth.tenant.id);
     const row = await client.hostApproval.findUnique({
       where: { id },
-      select: { host: { select: { ownerSubject: true } } },
+      select: {
+        actionId: true,
+        highRisk: true,
+        host: { select: { ownerSubject: true } },
+      },
     });
-    const own = row?.host.ownerSubject === auth.user.keycloakSubject;
-    if (!row || (!this.isAdmin(auth) && !own))
+    const visible =
+      row !== null &&
+      (isApproverRole(auth.roles) ||
+        (row.host.ownerSubject === auth.user.keycloakSubject &&
+          isOperatorRole(auth.roles)));
+    if (!row || !visible)
       throw new NotFoundException('That approval was not found.');
-    if (!(await this.viewer(auth)))
+    if (!(await this.rights(auth, row)).canRevoke)
       throw new ForbiddenException(
         'Only a workspace approver can revoke this approval. Nothing was changed.',
       );

@@ -5,7 +5,11 @@ import {
   type DecodedCursor,
 } from '../common/pagination/cursor-pagination';
 import { SITE_CONNECT_ACTION } from '../jail/jail-sites';
-import { choicesFor, type DeciderKind } from './approver-directory';
+import {
+  decisionRights,
+  sensitiveReason,
+  type DecisionRights,
+} from './decision-rights';
 
 export type ApprovalHistoryStatus =
   'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED' | 'REVOKED';
@@ -14,10 +18,12 @@ export type ApprovalHistoryStatus =
 export interface HistoryViewer {
   userId: string;
   subject: string;
-  /** An approver role: sees and decides everything. */
+  /** An approver role: sees everything and decides it (see decision-rights.ts). */
   admin: boolean;
-  /** Not an admin: may decide their own devices' and agents' requests ("admins only" is off). */
-  ownerMayDecide: boolean;
+  /** Holds a role that may operate agents and devices now: the owner path. */
+  operator: boolean;
+  adminsOnly: boolean;
+  company: boolean;
 }
 
 export interface ApprovalHistoryItem {
@@ -53,6 +59,9 @@ export interface ApprovalHistoryItem {
     useCount?: number;
   }[];
   allowedDecisions: string[];
+  /** Why the person cannot approve it, and what makes it sensitive (decision-rights.ts). */
+  needs: DecisionRights['needs'];
+  why: DecisionRights['why'];
   canRevoke: boolean;
 }
 
@@ -96,7 +105,7 @@ export async function listApprovalHistory(
       orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
       include: {
-        agent: { select: { displayName: true } },
+        agent: { select: { displayName: true, createdBy: true } },
         grant: { select: { consumedAt: true } },
         decisions: { orderBy: { decidedAt: 'desc' }, take: 1 },
       },
@@ -109,7 +118,7 @@ export async function listApprovalHistory(
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
-      include: { host: { select: { hostname: true } } },
+      include: { host: { select: { hostname: true, ownerSubject: true } } },
     }),
   ]);
 
@@ -143,7 +152,10 @@ export async function listApprovalHistory(
       if (m.host.revokedBy) subjects.add(m.host.revokedBy);
     }
   }
-  const [grants, siteRules, people] = await Promise.all([
+  const agentActionIds = page.flatMap((m) =>
+    'agent' in m ? [m.agent.actionId] : [],
+  );
+  const [grants, siteRules, people, actions] = await Promise.all([
     ids.length
       ? client.approvalAllowGrant.findMany({ where: { sourceId: { in: ids } } })
       : [],
@@ -171,7 +183,14 @@ export async function listApprovalHistory(
           },
         })
       : [],
+    agentActionIds.length
+      ? client.toolAction.findMany({
+          where: { id: { in: [...new Set(agentActionIds)] } },
+          select: { id: true, name: true },
+        })
+      : [],
   ]);
+  const actionName = new Map(actions.map((a) => [a.id, a.name]));
   const nameById = new Map(people.map((p) => [p.id, p.displayName || p.email]));
   const nameBySubject = new Map(
     people.map((p) => [p.keycloakSubject, p.displayName || p.email]),
@@ -180,11 +199,23 @@ export async function listApprovalHistory(
   const named = (map: Map<string, string>, key: string | null) =>
     key ? (map.get(key) ?? 'A former member') : null;
 
-  const decider: DeciderKind | null = viewer.admin
-    ? 'admin'
-    : viewer.ownerMayDecide
-      ? 'owner'
-      : null;
+  const rightsFor = (
+    own: boolean,
+    approval: {
+      actionId: string;
+      highRisk?: boolean;
+      riskScore?: number | null;
+    },
+    nameOfAction?: string,
+  ) =>
+    decisionRights({
+      admin: viewer.admin,
+      owner: own && viewer.operator,
+      adminsOnly: viewer.adminsOnly,
+      company: viewer.company,
+      sensitive: sensitiveReason({ ...approval, actionName: nameOfAction }),
+      actionId: approval.actionId,
+    });
   const live = (status: string, expiresAt: Date) =>
     status === 'PENDING' && expiresAt > now;
 
@@ -202,6 +233,11 @@ export async function listApprovalHistory(
       const a = m.agent;
       const d = a.decisions[0];
       const eightHours = standing.some((s) => s.kind === 'grant');
+      const rights = rightsFor(
+        a.agent.createdBy === viewer.userId,
+        a,
+        actionName.get(a.actionId),
+      );
       return {
         kind: 'agent',
         id: a.id,
@@ -237,12 +273,15 @@ export async function listApprovalHistory(
         usedBeforeRevoke: a.usedBeforeRevoke,
         standing,
         allowedDecisions: live(a.status, a.expiresAt)
-          ? choicesFor(decider, a).filter((c) => c !== 'approve_always')
+          ? rights.choices.filter((c) => c !== 'approve_always')
           : [],
-        canRevoke: a.status === 'APPROVED' && decider !== null,
+        needs: rights.needs,
+        why: rights.why,
+        canRevoke: a.status === 'APPROVED' && rights.canRevoke,
       };
     }
     const h = withdrawnLegacy(m.host);
+    const rights = rightsFor(h.host.ownerSubject === viewer.subject, h);
     if (h.actionId === SITE_CONNECT_ACTION) {
       const rule = siteRules.find(
         (r) =>
@@ -285,10 +324,10 @@ export async function listApprovalHistory(
       revokeNote: h.revokeNote,
       usedBeforeRevoke: h.usedBeforeRevoke,
       standing,
-      allowedDecisions: live(h.status, h.expiresAt)
-        ? choicesFor(decider, h)
-        : [],
-      canRevoke: h.status === 'APPROVED' && decider !== null,
+      allowedDecisions: live(h.status, h.expiresAt) ? rights.choices : [],
+      needs: rights.needs,
+      why: rights.why,
+      canRevoke: h.status === 'APPROVED' && rights.canRevoke,
     };
   });
   return { items, nextCursor };

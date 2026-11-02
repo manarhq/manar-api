@@ -51,9 +51,15 @@ import {
 import {
   APPROVER_ROLES,
   ApproverDirectory,
-  choicesFor,
-  type DeciderKind,
+  isApproverRole,
+  isOperatorRole,
 } from './approver-directory';
+import {
+  decisionRights,
+  refusalMessage,
+  sensitiveReason,
+  type DecisionRights,
+} from './decision-rights';
 import { ApprovalRevokeService } from './approval-revoke.service';
 import {
   listApprovalHistory,
@@ -212,18 +218,29 @@ export class ApprovalsController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    const viewer = await this.viewer(auth);
+    const admin = isApproverRole(auth.roles);
+    // Not an approver and no role that operates agents (demoted, or never had one): nothing.
+    if (!admin && !isOperatorRole(auth.roles))
+      return { items: [], nextCursor: null };
     const page = await this.approvalRequestService.listApprovalRequests(
       tenantClient,
       {
         status,
         limit: parseLimit(limit),
         cursor: parseCursor(cursor),
-        ...(viewer === 'admin' ? {} : { agentCreatedBy: auth.user.id }),
+        ...(admin ? {} : { agentCreatedBy: auth.user.id }),
       },
     );
+    const ws = await this.approvers.workspace(auth.tenant.id);
+    const names = await this.actionNames(
+      tenantClient,
+      page.items.map((r) => r.actionId),
+    );
+    const rights = page.items.map((r) =>
+      this.rightsFor(auth, ws, r, r.agent.createdBy, names.get(r.actionId)),
+    );
     return {
-      items: page.items.map((request) => ({
+      items: page.items.map((request, i) => ({
         id: request.id,
         taskId: request.taskId,
         agentId: request.agentId,
@@ -236,9 +253,9 @@ export class ApprovalsController {
         requestedAt: request.requestedAt,
         expiresAt: request.expiresAt,
         allowedDecisions:
-          request.status === 'PENDING'
-            ? choicesFor(viewer, request).filter((c) => c !== 'approve_always')
-            : [],
+          request.status === 'PENDING' ? agentChoices(rights[i]!) : [],
+        needs: rights[i]!.needs,
+        why: rights[i]!.why,
       })),
       nextCursor: page.nextCursor,
     };
@@ -271,7 +288,10 @@ export class ApprovalsController {
         tenantClient,
         id,
       );
-      const access = await this.access(auth, tenantClient, detail.agentId);
+      const access = await this.access(auth, tenantClient, {
+        ...detail,
+        actionName: detail.expectedEffect?.actionName,
+      });
       if (!access.visible) throw new ApprovalRequestNotFoundError(id);
       const revoker = detail.revokedBy
         ? await tenantClient.userProfile.findUnique({
@@ -306,12 +326,10 @@ export class ApprovalsController {
         grantIssued: detail.grantIssued,
         grantConsumedAt: detail.grantConsumedAt,
         allowedDecisions:
-          detail.status === 'PENDING'
-            ? choicesFor(access.kind, detail).filter(
-                (c) => c !== 'approve_always',
-              )
-            : [],
-        canRevoke: detail.status === 'APPROVED' && access.kind !== null,
+          detail.status === 'PENDING' ? agentChoices(access.rights) : [],
+        needs: access.rights.needs,
+        why: access.rights.why,
+        canRevoke: detail.status === 'APPROVED' && access.rights.canRevoke,
         releasedAt: detail.releasedAt,
         revokedAt: detail.revokedAt,
         revokedByName: detail.revokedBy
@@ -380,11 +398,7 @@ export class ApprovalsController {
       throw error;
     }
 
-    const access = await this.access(
-      auth,
-      tenantClient,
-      approvalRequest.agentId,
-    );
+    const access = await this.access(auth, tenantClient, approvalRequest);
     if (!access.visible)
       throw new NotFoundException('That approval was not found.');
     const choice =
@@ -393,16 +407,12 @@ export class ApprovalsController {
         : input.extended
           ? 'approve_8h'
           : 'approve_once';
-    if (!access.kind)
+    if (!access.rights.choices.includes(choice))
+      throw new ForbiddenException(refusalMessage(access.rights));
+    // A rule is a standing approval: only an approver, and only when they may approve outright.
+    if (input.makeRule && !access.rights.choices.includes('approve_8h'))
       throw new ForbiddenException(
-        'Only a workspace approver can answer this request. Nothing was changed.',
-      );
-    if (
-      !choicesFor(access.kind, approvalRequest).includes(choice) ||
-      (input.makeRule && access.kind !== 'admin')
-    )
-      throw new ForbiddenException(
-        'As the creator of this agent you can approve once or deny. Longer approvals and rules need a workspace approver. Nothing was changed.',
+        'Only a workspace approver can turn an approval into a rule. Nothing was changed.',
       );
 
     // No approval is granted while AI is paused; a deny stays possible.
@@ -513,7 +523,10 @@ export class ApprovalsController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    const viewer = await this.viewer(auth);
+    const admin = isApproverRole(auth.roles);
+    if (!admin && !isOperatorRole(auth.roles))
+      return { items: [], nextCursor: null, seesAll: false };
+    const ws = await this.approvers.workspace(auth.tenant.id);
     const page = await listApprovalHistory(tenantClient, {
       limit: parseLimit(limit),
       cursor: parseCursor(cursor),
@@ -521,11 +534,13 @@ export class ApprovalsController {
       viewer: {
         userId: auth.user.id,
         subject: auth.user.keycloakSubject,
-        admin: viewer === 'admin',
-        ownerMayDecide: viewer === 'owner',
+        admin,
+        // The owner path: a role that may operate agents and devices now.
+        operator: isOperatorRole(auth.roles),
+        ...ws,
       },
     });
-    return { ...page, seesAll: viewer === 'admin' };
+    return { ...page, seesAll: admin };
   }
 
   @Post('allow-grants/:grantId/revoke')
@@ -578,14 +593,12 @@ export class ApprovalsController {
     );
     const row = await tenantClient.approvalRequest.findUnique({
       where: { id },
-      select: { agentId: true },
+      select: { agentId: true, actionId: true, riskScore: true },
     });
-    const access = row
-      ? await this.access(auth, tenantClient, row.agentId)
-      : { visible: false, kind: null };
-    if (!access.visible)
+    const access = row ? await this.access(auth, tenantClient, row) : null;
+    if (!access?.visible)
       throw new NotFoundException('That approval was not found.');
-    if (!access.kind)
+    if (!access.rights.canRevoke)
       throw new ForbiddenException(
         'Only a workspace approver can revoke this approval. Nothing was changed.',
       );
@@ -598,35 +611,80 @@ export class ApprovalsController {
     );
   }
 
-  private isAdmin(auth: AuthContext): boolean {
-    return auth.roles.some((r) =>
-      (APPROVER_ROLES as readonly string[]).includes(r),
-    );
-  }
-
-  /** What the signed-in person may do with requests of agents they created (admins: anything). */
-  private async viewer(auth: AuthContext): Promise<DeciderKind | null> {
-    if (this.isAdmin(auth)) return 'admin';
-    return (await this.approvers.adminsOnly(auth.tenant.id)) ? null : 'owner';
+  /**
+   * The rights of the signed-in person over one agent request (decision-rights.ts). The owner path
+   * is the agent's creator who holds a role that may operate agents *now*: `Agent.createdBy` never
+   * changes, so a demoted or removed creator must not keep deciding.
+   */
+  private rightsFor(
+    auth: AuthContext,
+    ws: { adminsOnly: boolean; company: boolean },
+    request: { actionId: string; riskScore: number },
+    createdBy: string | null | undefined,
+    actionName?: string | null,
+  ): DecisionRights {
+    return decisionRights({
+      admin: isApproverRole(auth.roles),
+      owner: createdBy === auth.user.id && isOperatorRole(auth.roles),
+      adminsOnly: ws.adminsOnly,
+      company: ws.company,
+      sensitive: sensitiveReason({
+        actionId: request.actionId,
+        actionName,
+        riskScore: request.riskScore,
+      }),
+      actionId: request.actionId,
+    });
   }
 
   /** Whether the person may see this agent's request, and what they may do with it. */
   private async access(
     auth: AuthContext,
     tenantClient: Awaited<ReturnType<TenantDatabaseManager['getClient']>>,
-    agentId: string,
-  ): Promise<{ visible: boolean; kind: DeciderKind | null }> {
-    if (this.isAdmin(auth)) return { visible: true, kind: 'admin' };
+    request: {
+      agentId: string;
+      actionId: string;
+      riskScore: number;
+      actionName?: string | null;
+    },
+  ): Promise<{ visible: boolean; rights: DecisionRights }> {
     const agent = await tenantClient.agent.findUnique({
-      where: { id: agentId },
+      where: { id: request.agentId },
       select: { createdBy: true },
     });
-    if (agent?.createdBy !== auth.user.id)
-      return { visible: false, kind: null };
-    return { visible: true, kind: await this.viewer(auth) };
+    const name =
+      request.actionName ??
+      (await this.actionNames(tenantClient, [request.actionId])).get(
+        request.actionId,
+      );
+    const rights = this.rightsFor(
+      auth,
+      await this.approvers.workspace(auth.tenant.id),
+      request,
+      agent?.createdBy,
+      name,
+    );
+    const owner =
+      agent?.createdBy === auth.user.id && isOperatorRole(auth.roles);
+    return { visible: isApproverRole(auth.roles) || owner, rights };
+  }
+
+  /** Action names by id, for the handover check (an action id may be a uuid or the name itself). */
+  private async actionNames(
+    tenantClient: Awaited<ReturnType<TenantDatabaseManager['getClient']>>,
+    ids: string[],
+  ): Promise<Map<string, string>> {
+    if (ids.length === 0) return new Map();
+    const rows = await tenantClient.toolAction.findMany({
+      where: { id: { in: [...new Set(ids)] } },
+      select: { id: true, name: true },
+    });
+    return new Map(rows.map((r) => [r.id, r.name]));
   }
 
   @Post(':id/handover')
+  // A handover releases a secret (a temporary password): approvers only, whatever else changes.
+  @RequireRole(...APPROVER_ROLES)
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
   @ApiOperation({
@@ -723,4 +781,9 @@ export class ApprovalsController {
       clearTimeout(timer);
     }
   }
+}
+
+/** An agent request has no "always" (that is for a new site on a device). */
+function agentChoices(rights: DecisionRights): string[] {
+  return rights.choices.filter((c) => c !== 'approve_always');
 }

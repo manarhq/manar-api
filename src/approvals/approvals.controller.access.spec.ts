@@ -2,6 +2,7 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import type { AuthContext } from '../auth/auth-context';
 import type { RoleName } from '../auth/roles';
+import { REQUIRED_ROLES_KEY } from '../auth/require-role.decorator';
 import { ApprovalsController } from './approvals.controller';
 
 /**
@@ -9,12 +10,20 @@ import { ApprovalsController } from './approvals.controller';
  * anything; the person who created the agent approves once or denies its requests unless the
  * workspace is "admins only"; nobody else sees it at all.
  */
-function world(opts: { adminsOnly?: boolean; paused?: boolean } = {}) {
+function world(
+  opts: {
+    adminsOnly?: boolean;
+    paused?: boolean;
+    riskScore?: number;
+    actionId?: string;
+  } = {},
+) {
   const request = {
     id: 'ap1',
     agentId: 'agent-1',
     toolId: 'gitlab',
-    actionId: 'merge',
+    actionId: opts.actionId ?? 'merge',
+    riskScore: opts.riskScore ?? 30,
     resource: 'repo/x',
     status: 'PENDING',
     temporalWorkflowId: 'wf-1',
@@ -24,8 +33,9 @@ function world(opts: { adminsOnly?: boolean; paused?: boolean } = {}) {
       findUnique: () => Promise.resolve({ createdBy: 'creator' }),
     },
     approvalRequest: {
-      findUnique: () => Promise.resolve({ agentId: 'agent-1' }),
+      findUnique: () => Promise.resolve(request),
     },
+    toolAction: { findMany: () => Promise.resolve([]) },
     approvalAllowGrant: {
       create: ({ data }: { data: object }) =>
         Promise.resolve({ id: 'g8', ...data }),
@@ -44,13 +54,24 @@ function world(opts: { adminsOnly?: boolean; paused?: boolean } = {}) {
     },
   };
   const approvers = {
-    adminsOnly: () => Promise.resolve(opts.adminsOnly ?? false),
+    workspace: () =>
+      Promise.resolve({ adminsOnly: opts.adminsOnly ?? false, company: true }),
   };
   const controller = new ApprovalsController(
     {
       getOrThrow: () => Promise.resolve(request),
+      getDetailOrThrow: () =>
+        Promise.resolve({
+          ...request,
+          expectedEffect: null,
+          decisions: [],
+          parameters: {},
+        }),
       listApprovalRequests: vi.fn(() =>
-        Promise.resolve({ items: [], nextCursor: null }),
+        Promise.resolve({
+          items: [{ ...request, agent: { createdBy: 'creator' } }],
+          nextCursor: null,
+        }),
       ),
     } as never,
     { getClient: () => Promise.resolve(client) } as never,
@@ -156,5 +177,74 @@ describe('deciding an agent approval', () => {
     expect(svc.listApprovalRequests.mock.calls[1]![1]).not.toHaveProperty(
       'agentCreatedBy',
     );
+  });
+
+  it('an owner cannot approve a high-risk request', async () => {
+    const w = world({ riskScore: 80 });
+    await expect(
+      w.controller.decide(auth('creator', ['DEVELOPER']), 'ap1', {
+        decision: 'approve_once',
+      }),
+    ).rejects.toThrow('it is high risk');
+    expect(w.signal).not.toHaveBeenCalled();
+  });
+
+  it('an owner cannot approve an action that hands over a secret', async () => {
+    const w = world({ actionId: 'entra.user.password.reset' });
+    await expect(
+      w.controller.decide(auth('creator', ['DEVELOPER']), 'ap1', {
+        decision: 'approve_once',
+      }),
+    ).rejects.toThrow('it hands over a secret');
+  });
+
+  it('an approver cannot approve a sensitive request from their own agent; another approver can', async () => {
+    const w = world({ riskScore: 80 });
+    await expect(
+      w.controller.decide(auth('creator', ['APPROVER']), 'ap1', {
+        decision: 'approve_once',
+      }),
+    ).rejects.toThrow('Ask another approver');
+    const r = await w.controller.decide(auth('boss', ['APPROVER']), 'ap1', {
+      decision: 'approve_once',
+    });
+    expect(r.status).toBe('APPROVED');
+  });
+
+  it("a demoted or removed creator can no longer see or decide their old agent's requests", async () => {
+    for (const roles of [['READ_ONLY'], ['AUDITOR'], []] as RoleName[][]) {
+      const w = world();
+      const who = auth('creator', roles);
+      expect((await w.controller.list(who)).items).toEqual([]);
+      await expect(w.controller.getOne(who, 'ap1')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      await expect(
+        w.controller.decide(who, 'ap1', { decision: 'deny' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(w.controller.revoke(who, 'ap1', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect((await w.controller.history(who)).items).toEqual([]);
+    }
+  });
+
+  it('the list says what the person may answer and why not', async () => {
+    const w = world({ riskScore: 80 });
+    const page = await w.controller.list(auth('creator', ['DEVELOPER']));
+    expect(page.items[0]).toMatchObject({
+      allowedDecisions: ['deny'],
+      needs: 'needs_admin',
+      why: 'high_risk',
+    });
+  });
+
+  it('collecting a handover stays approver-only', () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      ApprovalsController.prototype,
+      'collectHandover',
+    )!.value as object;
+    const roles = Reflect.getMetadata(REQUIRED_ROLES_KEY, handler) as string[];
+    expect(roles).toEqual(['TENANT_OWNER', 'SECURITY_ADMIN', 'APPROVER']);
   });
 });

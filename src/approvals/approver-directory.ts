@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { SITE_CONNECT_ACTION } from '../jail/jail-sites';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 
@@ -14,22 +13,24 @@ export const APPROVER_ROLES = [
   'APPROVER',
 ] as const;
 
-/** `admin`: an approver role. `owner`: the device's owner or the agent's creator. */
-export type DeciderKind = 'admin' | 'owner';
-
 /**
- * What a decider may choose. An owner answers once or denies; standing permissions (8 hours,
- * always) and rules are an admin's call. `approve_always` exists for a new site only.
+ * Roles that may operate agents and devices. The owner path (deciding one's own device's or agent's
+ * routine requests) needs one of these *now*: a person demoted to READ_ONLY or AUDITOR, or removed,
+ * loses it even though `Agent.createdBy` / `Host.ownerSubject` still name them.
  */
-export function choicesFor(
-  kind: DeciderKind | null,
-  approval: { actionId: string },
-): ('approve_once' | 'approve_8h' | 'approve_always' | 'deny')[] {
-  if (!kind) return [];
-  if (kind === 'owner') return ['approve_once', 'deny'];
-  return approval.actionId === SITE_CONNECT_ACTION
-    ? ['approve_once', 'approve_8h', 'approve_always', 'deny']
-    : ['approve_once', 'approve_8h', 'deny'];
+export const OPERATOR_ROLES = [
+  ...APPROVER_ROLES,
+  'AI_GOVERNANCE_MANAGER',
+  'SOC_OPERATOR',
+  'DEVELOPER',
+] as const;
+
+export function isApproverRole(roles: readonly string[]): boolean {
+  return roles.some((r) => (APPROVER_ROLES as readonly string[]).includes(r));
+}
+
+export function isOperatorRole(roles: readonly string[]): boolean {
+  return roles.some((r) => (OPERATOR_ROLES as readonly string[]).includes(r));
 }
 
 export async function listApproverSubjects(
@@ -97,35 +98,20 @@ export class ApproverDirectory {
    * "Admins only" (founder decision, 3 Nov 2026): a company workspace can stop device owners from
    * deciding their own approvals. Fail closed: a failed read is "admins only".
    */
-  async adminsOnly(tenantId: string): Promise<boolean> {
+  async workspace(
+    tenantId: string,
+  ): Promise<{ adminsOnly: boolean; company: boolean }> {
     try {
       const t = await this.control.tenant.findUnique({
         where: { id: tenantId },
         select: { kind: true, approvalsAdminsOnly: true },
       });
-      if (!t) return true;
-      return t.kind === 'COMPANY' && t.approvalsAdminsOnly;
+      if (!t) return { adminsOnly: true, company: true };
+      const company = t.kind === 'COMPANY';
+      return { adminsOnly: company && t.approvalsAdminsOnly, company };
     } catch {
-      return true;
+      return { adminsOnly: true, company: true };
     }
-  }
-
-  /**
-   * Who may decide one approval (founder decision, 3 Nov 2026): an approver role decides anything
-   * (`admin`); the person who owns the device, or who created the agent, decides that device's or
-   * agent's own requests (`owner`), unless the workspace is "admins only". Null: may not decide.
-   * `ownerSubject` is the device's `ownerSubject` or the agent creator's Keycloak subject.
-   */
-  async deciderKind(
-    tenantId: string,
-    tenantClient: Pick<TenantPrismaClient, 'roleBinding'>,
-    subject: string | null | undefined,
-    ownerSubject: string | null | undefined,
-  ): Promise<DeciderKind | null> {
-    if (!subject) return null;
-    if (await this.canApprove(tenantId, tenantClient, subject)) return 'admin';
-    if (!ownerSubject || ownerSubject !== subject) return null;
-    return (await this.adminsOnly(tenantId)) ? null : 'owner';
   }
 
   /** Fail closed: no subject, or any lookup failure, is "no". */

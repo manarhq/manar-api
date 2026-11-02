@@ -173,8 +173,8 @@ function world() {
   const push = { notifyApprovers: vi.fn() };
   // Every decider here is an approver (who may decide is covered in host-approvals.spec.ts).
   const approvers = {
-    deciderKind: () => Promise.resolve('admin'),
     canApprove: () => Promise.resolve(true),
+    workspace: () => Promise.resolve({ adminsOnly: false, company: true }),
   };
   const approvals = new HostApprovalsService(
     auditSvc as never,
@@ -579,7 +579,7 @@ describe('site prompts are answered in the console or on the phone', () => {
     const ctrl = new HostApprovalsController(
       w.approvals,
       { getClient: () => Promise.resolve(w.client) } as never,
-      { deciderKind: () => Promise.resolve('admin') } as never,
+      { canApprove: () => Promise.resolve(true) } as never,
     );
     const r = await ctrl.pending(HOST);
     const site = r.items.find((i) => i.actionId === 'site.connect');

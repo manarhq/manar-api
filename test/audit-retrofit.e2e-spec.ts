@@ -66,6 +66,9 @@ describe('Audit retrofit points (e2e)', () => {
   >;
   let tenant: ProvisionedTenant;
   let adminToken: string;
+  // A different person from the agent's creator: a sensitive request is never approved by the
+  // person whose agent asked (decision-rights.ts, 3 Nov 2026).
+  let approverToken: string;
   let auditorToken: string;
   let noAuditRoleToken: string;
 
@@ -442,6 +445,20 @@ describe('Audit retrofit points (e2e)', () => {
       clientId: tenant.keycloakClientId!,
       clientSecret: clientSecretRef.reference,
       username: ADMIN_USERNAME,
+      password: USER_PASSWORD,
+    });
+
+    const approverUserId = await createRealmUser(tenant.keycloakRealm, {
+      username: `${ADMIN_USERNAME}-ap`,
+      email: `${ADMIN_USERNAME}-ap@example.test`,
+      password: USER_PASSWORD,
+    });
+    await assignRealmRole(tenant.keycloakRealm, approverUserId, 'APPROVER');
+    approverToken = await getUserToken({
+      realm: tenant.keycloakRealm,
+      clientId: tenant.keycloakClientId!,
+      clientSecret: clientSecretRef.reference,
+      username: `${ADMIN_USERNAME}-ap`,
       password: USER_PASSWORD,
     });
 
@@ -829,7 +846,7 @@ describe('Audit retrofit points (e2e)', () => {
 
       await request(humanApp.getHttpServer() as App)
         .post(`/approvals/${approvalId}/decide`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .set('Authorization', `Bearer ${approverToken}`)
         .send({ decision: 'APPROVE', reason: 'audit-retrofit-test' })
         .expect(201);
 
@@ -880,7 +897,7 @@ describe('Audit retrofit points (e2e)', () => {
 
       await request(humanApp.getHttpServer() as App)
         .post(`/approvals/${approvalId2}/decide`)
-        .set('Authorization', `Bearer ${adminToken}`)
+        .set('Authorization', `Bearer ${approverToken}`)
         .send({ decision: 'DENY', reason: 'audit-retrofit-test-deny' })
         .expect(201);
 

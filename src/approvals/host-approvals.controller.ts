@@ -47,15 +47,9 @@ export class HostApprovalsController {
     const client = await this.tenants.getClient(host.tenantId);
     await this.approvals.expireDue(client, host.tenantId);
     const [ownerMayApprove, rows] = await Promise.all([
-      // The owner decides their own device's requests unless the workspace is "admins only".
-      this.approvers
-        .deciderKind(
-          host.tenantId,
-          client,
-          host.ownerSubject,
-          host.ownerSubject,
-        )
-        .then((kind) => kind !== null),
+      // The device decides only for an owner who is an approver: anyone else answers in the
+      // signed-in console (a process on the device can answer a device prompt).
+      this.approvers.canApprove(host.tenantId, client, host.ownerSubject),
       this.approvals.listPending(client, host.hostId),
     ]);
     return {
@@ -136,7 +130,8 @@ export class HostApprovalsController {
       throw new ForbiddenException('device_not_allowed_to_decide');
     }
     const client = await this.tenants.getClient(host.tenantId);
-    // Who may decide (the owner, unless "admins only") is checked in HostApprovalsService.decide.
+    // Who may decide (an approver owner, routine requests only) is checked in
+    // HostApprovalsService.decide.
     const row = await this.approvals.get(client, id, host.hostId);
     if (row.highRisk) throw new ForbiddenException('high_risk_open_in_console');
     if (row.actionId === SITE_CONNECT_ACTION && input.decision !== 'deny')

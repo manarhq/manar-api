@@ -365,14 +365,27 @@ already boots both Nest apps in-process), and the real
 
 ## History, revoke and who decides (3 Nov 2026)
 
-**Who decides.** An approver role (`TENANT_OWNER`, `SECURITY_ADMIN`, `APPROVER`) decides any
-request. The owner of a device, or the creator of an agent, may approve once or deny that
-device's or agent's own requests, unless the company workspace turned on "admins only"
-(`PATCH /tenant/settings {"approvalsAdminsOnly": true}`). Longer approvals (8 hours, always) and
-"make rule" stay with approvers. `HostApprovalsService.decide` checks this for every channel
-(console, device, phone, Telegram); `ApprovalsController` checks it for agent requests. Lists,
-history and detail show a person who is not an approver only their own devices and agents, and
-each item carries `allowedDecisions` / `canRevoke` so the console shows only what the person may do.
+**Who decides** (`src/approvals/decision-rights.ts`).
+
+- An approver role (`TENANT_OWNER`, `SECURITY_ADMIN`, `APPROVER`) decides any request, except a
+  _sensitive_ request from their own device or agent in a company workspace: another approver must
+  answer it ("Ask another approver, or deny it"). There is no bypass; a personal workspace has one
+  person, so its owner can approve.
+- The device owner, or the agent's creator, may approve once or deny their own _routine_ requests
+  in the signed-in console, if they hold a role that operates agents now (`OPERATOR_ROLES`; a
+  demoted or removed person loses it even though `createdBy` still names them), and unless the
+  company workspace set `approvalsAdminsOnly` (`PATCH /tenant/settings`). A sensitive request they
+  can only deny. 8 hours, always and "make rule" stay with approvers.
+- Sensitive: a device approval flagged `highRisk`, an agent request scoring
+  `AGENT_HIGH_RISK_SCORE` (60) or more, or an action that hands over a secret (`HANDOVER_ACTIONS`).
+  Collecting a handover (`POST /approvals/:id/handover`) stays approver-only.
+- Off the console (WARDEN on the device, push, Telegram) only an approver decides: a process on the
+  device can answer a device prompt, so the device credential alone is never consent.
+
+`HostApprovalsService.decide` enforces this for every device channel and `ApprovalsController` for
+agent requests. Lists, history and detail show a person who is not an approver only their own
+devices and agents; each item carries `allowedDecisions`, `needs` and `why` so the console shows
+only what the person may do and says why not.
 
 **History.** `GET /approvals/history`: agent and device approvals in one cursor, every state
 (`PENDING`, `APPROVED`, `DENIED`, `EXPIRED`, `REVOKED`), with who decided, when, through which

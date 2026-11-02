@@ -22,7 +22,12 @@ import {
 } from '../jail/jail-sites.service';
 import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
-import { ApproverDirectory, choicesFor } from './approver-directory';
+import { ApproverDirectory } from './approver-directory';
+import {
+  decisionRights,
+  refusalMessage,
+  sensitiveReason,
+} from './decision-rights';
 import {
   PAUSED_CONFLICT_MESSAGE,
   approvalConflict,
@@ -86,6 +91,11 @@ export interface DecideHostApprovalInput {
    * do not set the flag).
    */
   withdraw?: boolean;
+  /**
+   * Console only: the signed-in person currently holds a role that may operate devices
+   * (`OPERATOR_ROLES`). The owner path needs it, so a demoted owner cannot decide.
+   */
+  ownerMayOperate?: boolean;
 }
 
 @Injectable()
@@ -275,7 +285,7 @@ export class HostApprovalsService {
         status: 'PENDING',
         expiresAt: { gt: now },
       },
-      include: { host: { select: { hostname: true } } },
+      include: { host: { select: { hostname: true, ownerSubject: true } } },
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
@@ -366,27 +376,39 @@ export class HostApprovalsService {
       (input.withdraw || isSite)
     )
       return this.withdraw(client, tenantId, row);
-    // Founder decision, 3 Nov 2026: an approver decides anything; the device's owner decides
-    // their own device's requests unless the workspace is "admins only". Checked here, where every
-    // channel (console, device, phone, Telegram) arrives, so no caller can skip it.
+    // Founder decisions, 3 Nov 2026 (decision-rights.ts): an approver decides anything, but not a
+    // sensitive request from their own device in a company workspace; the device's owner answers
+    // their own routine requests in the signed-in console only. Off the console (WARDEN on the
+    // device, push, Telegram) only an approver decides: a process on the device can answer a
+    // device prompt, so the device credential alone is never consent. Checked here, where every
+    // channel arrives, so no caller can skip it.
+    const admin = await this.approvers.canApprove(
+      tenantId,
+      client,
+      input.subject,
+    );
+    if (input.via !== 'console' && !admin)
+      throw new ForbiddenException(
+        'Answer this in the Manar console. Only a workspace approver can answer from a device or a phone. Nothing was changed.',
+      );
     const owner = await client.host.findUnique({
       where: { id: row.hostId },
       select: { ownerSubject: true },
     });
-    const kind = await this.approvers.deciderKind(
-      tenantId,
-      client,
-      input.subject,
-      owner?.ownerSubject,
-    );
-    if (!kind)
-      throw new ForbiddenException(
-        'Only a workspace approver or the owner of this device can answer this request. Nothing was changed.',
-      );
-    if (!choicesFor(kind, row).includes(input.decision))
-      throw new ForbiddenException(
-        'As the owner of this device you can approve once or deny. Longer approvals need a workspace approver. Nothing was changed.',
-      );
+    const ws = await this.approvers.workspace(tenantId);
+    const rights = decisionRights({
+      admin,
+      owner:
+        !!owner?.ownerSubject &&
+        owner.ownerSubject === input.subject &&
+        (admin || input.ownerMayOperate === true),
+      adminsOnly: ws.adminsOnly,
+      company: ws.company,
+      sensitive: sensitiveReason(row),
+      actionId: row.actionId,
+    });
+    if (!rights.choices.includes(input.decision))
+      throw new ForbiddenException(refusalMessage(rights));
     // A permanent site rule needs the role that may write site rules; an approver without it
     // gets "once" (fail closed: an absent flag is "no").
     let decision: HostDecision = input.decision;

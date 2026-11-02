@@ -63,7 +63,10 @@ function client() {
     usedBeforeRevoke: null,
     endReason: null,
     creator: 'u-dev',
-    agent: { displayName: 'Release bot' },
+    agent: {
+      displayName: 'Release bot',
+      createdBy: (extra.creator as string | undefined) ?? 'u-dev',
+    },
     grant: { consumedAt: t(min + 1) },
     decisions: [
       {
@@ -95,7 +98,10 @@ function client() {
     usedBeforeRevoke: null,
     endReason: 'withdrawn',
     owner: 'sub-dev',
-    host: { hostname: 'dev-laptop' },
+    host: {
+      hostname: 'dev-laptop',
+      ownerSubject: (extra.owner as string | undefined) ?? 'sub-dev',
+    },
     ...extra,
   });
   return {
@@ -126,6 +132,7 @@ function client() {
       'createdAt',
     ),
     approvalAllowGrant: { findMany: () => Promise.resolve([]) },
+    toolAction: { findMany: () => Promise.resolve([]) },
     hostSiteRule: {
       findMany: () =>
         Promise.resolve([
@@ -158,13 +165,17 @@ const admin: HistoryViewer = {
   userId: 'u-boss',
   subject: 'sub-boss',
   admin: true,
-  ownerMayDecide: false,
+  operator: true,
+  adminsOnly: false,
+  company: true,
 };
 const dev: HistoryViewer = {
   userId: 'u-dev',
   subject: 'sub-dev',
   admin: false,
-  ownerMayDecide: true,
+  operator: true,
+  adminsOnly: false,
+  company: true,
 };
 
 describe('approval history', () => {
@@ -232,7 +243,7 @@ describe('approval history', () => {
   it('with "admins only" a member still sees their own history but can act on none of it', async () => {
     const page = await listApprovalHistory(client() as never, {
       limit: 10,
-      viewer: { ...dev, ownerMayDecide: false },
+      viewer: { ...dev, adminsOnly: true },
     });
     expect(page.items.length).toBeGreaterThan(0);
     expect(
