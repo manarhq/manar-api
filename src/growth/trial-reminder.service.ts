@@ -68,10 +68,12 @@ export class TrialReminderService {
           ent?.stripeSubscriptionId !== c.stripeSubscriptionId
         )
           continue;
+        const locale = m.locale === 'ar' ? 'ar' : 'en';
+        // The console's pages live under the locale (/en/..., /ar/...).
         const mail = renderTrialReminder({
-          locale: m.locale === 'ar' ? 'ar' : 'en',
+          locale,
           endsAt: c.trialEndsAt!,
-          link: `${web || DEVICES_DEFAULTS.MANAR_CONSOLE_URL}/settings/billing`,
+          link: `${web || DEVICES_DEFAULTS.MANAR_CONSOLE_URL}/${locale}/settings/billing`,
         });
         if (!(await this.mailer.send({ to, ...mail })))
           throw new Error('mail not accepted');
