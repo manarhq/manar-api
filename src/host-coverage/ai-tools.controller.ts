@@ -36,6 +36,16 @@ export class AiToolsController {
     return this.tools.list(auth.tenant.id);
   }
 
+  @Get('protection')
+  @RequireRole(...READ)
+  @ApiOperation({
+    summary:
+      'Is this workspace protected? The checks of `manar-edge status` across every device, as problem codes',
+  })
+  protection(@CurrentAuth() auth: AuthContext) {
+    return this.tools.protection(auth.tenant.id);
+  }
+
   @Post(':hostId/:toolId/protect')
   @RequireRole(...WRITE)
   @ApiOperation({ summary: 'Turn protection on for one tool on one device' })

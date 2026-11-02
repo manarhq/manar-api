@@ -2237,6 +2237,9 @@ model Host {
   /// device. Re-enrolling within 30 days revives this row; later, its `machineId` is rewritten to
   /// `removed:<id>` so the machine enrols as a new device (HostsService.completeRegistration).
   removedAt             DateTime?
+  /// The device service's modules and their state from the last inventory, e.g.
+  /// `{"jail":{"state":"ok"}}`; null for a device too old to report them.
+  modules               Json?
   certificates          HostCertificate[]
   fileChanges           HostFileChange[]
   tools                 HostTool[]
