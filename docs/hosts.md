@@ -55,9 +55,10 @@ Body: `installKey`, `csr`, `machineId` (`[A-Za-z0-9._-]{1,128}`), `hostname`, `o
    - **new machine**: created, bound to the CSR's key (SHA-256 of its SPKI), `APPROVED` if an
      approval rule matches, else `PENDING`. In a **personal** workspace (Free, Pro) a machine
      installed with the owner's one-time Add-device code is `APPROVED` at once
-     (`approvedBy: system:personal-install-code`, with a `host.approved` audit event); the owner
-     re-installing their machine with a new key stays approved the same way. Company workspaces
-     always wait for a rule or an admin. The device cap applies either way;
+     (`approvedBy: system:personal-install-code`, with a `host.approved` audit event). A machine
+     already known is never approved this way: `machineId` is the installer's claim, so a
+     re-install with a new key waits `PENDING` for the owner to confirm it in the console.
+     Company workspaces always wait for a rule or an admin. The device cap applies either way;
    - **known machine, same key and group** (VDI re-registration): merged, status kept;
    - **known machine, different key or another group's key**: nothing about the machine
      changes; the request is recorded as a pending rekey (`host.rekey_requested`) and the call

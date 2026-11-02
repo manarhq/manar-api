@@ -317,18 +317,33 @@ describe('Add device re-install (e2e)', () => {
       });
     }, 60_000);
 
-    it("a personal owner's re-install with a new key stays approved", async () => {
+    it('a re-install of a known machine with a valid code waits PENDING for the owner', async () => {
       const t = await tenant('PERSONAL');
       const u = await t.person('sub-p2');
       const first = await newCode(t, u.id);
       const { result } = await install(t, first.code, 'p-2');
+      const before = await t.client.host.findUniqueOrThrow({
+        where: { id: result.hostId },
+      });
+      expect(before.status).toBe('APPROVED');
       const again = await newCode(t, u.id);
-      await install(t, again.code, 'p-2'); // a fresh key pair
+      const second = await install(t, again.code, 'p-2'); // same machineId, a fresh key pair
+      expect(second.result.status).toBe('PENDING');
       const host = await t.client.host.findUniqueOrThrow({
         where: { id: result.hostId },
       });
-      expect(host.status).toBe('APPROVED');
-      expect(host.installKeyId).toBe(again.key.id);
+      // PENDING: the new key gets no decisions, tools or config until the owner approves it.
+      expect(host.status).toBe('PENDING');
+      expect(host.approvedBy).toBeNull();
+      expect(host.keyFingerprint).not.toBe(before.keyFingerprint);
+      const afterEvents = recorded
+        .filter((e) => e.tenantId === t.id && e.eventType.startsWith('host.'))
+        .map((e) => e.eventType);
+      expect(afterEvents).toEqual([
+        'host.registered',
+        'host.approved',
+        'host.registered',
+      ]);
     }, 60_000);
 
     it('a company workspace keeps the device PENDING for a rule or an admin', async () => {

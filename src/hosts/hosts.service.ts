@@ -76,8 +76,9 @@ export interface CompleteRegistrationInput {
   autoApprove: boolean;
   /**
    * A personal workspace's own one-time Add-device code: the one person who could make the code
-   * approves the device, so it is APPROVED at once (audited as an approval). Never for company
-   * workspaces, which wait for an approval rule or an admin.
+   * approves a new device, so it is APPROVED at once (audited as an approval). Never a machine
+   * already known (re-install), and never for company workspaces, which wait for an approval
+   * rule or an admin.
    */
   ownerApproves?: boolean;
   verified: VerifiedFacts;
@@ -363,9 +364,10 @@ export class HostsService {
             reenrolled: false,
           };
         }
-        // A personal owner's own code approves a new device, or their own re-install.
+        // A personal owner's own code approves a NEW device only. machineId is the installer's
+        // claim, so a re-install of a known machine (new key) waits for the owner to confirm it.
         const ownerApproved =
-          !!ctx.ownerApproves && ctx.autoApprove && (!existing || reenrol);
+          !!ctx.ownerApproves && ctx.autoApprove && !existing;
         const rule =
           existing || !ctx.autoApprove || ownerApproved
             ? null
@@ -412,17 +414,9 @@ export class HostsService {
                 ...(reenrol
                   ? {
                       keyFingerprint,
-                      ...(ownerApproved
-                        ? {
-                            status: 'APPROVED' as const,
-                            approvedBy: OWNER_APPROVER,
-                            approvedAt: new Date(),
-                          }
-                        : {
-                            status: 'PENDING' as const,
-                            approvedBy: null,
-                            approvedAt: null,
-                          }),
+                      status: 'PENDING' as const,
+                      approvedBy: null,
+                      approvedAt: null,
                       pendingKeyFingerprint: null,
                       pendingHostGroupId: null,
                       tpmVerified: false,
