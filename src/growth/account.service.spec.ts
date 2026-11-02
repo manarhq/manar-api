@@ -32,6 +32,7 @@ function setup(opts: { soleOwner?: boolean } = {}) {
     contactEmail: {
       deleteMany: async () => (calls.push('contact'), { count: 1 }),
     },
+    userDataPreference: { deleteMany: async () => ({ count: 1 }) },
     accountDeletion: {
       findMany: async (a: { where: { status: { in: string[] } } }) =>
         a.where.status.in.includes(row.status) ? [row] : [],
@@ -67,6 +68,7 @@ function setup(opts: { soleOwner?: boolean } = {}) {
     { send: async () => true } as never,
     { verified: async () => 'me@acme.io' } as never,
     { get: () => undefined } as never,
+    { deleteUserData: async () => void calls.push('data') } as never,
   );
   return { svc, calls, row };
 }
@@ -81,6 +83,7 @@ describe('account deletion', () => {
       'revoke',
       'workspace',
       'memberships',
+      'data',
       'kc:manar:u1',
       'contact',
     ]);

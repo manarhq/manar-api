@@ -377,6 +377,12 @@ describe('device config', () => {
       { getClient: () => Promise.resolve({}) } as never,
       { features: () => Promise.resolve([]) } as never,
       { config: () => Promise.resolve({}) } as never,
+      {
+        forHost: () =>
+          Promise.resolve({
+            effective: { improveManar: true, aiTraining: true },
+          }),
+      } as never,
     );
     const cfg = await c.config(host('h1') as never);
     expect(cfg.door).toEqual({ unavailable: true });
