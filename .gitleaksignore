@@ -34,3 +34,12 @@ d82a13e24a177fcc905c38ea8b3019dc7af00b4c:src/agent-runtime/llm-anthropic.service
 
 # Triaged 2026-11-01: cloud-agents MCP guard spec, an OAuth scope name fixture, not a key.
 1e0178863cbdbb263784fdaeb65fa4d92d85d90b:src/cloud-mcp/cloud-mcp-auth.guard.spec.ts:generic-api-key:765
+
+# Triaged 2026-11-03: host contract fixture and spec (shared with manar-edge), synthetic values
+# (tok-123456789, zZ9yY8xX7wW6) that the redaction tests must catch; not keys.
+791fb8bd95e3be0b023ecd9d236c9870e1c0fd19:src/host-coverage/host-coverage.spec.ts:generic-api-key:420
+791fb8bd95e3be0b023ecd9d236c9870e1c0fd19:src/contract/host-contract.json:generic-api-key:108
+791fb8bd95e3be0b023ecd9d236c9870e1c0fd19:src/contract/host-contract.json:generic-api-key:114
+791fb8bd95e3be0b023ecd9d236c9870e1c0fd19:src/contract/host-contract.json:generic-api-key:287
+791fb8bd95e3be0b023ecd9d236c9870e1c0fd19:src/contract/host-contract.json:generic-api-key:295
+791fb8bd95e3be0b023ecd9d236c9870e1c0fd19:src/contract/host-contract.json:generic-api-key:315
