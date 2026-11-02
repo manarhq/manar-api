@@ -45,7 +45,7 @@ manifests with `kubeconform`/`kube-linter` (research current versions) —
 don't just eyeball YAML.
 
 **Do not deploy anything.** This phase produces chart files in the repos
-only. No `manar.vax.sh` configuration, no real cluster interaction.
+only. No production-domain configuration, no real cluster interaction.
 
 ## CI security scanning
 
@@ -81,7 +81,7 @@ separately) actually deploy, and the NetworkPolicy design.
 
 ## Out of scope this phase
 
-- Actual deployment to any cluster, `manar.vax.sh`, DNS, or production
+- Actual deployment to any cluster, the production domain, DNS, or production
   Nginx/TLS configuration — explicitly forbidden until a separate,
   later, explicitly-requested deployment phase
 - Application-level hardening (Phase 12a — separate, parallel-safe

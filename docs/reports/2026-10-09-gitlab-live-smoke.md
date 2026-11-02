@@ -1,7 +1,7 @@
 # GitLab connector live smoke run, 9 Oct 2026
 
 **What ran:** manar-api `feat/gitlab-connector` (ADR-0012) on the local stack, tool `gitlab-demo`
-(protocol `GITLAB`, `https://gitlab.vax.sh/api/v4`, pinned to `manar/demo-repo`), the coding pack
+(protocol `GITLAB`, `https://gitlab.example.com/api/v4`, pinned to `manar/demo-repo`), the coding pack
 policy (`gitlabPolicyContent`), and a task for the Claude agent (all 13 actions, selector `*`, risk
 ceiling 50, execution budget 60). Every call went through Manar's governed MCP server over mTLS,
 the same `tools/call` the Claude Code bridge sends (`~/manar-demo/coding/smoke.mjs`). Approvals were
@@ -10,7 +10,7 @@ decided by `demo-approver` through the console API. GitLab is live (`DataOrigin:
 **Token:** a project access token for `manar/demo-repo` only, **Developer** role, scope `api`,
 expires 2026-11-07, piped from GitLab straight into OpenBao `secret/tools/gitlab-demo`; never
 printed or written to disk. `main` is protected: push No one, merge Developers + Maintainers.
-`SSRF_ALLOWED_HOSTS` lists `gitlab.vax.sh` (required by the connector besides the tool row).
+`SSRF_ALLOWED_HOSTS` lists `gitlab.example.com` (required by the connector besides the tool row).
 
 ## Result (third run, all as expected)
 
@@ -51,7 +51,7 @@ After the run `~/manar-demo/coding/reset-demo-repo.sh` put the project back to i
 1. **Merge recorded as UNKNOWN although it landed** (run 1). GitLab took longer than the 15 s
    request deadline to answer the merge; Manar correctly recorded `UNKNOWN` (the merge had
    happened, merge commit on `main`). Fix: the GitLab request deadline defaults to 60 s.
-2. **Merge refused with 405** (run 2). Right after a push, gitlab.vax.sh reports the MR as
+2. **Merge refused with 405** (run 2). Right after a push, gitlab.example.com reports the MR as
    `preparing`/`checking` for about a minute and refuses a merge. The approved grant was spent on a
    refusal. Fix: the merge precheck re-reads the MR while GitLab is still checking (up to 45 s).
    The GitLab instance's background processing is slow; worth a look by whoever runs it.

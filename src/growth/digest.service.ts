@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
+import { DEVICES_DEFAULTS } from '../devices/devices.config';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { ContactEmailService } from '../contact/contact-email.service';
 import { ReportCardService } from '../workspace/report-card.service';
@@ -116,7 +117,7 @@ export class DigestService {
     const mail = renderDigest({
       locale: m.locale === 'ar' ? 'ar' : 'en',
       totals,
-      consoleUrl: web || 'https://manar.vax.sh',
+      consoleUrl: web || DEVICES_DEFAULTS.MANAR_CONSOLE_URL,
       unsubscribeUrl: unsub,
     });
     const ok = await this.mailer.send({

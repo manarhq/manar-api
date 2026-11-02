@@ -82,7 +82,7 @@ describe.skipIf(!existsSync(REALM_YAML))(
   () => {
     const PASSWORD = 'Passw0rd!Test';
     const CONSOLE_SECRET = 'local-console-secret';
-    const CONSOLE_CALLBACK = 'https://console-manar.vax.sh/api/auth/callback';
+    const CONSOLE_CALLBACK = 'https://console-manar.fixio.ae/api/auth/callback';
     const CHATGPT_CALLBACK =
       'https://chatgpt.com/connector_platform_oauth_redirect';
     const { realm, issuer } = shared;

@@ -109,7 +109,7 @@ describe('account deletion', () => {
     });
   });
   it('finds the realm in an issuer', () => {
-    expect(realmOf('https://auth-manar.vax.sh/realms/manar')).toBe('manar');
+    expect(realmOf('https://auth-manar.fixio.ae/realms/manar')).toBe('manar');
     expect(realmOf('https://x/y')).toBeNull();
   });
 });

@@ -34,7 +34,9 @@ import {
   AGENT_ROLE_CLAIM,
   PRE_REGISTERED_CLIENT_PREFIX,
   TENANT_CLAIM,
+  cloudMcpHosts,
   cloudMcpMetadataUrl,
+  cloudMcpRequestHost,
   cloudMcpResourceUrl,
   cloudMcpRole,
   cloudMcpScope,
@@ -170,7 +172,12 @@ export class CloudMcpAuthGuard implements CanActivate {
       throw new NotFoundException();
     }
 
-    const resource = cloudMcpResourceUrl(host, tenantSlug, agentSlug);
+    // The host the client used (primary or legacy) names the challenge; a token may carry the
+    // agent's URL on any configured host (agents made before a domain move hold the old one).
+    const usedHost = cloudMcpRequestHost(settings, request);
+    const resources = cloudMcpHosts(settings).map((h) =>
+      cloudMcpResourceUrl(h, tenantSlug, agentSlug),
+    );
     // Shared realm (a shared issuer is configured and the tenant has no realm of its own): the
     // scope name carries the tenant id. Looking the tenant up costs a database query, so it
     // happens only for a decodable token claiming the shared issuer, after the failure budget
@@ -180,7 +187,7 @@ export class CloudMcpAuthGuard implements CanActivate {
     let scopeHint: string | null = settings.sharedIssuer ? null : scope;
     const challenge = (error?: string) =>
       [
-        `Bearer resource_metadata="${cloudMcpMetadataUrl(host, tenantSlug, agentSlug)}"`,
+        `Bearer resource_metadata="${cloudMcpMetadataUrl(usedHost, tenantSlug, agentSlug)}"`,
         ...(scopeHint ? [`scope="${scopeHint}"`] : []),
         ...(error ? [`error="${error}"`] : []),
       ].join(', ');
@@ -257,8 +264,8 @@ export class CloudMcpAuthGuard implements CanActivate {
       unverified,
       tenantSlug,
       agentSlug,
-      `https://${host}/mcp/`,
-      resource,
+      cloudMcpHosts(settings).map((h) => `https://${h}/mcp/`),
+      resources,
       scope,
       sharedTenantId &&
         sharedTenant?.status === 'ACTIVE' &&
@@ -343,8 +350,8 @@ export class CloudMcpAuthGuard implements CanActivate {
     unverified: JWTPayload,
     tenantSlug: string,
     agentSlug: string,
-    mcpPrefix: string,
-    resource: string,
+    mcpPrefixes: string[],
+    resources: string[],
     scope: string,
     shared: { id: string; issuer: string } | null,
   ): Promise<Rejection | { context: AgentContext; taskId: string }> {
@@ -383,7 +390,7 @@ export class CloudMcpAuthGuard implements CanActivate {
         this.jwksCache.getJwks(known.issuerUrl),
         {
           issuer: known.issuerUrl,
-          audience: resource,
+          audience: resources,
           algorithms: [...ACCEPTED_SIGNING_ALGORITHMS],
         },
       ));
@@ -412,7 +419,13 @@ export class CloudMcpAuthGuard implements CanActivate {
     }
     // A token for several agents is a token for none of them.
     const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-    if (audiences.some((a) => a?.startsWith(mcpPrefix) && a !== resource)) {
+    if (
+      audiences.some(
+        (a) =>
+          mcpPrefixes.some((prefix) => a?.startsWith(prefix)) &&
+          !resources.includes(a as string),
+      )
+    ) {
       return { ...verified, reason: 'foreign_audience' };
     }
 

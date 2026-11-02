@@ -71,7 +71,7 @@ describe('trial reminder', () => {
       send.mock.calls[0] as unknown as [{ html: string; text: string }]
     )[0];
     expect(mail.html).toContain('dir="rtl"');
-    expect(mail.text).toContain('https://console.test/settings/billing');
+    expect(mail.text).toContain('https://console.test/ar/settings/billing');
     expect(await svc.sendDue(NOW)).toEqual({ sent: 0, failed: 0 });
   });
   it('waits until 7 days before, and skips a replaced subscription', async () => {

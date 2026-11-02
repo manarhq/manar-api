@@ -28,6 +28,7 @@ import { ControlPrismaService } from '../database/control-prisma.service';
 import { CloudMcpAuthGuard } from './cloud-mcp-auth.guard';
 import type { CloudMcpRequest } from './cloud-mcp-auth.guard';
 import {
+  cloudMcpRequestHost,
   cloudMcpResourceUrl,
   cloudMcpScope,
   cloudMcpSettings,
@@ -104,8 +105,8 @@ export class CloudMcpController {
     @Param('agentSlug') agentSlug: string,
     @Req() request: FastifyRequest,
   ) {
-    const host = cloudMcpSettings(this.config).host;
-    if (!host || !SLUG.test(tenantSlug) || !SLUG.test(agentSlug)) {
+    const settings = cloudMcpSettings(this.config);
+    if (!settings.host || !SLUG.test(tenantSlug) || !SLUG.test(agentSlug)) {
       throw new NotFoundException();
     }
     const usage = await failClosed('rate-limit-store', () =>
@@ -126,7 +127,12 @@ export class CloudMcpController {
     const realm = await this.issuerOf(tenantSlug);
     if (!realm) throw new NotFoundException();
     return {
-      resource: cloudMcpResourceUrl(host, tenantSlug, agentSlug),
+      // RFC 9728: `resource` is the URL the client used (primary or a legacy host).
+      resource: cloudMcpResourceUrl(
+        cloudMcpRequestHost(settings, request),
+        tenantSlug,
+        agentSlug,
+      ),
       authorization_servers: [realm.issuer],
       scopes_supported: [cloudMcpScope(agentSlug, realm.sharedTenantId)],
       bearer_methods_supported: ['header'],
