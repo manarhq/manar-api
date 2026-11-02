@@ -18,8 +18,8 @@ const SHA_ARM = 'c'.repeat(64);
 const params: ScriptParams = {
   version: 'v0.1.0',
   releaseBase: 'https://github.com/manarhq/manar-edge/releases/download',
-  consoleUrl: 'https://console-manar.vax.sh',
-  hostUrl: 'https://agents-manar.vax.sh:3443',
+  consoleUrl: 'https://console-manar.fixio.ae',
+  hostUrl: 'https://agents-manar.fixio.ae:3443',
   code: 'ABCDEFGH23',
   tenantSlug: 'me-1a2b3c',
   sha256: { windowsAmd64: SHA_WIN, linuxAmd64: SHA_AMD, linuxArm64: SHA_ARM },
@@ -107,12 +107,12 @@ describe('install scripts', () => {
   });
 
   it('shows the one-liners the console copies', () => {
-    const l = oneLiners('https://console-manar.vax.sh/', 'ABCDEFGH23');
+    const l = oneLiners('https://console-manar.fixio.ae/', 'ABCDEFGH23');
     expect(l.windows).toBe(
-      'irm https://console-manar.vax.sh/i/ABCDEFGH23 | iex',
+      'irm https://console-manar.fixio.ae/i/ABCDEFGH23 | iex',
     );
     expect(l.linux).toBe(
-      'curl -fsSL https://console-manar.vax.sh/i/ABCDEFGH23.sh | sudo sh',
+      'curl -fsSL https://console-manar.fixio.ae/i/ABCDEFGH23.sh | sudo sh',
     );
     expect(l.uninstallLinux).toContain('/i/uninstall.sh');
   });

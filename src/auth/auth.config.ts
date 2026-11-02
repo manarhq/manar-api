@@ -7,7 +7,7 @@ import { z } from 'zod';
 export const AuthConfigSchema = z.object({
   /**
    * Comma-separated issuer URLs whose tokens this API accepts: the shared hosted realm
-   * (`https://auth-manar.vax.sh/realms/manar`) and, for a customer-hosted install, that install's
+   * (`https://auth-manar.fixio.ae/realms/manar`) and, for a customer-hosted install, that install's
    * realm. A legacy per-tenant realm recorded in `Tenant.keycloakIssuerUrl` is accepted too and is
    * bound to its tenant. Anything else is rejected.
    */

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
+import { DEVICES_DEFAULTS } from '../devices/devices.config';
 import { ContactEmailService } from '../contact/contact-email.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { MailerService } from './mailer.service';
@@ -70,7 +71,7 @@ export class TrialReminderService {
         const mail = renderTrialReminder({
           locale: m.locale === 'ar' ? 'ar' : 'en',
           endsAt: c.trialEndsAt!,
-          link: `${web || 'https://manar.vax.sh'}/settings/billing`,
+          link: `${web || DEVICES_DEFAULTS.MANAR_CONSOLE_URL}/settings/billing`,
         });
         if (!(await this.mailer.send({ to, ...mail })))
           throw new Error('mail not accepted');

@@ -57,8 +57,8 @@ export type DevicesConfig = z.infer<typeof DevicesConfigSchema>;
 
 /** Used when the variable is unset (the hosted install). */
 export const DEVICES_DEFAULTS = {
-  MANAR_CONSOLE_URL: 'https://console-manar.vax.sh',
-  MANAR_HOST_URL: 'https://agents-manar.vax.sh:3443',
+  MANAR_CONSOLE_URL: 'https://console-manar.fixio.ae',
+  MANAR_HOST_URL: 'https://agents-manar.fixio.ae:3443',
   MANAR_EDGE_RELEASE_BASE:
     'https://github.com/manarhq/manar-edge/releases/download',
 } as const;
