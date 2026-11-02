@@ -74,6 +74,13 @@ export interface CompleteRegistrationInput {
   consumeSecret?: string;
   /** False: the host is PENDING whatever the rules say (doubt about identity). */
   autoApprove: boolean;
+  /**
+   * A personal workspace's own one-time Add-device code: the one person who could make the code
+   * approves a new device, so it is APPROVED at once (audited as an approval). Never a machine
+   * already known (re-install), and never for company workspaces, which wait for an approval
+   * rule or an admin.
+   */
+  ownerApproves?: boolean;
   verified: VerifiedFacts;
   tpmEkFingerprint: string | null;
   adcs: {
@@ -90,6 +97,9 @@ export interface RegisterHostResult {
   certificatePem: string;
   caChainPem: string;
 }
+
+/** `approvedBy` and audit actor for a personal workspace's device approved by its owner's code. */
+const OWNER_APPROVER = 'system:personal-install-code';
 
 /**
  * Host registration (docs/hosts.md). Order matters:
@@ -188,6 +198,7 @@ export class HostsService {
       consumeSecret: secret,
       ownerSubject: await this.ownerSubjectOf(client, key.createdBy),
       autoApprove: true,
+      ownerApproves: code !== null && tenant.kind === 'PERSONAL',
       verified: { adcs: false, adDn: null, tpm: redeemed !== null },
       tpmEkFingerprint: redeemed?.ekFingerprint ?? null,
       adcs: null,
@@ -353,8 +364,12 @@ export class HostsService {
             reenrolled: false,
           };
         }
+        // A personal owner's own code approves a NEW device only. machineId is the installer's
+        // claim, so a re-install of a known machine (new key) waits for the owner to confirm it.
+        const ownerApproved =
+          !!ctx.ownerApproves && ctx.autoApprove && !existing;
         const rule =
-          existing || !ctx.autoApprove
+          existing || !ctx.autoApprove || ownerApproved
             ? null
             : matchApprovalRule(
                 await tx.hostApprovalRule.findMany({
@@ -426,16 +441,16 @@ export class HostsService {
                 installKeyId: ctx.installKeyId,
                 ...adFacts,
                 ...tpmFacts,
-                ...(rule
+                ...(rule || ownerApproved
                   ? {
                       status: 'APPROVED' as const,
-                      approvedBy: `rule:${rule.id}`,
+                      approvedBy: rule ? `rule:${rule.id}` : OWNER_APPROVER,
                       approvedAt: new Date(),
                     }
                   : {}),
               },
             });
-        const done = await this.audit.recordInTransaction(tx, tenant.id, {
+        const registered = await this.audit.recordInTransaction(tx, tenant.id, {
           eventType: AUDIT_EVENT_TYPES.HOST_REGISTERED,
           actor: { type: 'system', id: 'system:host-registration' },
           data: {
@@ -459,6 +474,27 @@ export class HostsService {
             ip: input.ip,
           },
         });
+        // Approved by the workspace owner's own code: the same event an admin's approval writes.
+        const approved = ownerApproved
+          ? await this.audit.recordInTransaction(tx, tenant.id, {
+              eventType: AUDIT_EVENT_TYPES.HOST_APPROVED,
+              actor: { type: 'system', id: OWNER_APPROVER },
+              data: {
+                hostId: saved.id,
+                from: 'PENDING',
+                to: 'APPROVED',
+                reason: 'personal_workspace_install_code',
+                ownerSubject: ctx.ownerSubject ?? null,
+                installKeyId: ctx.installKeyId,
+              },
+            })
+          : null;
+        const done = approved
+          ? () => {
+              registered();
+              approved();
+            }
+          : registered;
         if (moved) {
           // Followed its OU to another group: its own record, same transaction.
           const groupMoved = await this.audit.recordInTransaction(

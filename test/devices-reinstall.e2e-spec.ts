@@ -22,8 +22,21 @@ import { InstallKeysService } from '../src/hosts/install-keys.service';
 import type { TpmAttestationService } from '../src/hosts/tpm/tpm-attestation.service';
 import { fakeConfigService } from './support/audit-test-config';
 
+const recorded: {
+  tenantId: string;
+  eventType: string;
+  actor: unknown;
+  data: Record<string, unknown>;
+}[] = [];
 const audit = {
-  recordInTransaction: () => Promise.resolve(() => undefined),
+  recordInTransaction: (
+    _tx: unknown,
+    tenantId: string,
+    event: { eventType: string; actor: unknown; data: Record<string, unknown> },
+  ) => {
+    recorded.push({ tenantId, ...event });
+    return Promise.resolve(() => undefined);
+  },
 } as unknown as AuditService;
 const revokeHostCertificates = vi.fn(() => Promise.resolve());
 const ca = {
@@ -89,11 +102,12 @@ describe('Add device re-install (e2e)', () => {
     await control.$disconnect();
   }, 60_000);
 
-  async function tenant() {
+  async function tenant(kind: 'PERSONAL' | 'COMPANY' = 'COMPANY') {
     const t = await manager.provisionTenant({
       slug: `re-${randomUUID().slice(0, 8)}`,
       name: 'Re',
     });
+    await control.tenant.update({ where: { id: t.id }, data: { kind } });
     provisioned.push({
       tenantId: t.id,
       databaseName: t.databaseBinding!.databaseName,
@@ -271,4 +285,96 @@ describe('Add device re-install (e2e)', () => {
       result.hostId,
     );
   }, 120_000);
+
+  describe('workspace kind', () => {
+    it('a personal workspace approves a device from its own Add-device code, audited', async () => {
+      const t = await tenant('PERSONAL');
+      const u = await t.person('sub-p1');
+      const { code } = await newCode(t, u.id);
+      const { result } = await install(t, code, 'p-1');
+      expect(result.status).toBe('APPROVED');
+      const host = await t.client.host.findUniqueOrThrow({
+        where: { id: result.hostId },
+      });
+      expect(host.status).toBe('APPROVED');
+      expect(host.approvedBy).toBe('system:personal-install-code');
+      expect(host.approvedAt).not.toBeNull();
+      const events = recorded.filter(
+        (e) => e.tenantId === t.id && e.eventType.startsWith('host.'),
+      );
+      expect(events.map((e) => e.eventType)).toEqual([
+        'host.registered',
+        'host.approved',
+      ]);
+      expect(events[1]).toMatchObject({
+        actor: { type: 'system', id: 'system:personal-install-code' },
+        data: {
+          hostId: result.hostId,
+          from: 'PENDING',
+          to: 'APPROVED',
+          ownerSubject: 'sub-p1',
+        },
+      });
+    }, 60_000);
+
+    it('a re-install of a known machine with a valid code waits PENDING for the owner', async () => {
+      const t = await tenant('PERSONAL');
+      const u = await t.person('sub-p2');
+      const first = await newCode(t, u.id);
+      const { result } = await install(t, first.code, 'p-2');
+      const before = await t.client.host.findUniqueOrThrow({
+        where: { id: result.hostId },
+      });
+      expect(before.status).toBe('APPROVED');
+      const again = await newCode(t, u.id);
+      const second = await install(t, again.code, 'p-2'); // same machineId, a fresh key pair
+      expect(second.result.status).toBe('PENDING');
+      const host = await t.client.host.findUniqueOrThrow({
+        where: { id: result.hostId },
+      });
+      // PENDING: the new key gets no decisions, tools or config until the owner approves it.
+      expect(host.status).toBe('PENDING');
+      expect(host.approvedBy).toBeNull();
+      expect(host.keyFingerprint).not.toBe(before.keyFingerprint);
+      const afterEvents = recorded
+        .filter((e) => e.tenantId === t.id && e.eventType.startsWith('host.'))
+        .map((e) => e.eventType);
+      expect(afterEvents).toEqual([
+        'host.registered',
+        'host.approved',
+        'host.registered',
+      ]);
+    }, 60_000);
+
+    it('a company workspace keeps the device PENDING for a rule or an admin', async () => {
+      const t = await tenant('COMPANY');
+      const u = await t.person('sub-c1');
+      const { code } = await newCode(t, u.id);
+      const { result } = await install(t, code, 'c-1');
+      expect(result.status).toBe('PENDING');
+      expect(
+        recorded
+          .filter((e) => e.tenantId === t.id && e.eventType.startsWith('host.'))
+          .map((e) => e.eventType),
+      ).toEqual(['host.registered']);
+    }, 60_000);
+
+    it('a personal workspace still hits the plan device limit', async () => {
+      const t = await tenant('PERSONAL');
+      const u = await t.person('sub-p3');
+      for (let i = 0; i < 3; i++) {
+        const c = await newCode(t, u.id);
+        expect((await install(t, c.code, `pcap-${i}`)).result.status).toBe(
+          'APPROVED',
+        );
+      }
+      const over = await newCode(t, u.id);
+      await expect(install(t, over.code, 'pcap-9')).rejects.toBeInstanceOf(
+        PlanLimitError,
+      );
+      expect(
+        await t.client.host.count({ where: { machineId: 'pcap-9' } }),
+      ).toBe(0);
+    }, 120_000);
+  });
 });
