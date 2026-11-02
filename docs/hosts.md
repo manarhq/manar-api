@@ -236,8 +236,10 @@ Writes need `TENANT_OWNER` or `SECURITY_ADMIN`; reads also allow `AUDITOR`.
   `REMOVED`. The record and everything pointing at it (sessions, approvals, events, tools, AI
   usage) are kept and listed with `GET /hosts?status=REMOVED`; the plain list leaves it out. Open
   device approvals expire and "approve for 8 hours" grants are revoked. Repeating it is harmless.
-  Re-installing the machine within 30 days brings it back as the same record (PENDING, approval
-  rules apply as for a new device); later it enrols as a new host and the old record stays.
+  Its owner re-installing it with an install key within 30 days brings it back as the same record,
+  PENDING for an admin (no owner or rule approval; old certificates stay revoked). Anyone else, AD
+  CS enrolment, or a later install gets a new host; the old record keeps the history. Removal and
+  registration lock the host row, so they never interleave.
 - `GET /install-keys`, `POST /install-keys`, `POST /install-keys/:id/revoke`
 - `GET/POST/PATCH /host-groups`
 - `GET/POST/PATCH /org-units` (a move under its own subtree is refused with `400`)
