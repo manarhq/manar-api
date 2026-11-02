@@ -77,6 +77,19 @@ export const AiAdvisoryConfigSchema = z.object({
   AI_ADVISORY_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
 
   /**
+   * Per-RPC deadline for `AnalyzeDlp` (its own **dlp lane**). manar-ai classifies DLP with an LLM
+   * whenever a provider is configured, which routinely takes longer than the hot lane's 2 s, so
+   * DLP gets its own deadline and its own breaker: slow classifications never open the hot
+   * lane's breaker for risk and prompt-injection signals. Shares the hot lane's threshold and
+   * cooldown values.
+   */
+  AI_ADVISORY_DLP_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10_000),
+
+  /**
    * Consecutive-failure threshold (timeout, transport error, or gRPC
    * status != OK) for the **hot lane** only, before `AiAdvisoryClient`'s
    * hot-lane circuit breaker opens and starts skipping hot-lane calls
@@ -110,7 +123,9 @@ export const AiAdvisoryConfigSchema = z.object({
     .number()
     .int()
     .positive()
-    .default(30_000),
+    // Above manar-ai's own 30 s provider timeout, so its structured "provider timed out" answer
+    // arrives instead of a deadline error that counts against the breaker.
+    .default(40_000),
 
   /**
    * Consecutive-failure threshold for the **long-form lane** only, before

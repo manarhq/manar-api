@@ -100,12 +100,42 @@ export interface AuditInvestigationAdvisory {
  *   - `longform`: `SummarizeIncident`/`SuggestPolicy`/`InvestigateAudit` —
  *     explicit, user-initiated LLM generation, off the authorization path.
  */
-export type AiRpcLane = 'hot' | 'longform';
+export type AiRpcLane = 'hot' | 'dlp' | 'longform';
+
+/**
+ * gRPC's default message cap, set explicitly on the channel so a change on either side is a
+ * deliberate one. manar-ai's server uses the same default.
+ */
+export const AI_ADVISORY_MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
+
+/** Characters per DLP chunk: at most 3 UTF-8 bytes each, with room left for the message envelope. */
+const DLP_CHUNK_CHARS = Math.floor(
+  (AI_ADVISORY_MAX_MESSAGE_BYTES - 64 * 1024) / 3,
+);
+/** Overlap between chunks, so a secret that straddles a boundary is whole in one of them. */
+const DLP_CHUNK_OVERLAP = 8 * 1024;
+
+/** Splits DLP content into overlapping chunks that each fit the gRPC message cap. */
+export function dlpChunks(content: string, size = DLP_CHUNK_CHARS): string[] {
+  if (content.length <= size) return [content];
+  const chunks: string[] = [];
+  for (let start = 0; ; start += size - DLP_CHUNK_OVERLAP) {
+    chunks.push(content.slice(start, start + size));
+    if (start + size >= content.length) return chunks;
+  }
+}
+
+const CHANNEL_OPTIONS: grpc.ChannelOptions = {
+  'grpc.max_send_message_length': AI_ADVISORY_MAX_MESSAGE_BYTES,
+  'grpc.max_receive_message_length': AI_ADVISORY_MAX_MESSAGE_BYTES,
+};
 
 /** Per-lane circuit-breaker state — see `call<T>()`'s doc comment. */
 interface CircuitBreakerState {
   consecutiveFailures: number;
   circuitOpenUntil: number | null;
+  /** True while the single half-open trial after a cooldown is in flight; other calls skip. */
+  trialInFlight: boolean;
 }
 
 /**
@@ -197,11 +227,27 @@ export class AiAdvisoryClient implements OnModuleDestroy {
   private readonly circuitThresholdByLane: Record<AiRpcLane, number>;
   private readonly circuitCooldownMsByLane: Record<AiRpcLane, number>;
 
+  /** Per-tenant breaker state for the dlp lane; see `stateFor`. */
+  private readonly dlpStateByTenant = new Map<string, CircuitBreakerState>();
+
   /** Per-lane circuit-breaker state, mutated only by `onSuccess`/`onFailure` for that same lane — see `call<T>()`'s doc comment. */
   private readonly circuitStateByLane: Record<AiRpcLane, CircuitBreakerState> =
     {
-      hot: { consecutiveFailures: 0, circuitOpenUntil: null },
-      longform: { consecutiveFailures: 0, circuitOpenUntil: null },
+      hot: {
+        consecutiveFailures: 0,
+        circuitOpenUntil: null,
+        trialInFlight: false,
+      },
+      dlp: {
+        consecutiveFailures: 0,
+        circuitOpenUntil: null,
+        trialInFlight: false,
+      },
+      longform: {
+        consecutiveFailures: 0,
+        circuitOpenUntil: null,
+        trialInFlight: false,
+      },
     };
 
   constructor(
@@ -213,12 +259,16 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     });
     this.timeoutMsByLane = {
       hot: configService.get('AI_ADVISORY_TIMEOUT_MS', { infer: true }),
+      dlp: configService.get('AI_ADVISORY_DLP_TIMEOUT_MS', { infer: true }),
       longform: configService.get('AI_ADVISORY_LONGFORM_TIMEOUT_MS', {
         infer: true,
       }),
     };
     this.circuitThresholdByLane = {
       hot: configService.get('AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD', {
+        infer: true,
+      }),
+      dlp: configService.get('AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD', {
         infer: true,
       }),
       longform: configService.get(
@@ -228,6 +278,9 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     };
     this.circuitCooldownMsByLane = {
       hot: configService.get('AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS', {
+        infer: true,
+      }),
+      dlp: configService.get('AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS', {
         infer: true,
       }),
       longform: configService.get(
@@ -299,7 +352,11 @@ export class AiAdvisoryClient implements OnModuleDestroy {
       this.logger.log(
         `manar-ai AnalysisService channel secured with mTLS to ${target}`,
       );
-      this.client = new AnalysisServiceClient(target, credentials);
+      this.client = new AnalysisServiceClient(
+        target,
+        credentials,
+        CHANNEL_OPTIONS,
+      );
     } else {
       this.logger.warn(
         `manar-ai AnalysisService channel is PLAINTEXT to ${target}. This is supported only against a local/development/test manar-ai; set AI_ADVISORY_TLS_ENABLED=true with the CA/certificate/key for any real deployment.`,
@@ -307,6 +364,7 @@ export class AiAdvisoryClient implements OnModuleDestroy {
       this.client = new AnalysisServiceClient(
         target,
         grpc.credentials.createInsecure(),
+        CHANNEL_OPTIONS,
       );
     }
   }
@@ -423,20 +481,23 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('hot', 'AnalyzeDlp', () =>
-      this.promisify<DlpAnalysisResult>('hot', (deadline, callback) =>
-        this.client.analyzeDlp(
-          {
-            content: input.content,
-            correlationId: input.correlationId ?? this.resolveCorrelationId(),
-          },
-          new grpc.Metadata(),
-          { deadline },
-          callback,
-        ),
-      ),
-    );
-    if (!result) return null;
+    // Content over the gRPC message cap is scanned whole, in overlapping chunks under it; one
+    // chunk without an answer means no verdict for the whole content.
+    const results: DlpAnalysisResult[] = [];
+    for (const chunk of dlpChunks(input.content)) {
+      const r = await this.call(
+        'dlp',
+        'AnalyzeDlp',
+        () => this.analyzeDlpOnce(chunk, input.correlationId),
+        input.tenantId,
+      );
+      if (!r) return null;
+      results.push(r);
+    }
+    const result: DlpAnalysisResult = {
+      findings: results.flatMap((r) => r.findings),
+      overallSeverity: Math.max(...results.map((r) => r.overallSeverity)),
+    };
     return {
       findings: result.findings.map((f) => ({
         type: dlpFinding_TypeToJSON(f.type),
@@ -446,6 +507,41 @@ export class AiAdvisoryClient implements OnModuleDestroy {
       })),
       overallSeverity: dlpAnalysisResult_SeverityToJSON(result.overallSeverity),
     };
+  }
+
+  /**
+   * One AnalyzeDlp chunk inside the dlp lane's deadline. A transient UNAVAILABLE (a reconnect, a
+   * pod moving) is retried once while the deadline has time left, so the breaker sees one outcome.
+   */
+  private async analyzeDlpOnce(
+    content: string,
+    correlationId: string | undefined,
+  ): Promise<DlpAnalysisResult> {
+    const deadline = Date.now() + this.timeoutMsFor('dlp');
+    const attempt = () =>
+      this.promisify<DlpAnalysisResult>(
+        'dlp',
+        (d, callback) =>
+          this.client.analyzeDlp(
+            {
+              content,
+              correlationId: correlationId ?? this.resolveCorrelationId(),
+            },
+            new grpc.Metadata(),
+            { deadline: d },
+            callback,
+          ),
+        deadline,
+      );
+    try {
+      return await attempt();
+    } catch (error) {
+      const retriable =
+        (error as { code?: unknown })?.code === grpc.status.UNAVAILABLE &&
+        deadline - Date.now() > 100;
+      if (!retriable) throw error;
+      return attempt();
+    }
   }
 
   /**
@@ -723,31 +819,69 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     lane: AiRpcLane,
     rpcName: string,
     fn: () => Promise<T>,
+    tenantId?: string,
   ): Promise<T | null> {
-    const state = this.circuitStateByLane[lane];
+    const state = this.stateFor(lane, tenantId);
+    let trial = false;
     if (state.circuitOpenUntil !== null) {
-      if (Date.now() < state.circuitOpenUntil) {
-        // Circuit open — skip the call entirely rather than paying the
-        // full timeout on a backend already known to be failing.
+      // Circuit open — skip the call entirely rather than paying the
+      // full timeout on a backend already known to be failing. After the
+      // cooldown exactly one call goes through as a half-open trial; the
+      // others keep skipping until it settles.
+      if (Date.now() < state.circuitOpenUntil || state.trialInFlight) {
         return null;
       }
-      // Cooldown elapsed: let this one call through as a half-open trial.
-      // `onFailure`/`onSuccess` below decide whether the circuit re-opens
-      // or fully closes.
+      state.trialInFlight = true;
+      trial = true;
     }
 
     try {
       const result = await fn();
-      this.onSuccess(lane);
+      this.onSuccess(lane, state, tenantId);
       return result;
     } catch (error) {
-      this.onFailure(lane, rpcName, error);
+      // An oversized request is about this request, not manar-ai's health. Still `null`: no
+      // verdict, which the LLM proxy treats as blocked.
+      if (
+        (error as { code?: unknown })?.code === grpc.status.RESOURCE_EXHAUSTED
+      ) {
+        this.logger.warn(
+          `manar-ai AnalysisService.${rpcName} refused an oversized message on the "${lane}" lane; not counted as an outage`,
+        );
+        return null;
+      }
+      this.onFailure(lane, rpcName, error, state);
       return null;
+    } finally {
+      if (trial) state.trialInFlight = false;
     }
   }
 
-  private onSuccess(lane: AiRpcLane): void {
-    const state = this.circuitStateByLane[lane];
+  /**
+   * The dlp lane keeps one breaker per tenant: DLP runs on each tenant's own content, so one
+   * tenant's slow scans must not stop everyone else's calls. Other lanes share one breaker.
+   */
+  private stateFor(lane: AiRpcLane, tenantId?: string): CircuitBreakerState {
+    if (lane !== 'dlp' || tenantId === undefined) {
+      return this.circuitStateByLane[lane];
+    }
+    let state = this.dlpStateByTenant.get(tenantId);
+    if (!state) {
+      state = {
+        consecutiveFailures: 0,
+        circuitOpenUntil: null,
+        trialInFlight: false,
+      };
+      this.dlpStateByTenant.set(tenantId, state);
+    }
+    return state;
+  }
+
+  private onSuccess(
+    lane: AiRpcLane,
+    state: CircuitBreakerState,
+    tenantId?: string,
+  ): void {
     if (state.consecutiveFailures > 0 || state.circuitOpenUntil !== null) {
       this.logger.log(
         `manar-ai AnalysisService call succeeded on the "${lane}" lane — circuit breaker reset`,
@@ -755,10 +889,18 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     }
     state.consecutiveFailures = 0;
     state.circuitOpenUntil = null;
+    // A healthy tenant needs no entry; only failing tenants are remembered.
+    if (lane === 'dlp' && tenantId !== undefined) {
+      this.dlpStateByTenant.delete(tenantId);
+    }
   }
 
-  private onFailure(lane: AiRpcLane, rpcName: string, error: unknown): void {
-    const state = this.circuitStateByLane[lane];
+  private onFailure(
+    lane: AiRpcLane,
+    rpcName: string,
+    error: unknown,
+    state: CircuitBreakerState,
+  ): void {
     state.consecutiveFailures += 1;
     this.logger.warn(
       `manar-ai AnalysisService.${rpcName} failed on the "${lane}" lane (consecutive failures: ${state.consecutiveFailures}): ${error instanceof Error ? error.message : String(error)}`,
@@ -783,8 +925,8 @@ export class AiAdvisoryClient implements OnModuleDestroy {
       deadline: grpc.Deadline,
       callback: (error: grpc.ServiceError | null, response: T) => void,
     ) => grpc.ClientUnaryCall,
+    deadline = Date.now() + this.timeoutMsFor(lane),
   ): Promise<T> {
-    const deadline = Date.now() + this.timeoutMsFor(lane);
     return new Promise<T>((resolve, reject) => {
       invoke(deadline, (error, response) => {
         if (error) {

@@ -241,6 +241,7 @@ describe('Phase 10c: AI Extended Capabilities (e2e)', () => {
     const values = {
       AI_ADVISORY_GRPC_TARGET: overrides.grpcTarget,
       AI_ADVISORY_TIMEOUT_MS: timeoutMs,
+      AI_ADVISORY_DLP_TIMEOUT_MS: timeoutMs,
       AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
       AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
       AI_ADVISORY_LONGFORM_TIMEOUT_MS: timeoutMs,
