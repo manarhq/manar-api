@@ -258,17 +258,32 @@ export class HostsService {
 
     const { host, publish, rekeyPending, reenrolled } =
       await client.$transaction(async (tx) => {
+        // Serialises with "Remove device" (HostsAdminService.retire takes the same row lock), so a
+        // removal and a registration of one machine never interleave.
+        await tx.$queryRaw`SELECT 1 FROM "hosts" WHERE "machineId" = ${input.machineId} FOR UPDATE`;
         const found = await tx.host.findUnique({
           where: { machineId: input.machineId },
         });
-        // A removed machine enrols as a new device would. Within RESTORE_WINDOW_MS it revives its
-        // old record, so its history continues; later the old record keeps the history under
-        // "Removed devices" and gives up the machineId.
+        // A removed machine enrols as a new device would. Its owner re-installing it with an
+        // install key within RESTORE_WINDOW_MS revives the old record (history continues), and
+        // it waits PENDING for an admin. Anyone else, another enrolment method, or a later
+        // install gets a new record; the old one keeps the history and gives up the machineId.
         let revive: Host | null = null;
         if (found?.status === 'REMOVED') {
           const removedAt = found.removedAt?.getTime() ?? 0;
-          if (Date.now() - removedAt < RESTORE_WINDOW_MS) {
+          if (
+            Date.now() - removedAt < RESTORE_WINDOW_MS &&
+            ctx.method === 'INSTALL_KEY' &&
+            found.enrolmentMethod === 'INSTALL_KEY' &&
+            !!ctx.ownerSubject &&
+            found.ownerSubject === ctx.ownerSubject
+          ) {
             revive = found;
+            // Certificates of the removed record never come back to life with it.
+            await tx.hostCertificate.updateMany({
+              where: { hostId: found.id, revokedAt: null },
+              data: { revokedAt: new Date() },
+            });
           } else {
             await tx.host.update({
               where: { id: found.id },
@@ -386,10 +401,11 @@ export class HostsService {
         }
         // A personal owner's own code approves a NEW device only. machineId is the installer's
         // claim, so a re-install of a known machine (new key) waits for the owner to confirm it.
+        // A revived record always waits for an admin: no owner or rule approval.
         const ownerApproved =
-          !!ctx.ownerApproves && ctx.autoApprove && !existing;
+          !!ctx.ownerApproves && ctx.autoApprove && !existing && !revive;
         const rule =
-          existing || !ctx.autoApprove || ownerApproved
+          existing || revive || !ctx.autoApprove || ownerApproved
             ? null
             : matchApprovalRule(
                 await tx.hostApprovalRule.findMany({
@@ -500,7 +516,7 @@ export class HostsService {
             enrolmentMethod: ctx.method,
             merged: existing !== null,
             restored: revive !== null,
-            reenrolled: reenrol,
+            reenrolled: reenrol || revive !== null,
             status: saved.status,
             approvalRuleId: rule?.id ?? null,
             keyType: saved.keyType,
@@ -560,14 +576,14 @@ export class HostsService {
               groupMoved();
             },
             rekeyPending: false,
-            reenrolled: reenrol,
+            reenrolled: reenrol || revive !== null,
           };
         }
         return {
           host: saved,
           publish: done,
           rekeyPending: false,
-          reenrolled: reenrol,
+          reenrolled: reenrol || revive !== null,
         };
       });
     publish();
@@ -577,7 +593,7 @@ export class HostsService {
       );
     }
 
-    // A re-install replaced the key: the old key's certificates stop now.
+    // A re-install replaced the key (or revived a removed record): the old certificates stop now.
     if (reenrolled) await this.ca.revokeHostCertificates(client, host.id);
     const issued = await this.ca.issueHostCertificate(
       client,
@@ -590,6 +606,7 @@ export class HostsService {
     if (
       !now ||
       (now.status !== 'PENDING' && now.status !== 'APPROVED') ||
+      now.removedAt !== null ||
       now.keyFingerprint !== keyFingerprint
     ) {
       await this.ca.revokeHostCertificateSerial(client, issued.serialNumber);

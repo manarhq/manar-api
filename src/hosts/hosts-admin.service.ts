@@ -224,6 +224,8 @@ export class HostsAdminService {
     const hostId = host.id;
     const now = new Date();
     const publish = await client.$transaction(async (tx) => {
+      // The same row lock registration takes: the two never interleave for one machine.
+      await tx.$queryRaw`SELECT 1 FROM "hosts" WHERE "id" = ${hostId} FOR UPDATE`;
       const { count } = await tx.host.updateMany({
         where: { id: hostId, status: { not: 'REMOVED' } },
         data: {
@@ -235,6 +237,11 @@ export class HostsAdminService {
         },
       });
       if (count === 0) return null; // a concurrent remove won
+      // Revoked in the same transaction as the status change; OpenBao follows after commit.
+      await tx.hostCertificate.updateMany({
+        where: { hostId, revokedAt: null },
+        data: { revokedAt: now },
+      });
       await tx.hostApproval.updateMany({
         where: { hostId, status: 'PENDING' },
         data: { status: 'EXPIRED' },
