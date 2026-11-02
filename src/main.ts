@@ -39,7 +39,14 @@ async function bootstrap(): Promise<void> {
   const port = configService.get('PORT', { infer: true });
   instrumentHttp(app.getHttpAdapter().getInstance(), 'human');
   // RFC 8058 one-click unsubscribe (and its confirm-page form) POSTs form-encoded; nothing else
-  // on this listener takes a form body, so the parser is limited to that one route.
+  // on this listener takes a form body, so the parser is limited to that one route. Nest registers
+  // its own form parser at listen() (and refuses a second one), so register Nest's parsers now and
+  // replace only the form one; Nest then skips its registration.
+  app.getHttpAdapter().registerParserMiddleware(undefined, true);
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .removeContentTypeParser('application/x-www-form-urlencoded');
   app
     .getHttpAdapter()
     .getInstance()
