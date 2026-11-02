@@ -6,7 +6,10 @@ import {
   NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 import { ConfigService } from '@nestjs/config';
-import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
+import {
+  WINSTON_MODULE_NEST_PROVIDER,
+  WINSTON_MODULE_PROVIDER,
+} from 'nest-winston';
 import { AppModule } from './app.module';
 import { AgentMtlsAppModule } from './agent-mtls/agent-mtls-app.module';
 import { allowLargeLlmBodies } from './agent-runtime/llm-proxy.controller';
@@ -16,6 +19,7 @@ import type { AppConfig } from './config/env.validation';
 import { setupOpenApiDocs } from './openapi/setup-openapi-docs';
 import { setupCors, setupHelmet } from './security/setup-security';
 import { instrumentHttp, startMetricsServer } from './metrics/metrics';
+import { logRequests } from './logging/logging.interceptor';
 
 async function bootstrap(): Promise<void> {
   // Validated once, directly against process.env, before either Nest
@@ -38,6 +42,10 @@ async function bootstrap(): Promise<void> {
   const configService = app.get(ConfigService<AppConfig, true>);
   const port = configService.get('PORT', { infer: true });
   instrumentHttp(app.getHttpAdapter().getInstance(), 'human');
+  logRequests(
+    app.getHttpAdapter().getInstance(),
+    app.get(WINSTON_MODULE_PROVIDER),
+  );
   // RFC 8058 one-click unsubscribe (and its confirm-page form) POSTs form-encoded; nothing else
   // on this listener takes a form body, so the parser is limited to that one route. Nest registers
   // its own form parser at listen() (and refuses a second one), so register Nest's parsers now and
@@ -90,6 +98,10 @@ async function bootstrap(): Promise<void> {
   agentMtlsApp.useLogger(agentMtlsApp.get(WINSTON_MODULE_NEST_PROVIDER));
   allowLargeLlmBodies(agentMtlsApp.getHttpAdapter().getInstance());
   instrumentHttp(agentMtlsApp.getHttpAdapter().getInstance(), 'agent');
+  logRequests(
+    agentMtlsApp.getHttpAdapter().getInstance(),
+    agentMtlsApp.get(WINSTON_MODULE_PROVIDER),
+  );
   setupHelmet(agentMtlsApp);
   enableGracefulShutdown(agentMtlsApp);
   await agentMtlsApp.listen(bootstrapConfig.AGENT_MTLS_PORT, '0.0.0.0');

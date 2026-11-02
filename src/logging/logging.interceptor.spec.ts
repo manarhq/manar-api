@@ -1,32 +1,115 @@
-import { NotFoundException } from '@nestjs/common';
-import type { CallHandler, ExecutionContext } from '@nestjs/common';
-import { lastValueFrom, of, throwError } from 'rxjs';
-import { describe, expect, it, vi } from 'vitest';
-import { LoggingInterceptor } from './logging.interceptor';
+import {
+  CanActivate,
+  Controller,
+  Delete,
+  ForbiddenException,
+  Get,
+  NotFoundException,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { Test } from '@nestjs/testing';
+import {
+  FastifyAdapter,
+  type NestFastifyApplication,
+} from '@nestjs/platform-fastify';
+import type { Logger } from 'winston';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { LoggingInterceptor, logRequests } from './logging.interceptor';
 
-function run(handle: CallHandler['handle']) {
-  const info = vi.fn();
-  const context = {
-    switchToHttp: () => ({
-      getRequest: () => ({ method: 'DELETE', url: '/hosts/x' }),
-      // The reply still says 200 when the handler throws: the filter sets it later.
-      getResponse: () => ({ statusCode: 200 }),
-    }),
-  } as unknown as ExecutionContext;
-  const done = lastValueFrom(
-    new LoggingInterceptor({ info } as never).intercept(context, { handle }),
-  ).catch(() => undefined);
-  return done.then(() => info.mock.calls[0]?.[1] as { statusCode: number });
+class Deny implements CanActivate {
+  canActivate(): boolean {
+    throw new ForbiddenException();
+  }
 }
 
-describe('LoggingInterceptor', () => {
-  it('logs the status of a thrown error, not the reply default', async () => {
-    expect(
-      (await run(() => throwError(() => new NotFoundException()))).statusCode,
-    ).toBe(404);
-    expect(
-      (await run(() => throwError(() => new Error('db')))).statusCode,
-    ).toBe(500);
-    expect((await run(() => of({ ok: true }))).statusCode).toBe(200);
+class FakePrismaError extends Error {
+  code = 'P2003';
+}
+
+@Controller()
+class TestController {
+  @Delete('hosts/:id')
+  remove(): void {
+    throw new FakePrismaError('foreign key');
+  }
+
+  @Post('events')
+  events(): void {
+    throw new NotFoundException();
+  }
+
+  @Get('i/:code')
+  install(@Param('code') code: string): string {
+    return code;
+  }
+
+  @Get('guarded')
+  @UseGuards(Deny)
+  guarded(): string {
+    return 'never';
+  }
+}
+
+describe('request log', () => {
+  const lines: Record<string, unknown>[] = [];
+  const logger = {
+    info: (_msg: string, meta: Record<string, unknown>) => lines.push(meta),
+  } as unknown as Logger;
+  let app: NestFastifyApplication;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [TestController],
+      providers: [{ provide: APP_INTERCEPTOR, useClass: LoggingInterceptor }],
+    }).compile();
+    app = moduleRef.createNestApplication(new FastifyAdapter(), {
+      logger: false,
+    });
+    logRequests(app.getHttpAdapter().getInstance(), logger);
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+  });
+
+  afterAll(() => app.close());
+
+  async function call(method: 'GET' | 'POST' | 'DELETE', url: string) {
+    lines.length = 0;
+    const res = await app.inject({ method, url });
+    return { status: res.statusCode, line: lines[0] };
+  }
+
+  it('logs the status the client got when a handler throws', async () => {
+    const { status, line } = await call('DELETE', '/hosts/abc');
+    expect(status).toBe(500);
+    expect(line).toMatchObject({
+      method: 'DELETE',
+      route: '/hosts/:id',
+      statusCode: 500,
+      errorName: 'FakePrismaError',
+      errorCode: 'P2003',
+    });
+
+    const notFound = await call('POST', '/events');
+    expect(notFound.line).toMatchObject({ statusCode: 404 });
+  });
+
+  it('logs guard rejections and unknown routes', async () => {
+    expect((await call('GET', '/guarded')).line).toMatchObject({
+      statusCode: 403,
+    });
+    expect((await call('GET', '/nope?x=1')).line).toMatchObject({
+      statusCode: 404,
+      route: 'unmatched',
+    });
+  });
+
+  it('logs the route template, never the raw path', async () => {
+    const { status, line } = await call('GET', '/i/SECRETCODE.sh?t=1');
+    expect(status).toBe(200);
+    expect(line).toMatchObject({ route: '/i/:code', statusCode: 200 });
+    expect(JSON.stringify(line)).not.toContain('SECRETCODE');
   });
 });
