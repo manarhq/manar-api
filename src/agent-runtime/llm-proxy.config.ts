@@ -43,7 +43,7 @@ export const LlmProxyConfigSchema = z.object({
   /** e.g. `https://<resource>.openai.azure.com` */
   LLM_AZURE_OPENAI_ENDPOINT: z.string().url().optional(),
   LLM_AZURE_OPENAI_DEPLOYMENT: z.string().min(1).optional(),
-  LLM_AZURE_OPENAI_API_VERSION: z.string().min(1).default('2024-10-21'),
+  LLM_AZURE_OPENAI_API_VERSION: z.string().min(1).default('2025-04-01-preview'),
   AZURE_OPENAI_API_KEY: z.string().min(1).optional(),
   /**
    * Upstream of `POST /agent/v1/llm/anthropic/v1/messages` (Anthropic Messages format, for

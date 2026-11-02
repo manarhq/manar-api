@@ -50,6 +50,36 @@ export function chargedTokens(
   );
 }
 
+/**
+ * Azure OpenAI serves GPT-5 reasoning models, which reject `max_tokens` (use
+ * `max_completion_tokens`) and any `temperature`. The original GPT-5 deployments (gpt-5,
+ * gpt-5-mini, gpt-5-nano) take `minimal` but not `none`; gpt-5.1 and later take `none` but not
+ * `minimal`.
+ *
+ * ponytail: the GPT-5 generation is read from the deployment name (Azure's default, the model
+ * name). A deployment named otherwise passes `reasoning_effort` through unchanged.
+ */
+export function forAzureReasoningModel(
+  request: UpstreamChatRequest,
+  deployment: string,
+): UpstreamChatRequest & { max_completion_tokens?: number } {
+  const { max_tokens, ...rest } = request;
+  delete rest.temperature;
+  const out: UpstreamChatRequest & { max_completion_tokens?: number } = {
+    ...rest,
+    ...(max_tokens !== undefined ? { max_completion_tokens: max_tokens } : {}),
+  };
+  if (out.reasoning_effort === 'none' && /^gpt-5(-|$)/.test(deployment)) {
+    out.reasoning_effort = 'minimal';
+  } else if (
+    out.reasoning_effort === 'minimal' &&
+    /^gpt-5\.\d/.test(deployment)
+  ) {
+    out.reasoning_effort = 'none';
+  }
+  return out;
+}
+
 /** The upstream could not answer (unreachable, timeout, non-2xx, not JSON). Never carries the upstream body. */
 export class LlmUpstreamError extends Error {
   constructor(readonly detail: string) {
@@ -136,10 +166,7 @@ export class LlmUpstreamClient {
       model = route?.model ?? deployment;
       url = `${endpoint.replace(/\/+$/, '')}/openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
       headers['api-key'] = key;
-      // gpt-5-mini's lowest setting is `minimal`; it rejects `none`.
-      if (request.reasoning_effort === 'none') {
-        request = { ...request, reasoning_effort: 'minimal' };
-      }
+      request = forAzureReasoningModel(request, model);
     } else if (provider === 'core42_compass') {
       const base = this.config.get('LLM_CORE42_BASE_URL', { infer: true });
       const key = this.config.get('CORE42_API_KEY', { infer: true });
