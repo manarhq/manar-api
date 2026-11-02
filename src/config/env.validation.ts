@@ -45,6 +45,10 @@ import {
   TelegramConfigSchema,
   telegramConfigIssues,
 } from '../telegram/telegram.config';
+import {
+  DataCollectionConfigSchema,
+  dataCollectionConfigIssues,
+} from '../data-collection/data-collection.config';
 import { EdgeConfigSchema, edgeConfigIssues } from '../edge/edge.config';
 
 /**
@@ -102,6 +106,7 @@ export const AppConfigSchema = z
   .extend(PushConfigSchema.shape)
   .extend(TelegramConfigSchema.shape)
   .extend(GrowthConfigSchema.shape)
+  .extend(DataCollectionConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {
@@ -115,6 +120,7 @@ export const AppConfigSchema = z
       ...edgeConfigIssues(c),
       ...pushConfigIssues(c),
       ...telegramConfigIssues(c),
+      ...dataCollectionConfigIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });
   });

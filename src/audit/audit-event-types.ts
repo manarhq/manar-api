@@ -220,6 +220,8 @@ export const AUDIT_EVENT_TYPES = {
   LAUNCH_OFFER_CLAIMED: 'launch.offer.claimed',
   /** The owner turned the public "Protected by Manar" badge on or off. */
   PROFILE_BADGE_CHANGED: 'profile.badge.changed',
+  /** A manager changed the workspace's product improvement data switches. */
+  WORKSPACE_DATA_PREFERENCES_CHANGED: 'workspace.data_preferences.changed',
   WORKSPACE_INVITE_CREATED: 'workspace.invite.created',
   WORKSPACE_INVITE_ACCEPTED: 'workspace.invite.accepted',
   WORKSPACE_INVITE_REVOKED: 'workspace.invite.revoked',

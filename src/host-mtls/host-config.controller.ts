@@ -5,6 +5,7 @@ import { ApiExcludeController, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { PauseService } from '../pause/pause.service';
 import { SecretsService } from '../secrets/secrets.service';
+import { DataCollectionService } from '../data-collection/data-collection.service';
 import { JailSitesService } from '../jail/jail-sites.service';
 import { CurrentHost, type HostContext } from './host-context';
 import { HostAuthGuard } from './host-auth.guard';
@@ -28,6 +29,7 @@ export class HostConfigController {
     private readonly tenants: TenantDatabaseManager,
     private readonly secrets: SecretsService,
     private readonly jail: JailSitesService,
+    private readonly data: DataCollectionService,
   ) {}
 
   /** Secret blocking flags. Any failure reads as "off": a lookup problem must never lock a person out. */
@@ -40,6 +42,18 @@ export class HostConfigController {
     } catch (e) {
       this.logger.warn(`secret features unavailable: ${(e as Error).message}`);
       return [];
+    }
+  }
+
+  private async dataCollection(host: HostContext) {
+    try {
+      return (await this.data.forHost(host.tenantId, host.ownerSubject))
+        .effective;
+    } catch (e) {
+      this.logger.warn(
+        `data collection flags unavailable: ${(e as Error).message}`,
+      );
+      return { improveManar: false, aiTraining: false };
     }
   }
 
@@ -74,6 +88,8 @@ export class HostConfigController {
       }),
       // JAIL: which tools the device filters and the remembered site decisions (owned by the jail track).
       jail: await this.jail.config(host),
+      // Product improvement data: the device owner's effective switches. Off on any failure.
+      dataCollection: await this.dataCollection(host),
     };
   }
 }

@@ -32,7 +32,7 @@ import type {
  * blocked call; a false negative ships a secret to a model provider).
  */
 
-const CREDENTIAL_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+export const CREDENTIAL_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
   ['jwt', /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g],
   ['bearer_token', /\bbearer\s+[A-Za-z0-9\-._~+/]{20,}=*/gi],
   ['private_key', /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/g],

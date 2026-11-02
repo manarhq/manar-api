@@ -12,6 +12,7 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { KeycloakAdminClient } from '../keycloak/keycloak-admin.client';
 import { StripeGateway } from '../billing/stripe.gateway';
 import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
+import { DataCollectionService } from '../data-collection/data-collection.service';
 import { growthSetting } from './growth.config';
 import { ContactEmailService } from '../contact/contact-email.service';
 import { MailerService } from './mailer.service';
@@ -54,6 +55,7 @@ export class AccountService {
     private readonly mailer: MailerService,
     private readonly contact: ContactEmailService,
     private readonly config: ConfigService<AppConfig, true>,
+    private readonly data: DataCollectionService,
   ) {}
 
   // ---- export ----
@@ -386,7 +388,12 @@ export class AccountService {
     summary.companyMembershipsRemoved = (
       await this.control.membership.deleteMany({ where: { issuer, subject } })
     ).count;
-    // 4. The sign-in account itself.
+    // 4. Product improvement data: stored samples and the PostHog person.
+    await this.data.deleteUserData(issuer, subject);
+    await this.control.userDataPreference.deleteMany({
+      where: { issuer, subject },
+    });
+    // 5. The sign-in account itself.
     const realm = realmOf(issuer);
     if (realm) {
       await this.keycloak.deleteUser(realm, subject);

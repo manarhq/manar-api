@@ -126,6 +126,10 @@ model Tenant {
   allowOutboundTelemetry Boolean         @default(false)
   allowCloudStorage      Boolean         @default(false)
 
+  /// Product improvement data, workspace switches (COMPANY only; default on). Org off overrides every member.
+  dataImproveManar Boolean @default(true)
+  dataAiTraining   Boolean @default(true)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -637,4 +641,41 @@ model ContactEmail {
 
   @@id([issuer, subject])
   @@map("contact_emails")
+}
+
+/// Per-person product improvement data switches (across every workspace of the person). No row = both on.
+model UserDataPreference {
+  issuer          String
+  subject         String
+  improveManar    Boolean  @default(true)
+  aiTraining      Boolean  @default(true)
+  /// The one-time sign-up notice was dismissed.
+  noticeDismissed Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@id([issuer, subject])
+  @@map("user_data_preferences")
+}
+
+/// Redacted samples from devices (commands and domains WARDEN asked about or blocked). Kept 12 months,
+/// deleted at once when the owner turns "Help improve Manar" off or the account is deleted.
+model ProductSample {
+  id                String   @id @default(uuid())
+  issuer            String
+  subject           String
+  tenantId          String
+  kind              String
+  tool              String
+  decision          String
+  text              String
+  at                DateTime
+  /// The owner's effective `aiTraining` when the sample was written.
+  aiTrainingAllowed Boolean
+  createdAt         DateTime @default(now())
+
+  @@index([issuer, subject])
+  @@index([tenantId])
+  @@index([createdAt])
+  @@map("product_samples")
 }
