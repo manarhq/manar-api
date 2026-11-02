@@ -68,7 +68,9 @@ export function parseTcpEndpoint(
   const host = url.hostname;
   if (!host) return null;
 
-  const port = url.port ? Number(url.port) : defaultPort;
+  // A URL without a port uses its scheme's (`https://auth.example` -> 443).
+  const schemePort = { 'http:': 80, 'https:': 443 }[url.protocol];
+  const port = url.port ? Number(url.port) : (defaultPort ?? schemePort);
   if (
     port === undefined ||
     !Number.isInteger(port) ||
