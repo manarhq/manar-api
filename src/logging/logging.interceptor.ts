@@ -1,57 +1,62 @@
 import {
   CallHandler,
   ExecutionContext,
-  HttpException,
-  Inject,
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
-import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
-import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Logger } from 'winston';
 import { Observable, tap } from 'rxjs';
+import { CORRELATION_ID_HEADER } from './correlation-id.store';
+
+/** Error class and code a handler threw, keyed by the raw request; read by the onResponse log. */
+const handlerErrors = new WeakMap<
+  object,
+  { errorName: string; errorCode?: string }
+>();
 
 /**
- * Logs one structured JSON line per completed request (method, path,
- * status code, duration). The correlation ID itself is attached by the
- * Winston format in `winston.config.ts`, which reads it from the
- * AsyncLocalStorage context `CorrelationIdMiddleware` establishes.
+ * Remembers the class and code of an error a handler threw, so the access log line written in
+ * `onResponse` can say what failed. It does not log: inside the interceptor the exception filter
+ * has not run yet, so the reply still carries the route's default status (200/201).
  */
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
-  constructor(
-    @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
-  ) {}
-
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const request = context.switchToHttp().getRequest<FastifyRequest>();
-    const response = context.switchToHttp().getResponse<FastifyReply>();
-    const startedAt = Date.now();
-
     return next.handle().pipe(
       tap({
-        next: () => this.logCompletion(request, response.statusCode, startedAt),
-        // The exception filter has not set the reply's status yet: take it from the error.
-        error: (error: unknown) =>
-          this.logCompletion(
-            request,
-            error instanceof HttpException ? error.getStatus() : 500,
-            startedAt,
-          ),
+        error: (err: unknown) => {
+          const e = err as { name?: unknown; code?: unknown } | null;
+          handlerErrors.set(request.raw, {
+            errorName:
+              (err as object | null)?.constructor?.name ??
+              (typeof e?.name === 'string' ? e.name : 'Error'),
+            ...(typeof e?.code === 'string' ? { errorCode: e.code } : {}),
+          });
+        },
       }),
     );
   }
+}
 
-  private logCompletion(
-    request: FastifyRequest,
-    statusCode: number,
-    startedAt: number,
-  ): void {
-    this.logger.info('request completed', {
+/**
+ * One structured line per finished request, from Fastify's `onResponse` hook, where
+ * `reply.statusCode` is final. That covers guard rejections, unknown routes and exception-filter
+ * statuses, which an interceptor never sees correctly. The path is the route template
+ * (`/i/:code`), never the raw URL, so ids, query strings and credentials in paths stay out of logs.
+ */
+export function logRequests(fastify: FastifyInstance, logger: Logger): void {
+  fastify.addHook('onResponse', (request, reply, done) => {
+    const correlationId = reply.getHeader(CORRELATION_ID_HEADER);
+    logger.info('request completed', {
       method: request.method,
-      url: request.url,
-      statusCode,
-      durationMs: Date.now() - startedAt,
+      route: request.routeOptions.url ?? 'unmatched',
+      statusCode: reply.statusCode,
+      durationMs: Math.round(reply.elapsedTime),
+      ...(typeof correlationId === 'string' ? { correlationId } : {}),
+      ...handlerErrors.get(request.raw),
     });
-  }
+    done();
+  });
 }
