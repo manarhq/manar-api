@@ -23,7 +23,9 @@ import type { DataClassification } from '../common/data-classification';
 import {
   aiAdvisoryTlsEnabled,
   assertAiAdvisoryTlsMaterial,
+  aiAdvisoryProvider,
   isExternalAiProvider,
+  type AiAdvisoryProvider,
 } from './ai-advisory.config';
 
 export interface RiskAdvisory {
@@ -220,7 +222,7 @@ interface CircuitBreakerState {
 export class AiAdvisoryClient implements OnModuleDestroy {
   private readonly logger = new Logger(AiAdvisoryClient.name);
   private readonly client: AnalysisServiceClient;
-  private readonly provider: 'anthropic' | 'ollama' | 'vllm';
+  private readonly provider: AiAdvisoryProvider;
 
   /** Per-lane timeout/circuit-breaker config — see `AiRpcLane`'s doc comment. */
   private readonly timeoutMsByLane: Record<AiRpcLane, number>;
@@ -288,9 +290,10 @@ export class AiAdvisoryClient implements OnModuleDestroy {
         { infer: true },
       ),
     };
-    this.provider = configService.get('AI_ADVISORY_PROVIDER', {
-      infer: true,
-    });
+    this.provider = aiAdvisoryProvider(
+      configService.get('AI_ADVISORY_PROVIDER', { infer: true }),
+      configService.get('NODE_ENV', { infer: true }),
+    );
     // Release 2026-11-11: manar-ai's `AnalysisService` now binds
     // `add_secure_port` with `require_client_auth=True` plus a peer-identity
     // interceptor, and refuses to bind plaintext at all when its own
@@ -790,12 +793,18 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     try {
       const tenant = await this.control.tenant.findUnique({
         where: { id: tenantId },
-        select: { allowExternalAi: true },
+        select: { allowExternalAi: true, residency: true },
       });
-      if (tenant?.allowExternalAi === true) return true;
+      // An air-gapped tenant's boundary admits no external provider, whatever the flag says.
+      if (
+        tenant?.allowExternalAi === true &&
+        tenant.residency !== 'AIR_GAPPED'
+      ) {
+        return true;
+      }
 
       this.logger.log(
-        `Skipping manar-ai ${rpcName} for tenant "${tenantId}": provider "${this.provider}" is external and this tenant's allowExternalAi is not true — no RPC attempted (Section 54 data residency enforcement).`,
+        `Skipping manar-ai ${rpcName} for tenant "${tenantId}": provider "${this.provider}" is external and this tenant's allowExternalAi is not true or its residency is AIR_GAPPED — no RPC attempted (Section 54 data residency enforcement).`,
       );
       return false;
     } catch (error) {
