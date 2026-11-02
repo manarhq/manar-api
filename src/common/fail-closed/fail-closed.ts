@@ -3,6 +3,7 @@ import {
   Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { getCorrelationId } from '../../logging/correlation-id.store';
 
 export const ENFORCEMENT_DEPENDENCY_UNAVAILABLE =
   'enforcement_dependency_unavailable';
@@ -14,12 +15,19 @@ export const ENFORCEMENT_DEPENDENCY_UNAVAILABLE =
  * and never an ALLOW (`CLAUDE.md`: fail closed).
  */
 export class EnforcementDependencyUnavailableException extends ServiceUnavailableException {
-  constructor(readonly dependency: string) {
+  /** `message`, when given, is shown to a person, with the request's correlation id as `reference`. */
+  constructor(
+    readonly dependency: string,
+    message?: string,
+  ) {
+    const reference = message === undefined ? undefined : getCorrelationId();
     super({
       statusCode: 503,
       error: 'Service Unavailable',
       reason: ENFORCEMENT_DEPENDENCY_UNAVAILABLE,
       dependency,
+      ...(message === undefined ? {} : { message }),
+      ...(reference === undefined ? {} : { reference }),
     });
   }
 }

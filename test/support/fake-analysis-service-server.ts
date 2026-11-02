@@ -45,6 +45,9 @@ export class FakeAnalysisServiceServer {
   /** Artificial delay (ms) before responding to any RPC — set high to exercise `AiAdvisoryClient`'s timeout path. */
   responseDelayMs = 0;
 
+  /** When set, the next RPC fails with this gRPC status (then it clears). */
+  failNextWith: grpc.status | undefined;
+
   riskResult: RiskAnalysisResult = {
     score: 0,
     confidence: 0,
@@ -149,6 +152,19 @@ export class FakeAnalysisServiceServer {
     callback: (error: grpc.ServiceError | null, response: T) => void,
     getResult: () => T,
   ): void {
+    if (this.failNextWith !== undefined) {
+      const code = this.failNextWith;
+      this.failNextWith = undefined;
+      callback(
+        Object.assign(new Error('injected'), {
+          code,
+          details: 'injected',
+          metadata: new grpc.Metadata(),
+        }),
+        undefined as T,
+      );
+      return;
+    }
     if (this.responseDelayMs > 0) {
       setTimeout(() => callback(null, getResult()), this.responseDelayMs);
     } else {

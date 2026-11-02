@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { correlationIdStore } from '../logging/correlation-id.store';
 import type { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import type { AgentContext } from '../agent-mtls/agent-context';
@@ -261,13 +262,22 @@ describe('LlmProxyService', () => {
     expect(upstream.chat).not.toHaveBeenCalled();
   });
 
-  it('blocks (503, fail closed) when the DLP advisory is unavailable', async () => {
+  it('blocks (503, fail closed) when the DLP advisory is unavailable, with a message a person can read', async () => {
     const { service, upstream } = setup({ advisory: null });
-    await expectDeny(
-      service.complete(AGENT, 'task-1', body()),
-      503,
-      'enforcement_dependency_unavailable',
-    );
+    await expect(
+      correlationIdStore.run({ correlationId: 'ref-123' }, () =>
+        service.complete(AGENT, 'task-1', body()),
+      ),
+    ).rejects.toMatchObject({
+      status: 503,
+      response: expect.objectContaining({
+        reason: 'enforcement_dependency_unavailable',
+        dependency: 'dlp-advisory',
+        message:
+          "Manar couldn't check this request for secrets, so it wasn't sent. Try again in a moment.",
+        reference: 'ref-123',
+      }) as unknown,
+    });
     expect(upstream.chat).not.toHaveBeenCalled();
   });
 
