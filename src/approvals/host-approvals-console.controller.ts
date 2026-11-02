@@ -97,11 +97,29 @@ export class HostApprovalsConsoleController {
     );
     const ws = await this.approvers.workspace(auth.tenant.id);
     const rights = await Promise.all(rows.map((r) => this.rights(auth, r, ws)));
+    // "Cursor on Sara's laptop wants to ...": the owner's name, never their subject.
+    const owners = [
+      ...new Set(
+        rows.flatMap((r) => (r.host.ownerSubject ? [r.host.ownerSubject] : [])),
+      ),
+    ];
+    const people = owners.length
+      ? await client.userProfile.findMany({
+          where: { keycloakSubject: { in: owners } },
+          select: { keycloakSubject: true, displayName: true },
+        })
+      : [];
+    const ownerName = new Map(
+      people.map((p) => [p.keycloakSubject, p.displayName]),
+    );
     return {
       items: rows.map((r, i) => ({
         id: r.id,
         hostId: r.hostId,
         hostName: r.host.hostname,
+        ownerName: r.host.ownerSubject
+          ? (ownerName.get(r.host.ownerSubject) ?? null)
+          : null,
         toolId: r.toolId,
         actionId: r.actionId,
         resource: r.resource,

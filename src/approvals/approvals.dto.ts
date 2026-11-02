@@ -106,6 +106,12 @@ export class ApprovalRequestSummaryDto {
   @ApiProperty({ format: 'date-time' })
   expiresAt!: Date;
 
+  @ApiProperty({ description: 'The agent, by name.' })
+  agentName!: string;
+
+  @ApiProperty({ description: 'The person who created the agent.' })
+  ownerName!: string;
+
   @ApiProperty({
     type: [String],
     enum: ['approve_once', 'approve_8h', 'deny'],

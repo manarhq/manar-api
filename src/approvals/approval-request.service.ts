@@ -205,7 +205,15 @@ export class ApprovalRequestService {
       where,
       orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
       take: input.limit + 1,
-      include: { agent: { select: { createdBy: true } } },
+      include: {
+        agent: {
+          select: {
+            createdBy: true,
+            displayName: true,
+            creator: { select: { displayName: true } },
+          },
+        },
+      },
     });
     return toCursorPage(rows, input.limit, (row) => row.requestedAt);
   }

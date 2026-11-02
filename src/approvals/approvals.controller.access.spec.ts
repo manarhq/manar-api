@@ -69,7 +69,16 @@ function world(
         }),
       listApprovalRequests: vi.fn(() =>
         Promise.resolve({
-          items: [{ ...request, agent: { createdBy: 'creator' } }],
+          items: [
+            {
+              ...request,
+              agent: {
+                createdBy: 'creator',
+                displayName: 'Release bot',
+                creator: { displayName: 'Dana' },
+              },
+            },
+          ],
           nextCursor: null,
         }),
       ),
@@ -233,6 +242,8 @@ describe('deciding an agent approval', () => {
     const w = world({ riskScore: 80 });
     const page = await w.controller.list(auth('creator', ['DEVELOPER']));
     expect(page.items[0]).toMatchObject({
+      agentName: 'Release bot',
+      ownerName: 'Dana',
       allowedDecisions: ['deny'],
       needs: 'needs_admin',
       why: 'high_risk',

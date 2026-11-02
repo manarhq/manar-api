@@ -252,6 +252,8 @@ export class ApprovalsController {
         status: request.status,
         requestedAt: request.requestedAt,
         expiresAt: request.expiresAt,
+        agentName: request.agent.displayName,
+        ownerName: request.agent.creator.displayName,
         allowedDecisions:
           request.status === 'PENDING' ? agentChoices(rights[i]!) : [],
         needs: rights[i]!.needs,
