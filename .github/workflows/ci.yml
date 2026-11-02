@@ -65,6 +65,20 @@ jobs:
           persist-credentials: false
       - run: sh deploy/ci/validate-fleet-inputs.test.sh
 
+  # src/contract/host-contract.json is shared with manar-edge (testdata/contract/host-contract.json):
+  # both test suites read it, so the copies must stay byte-identical.
+  contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          code="$(curl -sS -o edge.json -w '%{http_code}' https://raw.githubusercontent.com/manarhq/manar-edge/main/testdata/contract/host-contract.json)"
+          if [ "$code" = 404 ]; then echo "manar-edge has no copy yet"; exit 0; fi
+          test "$code" = 200
+          cmp src/contract/host-contract.json edge.json || { echo "host-contract.json differs from manar-edge main: change both repos together"; exit 1; }
+
   unit:
     runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
