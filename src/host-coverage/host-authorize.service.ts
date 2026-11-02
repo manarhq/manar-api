@@ -10,6 +10,7 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { KNOWN_HOST_TOOL_IDS, hostActionRisk } from '../tools/host-actions';
+import { redactForStorage } from '../contract/redact';
 import type { HostContext } from '../host-mtls/host-context';
 
 /** `POST /host/v1/authorize`: the `/agent/v1/authorize` body without a task (a device has none). */
@@ -114,11 +115,13 @@ export class HostAuthorizeService {
           hostId: host.hostId,
           toolId: request.toolId,
           actionId: request.actionId.toLowerCase(),
-          resource: request.resource.slice(0, 512),
+          resource: redactForStorage(request.resource),
         },
       });
     }
-    // The audit record is the evidence of governance: no record, no ALLOW.
+    // The audit record is the evidence of governance: no record, no ALLOW. The command is kept
+    // redacted (secrets, tokens, URL credentials and queries, home folders): the Sessions view
+    // shows it, and secret values are never stored. The decision above used the real one.
     const recorded = await this.audit.recordSafely(client, host.tenantId, {
       eventType: AUDIT_EVENT_TYPES.HOST_ACTION_DECIDED,
       actor: { type: 'system', id: `host:${host.hostId}` },
@@ -126,7 +129,7 @@ export class HostAuthorizeService {
         hostId: host.hostId,
         toolId: request.toolId,
         actionId: request.actionId,
-        resource: request.resource.slice(0, 512),
+        resource: redactForStorage(request.resource),
         decision: result.decision,
         reason: result.reason ?? null,
         riskScore: result.riskScore ?? null,

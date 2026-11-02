@@ -413,6 +413,18 @@ describe('HostAuthorizeService', () => {
       sessionId: null,
     });
   });
+  it('decides Claude Code device-hook calls and stores the command redacted', async () => {
+    const { svc, audit } = make({
+      policy: { effect: 'ALLOW', matchedRule: {} },
+    });
+    const cmd = 'export API_TOKEN=tok-123456789 && ls /home/sam/app';
+    const r = await svc.authorize(hostA, req('shell', cmd, 'host.claude-code'));
+    expect(r.decision).toBe('ALLOW');
+    const stored = JSON.stringify(audit.recordSafely.mock.calls);
+    expect(stored).not.toContain('tok-123456789');
+    expect(stored).not.toContain('/home/sam');
+    expect(stored).toContain('export API_TOKEN=<redacted> && ls ~/app');
+  });
   it('obeys a matched rule over the risk fallback (a watch preset allows everything)', async () => {
     const { svc } = make({ policy: { effect: 'ALLOW', matchedRule: {} } });
     expect((await svc.authorize(hostA, req('shell'))).decision).toBe('ALLOW');

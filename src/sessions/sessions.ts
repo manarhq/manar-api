@@ -27,8 +27,8 @@ export interface Step {
   /** The command, file path, URL, MCP call or secret path (masked by the device). */
   label: string;
   decision?: 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED';
-  /** For `kind: approval`: what the person answered. */
-  outcome?: 'approved' | 'denied';
+  /** For `kind: approval` and a JAIL site ask: what the person answered, or nobody did. */
+  outcome?: 'approved' | 'denied' | 'expired';
   blocked?: boolean;
 }
 
@@ -54,6 +54,15 @@ export interface Session {
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
 /** `shell` -> command, `read`/`edit` -> file, `webfetch` -> site, everything else -> tool. */
+/** A JAIL question: may this tool reach this site? (manar-edge jail/ask) */
+export const SITE_CONNECT_ACTION = 'site.connect';
+
+const OUTCOME: Record<string, Step['outcome']> = {
+  'approval.approved': 'approved',
+  'approval.denied': 'denied',
+  'approval.expired': 'expired',
+};
+
 export function kindOfAction(actionId: string): StepKind {
   const a = actionId.toLowerCase();
   if (a === 'shell' || a === 'bash') return 'command';
@@ -78,11 +87,12 @@ function normalise(events: readonly RawEvent[]): Norm[] {
   const out: Norm[] = [];
   const approvals = new Map<string, RawEvent>();
   for (const e of events) {
-    if (
-      e.eventType === 'approval.approved' ||
-      e.eventType === 'approval.denied'
-    ) {
-      const id = str(e.data.approvalRequestId) || str(e.data.approvalId);
+    if (OUTCOME[e.eventType]) {
+      // Device approvals carry hostApprovalId; task approvals approvalRequestId.
+      const id =
+        str(e.data.hostApprovalId) ||
+        str(e.data.approvalRequestId) ||
+        str(e.data.approvalId);
       if (id) approvals.set(id, e);
     }
   }
@@ -124,11 +134,28 @@ function normalise(events: readonly RawEvent[]): Norm[] {
             kind: 'approval',
             action,
             label: str(d.resource),
-            outcome:
-              res.eventType === 'approval.approved' ? 'approved' : 'denied',
+            outcome: OUTCOME[res.eventType],
           },
         });
       }
+    } else if (
+      OUTCOME[e.eventType] &&
+      str(d.actionId) === SITE_CONNECT_ACTION
+    ) {
+      // A JAIL site question; the site name is added by the loader (`resource`).
+      const outcome = OUTCOME[e.eventType];
+      out.push({
+        ...base,
+        step: {
+          at: e.timestamp.toISOString(),
+          kind: 'site',
+          action: SITE_CONNECT_ACTION,
+          label: str(d.resource),
+          decision: 'APPROVAL_REQUIRED',
+          outcome,
+          blocked: outcome !== 'approved',
+        },
+      });
     } else if (
       e.eventType === 'secret.touched' ||
       e.eventType === 'secret.vault.denied'
@@ -212,7 +239,8 @@ function build(
       files: count('file'),
       sites: count('site'),
       tools: count('tool'),
-      approvals: count('approval'),
+      // Every question put to a person: WARDEN approvals and JAIL site asks.
+      approvals: steps.filter((s) => s.outcome).length,
       secrets: count('secret'),
       blocked: steps.filter((s) => s.blocked).length,
     },

@@ -6,6 +6,7 @@ import { TenantDatabaseManager } from '../database/tenant-database-manager.servi
 import { hostTool } from '../tools/host-actions';
 import { ReportShareService } from '../workspace/report-share.service';
 import {
+  SITE_CONNECT_ACTION,
   groupSessions,
   parseSessionId,
   redactSession,
@@ -19,7 +20,11 @@ const ACTION_TYPES = [
   'secret.touched',
   'secret.vault.denied',
 ];
-const APPROVAL_TYPES = ['approval.approved', 'approval.denied'];
+const APPROVAL_TYPES = [
+  'approval.approved',
+  'approval.denied',
+  'approval.expired',
+];
 /**
  * Work per request is bounded: at most PER_HOST newest events of each device (so one noisy device
  * cannot push the others out) and MAX_EVENTS in all. A busier window shows its newest sessions.
@@ -61,7 +66,9 @@ export class SessionsService {
         SELECT id, "eventType", "timestamp", data,
           row_number() OVER (PARTITION BY data->>'hostId' ORDER BY "timestamp" DESC) AS rn
         FROM audit_events
-        WHERE "eventType" IN (${Prisma.join(ACTION_TYPES)})
+        WHERE ("eventType" IN (${Prisma.join(ACTION_TYPES)})
+            OR ("eventType" IN (${Prisma.join(APPROVAL_TYPES)})
+              AND data->>'actionId' = ${SITE_CONNECT_ACTION}))
           AND "timestamp" >= ${from} AND "timestamp" < ${to}
           ${hostId ? Prisma.sql`AND data->>'hostId' = ${hostId}` : Prisma.empty}
           ${toolId ? Prisma.sql`AND data->>'toolId' = ${toolId}` : Prisma.empty}
@@ -78,14 +85,42 @@ export class SessionsService {
       ? await client.$queryRaw<Row[]>(Prisma.sql`
           SELECT id, "eventType", "timestamp", data FROM audit_events
           WHERE "eventType" IN (${Prisma.join(APPROVAL_TYPES)})
-            AND data->>'approvalRequestId' = ANY(${approvalIds}::text[])`)
+            AND COALESCE(data->>'hostApprovalId', data->>'approvalRequestId')
+              = ANY(${approvalIds}::text[])`)
       : [];
-    const events: RawEvent[] = [...rows, ...approvals].map((r) => ({
-      id: r.id,
-      eventType: r.eventType,
-      timestamp: r.timestamp,
-      data: r.data ?? {},
-    }));
+    // JAIL site asks: the site is on the approval row, not in the audit event.
+    const siteAskIds = [
+      ...new Set(
+        rows
+          .filter((r) => r.data?.actionId === SITE_CONNECT_ACTION)
+          .map((r) => r.data?.hostApprovalId)
+          .filter((v): v is string => typeof v === 'string' && v.length > 0),
+      ),
+    ].slice(0, 5000);
+    const sites = siteAskIds.length
+      ? new Map(
+          (
+            await client.hostApproval.findMany({
+              where: { id: { in: siteAskIds } },
+              select: { id: true, resource: true },
+            })
+          ).map((a) => [a.id, a.resource]),
+        )
+      : new Map<string, string>();
+    const events: RawEvent[] = [...rows, ...approvals].map((r) => {
+      const data = r.data ?? {};
+      const site =
+        data.actionId === SITE_CONNECT_ACTION &&
+        typeof data.hostApprovalId === 'string'
+          ? sites.get(data.hostApprovalId)
+          : undefined;
+      return {
+        id: r.id,
+        eventType: r.eventType,
+        timestamp: r.timestamp,
+        data: site ? { ...data, resource: site } : data,
+      };
+    });
     const sessions = groupSessions(events);
     const hosts = await client.host.findMany({
       where: { id: { in: [...new Set(sessions.map((s) => s.hostId))] } },

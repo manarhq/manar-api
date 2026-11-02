@@ -330,11 +330,12 @@ export function hostActionRisk(
   toolId: string,
   actionId: string,
 ): number | null {
-  const list =
-    toolId === HOST_CLAUDE_CODE_TOOL
-      ? HOST_CLAUDE_CODE_ACTIONS
-      : HOST_GENERIC_ACTIONS;
-  const a = list.find((x) => x.name === actionId);
+  // Claude Code on an enrolled device (manar-edge hook-tool) sends the generic ids (shell, mcp,
+  // ...) like every other tool; agent mode (install-claude-code) sends its own tool names.
+  const a =
+    (toolId === HOST_CLAUDE_CODE_TOOL
+      ? HOST_CLAUDE_CODE_ACTIONS.find((x) => x.name === actionId)
+      : undefined) ?? HOST_GENERIC_ACTIONS.find((x) => x.name === actionId);
   if (!a) return null;
   return (
     10 + a.riskBaseScore + (a.mutating ? 15 : 0) + (a.destructive ? 25 : 0)
