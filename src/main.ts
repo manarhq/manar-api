@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import type { Server as TlsServer } from 'node:tls';
 import { NestFactory } from '@nestjs/core';
 import type { INestApplication } from '@nestjs/common';
 import {
@@ -16,6 +17,7 @@ import type { AppConfig } from './config/env.validation';
 import { setupOpenApiDocs } from './openapi/setup-openapi-docs';
 import { setupCors, setupHelmet } from './security/setup-security';
 import { instrumentHttp, startMetricsServer } from './metrics/metrics';
+import { reloadServerTls } from './common/tls/reload-tls';
 
 async function bootstrap(): Promise<void> {
   // Validated once, directly against process.env, before either Nest
@@ -93,6 +95,13 @@ async function bootstrap(): Promise<void> {
   setupHelmet(agentMtlsApp);
   enableGracefulShutdown(agentMtlsApp);
   await agentMtlsApp.listen(bootstrapConfig.AGENT_MTLS_PORT, '0.0.0.0');
+  // cert-manager renews the server certificate in place; serve the new one without a restart.
+  // An https server (the adapter's `https` option); its type says http.
+  reloadServerTls(agentMtlsApp.getHttpServer() as unknown as TlsServer, {
+    cert: bootstrapConfig.AGENT_MTLS_SERVER_CERT_PATH,
+    key: bootstrapConfig.AGENT_MTLS_SERVER_KEY_PATH,
+    ca: bootstrapConfig.AGENT_MTLS_CLIENT_CA_PATH,
+  });
   startMetricsServer(bootstrapConfig.METRICS_PORT);
 }
 
