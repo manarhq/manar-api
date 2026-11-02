@@ -43,7 +43,10 @@ async function bootstrap(): Promise<void> {
   // its own form parser at listen() (and refuses a second one), so register Nest's parsers now and
   // replace only the form one; Nest then skips its registration.
   app.getHttpAdapter().registerParserMiddleware(undefined, true);
-  app.getHttpAdapter().getInstance().removeContentTypeParser('application/x-www-form-urlencoded');
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .removeContentTypeParser('application/x-www-form-urlencoded');
   app
     .getHttpAdapter()
     .getInstance()
