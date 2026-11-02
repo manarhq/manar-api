@@ -6,6 +6,9 @@ metadata:
     {{- include "manar-api.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- with .Values.minReadySeconds }}
+  minReadySeconds: {{ . }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "manar-api.selectorLabels" . | nindent 6 }}
@@ -99,6 +102,10 @@ spec:
                 command:
                   - sleep
                   - {{ .Values.preStopSleepSeconds | quote }}
+          {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}

@@ -1,3 +1,7 @@
+import {
+  agentListenerBound,
+  expectAgentListener,
+} from './agent-listener-state';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer, type AddressInfo, type Server } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -105,7 +109,8 @@ describe('ReadinessService probe list', () => {
   it('covers every dependency the chart’s NetworkPolicy egress list allows', () => {
     // Ten probes for the nine dependencies in
     // deploy/helm/manar-api/values.yaml's `networkPolicy.egress`
-    // (minus the demo tool server): Postgres gets two, because the control
+    // (minus the demo tool server), plus this process's own agent mTLS
+    // listener: Postgres gets two, because the control
     // plane and a tenant's own database fail independently and carry
     // different consequences.
     expect(
@@ -113,6 +118,7 @@ describe('ReadinessService probe list', () => {
         .probes.map((probe) => probe.name)
         .sort(),
     ).toEqual([
+      'agent-listener',
       'ai-advisory',
       'kafka',
       'keycloak',
@@ -126,7 +132,7 @@ describe('ReadinessService probe list', () => {
     ]);
   });
 
-  it('marks ONLY the control database and OpenFGA as required', () => {
+  it('marks ONLY the control database, OpenFGA and the agent listener as required', () => {
     const required = makeService()
       .probes.filter((probe) => probe.required)
       .map((probe) => probe.name)
@@ -136,7 +142,7 @@ describe('ReadinessService probe list', () => {
     // that dependency's outage into a *total* outage. Only the two that
     // sit on every authenticated request path — and that would 500 rather
     // than degrade — earn it.
-    expect(required).toEqual(['openfga', 'postgres-control']);
+    expect(required).toEqual(['agent-listener', 'openfga', 'postgres-control']);
   });
 
   it('never marks the AI advisory service required', () => {
@@ -250,5 +256,19 @@ describe('ReadinessService OpenBao probe (F1)', () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe('agent mTLS listener readiness (E-017)', () => {
+  it('is not ready while the process expects the agent listener and it is not bound yet', async () => {
+    expectAgentListener();
+    const before = await makeService({ openfgaReachable: true }).check();
+    expect(before.ready).toBe(false);
+    expect(before.dependencies['agent-listener']?.status).toBe('unhealthy');
+
+    agentListenerBound();
+    const after = await makeService({ openfgaReachable: true }).check();
+    expect(after.dependencies['agent-listener']?.status).toBe('ok');
+    expect(after.ready).toBe(true);
   });
 });

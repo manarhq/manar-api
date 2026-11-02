@@ -113,6 +113,16 @@ livenessProbe:
   periodSeconds: 10
   timeoutSeconds: 3
   failureThreshold: 3
+# Holds liveness and readiness off until the process answers at all, so a slow boot (migrations
+# of a large tenant cache, OpenFGA model write) is not killed by liveness.
+startupProbe:
+  httpGet:
+    path: /health/live
+    port: http
+  periodSeconds: 2
+  failureThreshold: 60
+# A new pod must stay ready this long before the rollout counts it and stops an old one.
+minReadySeconds: 10
 readinessProbe:
   httpGet:
     path: /health/ready

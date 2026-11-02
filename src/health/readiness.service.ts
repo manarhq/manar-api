@@ -1,3 +1,4 @@
+import { agentListenerReady } from './agent-listener-state';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
@@ -107,6 +108,20 @@ export class ReadinessService {
           // recovery mode). `SELECT 1` is the same idiom
           // `TenantDatabaseManager.checkHealth` already uses.
           await this.controlPrisma.$queryRaw`SELECT 1`;
+        },
+      },
+      {
+        name: 'agent-listener',
+        required: true,
+        impact:
+          'Device and agent calls (/host/v1, /agent/v1) on the mTLS port; until it is bound this replica must not count as ready.',
+        run: () => {
+          if (!agentListenerReady()) {
+            return Promise.reject(
+              new Error('agent mTLS listener not bound yet'),
+            );
+          }
+          return Promise.resolve();
         },
       },
       {
