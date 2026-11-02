@@ -45,10 +45,10 @@ describe('CloudMcpConfigSchema', () => {
   it('takes plain host names only for legacy hosts', () => {
     const ok = (v: string) =>
       CloudMcpConfigSchema.safeParse({ MANAR_MCP_LEGACY_HOSTS: v }).success;
-    expect(ok('mcp-manar.vax.sh')).toBe(true);
+    expect(ok('mcp-manar.fixio.ae')).toBe(true);
     expect(ok('')).toBe(true);
-    expect(ok('https://mcp-manar.vax.sh')).toBe(false);
-    expect(ok('mcp-manar.vax.sh:443')).toBe(false);
+    expect(ok('https://mcp-manar.fixio.ae')).toBe(false);
+    expect(ok('mcp-manar.fixio.ae:443')).toBe(false);
   });
 
   it('names tenant-prefixed scope and client on the shared realm only', () => {

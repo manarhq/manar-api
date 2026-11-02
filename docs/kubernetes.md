@@ -5,7 +5,7 @@ hardening audit; Sections 77-78: CI security scanning). **This document
 describes deployable-later artifacts. Nothing in this phase deploys
 anything anywhere** — no cluster interaction beyond local, offline
 validation (`helm template`, `kubeconform`, `kube-linter`), no
-`manar.vax.sh` configuration. A separate, later, explicitly-requested
+production configuration. A separate, later, explicitly-requested
 deployment phase covers actually rolling any of this out.
 
 This document covers `manar-api`'s three charts (this repo). `manar-web`

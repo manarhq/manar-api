@@ -46,6 +46,7 @@ Compose v5.
 ### A. Toolchain & repo hygiene
 
 **manar-api**
+
 - Swap the Express adapter for `@nestjs/platform-fastify` (decision #5).
 - `tsconfig.json`: enable `strict`, `noUncheckedIndexedAccess`,
   `noImplicitOverride`; keep `esModuleInterop`. No `any` in hand-written
@@ -56,12 +57,14 @@ Compose v5.
   stays in CI per Section 78.
 
 **manar-web**
+
 - Same Husky/lint-staged/Commitlint setup as manar-api.
 - `tsconfig.json`: `strict: true` (Next.js default already sets this;
   verify no `any` leaks in scaffold).
 
 **manar-ai**
-- `git init`; set `origin` to `ssh://git@gitlab.vax.sh:2224/manar/manar-ai.git`.
+
+- `git init`; set `origin` to `ssh://git@git.example.com/manar/manar-ai.git`.
 - Bootstrap FastAPI skeleton under `app/` per Section 38's layer list
   (only `api/`, `domain/`, `observability/` populated at this phase — the
   rest are empty-with-`__init__.py` placeholders documented as "populated
@@ -150,6 +153,7 @@ Compose v5.
 ## Testing strategy for this phase
 
 Each repo must, at the end of Phase 1:
+
 - `pnpm lint` / `ruff check` passes
 - `pnpm typecheck` (`tsc --noEmit`) / `mypy` passes
 - `pnpm test` / `pytest` passes (the one smoke test per repo)
