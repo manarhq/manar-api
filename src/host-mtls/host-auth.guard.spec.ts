@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { ExecutionContext } from '@nestjs/common';
-import { UnauthorizedException } from '@nestjs/common';
+import { GoneException, UnauthorizedException } from '@nestjs/common';
 import * as x509 from '@peculiar/x509';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { HostAuthGuard } from './host-auth.guard';
@@ -70,9 +70,9 @@ function world() {
         findUnique: vi.fn(({ where }: { where: Record<string, string> }) =>
           Promise.resolve(
             where.serialNumber === '0A0A'
-              ? { hostId: 'host-a', revokedAt: null }
+              ? { hostId: 'host-a', revokedAt: null, host: hostA }
               : where.serialNumber === '0B0B'
-                ? { hostId: 'host-a', revokedAt: new Date() }
+                ? { hostId: 'host-a', revokedAt: new Date(), host: hostA }
                 : null,
           ),
         ),
@@ -184,6 +184,27 @@ describe('HostAuthGuard', () => {
         UnauthorizedException,
       );
     }
+  });
+
+  it('tells a removed device so with 410 device_removed, its revoked certificate included', async () => {
+    const { guard, hostA } = world();
+    hostA.status = 'REMOVED';
+    for (const serial of ['0A0A', '0B0B']) {
+      const { context } = ctx(await hostCert('host://a/m-1', serial));
+      const error: unknown = await guard
+        .canActivate(context)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GoneException);
+      expect((error as GoneException).getResponse()).toMatchObject({
+        statusCode: 410,
+        code: 'device_removed',
+      });
+    }
+    // A certificate the removed host never had learns nothing.
+    const { context } = ctx(await hostCert('host://a/m-1', 'FFFF'));
+    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
   });
 
   it('a random serial is unknown', async () => {

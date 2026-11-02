@@ -376,7 +376,7 @@ export class AccountService {
         const db = await this.tenants.getClient(t.id);
         summary.devicesRevoked += (
           await db.host.updateMany({
-            where: { status: { not: 'REVOKED' } },
+            where: { status: { notIn: ['REVOKED', 'REMOVED'] } },
             data: { status: 'REVOKED' },
           })
         ).count;

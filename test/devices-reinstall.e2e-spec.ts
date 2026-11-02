@@ -198,14 +198,163 @@ describe('Add device re-install (e2e)', () => {
     expect(key.uses).toBe(0);
     expect(await codes.find(again.code)).not.toBeNull();
 
-    // "Remove device" deletes the record, and the same code then works.
+    // "Remove device" retires the record, and the same code then works: within 30 days the
+    // machine comes back as the same device.
     await admin.remove(
       t.client,
       t.id,
       { type: 'human', id: u.id },
       result.hostId,
     );
-    await expect(install(t, again.code, 'm-2')).resolves.toBeDefined();
+    const back = await install(t, again.code, 'm-2');
+    expect(back.result.hostId).toBe(result.hostId);
+    const revived = await t.client.host.findUniqueOrThrow({
+      where: { id: result.hostId },
+    });
+    expect(revived.status).toBe('PENDING');
+    expect(revived.removedAt).toBeNull();
+  }, 60_000);
+
+  it('removes a device with history, keeps the history, and stops the device', async () => {
+    const t = await tenant();
+    const u = await t.person('sub-rm');
+    const actor = { type: 'human' as const, id: u.id };
+    const first = await newCode(t, u.id);
+    const { result } = await install(t, first.code, 'm-rm');
+    const hostId = result.hostId;
+    await admin.decide(t.client, t.id, actor, hostId, 'approve');
+    // History of every kind that points at the device. host_approvals, approval_allow_grants
+    // and host_certificates have no ON DELETE action: a hard delete failed on them in production.
+    const soon = new Date(Date.now() + 3_600_000);
+    const approval = (status: 'PENDING' | 'APPROVED') =>
+      t.client.hostApproval.create({
+        data: {
+          hostId,
+          toolId: 'claude-code',
+          actionId: 'shell.exec',
+          resource: 'rm -rf build',
+          summary: 'Run a command',
+          status,
+          expiresAt: soon,
+        },
+      });
+    const decided = await approval('APPROVED');
+    const open = await approval('PENDING');
+    const grant = await t.client.approvalAllowGrant.create({
+      data: {
+        hostId,
+        toolId: 'claude-code',
+        actionId: 'shell.exec',
+        resource: 'rm -rf build',
+        createdBy: 'sub-rm',
+        sourceId: decided.id,
+        expiresAt: soon,
+      },
+    });
+    await t.client.hostCertificate.create({
+      data: {
+        hostId,
+        serialNumber: `rm-${randomUUID()}`,
+        notBefore: new Date(),
+        notAfter: soon,
+      },
+    });
+    await t.client.hostTool.create({
+      data: { hostId, toolId: 'claude-code', name: 'Claude Code' },
+    });
+    await t.client.hostMcpServer.create({
+      data: {
+        hostId,
+        toolId: 'claude-code',
+        name: 'files',
+        fingerprint: 'f1',
+        transport: 'stdio',
+      },
+    });
+
+    revokeHostCertificates.mockClear();
+    recorded.length = 0;
+    await admin.remove(t.client, t.id, actor, hostId);
+
+    const host = await t.client.host.findUniqueOrThrow({
+      where: { id: hostId },
+    });
+    expect(host.status).toBe('REMOVED');
+    expect(host.removedAt).not.toBeNull();
+    expect(host.hostname).toBe('LAPTOP'); // history still names the device
+    expect(revokeHostCertificates).toHaveBeenCalledWith(
+      expect.anything(),
+      hostId,
+    );
+    expect(
+      await t.client.hostApproval.findMany({
+        where: { hostId },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true, status: true },
+      }),
+    ).toEqual([
+      { id: decided.id, status: 'APPROVED' },
+      { id: open.id, status: 'EXPIRED' },
+    ]);
+    expect(
+      (
+        await t.client.approvalAllowGrant.findUniqueOrThrow({
+          where: { id: grant.id },
+        })
+      ).revokedAt,
+    ).not.toBeNull();
+    expect(await t.client.hostTool.count({ where: { hostId } })).toBe(1);
+    expect(await t.client.hostMcpServer.count({ where: { hostId } })).toBe(1);
+    expect(recorded.filter((e) => e.eventType === 'host.removed')).toHaveLength(
+      1,
+    );
+
+    // Hidden from the device list unless asked for; no longer counted against the plan.
+    const listed = await admin.listHosts(t.client, { limit: 50 });
+    expect(listed.items.map((h) => h.id)).not.toContain(hostId);
+    const removed = await admin.listHosts(t.client, {
+      status: 'REMOVED',
+      limit: 50,
+    });
+    expect(removed.items.map((h) => h.id)).toEqual([hostId]);
+
+    // A second click is harmless: no second event, revocation retried.
+    await admin.remove(t.client, t.id, actor, hostId);
+    expect(recorded.filter((e) => e.eventType === 'host.removed')).toHaveLength(
+      1,
+    );
+    expect(revokeHostCertificates).toHaveBeenCalledTimes(2);
+
+    // Approve, reject or revoke no longer apply to it.
+    await expect(
+      admin.decide(t.client, t.id, actor, hostId, 'approve'),
+    ).rejects.toThrow();
+  }, 60_000);
+
+  it('a machine removed more than 30 days ago enrols as a new device; the old record stays', async () => {
+    const t = await tenant();
+    const u = await t.person('sub-old');
+    const first = await newCode(t, u.id);
+    const { result } = await install(t, first.code, 'm-old');
+    await admin.remove(
+      t.client,
+      t.id,
+      { type: 'human', id: u.id },
+      result.hostId,
+    );
+    await t.client.host.update({
+      where: { id: result.hostId },
+      data: { removedAt: new Date(Date.now() - 31 * 24 * 3_600_000) },
+    });
+    const again = await newCode(t, u.id);
+    const { result: fresh } = await install(t, again.code, 'm-old');
+    expect(fresh.hostId).not.toBe(result.hostId);
+    const old = await t.client.host.findUniqueOrThrow({
+      where: { id: result.hostId },
+    });
+    expect(old.status).toBe('REMOVED');
+    expect(old.machineId).toBe(`removed:${result.hostId}`);
+    expect(old.hostname).toBe('LAPTOP');
   }, 60_000);
 
   it('the device cap is checked before the code is used', async () => {

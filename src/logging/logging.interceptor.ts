@@ -1,6 +1,7 @@
 import {
   CallHandler,
   ExecutionContext,
+  HttpException,
   Inject,
   Injectable,
   NestInterceptor,
@@ -29,21 +30,27 @@ export class LoggingInterceptor implements NestInterceptor {
 
     return next.handle().pipe(
       tap({
-        next: () => this.logCompletion(request, response, startedAt),
-        error: () => this.logCompletion(request, response, startedAt),
+        next: () => this.logCompletion(request, response.statusCode, startedAt),
+        // The exception filter has not set the reply's status yet: take it from the error.
+        error: (error: unknown) =>
+          this.logCompletion(
+            request,
+            error instanceof HttpException ? error.getStatus() : 500,
+            startedAt,
+          ),
       }),
     );
   }
 
   private logCompletion(
     request: FastifyRequest,
-    response: FastifyReply,
+    statusCode: number,
     startedAt: number,
   ): void {
     this.logger.info('request completed', {
       method: request.method,
       url: request.url,
-      statusCode: response.statusCode,
+      statusCode,
       durationMs: Date.now() - startedAt,
     });
   }

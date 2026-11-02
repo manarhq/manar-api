@@ -2186,6 +2186,8 @@ enum HostStatus {
   APPROVED
   REJECTED
   REVOKED
+  /// "Remove device": certificates revoked, history kept; the machine may enrol again.
+  REMOVED
 }
 
 enum HostKeyType {
@@ -2231,6 +2233,10 @@ model Host {
   /// The install key that enrolled (or last re-enrolled) it: the first-run screen matches the
   /// device it waits for by this, never by time.
   installKeyId          String?
+  /// Set by "Remove device". The row stays so sessions, approvals and events still name the
+  /// device. Re-enrolling within 30 days revives this row; later, its `machineId` is rewritten to
+  /// `removed:<id>` so the machine enrols as a new device (HostsService.completeRegistration).
+  removedAt             DateTime?
   certificates          HostCertificate[]
   fileChanges           HostFileChange[]
   tools                 HostTool[]

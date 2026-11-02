@@ -163,7 +163,7 @@ export const AUDIT_EVENT_TYPES = {
   HOST_TPM_VERIFIED: 'host.tpm_verified',
   /** A tenant's plan changed (Stripe, trial start or end). Data: from, to, source. */
   BILLING_PLAN_CHANGED: 'billing.plan.changed',
-  /** The owner removed a device (console "Remove device"): its record and certificates are gone, so it can be installed again. */
+  /** The owner removed a device (console "Remove device"): certificates revoked, record kept as REMOVED; it can be installed again. */
   HOST_REMOVED: 'host.removed',
 
   // AI tool coverage (launch spec 4.5).

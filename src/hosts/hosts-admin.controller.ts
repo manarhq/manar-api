@@ -137,7 +137,7 @@ export class HostsController {
   @ApiOperation({
     summary: 'Remove a device',
     description:
-      'Revokes its certificates and deletes the record, so the machine can be installed again. Audited.',
+      'Revokes its certificates and marks the record REMOVED (kept so its history stays readable); the machine can be installed again. Repeating it is harmless. Audited.',
   })
   @ApiResponse({ status: 200, description: '{ removed: true }' })
   @ApiResponse({ status: 404, type: ErrorResponseDto })
