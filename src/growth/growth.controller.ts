@@ -206,6 +206,8 @@ export class GrowthWorkspaceController {
   }
 
   @Post('invites')
+  // Each invite is an email from our sender, and replacing an open invite re-sends: cap per workspace.
+  @Throttle({ human: { limit: 20, ttl: 3_600_000 } })
   @ApiOperation({
     summary: 'Invite someone by email (signed link, expires, works once)',
   })
