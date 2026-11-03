@@ -31,6 +31,15 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
   let n = 0;
   const control = {
     tenant: {
+      count: ({ where }: any) =>
+        Promise.resolve(
+          tenants.filter(
+            (t) =>
+              t.kind === where.kind &&
+              t.createdByIssuer === where.createdByIssuer &&
+              t.createdBySubject === where.createdBySubject,
+          ).length,
+        ),
       findFirst: ({ where }: any) =>
         Promise.resolve(
           tenants.find(
@@ -43,17 +52,6 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
         ),
     },
     membership: {
-      count: ({ where }: any) =>
-        Promise.resolve(
-          memberships.filter(
-            (m) =>
-              m.issuer === where.issuer &&
-              m.subject === where.subject &&
-              m.role === where.role &&
-              tenants.find((t) => t.id === m.tenantId)?.kind ===
-                where.tenant.kind,
-          ).length,
-        ),
       findUnique: ({ where }: any) =>
         Promise.resolve(
           memberships.find(
@@ -107,6 +105,8 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
       ownerSubject: input.kind === 'PERSONAL' ? input.ownerSubject : null,
       ownerIssuer: input.kind === 'PERSONAL' ? input.ownerIssuer : null,
       entraTenantId: input.entraTenantId ?? null,
+      createdByIssuer: input.ownerIssuer,
+      createdBySubject: input.ownerSubject,
     };
     tenants.push(tenant);
     memberships.push({
@@ -220,10 +220,35 @@ describe('company workspaces (spec 7a)', () => {
       },
     });
     expect(createWorkspace).toHaveBeenCalledTimes(3);
+    expect(createWorkspace.mock.calls[0]![0]).toMatchObject({
+      maxPerCreator: 3,
+    });
     // Someone else in the same position is unaffected.
     await expect(
       svc.startCompanyTrial({ ...admin, subject: 'other', tid: 't5' }, 't5'),
     ).resolves.toMatchObject({ status: 'ACTIVE' });
+  });
+
+  it('the trial cap is for life: handing a workspace over does not free a slot', async () => {
+    const { svc, memberships, createWorkspace } = world();
+    for (const tid of ['t1', 't2', 't3']) {
+      await svc.startCompanyTrial({ ...admin, tid }, tid);
+    }
+    // Ownership moved away from the person who started them.
+    for (const m of memberships) m.role = 'DEVELOPER';
+    await expect(
+      svc.startCompanyTrial({ ...admin, tid: 't4' }, 't4'),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(createWorkspace).toHaveBeenCalledTimes(3);
+  });
+
+  it('a second trial for an Entra tenant that already has one is refused before any budget is spent', async () => {
+    const { svc, createWorkspace } = world();
+    await svc.startCompanyTrial(admin, 'Acme');
+    await expect(
+      svc.startCompanyTrial({ ...admin, subject: 'other-admin' }, 'Acme 2'),
+    ).rejects.toThrow(ConflictException);
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it('a matching tid never joins automatically: it only creates a PENDING request with no effective roles', async () => {

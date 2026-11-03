@@ -8,6 +8,7 @@ import { ControlPrismaService } from './control-prisma.service';
 import { EnvSecretProvider } from './env-secret-provider';
 import { TenantDatabaseManager } from './tenant-database-manager.service';
 import {
+  TenantCreatorLimitError,
   TenantNotFoundError,
   TenantSlugConflictError,
 } from './tenant-database.errors';
@@ -432,4 +433,72 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     });
     expect(tenantCount).toBe(1);
   }, 30_000);
+
+  it('9. the per-creator cap holds under parallel requests and counts tenants whatever happened to them since', async () => {
+    const subject = `creator-${randomUUID()}`;
+    const creator = {
+      issuer: 'https://auth.test/realms/manar',
+      subject,
+      maxOfKind: 3,
+    };
+    // Queued: only the control-DB rows are written, which is where the cap is decided.
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 8 }, (_, i) =>
+        manager.provisionTenant({
+          slug: uniqueSlug(`cap${i}`),
+          name: 'Cap',
+          kind: 'COMPANY',
+          queued: true,
+          creator,
+        }),
+      ),
+    );
+    const made = attempts.filter((a) => a.status === 'fulfilled');
+    expect(made).toHaveLength(3);
+    for (const a of attempts) {
+      if (a.status === 'rejected') {
+        expect(a.reason).toBeInstanceOf(TenantCreatorLimitError);
+      }
+    }
+
+    // A tenant marked DELETED, or handed to someone else, still counts.
+    const ids = made.map(
+      (a) => (a as PromiseFulfilledResult<{ id: string }>).value.id,
+    );
+    await control.tenant.update({
+      where: { id: ids[0]! },
+      data: { status: 'DELETED' },
+    });
+    await control.membership.deleteMany({ where: { tenantId: ids[1]! } });
+    await expect(
+      manager.provisionTenant({
+        slug: uniqueSlug('cap-late'),
+        name: 'Cap',
+        kind: 'COMPANY',
+        queued: true,
+        creator,
+      }),
+    ).rejects.toThrow(TenantCreatorLimitError);
+
+    // Another person is unaffected.
+    const other = await manager.provisionTenant({
+      slug: uniqueSlug('cap-other'),
+      name: 'Cap',
+      kind: 'COMPANY',
+      queued: true,
+      creator: { ...creator, subject: `${subject}-other` },
+    });
+    await control.$transaction([
+      control.tenantDatabaseBinding.deleteMany({
+        where: { tenantId: { in: [...ids, other.id] } },
+      }),
+      control.secretReference.deleteMany({
+        where: { tenantId: { in: [...ids, other.id] } },
+      }),
+      control.membership.deleteMany({
+        where: { tenantId: { in: [...ids, other.id] } },
+      }),
+      control.tenant.deleteMany({ where: { id: { in: [...ids, other.id] } } }),
+    ]);
+  }, 60_000);
 });

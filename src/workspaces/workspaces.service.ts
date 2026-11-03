@@ -19,7 +19,7 @@ import {
   type CreateWorkspaceResult,
 } from './workspace-provisioning.service';
 
-/** Company trials one person may start (founder decision); their personal workspace is separate. */
+/** Company trials one person may ever start (founder decision), transferred or deleted ones included. */
 export const MAX_COMPANY_TRIALS_PER_PERSON = 3;
 
 /** Microsoft's tenant for personal (consumer) accounts: not an organisation. */
@@ -207,21 +207,28 @@ export class WorkspacesService {
     if (!tid) throw new ForbiddenException('work_account_required');
     if (!isEntraAdmin(identity))
       throw new ForbiddenException('entra_admin_required');
-    // ponytail: count-then-create, so two trials started at the same instant
-    // can pass one over; each still needs a distinct Entra tenant and admin.
-    const owned = await failClosed('control-db', () =>
-      this.control.membership.count({
-        where: {
-          issuer: identity.issuer.replace(/\/+$/, ''),
-          subject: identity.subject,
-          role: 'TENANT_OWNER',
-          tenant: { kind: 'COMPANY' },
-        },
-      }),
+    // Cheap refusals first, so a replay or a capped person spends no creation budget. The cap is
+    // enforced again, atomically, where the tenant row is written (`maxPerCreator`).
+    const issuer = identity.issuer.replace(/\/+$/, '');
+    const [made, existing] = await failClosed('control-db', () =>
+      Promise.all([
+        this.control.tenant.count({
+          where: {
+            createdByIssuer: issuer,
+            createdBySubject: identity.subject,
+            kind: 'COMPANY',
+          },
+        }),
+        this.control.tenant.findFirst({
+          where: { kind: 'COMPANY', entraTenantId: tid },
+          select: { id: true },
+        }),
+      ]),
     );
-    if (owned >= MAX_COMPANY_TRIALS_PER_PERSON) {
+    if (made >= MAX_COMPANY_TRIALS_PER_PERSON) {
       throw workspaceLimitError('company_trial_limit_reached');
     }
+    if (existing) throw new ConflictException('workspace_exists');
     return this.provisioning.createWorkspace({
       ownerIssuer: identity.issuer,
       ownerSubject: identity.subject,
@@ -230,6 +237,7 @@ export class WorkspacesService {
       entraTenantId: tid,
       ownerEmail: identity.email,
       ownerDisplayName: identity.displayName,
+      maxPerCreator: MAX_COMPANY_TRIALS_PER_PERSON,
     });
   }
 
