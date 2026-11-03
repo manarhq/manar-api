@@ -63,6 +63,8 @@ export interface ApprovalHistoryItem {
   needs: DecisionRights['needs'];
   why: DecisionRights['why'];
   canRevoke: boolean;
+  /** "Self-approved, high risk, re-confirmed": when the owner re-confirmed their sign-in. */
+  selfConfirmedAt: Date | null;
 }
 
 const HOST_DECISIONS = new Set([
@@ -278,6 +280,7 @@ export async function listApprovalHistory(
         needs: rights.needs,
         why: rights.why,
         canRevoke: a.status === 'APPROVED' && rights.canRevoke,
+        selfConfirmedAt: a.selfConfirmedAt,
       };
     }
     const h = withdrawnLegacy(m.host);
@@ -328,6 +331,7 @@ export async function listApprovalHistory(
       needs: rights.needs,
       why: rights.why,
       canRevoke: h.status === 'APPROVED' && rights.canRevoke,
+      selfConfirmedAt: h.selfConfirmedAt,
     };
   });
   return { items, nextCursor };

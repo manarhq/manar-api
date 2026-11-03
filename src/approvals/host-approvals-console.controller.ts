@@ -31,6 +31,7 @@ import {
 } from './approver-directory';
 import {
   decisionRights,
+  freshSignIn,
   sensitiveReason,
   type DecisionRights,
 } from './decision-rights';
@@ -132,6 +133,8 @@ export class HostApprovalsConsoleController {
         allowedDecisions: rights[i]!.choices,
         needs: rights[i]!.needs,
         why: rights[i]!.why,
+        // Approving needs a fresh sign-in first (personal workspace, own sensitive request).
+        stepUpNeeded: rights[i]!.stepUp && !freshSignIn(auth.authTime),
       })),
     };
   }
@@ -157,6 +160,7 @@ export class HostApprovalsConsoleController {
       // makeRule pre-fills a policy rule: an approver's call.
       makeRule: input.makeRule && isApproverRole(auth.roles),
       ownerMayOperate: isOperatorRole(auth.roles),
+      freshSignIn: freshSignIn(auth.authTime),
       // A permanent site rule needs the role that may write site rules in the console.
       canWriteSiteRules: auth.roles.some(
         (r) => r === 'TENANT_OWNER' || r === 'SECURITY_ADMIN',

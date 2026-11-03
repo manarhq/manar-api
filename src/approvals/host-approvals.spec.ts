@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- expect matchers */
 import { ForbiddenException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { HostApprovalsController } from './host-approvals.controller';
@@ -27,6 +28,8 @@ function world(opts: {
   recent?: number;
   /** The workspace's "admins only" switch (a COMPANY workspace). */
   adminsOnly?: boolean;
+  /** A personal workspace (one person, no second approver). */
+  personal?: boolean;
 }) {
   const rows: Row[] = [
     {
@@ -148,7 +151,7 @@ function world(opts: {
     tenant: {
       findUnique: () =>
         Promise.resolve({
-          kind: 'COMPANY',
+          kind: opts.personal ? 'PERSONAL' : 'COMPANY',
           approvalsAdminsOnly: opts.adminsOnly ?? false,
         }),
     },
@@ -349,6 +352,41 @@ describe('device decisions (spec 4.6)', () => {
       via: 'console',
     });
     expect(r.status).toBe('APPROVED');
+  });
+
+  it('personal workspace: the owner approves their own high-risk request only after a fresh sign-in, and it is recorded', async () => {
+    const w = world({
+      approverSubjects: ['owner'],
+      highRisk: true,
+      personal: true,
+    });
+    const self = (freshSignIn?: boolean, via: 'console' | 'push' = 'console') =>
+      w.service.decide(w.client as never, 't1', {
+        approvalId: 'ap1',
+        subject: 'owner',
+        decision: 'approve_once',
+        via,
+        freshSignIn,
+      });
+    await expect(self(false)).rejects.toMatchObject({
+      status: 401,
+      response: { code: 'reauth_required' },
+    });
+    await expect(self(true, 'push')).rejects.toBeInstanceOf(ForbiddenException);
+    expect(w.rows[0]!.status).toBe('PENDING');
+    expect((await self(true)).status).toBe('APPROVED');
+    expect(w.rows[0]).toHaveProperty('selfConfirmedAt');
+    expect(w.audit.recordSafely).toHaveBeenCalledWith(
+      expect.anything(),
+      't1',
+      expect.objectContaining({
+        eventType: 'approval.approved',
+        data: expect.objectContaining({
+          selfApproved: true,
+          reconfirmed: true,
+        }),
+      }),
+    );
   });
 
   it("a member cannot decide someone else's device, through any channel", async () => {

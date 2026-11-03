@@ -134,6 +134,12 @@ export class ApprovalRequestSummaryDto {
     enum: ['high_risk', 'handover', null],
   })
   why!: string | null;
+
+  @ApiProperty({
+    description:
+      'Approving needs a fresh sign-in first (a personal workspace owner approving their own high-risk request); otherwise decide answers 401 reauth_required.',
+  })
+  stepUpNeeded!: boolean;
 }
 
 /**
@@ -302,6 +308,20 @@ export class ApprovalRequestDetailDto {
   why!: string | null;
 
   @ApiProperty({
+    description:
+      'Approving needs a fresh sign-in first (a personal workspace owner approving their own high-risk request); otherwise decide answers 401 reauth_required.',
+  })
+  stepUpNeeded!: boolean;
+
+  @ApiProperty({
+    type: Date,
+    nullable: true,
+    format: 'date-time',
+    description: 'Self-approved, high risk, re-confirmed: when.',
+  })
+  selfConfirmedAt!: Date | null;
+
+  @ApiProperty({
     description: 'Whether the signed-in person may revoke it now.',
   })
   canRevoke!: boolean;
@@ -440,6 +460,8 @@ export class ApprovalHistoryItemDto {
   @ApiProperty({ type: String, nullable: true }) needs!: string | null;
   @ApiProperty({ type: String, nullable: true }) why!: string | null;
   @ApiProperty() canRevoke!: boolean;
+  @ApiProperty({ type: Date, nullable: true, format: 'date-time' })
+  selfConfirmedAt!: Date | null;
 }
 
 export class ApprovalHistoryResponseDto {

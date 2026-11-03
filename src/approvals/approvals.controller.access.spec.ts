@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- expect matchers */
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import type { AuthContext } from '../auth/auth-context';
@@ -16,6 +17,7 @@ function world(
     paused?: boolean;
     riskScore?: number;
     actionId?: string;
+    personal?: boolean;
   } = {},
 ) {
   const request = {
@@ -34,6 +36,7 @@ function world(
     },
     approvalRequest: {
       findUnique: () => Promise.resolve(request),
+      update: vi.fn(() => Promise.resolve({})),
     },
     toolAction: { findMany: () => Promise.resolve([]) },
     approvalAllowGrant: {
@@ -55,7 +58,10 @@ function world(
   };
   const approvers = {
     workspace: () =>
-      Promise.resolve({ adminsOnly: opts.adminsOnly ?? false, company: true }),
+      Promise.resolve({
+        adminsOnly: opts.adminsOnly ?? false,
+        company: !opts.personal,
+      }),
   };
   const controller = new ApprovalsController(
     {
@@ -93,10 +99,14 @@ function world(
       revokeAgent: vi.fn(() => Promise.resolve({ status: 'REVOKED' })),
     } as never,
   );
-  return { controller, signal };
+  return { controller, signal, client };
 }
 
-const auth = (userId: string, roles: RoleName[]): AuthContext => ({
+const auth = (
+  userId: string,
+  roles: RoleName[],
+  authTime?: number,
+): AuthContext => ({
   issuer: 'i',
   tenant: { id: 't1', slug: 't' },
   user: {
@@ -107,6 +117,7 @@ const auth = (userId: string, roles: RoleName[]): AuthContext => ({
   },
   roles,
   workspaceKind: 'COMPANY',
+  authTime,
 });
 
 describe('deciding an agent approval', () => {
@@ -257,5 +268,25 @@ describe('deciding an agent approval', () => {
     )!.value as object;
     const roles = Reflect.getMetadata(REQUIRED_ROLES_KEY, handler) as string[];
     expect(roles).toEqual(['TENANT_OWNER', 'SECURITY_ADMIN', 'APPROVER']);
+  });
+
+  it('personal workspace: the owner approves their own high-risk request only after a fresh sign-in', async () => {
+    const w = world({ riskScore: 80, personal: true });
+    const stale = auth('creator', ['TENANT_OWNER'], Date.now() / 1000 - 3600);
+    await expect(
+      w.controller.decide(stale, 'ap1', { decision: 'approve_once' }),
+    ).rejects.toMatchObject({
+      status: 401,
+      response: { code: 'reauth_required' },
+    });
+    expect(w.signal).not.toHaveBeenCalled();
+    const fresh = auth('creator', ['TENANT_OWNER'], Date.now() / 1000 - 60);
+    const r = await w.controller.decide(fresh, 'ap1', {
+      decision: 'approve_once',
+    });
+    expect(r.status).toBe('APPROVED');
+    expect(w.client.approvalRequest.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { selfConfirmedAt: expect.any(Date) } }),
+    );
   });
 });

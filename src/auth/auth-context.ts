@@ -26,6 +26,8 @@ export interface AuthContext {
   /** From the Membership row, never from the token. */
   roles: RoleName[];
   workspaceKind: WorkspaceKind;
+  /** Seconds since epoch of the last interactive sign-in (`auth_time`); absent = unknown (stale). */
+  authTime?: number;
 }
 
 /** The property `JwtAuthGuard` attaches `AuthContext` to on the request. */

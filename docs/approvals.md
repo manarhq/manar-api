@@ -369,8 +369,11 @@ already boots both Nest apps in-process), and the real
 
 - An approver role (`TENANT_OWNER`, `SECURITY_ADMIN`, `APPROVER`) decides any request, except a
   _sensitive_ request from their own device or agent in a company workspace: another approver must
-  answer it ("Ask another approver, or deny it"). There is no bypass; a personal workspace has one
-  person, so its owner can approve.
+  answer it ("Ask another approver, or deny it"). There is no bypass. A personal workspace has one person: its owner may approve their own sensitive
+  request (once, never 8 hours or always) only in the console and only within
+  `STEP_UP_MAX_AGE_SECONDS` (15 min) of an interactive sign-in (`auth_time`, checked on the server;
+  otherwise 401 `reauth_required` and the console sends them through sign-in and back). It is
+  recorded as `selfConfirmedAt` and audited as self-approved, high risk, re-confirmed.
 - The device owner, or the agent's creator, may approve once or deny their own _routine_ requests
   in the signed-in console, if they hold a role that operates agents now (`OPERATOR_ROLES`; a
   demoted or removed person loses it even though `createdBy` still names them), and unless the

@@ -1138,6 +1138,9 @@ model ApprovalRequest {
   /// Why it ended the way it did, in a word: `no_answer`, `paused`, `superseded`, a
   /// re-evaluation failure reason (`task_not_live`, `policy_denied`, ...), or null (a person decided).
   endReason        String?
+  /// Self-approved, high risk, re-confirmed: the personal workspace's owner approved their own
+  /// sensitive request after a fresh sign-in (decision-rights.ts `stepUp`), at this time.
+  selfConfirmedAt  DateTime?
 
   createdAt DateTime @default(now())
 
@@ -2535,6 +2538,8 @@ model HostApproval {
   usedBeforeRevoke Boolean?
   /// `no_answer`, `paused`, `withdrawn` (the device stopped waiting), or null (a person decided).
   endReason        String?
+  /// Self-approved, high risk, re-confirmed (see `ApprovalRequest.selfConfirmedAt`).
+  selfConfirmedAt  DateTime?
 
   @@index([hostId, status, expiresAt])
   @@index([createdAt, id])

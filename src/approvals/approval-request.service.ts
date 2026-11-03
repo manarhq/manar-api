@@ -341,6 +341,7 @@ export class ApprovalRequestService {
       revokeNote: row.revokeNote,
       usedBeforeRevoke: row.usedBeforeRevoke,
       endReason: row.endReason,
+      selfConfirmedAt: row.selfConfirmedAt,
     };
   }
 }
@@ -399,4 +400,5 @@ export interface ApprovalRequestDetail {
   revokeNote: string | null;
   usedBeforeRevoke: boolean | null;
   endReason: string | null;
+  selfConfirmedAt: Date | null;
 }
