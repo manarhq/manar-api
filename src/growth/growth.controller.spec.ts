@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   GrowthIdentityController,
   GrowthPublicController,
+  GrowthWorkspaceController,
 } from './growth.controller';
 import { signToken } from './signed-token';
 
@@ -68,5 +69,16 @@ describe('unsubscribe', () => {
     await expect(c.unsubscribePost('forged.token')).rejects.toThrow(
       'invalid_link',
     );
+  });
+});
+
+describe('invite emails', () => {
+  it('are capped per workspace: 20 an hour (each invite, and each replacement, is an email)', () => {
+    const handler = Object.getOwnPropertyDescriptor(
+      GrowthWorkspaceController.prototype,
+      'invite',
+    )!.value as object;
+    expect(Reflect.getMetadata('THROTTLER:LIMIThuman', handler)).toBe(20);
+    expect(Reflect.getMetadata('THROTTLER:TTLhuman', handler)).toBe(3_600_000);
   });
 });
