@@ -22,6 +22,8 @@ export const AuthConfigSchema = z.object({
   WORKSPACE_QUEUE_AT_RATIO: z.coerce.number().min(0.1).max(1).optional(),
   /** Queue drain period in ms (default 5000); 0 turns the loop off (the CLI still drains). */
   WORKSPACE_QUEUE_DRAIN_MS: z.coerce.number().int().min(0).optional(),
+  /** New workspaces (each a database) the deployment creates per hour, all accounts together (default 120). */
+  WORKSPACE_CREATE_PER_HOUR: z.coerce.number().int().min(1).optional(),
   /** Bounded concurrency for `tenants:migrate` (default 4). */
   TENANT_MIGRATE_CONCURRENCY: z.coerce.number().int().min(1).max(32).optional(),
 });
@@ -32,6 +34,7 @@ export const AUTH_DEFAULTS = {
   WORKSPACE_MAX_TENANTS: 5000,
   WORKSPACE_QUEUE_AT_RATIO: 0.95,
   WORKSPACE_QUEUE_DRAIN_MS: 5000,
+  WORKSPACE_CREATE_PER_HOUR: 120,
   TENANT_MIGRATE_CONCURRENCY: 4,
 } as const;
 

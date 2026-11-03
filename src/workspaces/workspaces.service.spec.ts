@@ -43,6 +43,17 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
         ),
     },
     membership: {
+      count: ({ where }: any) =>
+        Promise.resolve(
+          memberships.filter(
+            (m) =>
+              m.issuer === where.issuer &&
+              m.subject === where.subject &&
+              m.role === where.role &&
+              tenants.find((t) => t.id === m.tenantId)?.kind ===
+                where.tenant.kind,
+          ).length,
+        ),
       findUnique: ({ where }: any) =>
         Promise.resolve(
           memberships.find(
@@ -191,6 +202,28 @@ describe('company workspaces (spec 7a)', () => {
     await expect(svc.startCompanyTrial(admin, 'Acme')).resolves.toMatchObject({
       status: 'ACTIVE',
     });
+  });
+
+  it('one person starts at most three company trials, told why in English and Arabic', async () => {
+    const { svc, createWorkspace } = world();
+    for (const tid of ['t1', 't2', 't3']) {
+      await svc.startCompanyTrial({ ...admin, tid }, tid);
+    }
+    const refused = await svc
+      .startCompanyTrial({ ...admin, tid: 't4' }, 't4')
+      .catch((e: unknown) => e);
+    expect(refused).toMatchObject({
+      status: 403,
+      response: {
+        reason: 'company_trial_limit_reached',
+        message: { en: expect.any(String), ar: expect.any(String) },
+      },
+    });
+    expect(createWorkspace).toHaveBeenCalledTimes(3);
+    // Someone else in the same position is unaffected.
+    await expect(
+      svc.startCompanyTrial({ ...admin, subject: 'other', tid: 't5' }, 't5'),
+    ).resolves.toMatchObject({ status: 'ACTIVE' });
   });
 
   it('a matching tid never joins automatically: it only creates a PENDING request with no effective roles', async () => {

@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import {
   ConflictException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   OnModuleDestroy,
@@ -18,6 +20,37 @@ import {
 } from '../database/tenant-database.errors';
 import type { SampleDirectory, WorkspaceProvisioning } from './workspace-ports';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { RedisThrottlerStorageService } from '../rate-limit/redis-throttler-storage.service';
+import { failClosed } from '../common/fail-closed/fail-closed';
+
+/** One window for the deployment-wide workspace creation rate (GCRA: a burst of the limit, then a steady refill). */
+const CREATION_WINDOW_MS = 60 * 60_000;
+
+/**
+ * A refusal people see in the console, in both languages, with a stable `reason` for code.
+ * `status` 429 means "try again later"; 403 means a per-person limit.
+ */
+export function workspaceLimitError(
+  reason: 'workspace_creation_busy' | 'company_trial_limit_reached',
+  retryAfterSeconds?: number,
+): HttpException {
+  const message =
+    reason === 'workspace_creation_busy'
+      ? {
+          en: 'A lot of people are setting up workspaces right now. Please try again in a few minutes.',
+          ar: 'يُنشئ كثيرون مساحات عمل الآن. يُرجى المحاولة مرة أخرى بعد بضع دقائق.',
+        }
+      : {
+          en: 'You have already started the maximum number of company trials (3). Ask an administrator of an existing company workspace to invite you.',
+          ar: 'لقد بدأت الحد الأقصى من التجارب للشركات (3). اطلب من مسؤول مساحة عمل شركة قائمة أن يدعوك.',
+        };
+  return new HttpException(
+    { reason, message, ...(retryAfterSeconds ? { retryAfterSeconds } : {}) },
+    reason === 'workspace_creation_busy'
+      ? HttpStatus.TOO_MANY_REQUESTS
+      : HttpStatus.FORBIDDEN,
+  );
+}
 
 export interface CreateWorkspaceInput {
   /** Issuer of `ownerSubject`. Absent: the deployment's primary issuer (first of AUTH_ISSUERS). */
@@ -66,11 +99,13 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     private readonly manager: TenantDatabaseManager,
     private readonly control: ControlPrismaService,
     private readonly config: ConfigService<AppConfig, true>,
+    private readonly throttle: RedisThrottlerStorageService,
   ) {}
 
   async createWorkspace(
     input: CreateWorkspaceInput,
   ): Promise<CreateWorkspaceResult> {
+    await this.admitCreation();
     const queued = await this.shouldQueue();
     const slug = `${SLUG_PREFIX[input.kind]}-${randomBytes(8).toString('hex')}`;
     const name = input.displayName.trim().slice(0, 120) || 'Workspace';
@@ -131,6 +166,35 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
         if (row) return { tenantId: row.id, status: 'QUEUED' };
       }
       throw error;
+    }
+  }
+
+  /**
+   * The gate every new workspace passes (personal, company trial, sample): each one is a database,
+   * so the deployment creates at most WORKSPACE_CREATE_PER_HOUR of them, however many accounts ask.
+   * A refused creation leaves nothing behind. The limits store being down refuses too (503).
+   *
+   * A human check (Turnstile) belongs here as well: verify the token before the rate is spent.
+   */
+  private async admitCreation(): Promise<void> {
+    const limit = authSetting(this.config, 'WORKSPACE_CREATE_PER_HOUR');
+    const record = await failClosed('limits-store', () =>
+      this.throttle.increment(
+        'global',
+        CREATION_WINDOW_MS,
+        limit,
+        0,
+        'workspace-create',
+      ),
+    );
+    if (record.isBlocked || record.totalHits > limit) {
+      this.logger.warn(
+        `capacity=workspace-create refused: over ${limit} per hour`,
+      );
+      throw workspaceLimitError(
+        'workspace_creation_busy',
+        Math.max(60, record.timeToBlockExpire || record.timeToExpire),
+      );
     }
   }
 

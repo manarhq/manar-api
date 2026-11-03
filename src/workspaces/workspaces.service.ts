@@ -15,8 +15,12 @@ import { failClosed } from '../common/fail-closed/fail-closed';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import {
   WorkspaceProvisioningService,
+  workspaceLimitError,
   type CreateWorkspaceResult,
 } from './workspace-provisioning.service';
+
+/** Company trials one person may start (founder decision); their personal workspace is separate. */
+export const MAX_COMPANY_TRIALS_PER_PERSON = 3;
 
 /** Microsoft's tenant for personal (consumer) accounts: not an organisation. */
 export const CONSUMER_TENANT_ID = '9188040d-6c67-4c5b-b112-36a304b66dad';
@@ -203,6 +207,21 @@ export class WorkspacesService {
     if (!tid) throw new ForbiddenException('work_account_required');
     if (!isEntraAdmin(identity))
       throw new ForbiddenException('entra_admin_required');
+    // ponytail: count-then-create, so two trials started at the same instant
+    // can pass one over; each still needs a distinct Entra tenant and admin.
+    const owned = await failClosed('control-db', () =>
+      this.control.membership.count({
+        where: {
+          issuer: identity.issuer.replace(/\/+$/, ''),
+          subject: identity.subject,
+          role: 'TENANT_OWNER',
+          tenant: { kind: 'COMPANY' },
+        },
+      }),
+    );
+    if (owned >= MAX_COMPANY_TRIALS_PER_PERSON) {
+      throw workspaceLimitError('company_trial_limit_reached');
+    }
     return this.provisioning.createWorkspace({
       ownerIssuer: identity.issuer,
       ownerSubject: identity.subject,
