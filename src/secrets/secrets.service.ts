@@ -13,6 +13,7 @@ import type {
   SecretEvent,
 } from '../generated/tenant-client/client';
 import { SecretAlertBus } from './secret-alert-bus';
+import { TAMPER_EVENT_TYPES } from '../hosts/tamper';
 import {
   blockFeatures,
   DEFAULT_BLOCK_MODE,
@@ -25,6 +26,8 @@ export class SecretsNotFoundError extends Error {}
 export class SecretsConflictError extends Error {}
 
 const WATCH_TYPES = ['secret.watch.available', 'secret.watch.unavailable'];
+/** Not secrets: shown on the device (tampered), not in the secrets timeline. */
+const NOT_IN_TIMELINE = [...WATCH_TYPES, ...TAMPER_EVENT_TYPES];
 const FUTURE_SLACK_MS = 5 * 60_000;
 const ACCESS_TTL_MS = 10 * 60_000;
 const MAX_PENDING_ACCESS_PER_HOST = 50;
@@ -75,7 +78,7 @@ export class SecretsService {
     w.count += n;
   }
 
-  /** `POST /host/v1/events`: stores a validated batch, audits secret.* and raises alerts. */
+  /** `POST /host/v1/events`: stores a validated batch, audits secret.* and protect.tamper.*, raises alerts. */
   async ingest(
     client: TenantPrismaClient,
     tenantId: string,
@@ -135,7 +138,7 @@ export class SecretsService {
       where: {
         ...(q.hostId ? { hostId: q.hostId } : {}),
         ...(q.toolId ? { toolId: q.toolId } : {}),
-        type: q.type ? q.type : { notIn: WATCH_TYPES },
+        type: q.type ? q.type : { notIn: NOT_IN_TIMELINE },
         ...(q.from || q.to
           ? {
               at: {

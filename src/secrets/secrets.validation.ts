@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TAMPER_EVENT_TYPES } from '../hosts/tamper';
 
 /** Event types a device may send. The two `watch` types set the device's watcher status. */
 export const SECRET_EVENT_TYPES = [
@@ -40,7 +41,7 @@ const absentIfEmpty = <T extends z.ZodType>(t: T) =>
 
 export const HostEventSchema = z
   .object({
-    type: z.enum(SECRET_EVENT_TYPES),
+    type: z.enum([...SECRET_EVENT_TYPES, ...TAMPER_EVENT_TYPES]),
     toolId: absentIfEmpty(z.string().regex(/^(host\.[a-z0-9-]{1,40}|other)$/)),
     process: absentIfEmpty(text(128)),
     // 0.1.1 also sends the vault's request kind: an SSH key restore is about SSH keys; a refused
