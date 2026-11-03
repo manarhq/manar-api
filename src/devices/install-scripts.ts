@@ -56,6 +56,18 @@ function validated(p: ScriptParams) {
   };
 }
 
+/**
+ * manar-edge from v0.1.3 reads the install code from MANAR_INSTALL_CODE, so it is not on a command
+ * line other local users can list while the install runs. Older releases only take --code.
+ */
+export function codeFromEnv(version: string): boolean {
+  const [maj, min, pat] = version
+    .slice(1)
+    .split(/[.-]/)
+    .map((n) => Number(n));
+  return maj! > 0 || min! > 1 || (min === 1 && pat! >= 3);
+}
+
 function sum(value: string | undefined, name: string): string {
   check(!!value && SHA_OK.test(value), name);
   return value!;
@@ -75,22 +87,36 @@ try {
   $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
   if ($arch -ne 'AMD64') { throw "Manar supports 64-bit Intel/AMD Windows for now (this computer is $arch)." }
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  # A fresh folder only SYSTEM and Administrators can touch: nothing else can swap the file between
-  # the checksum and the elevated run (a folder in %TEMP% would be writable by the user's other programs).
+  # A fresh folder only SYSTEM and Administrators can touch, created with that access list already in
+  # place (ProgramData lets any user add files to a folder that inherits from it), then checked: owned
+  # by Administrators or SYSTEM, protected, and empty. Nothing else can swap the file between the
+  # checksum and the elevated run (a folder in %TEMP% would be writable by the user's other programs).
   $tmp = Join-Path $env:ProgramData ('manar-setup-' + [guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-  & icacls.exe $tmp /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not lock the download folder, so nothing was installed.' }
+  $sec = New-Object System.Security.AccessControl.DirectorySecurity
+  $sec.SetSecurityDescriptorSddlForm('O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+  if ($PSVersionTable.PSEdition -eq 'Core') { [System.IO.FileSystemAclExtensions]::CreateDirectory($sec, $tmp) | Out-Null }
+  else { [System.IO.Directory]::CreateDirectory($tmp, $sec) | Out-Null }
+  $acl = Get-Acl -LiteralPath $tmp
+  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+  if (($owner -ne 'S-1-5-32-544' -and $owner -ne 'S-1-5-18') -or -not $acl.AreAccessRulesProtected -or (Get-ChildItem -Force -LiteralPath $tmp)) {
+    throw 'Could not lock the download folder, so nothing was installed.'
+  }
   $exe = Join-Path $tmp 'manar-edge.exe'
   Write-Host 'Downloading Manar ${v.version}...'
   Invoke-WebRequest -UseBasicParsing -Uri '${v.base}/${v.version}/manar-edge-windows-amd64.exe' -OutFile $exe
   $got = (Get-FileHash -Algorithm SHA256 -Path $exe).Hash.ToLower()
   if ($got -ne '${sha}') { throw 'The download does not match its checksum, so it was not installed.' }
-  & $exe install --code '${v.code}' --tenant '${v.slug}' --api '${v.api}' --host-url '${v.host}'
+  ${
+    codeFromEnv(v.version)
+      ? `$env:MANAR_INSTALL_CODE = '${v.code}'
+  & $exe install --tenant '${v.slug}' --api '${v.api}' --host-url '${v.host}'`
+      : `& $exe install --code '${v.code}' --tenant '${v.slug}' --api '${v.api}' --host-url '${v.host}'`
+  }
   if ($LASTEXITCODE -ne 0) { throw "The installer stopped (exit code $LASTEXITCODE)." }
 } catch {
   Write-Host ('Manar install failed: ' + $_.Exception.Message) -ForegroundColor Red
 } finally {
+  Remove-Item Env:MANAR_INSTALL_CODE -ErrorAction SilentlyContinue
   if ($tmp) { Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue }
 }
 `;
@@ -122,7 +148,11 @@ else fail "curl or wget is needed."; fi
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is needed."
 echo "$sum  $tmp/manar-edge" | sha256sum -c - >/dev/null 2>&1 || fail "the download does not match its checksum, so it was not installed."
 chmod 755 "$tmp/manar-edge"
-"$tmp/manar-edge" install --code '${v.code}' --tenant '${v.slug}' --api '${v.api}' --host-url '${v.host}' || fail "the installer stopped."
+${
+  codeFromEnv(v.version)
+    ? `MANAR_INSTALL_CODE='${v.code}' "$tmp/manar-edge" install --tenant '${v.slug}' --api '${v.api}' --host-url '${v.host}' || fail "the installer stopped."`
+    : `"$tmp/manar-edge" install --code '${v.code}' --tenant '${v.slug}' --api '${v.api}' --host-url '${v.host}' || fail "the installer stopped."`
+}
 `;
 }
 

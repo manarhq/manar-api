@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   NOT_VALID_MESSAGE,
+  codeFromEnv,
   ScriptUnavailableError,
   oneLiners,
   renderError,
@@ -37,15 +38,50 @@ describe('install scripts', () => {
     expect(s).toContain('Administrator');
   });
 
-  it('PowerShell downloads into a folder locked to SYSTEM and Administrators, not %TEMP%', () => {
+  it('PowerShell downloads into a folder created locked to SYSTEM and Administrators, not %TEMP%', () => {
     const s = renderPowerShell(params);
     expect(s).not.toContain('GetTempPath');
+    expect(s).not.toContain('New-Item');
     expect(s).toContain("Join-Path $env:ProgramData ('manar-setup-'");
-    expect(s).toContain('/inheritance:r');
-    expect(s).toContain('*S-1-5-18:(OI)(CI)F');
-    expect(s).toContain('*S-1-5-32-544:(OI)(CI)F');
-    expect(s.indexOf('icacls')).toBeLessThan(s.indexOf('Invoke-WebRequest'));
+    // The access list is in place when the folder comes into being, then checked.
+    expect(s).toContain("'O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'");
+    expect(s).toContain('[System.IO.Directory]::CreateDirectory($tmp, $sec)');
+    expect(s).toContain(
+      '[System.IO.FileSystemAclExtensions]::CreateDirectory($sec, $tmp)',
+    );
+    expect(s).toContain("$owner -ne 'S-1-5-32-544'");
+    expect(s).toContain('AreAccessRulesProtected');
+    expect(s).toContain('Get-ChildItem -Force -LiteralPath $tmp');
+    expect(s.indexOf('AreAccessRulesProtected')).toBeLessThan(
+      s.indexOf('Invoke-WebRequest'),
+    );
     expect(s.indexOf('Get-FileHash')).toBeLessThan(s.indexOf('install --code'));
+  });
+
+  it('from v0.1.3 the install code goes in the environment, not on the command line', () => {
+    const v = { ...params, version: 'v0.1.3' };
+    const ps = renderPowerShell(v);
+    expect(ps).not.toContain('--code');
+    expect(ps).toContain("$env:MANAR_INSTALL_CODE = 'ABCDEFGH23'");
+    expect(ps.indexOf('Get-FileHash')).toBeLessThan(
+      ps.indexOf('MANAR_INSTALL_CODE'),
+    );
+    expect(ps).toContain('Remove-Item Env:MANAR_INSTALL_CODE');
+    const sh = renderSh(v);
+    expect(sh).not.toContain('--code');
+    expect(sh).toContain(
+      `MANAR_INSTALL_CODE='ABCDEFGH23' "$tmp/manar-edge" install --tenant 'me-1a2b3c'`,
+    );
+    for (const [ver, env] of [
+      ['v0.1.2', false],
+      ['v0.1.3', true],
+      ['v0.1.10', true],
+      ['v0.2.0', true],
+      ['v1.0.0', true],
+      ['v0.1.3-rc.1', true],
+    ] as const) {
+      expect(codeFromEnv(ver), ver).toBe(env);
+    }
   });
 
   it('a tenant slug ending in a dash is refused, as the installer would', () => {
