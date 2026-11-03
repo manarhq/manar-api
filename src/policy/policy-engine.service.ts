@@ -99,10 +99,12 @@ export class PolicyEngine {
       );
       classification = registered?.action.classification;
     } catch (error) {
-      this.logger.warn(
-        `Could not resolve ToolAction classification for tenant "${tenantId}" ("${request.toolId}"/"${request.actionId}") — proceeding as if unclassified (no ToolAction-classification rule can match): ${error instanceof Error ? error.message : String(error)}`,
+      // Fail closed: treating a failed lookup as "unclassified" would let a
+      // classification-scoped DENY rule silently not match.
+      this.logger.error(
+        `Could not resolve ToolAction classification for tenant "${tenantId}" ("${request.toolId}"/"${request.actionId}") — failing closed (DENY): ${error instanceof Error ? error.message : String(error)}`,
       );
-      classification = undefined;
+      return { effect: 'DENY', failureReason: 'classification_lookup_failed' };
     }
 
     let best: PolicyEvaluationResult = { effect: 'ALLOW' };

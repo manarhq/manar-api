@@ -49,6 +49,11 @@ describe('assertSafeOutboundUrl', () => {
     ['link-local', 'fe80::1'],
     ['unique-local', 'fd00::1'],
     ['IPv4-mapped private', '::ffff:10.0.0.1'],
+    ['6to4', '2002:a9fe:a9fe::1'],
+    ['Teredo', '2001:0:4136:e378:8000:63bf:3fff:fdd2'],
+    ['Teredo, compressed', '2001::1'],
+    ['multicast', 'ff02::1'],
+    ['local-use NAT64', '64:ff9b:1::a9fe:a9fe'],
   ])(
     'rejects a URL resolving to an IPv6 %s address (%s)',
     async (_label, address) => {
@@ -59,6 +64,17 @@ describe('assertSafeOutboundUrl', () => {
       ).rejects.toThrow(UnsafeOutboundUrlError);
     },
   );
+
+  it('still accepts a public IPv6 address', async () => {
+    await expect(
+      assertSafeOutboundUrl('https://example.com/', {
+        lookup: fixedLookup({
+          address: '2606:2800:220:1:248:1893:25c8:1946',
+          family: 6,
+        }),
+      }),
+    ).resolves.toBeUndefined();
+  });
 
   it('rejects a raw private IP literal in the URL itself (no hostname to rebind)', async () => {
     await expect(

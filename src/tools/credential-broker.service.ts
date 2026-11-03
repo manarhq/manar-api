@@ -9,7 +9,7 @@ import { AuditService } from '../audit/audit.service';
 import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
 import type { DataClassification } from '../common/data-classification';
 import { redactedToolResultPlaceholder } from './dlp-redaction.util';
-import { classifyDlp } from '../common/dlp/dlp-classification';
+import { classifyDlp, credentialTypes } from '../common/dlp/dlp-classification';
 import {
   DlpBlockedError,
   ToolActionNotFoundError,
@@ -26,6 +26,7 @@ import type { ToolInvocationResult } from './tool-protocol-adapter.interface';
 import { failClosed } from '../common/fail-closed/fail-closed';
 import { ToolRegistryService } from './tool-registry.service';
 import { HandoverStore } from './handover.store';
+import { bindResourceToParams } from './resource-binding';
 
 /**
  * Phase 10b DLP-before-call checkpoint threshold (see docs/ai-security-model.md).
@@ -78,6 +79,9 @@ const PROMPT_INJECTION_WITHHELD = Object.freeze({
  * metadata's own string values) while still bounding pathological nesting.
  */
 const PROMPT_INJECTION_SCAN_MAX_DEPTH = 5;
+
+/** Upstream failure text kept for screening; anything longer is cut before DLP sees it. */
+const ERROR_DETAIL_MAX_CHARS = 1_000;
 /**
  * ~4KB cap on collected leaf-string content walked out of the structured
  * result, not an exact byte-size cap on the final joined RPC payload --
@@ -323,8 +327,12 @@ export class CredentialBrokerService {
     // open) never blocks -- see DLP_BLOCKING_SEVERITIES's doc comment and
     // AiAdvisoryClient's own "never fail open, never fail closed toward
     // the caller" contract.
+    // The deterministic credential floor runs whatever manar-ai's state, so
+    // an outage never lets a credential-shaped param through unscanned.
+    const paramsText = JSON.stringify(input.params ?? null);
+    const floorCredentialTypes = credentialTypes(paramsText);
     const dlpBefore = await this.aiAdvisoryClient.analyzeDlp({
-      content: JSON.stringify(input.params ?? null),
+      content: paramsText,
       tenantId: input.tenantId,
       // Phase 15a (Section 53): lets AiAdvisoryClient's residency gate
       // independently block this call to an external provider when this
@@ -332,7 +340,10 @@ export class CredentialBrokerService {
       // flag.
       classification: action.classification,
     });
-    if (dlpBefore && DLP_BLOCKING_SEVERITIES.has(dlpBefore.overallSeverity)) {
+    if (
+      floorCredentialTypes.length > 0 ||
+      (dlpBefore && DLP_BLOCKING_SEVERITIES.has(dlpBefore.overallSeverity))
+    ) {
       await this.auditService.recordSafely(tenantClient, input.tenantId, {
         eventType: AUDIT_EVENT_TYPES.DLP_BLOCKED,
         actor: { type: 'agent', id: input.agentId },
@@ -342,11 +353,12 @@ export class CredentialBrokerService {
           toolId: input.toolId,
           actionId: input.actionId,
           resource: input.resource,
-          overallSeverity: dlpBefore.overallSeverity,
+          overallSeverity: dlpBefore?.overallSeverity ?? null,
+          floorCredentialTypes,
           // Redacted metadata only -- never the raw matched value (Section
           // 73, same rule Phase 9a's credential-secrecy test established
           // for tool credentials).
-          findings: dlpBefore.findings.map((f) => ({
+          findings: (dlpBefore?.findings ?? []).map((f) => ({
             type: f.type,
             source: f.source,
             redactedPreview: f.redactedPreview,
@@ -375,13 +387,25 @@ export class CredentialBrokerService {
               : tool.protocol === 'GITLAB'
                 ? this.gitlabAdapter
                 : this.httpAdapter;
-        result = await adapter.invoke(
-          tool,
-          action,
-          input.resource,
-          input.params,
-          credential,
-        );
+        // HTTP and MCP carry free-form params: an action that names its
+        // target param has it tied to the decided resource (resource-binding.ts).
+        const bound =
+          tool.protocol === 'MCP' || tool.protocol === 'HTTP'
+            ? bindResourceToParams(
+                action.inputSchema,
+                input.resource,
+                input.params,
+              )
+            : { ok: true as const, params: input.params };
+        result = bound.ok
+          ? await adapter.invoke(
+              tool,
+              action,
+              input.resource,
+              bound.params,
+              credential,
+            )
+          : { success: false, errorMessage: bound.errorMessage };
       }
     } catch (error) {
       // Credential resolution or an adapter-internal throw (never expected
@@ -410,6 +434,25 @@ export class CredentialBrokerService {
         ...result,
         data: { ...(result.data as object), handover: handoverState },
       };
+    }
+
+    // What the tool itself said about a failure is untrusted output: it is
+    // screened before it is stored or returned, and audit gets the code only.
+    const { errorDetail, ...withoutDetail } = result;
+    result = withoutDetail;
+    const errorCode = result.success ? null : (result.errorMessage ?? null);
+    if (!result.success && errorDetail) {
+      const screened = await this.screenErrorDetail(
+        input,
+        errorDetail,
+        action.classification,
+      );
+      if (screened) {
+        result = {
+          ...result,
+          errorMessage: `${result.errorMessage ?? 'tool_error'}: ${screened}`,
+        };
+      }
     }
 
     const status = result.success
@@ -453,7 +496,7 @@ export class CredentialBrokerService {
         actionId: input.actionId,
         resource: input.resource,
         status,
-        errorMessage: result.success ? null : (result.errorMessage ?? null),
+        errorMessage: errorCode,
         ...(handoverState ? { handover: handoverState } : {}),
       },
     });
@@ -636,17 +679,61 @@ export class CredentialBrokerService {
             withheld,
           },
         });
-        await tenantClient.agentRiskFlag.create({
-          data: {
-            agentId: input.agentId,
-            reason,
-            expiresAt: new Date(Date.now() + PROMPT_INJECTION_RISK_FLAG_TTL_MS),
-          },
-        });
+        // The call already ran: a failed flag write is logged, never turned
+        // into an error that would invite the agent to retry the action.
+        await tenantClient.agentRiskFlag
+          .create({
+            data: {
+              agentId: input.agentId,
+              reason,
+              expiresAt: new Date(
+                Date.now() + PROMPT_INJECTION_RISK_FLAG_TTL_MS,
+              ),
+            },
+          })
+          .catch((error: unknown) => {
+            this.logger.error(
+              `Risk flag for agent "${input.agentId}" was not stored: ${error instanceof Error ? error.name : 'unknown'}`,
+            );
+          });
       }
     }
 
     return outcome;
+  }
+
+  /**
+   * A failed call's upstream text (`ToolInvocationResult.errorDetail`) is
+   * returned only if it is clean: capped, the deterministic DLP floor and
+   * manar-ai DLP find nothing to block, and the prompt-injection check sees
+   * nothing at all. Anything else, including manar-ai being unreachable,
+   * drops it and the agent gets the fixed error code alone. PII the DLP
+   * redacts in place stays redacted.
+   */
+  private async screenErrorDetail(
+    input: CredentialBrokerInvokeInput,
+    detail: string,
+    classification: DataClassification,
+  ): Promise<string | null> {
+    const text = detail.slice(0, ERROR_DETAIL_MAX_CHARS);
+    const dlp = await classifyDlp(text, (content) =>
+      this.aiAdvisoryClient.analyzeDlp({
+        content,
+        tenantId: input.tenantId,
+        classification,
+      }),
+    );
+    if (dlp.blocked || dlp.advisory == null || dlp.unlocatedTypes.length > 0) {
+      return null;
+    }
+    const injection = await this.aiAdvisoryClient.analyzePromptInjection({
+      content: text,
+      source: 'tool_output',
+      tenantId: input.tenantId,
+      classification,
+    });
+    if (!injection || injection.detected) return null;
+    return typeof dlp.value === 'string' ? dlp.value : null;
   }
 
   /**

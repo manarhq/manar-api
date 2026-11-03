@@ -103,6 +103,54 @@ function embeddedIpv4(lowerIpv6: string): string | null {
   return [high >> 8, high & 0xff, low >> 8, low & 0xff].join('.');
 }
 
+/** The eight 16-bit groups of an IPv6 address (a dotted IPv4 tail included), or null if malformed. */
+function ipv6Groups(address: string): number[] | null {
+  let text = address;
+  const dotted = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(1).map(Number) as [
+      number,
+      number,
+      number,
+      number,
+    ];
+    text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves[1] ? halves[1].split(':') : [];
+  const groups =
+    halves.length === 2
+      ? [
+          ...head,
+          ...Array<string>(8 - head.length - tail.length).fill('0'),
+          ...tail,
+        ]
+      : head;
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) {
+    return null;
+  }
+  return groups.map((g) => parseInt(g, 16));
+}
+
+/**
+ * Ranges that carry an IPv4 address the IPv4 checks never see, or reach
+ * more than one host: 6to4 (2002::/16), Teredo (2001::/32), local-use NAT64
+ * (64:ff9b:1::/48) and multicast (ff00::/8). Malformed counts as unsafe.
+ */
+function tunnelsOrMulticast(lowerIpv6: string): boolean {
+  const g = ipv6Groups(lowerIpv6);
+  if (!g) return true;
+  const [g0, g1, g2] = g as [number, number, number];
+  return (
+    g0 >= 0xff00 ||
+    g0 === 0x2002 ||
+    (g0 === 0x2001 && g1 === 0) ||
+    (g0 === 0x64 && g1 === 0xff9b && g2 === 1)
+  );
+}
+
 type AddressClass = 'public' | 'private' | 'loopback' | 'never';
 
 /**
@@ -120,6 +168,7 @@ function classifyAddress(address: string): AddressClass {
     if (!v4) {
       if (/^fe[89ab][0-9a-f]:/.test(lower) || lower === '::') return 'never';
       if (/^f[cd][0-9a-f]{2}:/.test(lower)) return 'private';
+      if (tunnelsOrMulticast(lower)) return 'never';
       return isPrivateOrReservedIpv6(lower) ? 'never' : 'public';
     }
   }

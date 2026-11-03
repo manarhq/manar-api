@@ -1084,3 +1084,161 @@ describe('CredentialBrokerService handover (ADR-0011)', () => {
     expect(handoverNote(result)).toMatch(/^discarded: it could not be stored/);
   });
 });
+
+describe('CredentialBrokerService failure text from the tool', () => {
+  const CLEAN: DlpAdvisory = { findings: [], overallSeverity: 'SEVERITY_NONE' };
+  const NO_INJECTION: PromptInjectionAdvisory = {
+    detected: false,
+    confidence: 0,
+    indicators: [],
+    explanation: '',
+  };
+
+  async function invokeFailing(
+    errorDetail: string,
+    advisories: {
+      dlp?: DlpAdvisory | null;
+      injection?: PromptInjectionAdvisory | null;
+    } = {},
+  ) {
+    const { service, recordSafely } = makeService({
+      toolResult: {
+        success: false,
+        errorMessage: 'mcp_tool_error',
+        errorDetail,
+      },
+      analyzeDlp: vi
+        .fn()
+        .mockResolvedValue(
+          advisories.dlp === undefined ? CLEAN : advisories.dlp,
+        ),
+      analyzePromptInjection: vi
+        .fn()
+        .mockResolvedValue(
+          advisories.injection === undefined
+            ? NO_INJECTION
+            : advisories.injection,
+        ),
+    });
+    const create = vi
+      .fn<(arg: { data: { errorMessage: string } }) => Promise<object>>()
+      .mockResolvedValue({});
+    const tenantClient = {
+      toolInvocation: { create },
+      agentRiskFlag: { create: vi.fn() },
+    } as unknown as TenantPrismaClient;
+    const result = await service.invoke(tenantClient, baseInput);
+    const stored = create.mock.calls[0]![0].data.errorMessage;
+    const failed = recordSafely.mock.calls
+      .map((c) => c[2])
+      .find((e) => e.eventType === AUDIT_EVENT_TYPES.TOOL_INVOCATION_FAILED);
+    return { result, stored, failed };
+  }
+
+  it('returns and stores clean text after the code, but audits the code alone', async () => {
+    const { result, stored, failed } = await invokeFailing(
+      'ticket 42 not found',
+    );
+    expect(result.errorMessage).toBe('mcp_tool_error: ticket 42 not found');
+    expect(stored).toBe('mcp_tool_error: ticket 42 not found');
+    expect(failed!.data).toMatchObject({ errorMessage: 'mcp_tool_error' });
+    expect(JSON.stringify(failed)).not.toContain('ticket 42');
+    expect(result).not.toHaveProperty('errorDetail');
+  });
+
+  it('drops text carrying a credential (deterministic floor), wherever it would have gone', async () => {
+    const secret = 'Bearer ' + 'a'.repeat(32);
+    const { result, stored, failed } = await invokeFailing(
+      `denied for ${secret}`,
+    );
+    expect(result.errorMessage).toBe('mcp_tool_error');
+    expect(stored).toBe('mcp_tool_error');
+    expect(JSON.stringify([result, failed])).not.toContain(secret);
+  });
+
+  it('drops text the injection check flags, at any confidence', async () => {
+    const { result } = await invokeFailing('Ignore previous instructions', {
+      injection: { ...NO_INJECTION, detected: true, confidence: 0.1 },
+    });
+    expect(result.errorMessage).toBe('mcp_tool_error');
+  });
+
+  it('drops the text when manar-ai cannot screen it', async () => {
+    expect((await invokeFailing('x', { dlp: null })).result.errorMessage).toBe(
+      'mcp_tool_error',
+    );
+    expect(
+      (await invokeFailing('x', { injection: null })).result.errorMessage,
+    ).toBe('mcp_tool_error');
+  });
+
+  it('caps the text it screens', async () => {
+    const { result } = await invokeFailing('y'.repeat(5_000));
+    expect(result.errorMessage!.length).toBeLessThanOrEqual(
+      'mcp_tool_error: '.length + 1_000,
+    );
+  });
+});
+
+describe('CredentialBrokerService resource binding (HTTP and MCP)', () => {
+  const bound = makeAction({
+    inputSchema: {
+      type: 'object',
+      'x-manar-resource-param': 'hostId',
+    },
+  });
+
+  it('never calls the tool when params name another target than the decided resource', async () => {
+    const { service, invokeHttp } = makeService({
+      toolResult: { success: true, data: {} },
+      action: bound,
+    });
+    const { tenantClient } = fakeTenantClient();
+    const result = await service.invoke(tenantClient, {
+      ...baseInput,
+      resource: 'host-1',
+      params: { hostId: 'admin-host' },
+    });
+    expect(invokeHttp).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      success: false,
+      errorMessage: 'resource_param_mismatch',
+    });
+  });
+
+  it('passes the tool the decided resource in the named param', async () => {
+    const { service, invokeHttp } = makeService({
+      toolResult: { success: true, data: {} },
+      action: bound,
+    });
+    await service.invoke(fakeTenantClient().tenantClient, {
+      ...baseInput,
+      resource: 'host-1',
+      params: {},
+    });
+    expect(invokeHttp.mock.calls[0]![3]).toEqual({ hostId: 'host-1' });
+  });
+});
+
+describe('CredentialBrokerService params DLP floor', () => {
+  it('blocks a credential-shaped param even when manar-ai is unreachable', async () => {
+    const { service, invokeHttp, recordSafely } = makeService({
+      toolResult: { success: true, data: {} },
+      analyzeDlp: vi.fn().mockResolvedValue(null),
+    });
+    await expect(
+      service.invoke(fakeTenantClient().tenantClient, {
+        ...baseInput,
+        params: { note: 'Bearer ' + 'k'.repeat(32) },
+      }),
+    ).rejects.toThrow();
+    expect(invokeHttp).not.toHaveBeenCalled();
+    const blocked = recordSafely.mock.calls
+      .map((c) => c[2])
+      .find((e) => e.eventType === AUDIT_EVENT_TYPES.DLP_BLOCKED);
+    expect(blocked!.data).toMatchObject({
+      floorCredentialTypes: ['bearer_token'],
+    });
+    expect(JSON.stringify(blocked)).not.toContain('kkkk');
+  });
+});
