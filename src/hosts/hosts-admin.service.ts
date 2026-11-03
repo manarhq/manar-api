@@ -19,6 +19,7 @@ import { ruleHasVerifiedCondition } from './host-approval';
 import { normalizeDn } from './adcs/ou.util';
 import { isValidCidr } from './install-key.util';
 import { InvalidCidrError } from './install-keys.service';
+import { latestTamper, type TamperInfo } from './tamper';
 
 export class HostNotFoundError extends Error {}
 /** The requested change isn't allowed from the host's current status. */
@@ -60,7 +61,7 @@ export class HostsAdminService {
     private readonly entitlements: EntitlementsService,
   ) {}
 
-  listHosts(
+  async listHosts(
     client: TenantPrismaClient,
     input: {
       status?: HostStatus;
@@ -68,8 +69,8 @@ export class HostsAdminService {
       limit: number;
       cursor?: DecodedCursor;
     },
-  ): Promise<CursorPage<Host>> {
-    return client.host
+  ): Promise<CursorPage<Host & { tamper: TamperInfo | null }>> {
+    const page = await client.host
       .findMany({
         where: {
           // Removed devices only when asked for by status.
@@ -81,6 +82,17 @@ export class HostsAdminService {
         take: input.limit + 1,
       })
       .then((rows) => toCursorPage(rows, input.limit, (r) => r.createdAt));
+    const tampered = await latestTamper(
+      client,
+      page.items.map((h) => h.id),
+    );
+    return {
+      ...page,
+      items: page.items.map((h) => ({
+        ...h,
+        tamper: tampered.get(h.id) ?? null,
+      })),
+    };
   }
 
   /**
