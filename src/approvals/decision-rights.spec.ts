@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   AGENT_HIGH_RISK_SCORE,
+  STEP_UP_MAX_AGE_SECONDS,
   decisionRights,
+  freshSignIn,
   sensitiveReason,
 } from './decision-rights';
 
@@ -69,7 +71,7 @@ describe('decision rights', () => {
       choices: ['deny'],
       needs: 'needs_another_admin',
     });
-    // A personal workspace has nobody else to ask.
+    // A personal workspace has nobody else to ask: once or deny, after a fresh sign-in.
     expect(
       decisionRights({
         ...base,
@@ -77,8 +79,15 @@ describe('decision rights', () => {
         owner: true,
         sensitive: 'high_risk',
         company: false,
-      }).choices,
-    ).toContain('approve_once');
+      }),
+    ).toMatchObject({
+      choices: ['approve_once', 'deny'],
+      stepUp: true,
+      why: 'high_risk',
+    });
+    expect(
+      decisionRights({ ...base, admin: true, company: false }).stepUp,
+    ).toBe(false);
   });
 
   it('anyone else decides nothing', () => {
@@ -86,5 +95,14 @@ describe('decision rights', () => {
       choices: [],
       canRevoke: false,
     });
+  });
+
+  it('a fresh sign-in is at most STEP_UP_MAX_AGE_SECONDS old; unknown is stale', () => {
+    const now = 1_800_000_000_000;
+    expect(freshSignIn(now / 1000 - STEP_UP_MAX_AGE_SECONDS, now)).toBe(true);
+    expect(freshSignIn(now / 1000 - STEP_UP_MAX_AGE_SECONDS - 1, now)).toBe(
+      false,
+    );
+    expect(freshSignIn(undefined, now)).toBe(false);
   });
 });

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   HttpException,
+  UnauthorizedException,
   Injectable,
   NotFoundException,
   Optional,
@@ -24,6 +25,7 @@ import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
 import { ApproverDirectory } from './approver-directory';
 import {
+  STEP_UP_MAX_AGE_SECONDS,
   decisionRights,
   refusalMessage,
   sensitiveReason,
@@ -96,6 +98,11 @@ export interface DecideHostApprovalInput {
    * (`OPERATOR_ROLES`). The owner path needs it, so a demoted owner cannot decide.
    */
   ownerMayOperate?: boolean;
+  /**
+   * Console only: the signed-in person's `auth_time` is within `STEP_UP_MAX_AGE_SECONDS`. Needed
+   * for a personal workspace's owner approving their own sensitive request.
+   */
+  freshSignIn?: boolean;
 }
 
 @Injectable()
@@ -409,6 +416,21 @@ export class HostApprovalsService {
     });
     if (!rights.choices.includes(input.decision))
       throw new ForbiddenException(refusalMessage(rights));
+    // Self-approval of something sensitive (personal workspace): only in the signed-in console,
+    // and only right after a fresh sign-in, checked here on the server.
+    const selfConfirmed = rights.stepUp && input.decision !== 'deny';
+    if (selfConfirmed && input.via !== 'console')
+      throw new ForbiddenException(
+        'Approving your own high-risk request needs the Manar console. Nothing was changed.',
+      );
+    if (selfConfirmed && !input.freshSignIn)
+      throw new UnauthorizedException({
+        statusCode: 401,
+        code: 'reauth_required',
+        maxAge: STEP_UP_MAX_AGE_SECONDS,
+        message:
+          'Confirm it is you (sign in again) to approve your own high-risk request. Nothing was changed.',
+      });
     // A permanent site rule needs the role that may write site rules; an approver without it
     // gets "once" (fail closed: an absent flag is "no").
     let decision: HostDecision = input.decision;
@@ -454,6 +476,7 @@ export class HostApprovalsService {
           decidedBy: input.subject,
           decidedVia: input.via,
           decidedAt: now,
+          ...(selfConfirmed ? { selfConfirmedAt: now } : {}),
         },
       });
       if (won.count === 0) {
@@ -525,6 +548,10 @@ export class HostApprovalsService {
         hostId: row.hostId,
         decision,
         via: input.via,
+        // "Self-approved, high risk, re-confirmed".
+        ...(selfConfirmed
+          ? { selfApproved: true, sensitive: rights.why, reconfirmed: true }
+          : {}),
         toolId: row.toolId,
         actionId: row.actionId,
       },

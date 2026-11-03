@@ -40,6 +40,8 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_REVOKED: 'approval.revoked',
   /** A person withdrew an 8-hour grant, or lifted a block left by a revoked-after-use approval. */
   APPROVAL_GRANT_REVOKED: 'approval.grant.revoked',
+  /** A personal workspace's owner approved their own sensitive request after a fresh sign-in. */
+  APPROVAL_SELF_CONFIRMED: 'approval.self_confirmed',
   /** "Pause all AI" was turned on / off for the workspace. */
   WORKSPACE_AI_PAUSED: 'workspace.ai.paused',
   WORKSPACE_AI_RESUMED: 'workspace.ai.resumed',

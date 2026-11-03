@@ -11,6 +11,7 @@ import {
   Logger,
   NotFoundException,
   Param,
+  UnauthorizedException,
   Post,
   Query,
   UseGuards,
@@ -55,7 +56,9 @@ import {
   isOperatorRole,
 } from './approver-directory';
 import {
+  STEP_UP_MAX_AGE_SECONDS,
   decisionRights,
+  freshSignIn,
   refusalMessage,
   sensitiveReason,
   type DecisionRights,
@@ -258,6 +261,7 @@ export class ApprovalsController {
           request.status === 'PENDING' ? agentChoices(rights[i]!) : [],
         needs: rights[i]!.needs,
         why: rights[i]!.why,
+        stepUpNeeded: rights[i]!.stepUp && !freshSignIn(auth.authTime),
       })),
       nextCursor: page.nextCursor,
     };
@@ -331,6 +335,8 @@ export class ApprovalsController {
           detail.status === 'PENDING' ? agentChoices(access.rights) : [],
         needs: access.rights.needs,
         why: access.rights.why,
+        stepUpNeeded: access.rights.stepUp && !freshSignIn(auth.authTime),
+        selfConfirmedAt: detail.selfConfirmedAt,
         canRevoke: detail.status === 'APPROVED' && access.rights.canRevoke,
         releasedAt: detail.releasedAt,
         revokedAt: detail.revokedAt,
@@ -412,6 +418,17 @@ export class ApprovalsController {
     if (!access.rights.choices.includes(choice))
       throw new ForbiddenException(refusalMessage(access.rights));
     // A rule is a standing approval: only an approver, and only when they may approve outright.
+    // Self-approval of something sensitive (personal workspace): only right after a fresh sign-in,
+    // checked here on the server; the web sends the person through sign-in and back.
+    const selfConfirmed = access.rights.stepUp && choice !== 'deny';
+    if (selfConfirmed && !freshSignIn(auth.authTime))
+      throw new UnauthorizedException({
+        statusCode: 401,
+        code: 'reauth_required',
+        maxAge: STEP_UP_MAX_AGE_SECONDS,
+        message:
+          'Confirm it is you (sign in again) to approve your own high-risk request. Nothing was changed.',
+      });
     if (input.makeRule && !access.rights.choices.includes('approve_8h'))
       throw new ForbiddenException(
         'Only a workspace approver can turn an approval into a rule. Nothing was changed.',
@@ -454,6 +471,24 @@ export class ApprovalsController {
       approvalRequest.temporalWorkflowId,
       id,
     );
+
+    if (selfConfirmed && result.outcome === 'APPROVED') {
+      await tenantClient.approvalRequest.update({
+        where: { id: approvalRequest.id },
+        data: { selfConfirmedAt: new Date() },
+      });
+      await this.auditService.recordSafely(tenantClient, auth.tenant.id, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_SELF_CONFIRMED,
+        actor: { type: 'human', id: auth.user.id },
+        data: {
+          approvalRequestId: approvalRequest.id,
+          selfApproved: true,
+          sensitive: access.rights.why,
+          reconfirmed: true,
+          authTime: auth.authTime ?? null,
+        },
+      });
+    }
 
     // "Approve for 8 hours": only after the workflow really approved (re-evaluation can still
     // deny), for this agent, tool, action and exact resource.

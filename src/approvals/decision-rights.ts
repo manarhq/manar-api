@@ -24,6 +24,22 @@ export const HANDOVER_ACTIONS: readonly string[] = [
 export type SensitiveReason = 'high_risk' | 'handover';
 
 /**
+ * A personal workspace's owner may approve their own sensitive request only after a fresh sign-in
+ * (founder decision, 3 Nov 2026): `auth_time` no older than this, checked on the server.
+ */
+export const STEP_UP_MAX_AGE_SECONDS = 15 * 60;
+
+/** True when the sign-in behind this request is recent enough for a self-approval. */
+export function freshSignIn(
+  authTime: number | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  return (
+    authTime !== undefined && nowMs / 1000 - authTime <= STEP_UP_MAX_AGE_SECONDS
+  );
+}
+
+/**
  * Why the person cannot approve: `admins_only` (the workspace setting), `needs_admin` (not an
  * approver; or sensitive and they are only the owner), `needs_another_admin` (sensitive and it is
  * their own device or agent).
@@ -37,6 +53,11 @@ export interface DecisionRights {
   why: SensitiveReason | null;
   /** Revoking only ever restricts: an approver, or the owner unless "admins only". */
   canRevoke: boolean;
+  /**
+   * Approving needs a fresh sign-in first (`STEP_UP_MAX_AGE_SECONDS`): the owner of a personal
+   * workspace approving their own sensitive request. Deny never does.
+   */
+  stepUp: boolean;
 }
 
 export function sensitiveReason(input: {
@@ -63,8 +84,8 @@ export function sensitiveReason(input: {
  * - the device's owner or agent's creator approves once or denies their own routine requests,
  *   unless the company workspace is "admins only"; a sensitive one they can only deny;
  * - anyone else decides nothing.
- * A personal workspace has one person, so its owner approves their own sensitive requests:
- * there is nobody else to ask.
+ * A personal workspace has one person, so its owner approves their own sensitive requests, but
+ * only after re-confirming their sign-in (`stepUp`), and the approval is recorded as such.
  */
 export function decisionRights(input: {
   admin: boolean;
@@ -83,6 +104,17 @@ export function decisionRights(input: {
         needs: 'needs_another_admin',
         why: sensitive,
         canRevoke: true,
+        stepUp: false,
+      };
+    // Personal workspace, own sensitive request: once or deny, after a fresh sign-in. No standing
+    // permission (8 hours, always) is ever self-granted for something sensitive.
+    if (sensitive && owner)
+      return {
+        choices: ['approve_once', 'deny'],
+        needs: null,
+        why: sensitive,
+        canRevoke: true,
+        stepUp: true,
       };
     return {
       choices:
@@ -92,24 +124,39 @@ export function decisionRights(input: {
       needs: null,
       why: null,
       canRevoke: true,
+      stepUp: false,
     };
   }
   if (!owner)
-    return { choices: [], needs: 'needs_admin', why: null, canRevoke: false };
+    return {
+      choices: [],
+      needs: 'needs_admin',
+      why: null,
+      canRevoke: false,
+      stepUp: false,
+    };
   if (input.adminsOnly)
-    return { choices: [], needs: 'admins_only', why: null, canRevoke: false };
+    return {
+      choices: [],
+      needs: 'admins_only',
+      why: null,
+      canRevoke: false,
+      stepUp: false,
+    };
   if (sensitive)
     return {
       choices: ['deny'],
       needs: 'needs_admin',
       why: sensitive,
       canRevoke: true,
+      stepUp: false,
     };
   return {
     choices: ['approve_once', 'deny'],
     needs: null,
     why: null,
     canRevoke: true,
+    stepUp: false,
   };
 }
 
