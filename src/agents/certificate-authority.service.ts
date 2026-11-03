@@ -79,7 +79,7 @@ export class CertificateAuthorityService {
     agent: { id: string; identifier: string },
     csrPem: string,
   ): Promise<IssuedCertificate> {
-    await this.validateCsr(csrPem, agent.identifier);
+    await this.validateCsr(csrPem, agent.identifier, [agent.identifier]);
 
     const signed = await this.openBao.signVerbatim(
       csrPem,
@@ -113,7 +113,7 @@ export class CertificateAuthorityService {
    * exactly one URI SAN equal to `identifier`. Throws `CsrValidationError`.
    */
   async assertCsrNames(csrPem: string, identifier: string): Promise<void> {
-    await this.validateCsr(csrPem, identifier);
+    await this.validateCsr(csrPem, identifier, hostCommonNames(identifier));
   }
 
   /**
@@ -125,7 +125,11 @@ export class CertificateAuthorityService {
     host: { id: string; identifier: string },
     csrPem: string,
   ): Promise<IssuedCertificate> {
-    await this.validateCsr(csrPem, host.identifier);
+    await this.validateCsr(
+      csrPem,
+      host.identifier,
+      hostCommonNames(host.identifier),
+    );
     const signed = await this.openBao.signVerbatim(
       csrPem,
       CertificateAuthorityService.AGENT_LEAF_CERTIFICATE_TTL,
@@ -297,10 +301,17 @@ export class CertificateAuthorityService {
    * authoritative identity (the same SPIFFE-style convention
    * `AgentMtlsGuard` reads back out of an issued certificate), a free-text
    * CN is not.
+   *
+   * The subject is pinned too, because `sign-verbatim` copies it into the
+   * certificate and other services on the same PKI may read the CN: it must
+   * be exactly one CN, and that CN one of `allowedCommonNames` (the full
+   * identifier; for hosts also the bare machine id, which existing devices
+   * send, unless it looks like a service name).
    */
   private async validateCsr(
     csrPem: string,
     expectedIdentifier: string,
+    allowedCommonNames: string[],
   ): Promise<void> {
     let csr: x509.Pkcs10CertificateRequest;
     try {
@@ -321,6 +332,23 @@ export class CertificateAuthorityService {
     if (!signatureValid) {
       throw new CsrValidationError(
         'CSR signature does not verify against its own public key',
+      );
+    }
+
+    const attributes = csr.subjectName
+      .toJSON()
+      .flatMap((rdn) =>
+        Object.entries(rdn).flatMap(([type, values]) =>
+          values.map((value) => ({ type, value })),
+        ),
+      );
+    if (
+      attributes.length !== 1 ||
+      attributes[0]!.type !== 'CN' ||
+      !allowedCommonNames.includes(attributes[0]!.value)
+    ) {
+      throw new CsrValidationError(
+        `CSR subject must be exactly "CN=${expectedIdentifier}"`,
       );
     }
 
@@ -345,4 +373,18 @@ export class CertificateAuthorityService {
       );
     }
   }
+}
+
+/**
+ * Names that identify a service rather than a device. A bare machine id that
+ * matches is refused as a CN, so no device certificate can carry one.
+ */
+const SERVICE_LIKE_NAME = /^(?:manar|localhost$|kubernetes|system:)/i;
+
+/** CNs a host CSR may carry: its full `host://` identifier, or its bare machine id. */
+function hostCommonNames(identifier: string): string[] {
+  const machineId = identifier.slice(identifier.lastIndexOf('/') + 1);
+  return machineId && !SERVICE_LIKE_NAME.test(machineId)
+    ? [identifier, machineId]
+    : [identifier];
 }
