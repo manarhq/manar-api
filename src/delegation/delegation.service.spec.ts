@@ -12,7 +12,11 @@ import {
   DelegationDeniedError,
   DelegationExceedsParentLimitsError,
 } from './delegation.errors';
-import { DelegationService } from './delegation.service';
+import {
+  DelegationService,
+  MAX_DELEGATION_DEPTH,
+  MAX_DELEGATIONS_PER_TASK,
+} from './delegation.service';
 import { DelegateTaskRequestSchema } from './delegation.validation';
 
 /**
@@ -44,13 +48,29 @@ const PARENT: TaskRecord = {
 function setup(
   parent: Partial<TaskRecord> = {},
   killSwitch: { killed: boolean; reason?: string } = { killed: false },
+  tree: { ancestors?: number; children?: number[] } = {},
 ) {
+  const childCounts = [...(tree.children ?? [0, 1])];
+  const revoked: string[] = [];
+  const tenantClient = {
+    task: {
+      count: () => Promise.resolve(childCounts.shift() ?? 0),
+      update: ({ where }: { where: { id: string } }) => {
+        revoked.push(where.id);
+        return Promise.resolve({});
+      },
+    },
+  } as unknown as TenantPrismaClient;
   const created: CreateTaskInput[] = [];
   const agentsCreated: unknown[] = [];
   const audited: { data: Record<string, unknown> }[] = [];
   const tasksService = {
     getTaskOrThrow: () => Promise.resolve({ ...PARENT, ...parent }),
     evaluateFullLiveness: () => Promise.resolve({ ok: true }),
+    getAncestorChain: () =>
+      Promise.resolve(
+        Array.from({ length: tree.ancestors ?? 0 }, () => PARENT),
+      ),
     getEffectiveGrantSet: () => Promise.resolve(new Set<string>()),
     resolveRootRequesterId: () => Promise.resolve('user-1'),
     createTask: (_client: unknown, _tenant: string, input: CreateTaskInput) => {
@@ -86,7 +106,7 @@ function setup(
   );
   const delegate = (body: Record<string, unknown>) =>
     service.delegate(
-      {} as TenantPrismaClient,
+      tenantClient,
       'tenant-1',
       'acme',
       PARENT.id,
@@ -97,7 +117,7 @@ function setup(
         ...body,
       }),
     );
-  return { delegate, created, agentsCreated, audited };
+  return { delegate, created, agentsCreated, audited, revoked };
 }
 
 describe('DelegationService refuses a stopped caller (ADR-0009, finding 1)', () => {
@@ -191,4 +211,48 @@ describe('Delegation never hands out a Manar connector action (ADR-0009, finding
       ).toBe(false);
     });
   }
+});
+
+describe('DelegationService bounds the delegation tree', () => {
+  it('refuses a child below the maximum depth, writing nothing', async () => {
+    // The parent already sits at the deepest level.
+    const { delegate, created, agentsCreated } = setup({}, undefined, {
+      ancestors: MAX_DELEGATION_DEPTH,
+    });
+    await expect(delegate({})).rejects.toMatchObject({
+      constructor: DelegationDeniedError,
+      reason: 'delegation_depth_exceeded',
+    });
+    expect(agentsCreated).toHaveLength(0);
+    expect(created).toHaveLength(0);
+  });
+
+  it('allows the deepest permitted level', async () => {
+    const { delegate, created } = setup({}, undefined, {
+      ancestors: MAX_DELEGATION_DEPTH - 1,
+    });
+    await delegate({});
+    expect(created).toHaveLength(1);
+  });
+
+  it('refuses once the task has delegated its maximum, writing nothing', async () => {
+    const { delegate, created, agentsCreated } = setup({}, undefined, {
+      children: [MAX_DELEGATIONS_PER_TASK],
+    });
+    await expect(delegate({})).rejects.toMatchObject({
+      reason: 'delegation_limit_reached',
+    });
+    expect(agentsCreated).toHaveLength(0);
+    expect(created).toHaveLength(0);
+  });
+
+  it('revokes a child that a concurrent request pushed over the limit', async () => {
+    const { delegate, revoked } = setup({}, undefined, {
+      children: [MAX_DELEGATIONS_PER_TASK - 1, MAX_DELEGATIONS_PER_TASK + 1],
+    });
+    await expect(delegate({})).rejects.toMatchObject({
+      reason: 'delegation_limit_reached',
+    });
+    expect(revoked).toEqual(['task-child']);
+  });
 });

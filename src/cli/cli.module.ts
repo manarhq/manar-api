@@ -1,3 +1,4 @@
+import { RedisThrottlerStorageModule } from '../rate-limit/redis-throttler-storage.module';
 import { Module } from '@nestjs/common';
 import { AppConfigModule } from '../config/config.module';
 import { DatabaseModule } from '../database/database.module';
@@ -53,6 +54,8 @@ import { LicenseVerifyCommand } from './commands/license-verify.command';
   imports: [
     AppConfigModule,
     DatabaseModule,
+    // WorkspaceProvisioningService's creation gate (workspaces:drain never creates).
+    RedisThrottlerStorageModule,
     // AuditModule's key lookup and SEAL marks back the CLI's own AuditService.
     AuditModule,
     KeycloakModule,

@@ -19,6 +19,14 @@ const ISSUER = 'https://auth.test/realms/manar';
 function make(
   counts: { total: number; inflight: number; backlog: number },
   cfg: Record<string, unknown> = {},
+  throttle = {
+    increment: vi.fn().mockResolvedValue({
+      totalHits: 1,
+      timeToExpire: 30,
+      isBlocked: false,
+      timeToBlockExpire: 0,
+    }),
+  },
 ) {
   const count = vi.fn(({ where }: any) =>
     Promise.resolve(
@@ -52,12 +60,95 @@ function make(
       manager as never,
       control as never,
       config as never,
+      throttle as never,
     ),
     manager,
     control,
     config,
   };
 }
+
+describe('WorkspaceProvisioningService creation rate', () => {
+  const blocked = {
+    totalHits: 121,
+    timeToExpire: 30,
+    isBlocked: true,
+    timeToBlockExpire: 30,
+  };
+
+  it('refuses over the hourly deployment-wide rate with a friendly 429, creating nothing', async () => {
+    const throttle = { increment: vi.fn().mockResolvedValue(blocked) };
+    const { svc, manager } = make(
+      { total: 1, inflight: 0, backlog: 0 },
+      {},
+      throttle,
+    );
+    const refused = await svc
+      .createWorkspace({
+        ownerSubject: 's',
+        kind: 'PERSONAL',
+        displayName: 'P',
+      })
+      .catch((e: unknown) => e);
+    expect(refused).toMatchObject({
+      status: 429,
+      response: {
+        reason: 'workspace_creation_busy',
+        retryAfterSeconds: 60,
+        message: {
+          en: expect.stringContaining('try again'),
+          ar: expect.any(String),
+        },
+      },
+    });
+    expect(manager.provisionTenant).not.toHaveBeenCalled();
+    expect(throttle.increment).toHaveBeenCalledWith(
+      'global',
+      3_600_000,
+      120,
+      0,
+      'workspace-create',
+    );
+  });
+
+  it('uses the configured rate', async () => {
+    const { svc, manager } = make(
+      { total: 1, inflight: 0, backlog: 0 },
+      { WORKSPACE_CREATE_PER_HOUR: 5 },
+      {
+        increment: vi
+          .fn()
+          .mockResolvedValue({ ...blocked, isBlocked: false, totalHits: 6 }),
+      },
+    );
+    await expect(
+      svc.createWorkspace({
+        ownerSubject: 's',
+        kind: 'SAMPLE',
+        displayName: 'S',
+      }),
+    ).rejects.toMatchObject({ status: 429 });
+    expect(manager.provisionTenant).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (503) when the limits store is down', async () => {
+    const { svc, manager } = make(
+      { total: 1, inflight: 0, backlog: 0 },
+      {},
+      {
+        increment: vi.fn().mockRejectedValue(new Error('redis down')),
+      },
+    );
+    await expect(
+      svc.createWorkspace({
+        ownerSubject: 's',
+        kind: 'PERSONAL',
+        displayName: 'P',
+      }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(manager.provisionTenant).not.toHaveBeenCalled();
+  });
+});
 
 describe('WorkspaceProvisioningService', () => {
   it('provisions straight away and hands the owner to the same transaction as the tenant rows', async () => {

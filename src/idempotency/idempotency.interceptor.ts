@@ -6,6 +6,7 @@ import {
   Logger,
   NestInterceptor,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import type { FastifyRequest } from 'fastify';
 import { firstValueFrom, Observable, of } from 'rxjs';
@@ -14,7 +15,7 @@ import { IdempotencyStoreService } from './idempotency-store.service';
 import { failClosed } from '../common/fail-closed/fail-closed';
 
 interface RequestWithOptionalContexts extends FastifyRequest {
-  authContext?: { tenant?: { id?: string } };
+  authContext?: { tenant?: { id?: string }; user?: { id?: string } };
   agentContext?: { agent?: { id?: string } };
 }
 
@@ -76,7 +77,19 @@ export class IdempotencyInterceptor implements NestInterceptor {
       request.agentContext?.agent?.id ??
       'anonymous';
     const routeKey = `${context.getClass().name}.${context.getHandler().name}`;
-    const redisKey = `manar:idempotency:${scope}:${routeKey}:${idempotencyKey}`;
+    // The key is only a replay of the same request: same caller, same route
+    // target, same body. Reusing it for another target (a kill switch on a
+    // different agent) runs that request instead of answering with the first.
+    const fingerprint = createHash('sha256')
+      .update(
+        JSON.stringify([
+          request.authContext?.user?.id ?? null,
+          request.params ?? null,
+          request.body ?? null,
+        ]),
+      )
+      .digest('hex');
+    const redisKey = `manar:idempotency:${scope}:${routeKey}:${idempotencyKey}:${fingerprint}`;
     const ttlMs = this.configService.get('IDEMPOTENCY_KEY_TTL_MS', {
       infer: true,
     });

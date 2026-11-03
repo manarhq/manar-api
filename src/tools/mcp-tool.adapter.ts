@@ -3,8 +3,12 @@ import { ConfigService } from '@nestjs/config';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { AppConfig } from '../config/env.validation';
+import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   assertSafeOutboundUrl,
+  MAX_OUTBOUND_RESPONSE_BYTES,
+  OutboundResponseTooLargeError,
+  safeOutboundFetch,
   UnsafeOutboundUrlError,
 } from '../common/ssrf/url-safety';
 import {
@@ -19,6 +23,12 @@ import type {
 import type { ToolActionRecord, ToolRecord } from './tool-registry.service';
 
 const MCP_REQUEST_TIMEOUT_MS = 10_000;
+
+/** Wall clock for one invocation's HTTP traffic (connect + call + close), whatever the SDK waits on. */
+const MCP_TOTAL_TIMEOUT_MS = 25_000;
+
+/** Upstream text an `isError` result may contribute to the agent's error message (screened by the broker). */
+export const MCP_ERROR_DETAIL_MAX_CHARS = 1_000;
 
 /**
  * Release 2026-11-11 — argument names this adapter owns, which a caller's
@@ -155,6 +165,14 @@ export class McpToolAdapter implements ToolProtocolAdapter {
         requestInit: {
           headers: { Authorization: `Bearer ${credential}` },
         },
+        // Every request the SDK makes (it makes several, each resolving DNS
+        // again) goes through the same per-hop SSRF check, manual redirect
+        // handling and credential stripping as the HTTP adapter, with a
+        // bounded body and one deadline for the whole invocation.
+        fetch: guardedMcpFetch(
+          this.ssrfPolicy,
+          AbortSignal.timeout(MCP_TOTAL_TIMEOUT_MS),
+        ),
       },
     );
 
@@ -188,11 +206,16 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       );
 
       if (result.isError) {
+        // The tool's own text is untrusted output: it travels separately as
+        // `errorDetail`, which the broker screens (DLP, injection check)
+        // before anything is stored or returned, and keeps out of audit.
+        const detail = this.summarizeTextContent(result.content);
         return {
           success: false,
-          errorMessage:
-            this.summarizeTextContent(result.content) ??
-            'MCP tool call returned an error',
+          errorMessage: 'mcp_tool_error',
+          ...(detail
+            ? { errorDetail: detail.slice(0, MCP_ERROR_DETAIL_MAX_CHARS) }
+            : {}),
         };
       }
 
@@ -201,21 +224,19 @@ export class McpToolAdapter implements ToolProtocolAdapter {
         data: result.structuredContent ?? result.content,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      // Never the error text: the SDK copies upstream response bodies into
+      // it. A fixed code goes to the agent, the error class to the log.
+      const code = mcpFailureCode(error);
       this.logger.warn(
-        `MCP tool call to "${tool.name}/${action.name}" failed: ${message}`,
+        `MCP tool call to "${tool.name}/${action.name}" failed: ${code} (${error instanceof Error ? error.name : typeof error})`,
       );
       // Gate 0 finding R1: once `tools/call` was sent, a lost answer on a
       // mutating or destructive action means the side effect may have
       // happened. Connect failures happen before anything was asked.
       if (callSent && (action.mutating || action.destructive)) {
-        return {
-          success: false,
-          errorMessage: `MCP call failed: ${message}`,
-          outcomeUnknown: true,
-        };
+        return { success: false, errorMessage: code, outcomeUnknown: true };
       }
-      return { success: false, errorMessage: `MCP call failed: ${message}` };
+      return { success: false, errorMessage: code };
     } finally {
       // Bounded like every other step: a server that never completes its
       // shutdown handshake must not hold this request open.
@@ -262,4 +283,98 @@ export class McpToolAdapter implements ToolProtocolAdapter {
       .map((item) => item.text);
     return texts.length > 0 ? texts.join(' ') : undefined;
   }
+}
+
+/** Walks `cause` so an error the SDK wrapped is still recognised. */
+function findCause<T>(
+  error: unknown,
+  type: abstract new (...args: never[]) => T,
+): T | undefined {
+  for (let e = error, depth = 0; e && depth < 5; depth++) {
+    if (e instanceof type) return e;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+/** A fixed, upstream-free code for a failed MCP exchange. */
+function mcpFailureCode(error: unknown): string {
+  if (findCause(error, UnsafeOutboundUrlError)) {
+    return 'blocked_by_outbound_url_policy';
+  }
+  if (findCause(error, OutboundResponseTooLargeError)) {
+    return 'response_too_large';
+  }
+  const name = error instanceof Error ? error.name : '';
+  const code = (error as { code?: unknown } | null)?.code;
+  if (name === 'TimeoutError' || name === 'AbortError' || code === -32001) {
+    return 'mcp_call_timed_out';
+  }
+  return 'mcp_call_failed';
+}
+
+/**
+ * The `fetch` the MCP transport uses: `safeOutboundFetch` (SSRF check on
+ * every request and redirect hop, credentials dropped across origins), a
+ * deadline shared by every request of one invocation, and a byte cap on
+ * every response body, JSON or SSE stream alike.
+ */
+export function guardedMcpFetch(
+  policy: SsrfPolicy,
+  deadline: AbortSignal,
+  options: {
+    maxBytes?: number;
+    lookup?: Parameters<typeof safeOutboundFetch>[1]['lookup'];
+    fetchImpl?: typeof fetch;
+  } = {},
+): FetchLike {
+  const maxBytes = options.maxBytes ?? MAX_OUTBOUND_RESPONSE_BYTES;
+  return async (url, init) => {
+    if (init?.body != null && typeof init.body !== 'string') {
+      throw new Error('MCP transport sent a non-string body');
+    }
+    const response = await safeOutboundFetch(String(url), {
+      method: init?.method ?? 'GET',
+      headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      body: init?.body ?? undefined,
+      signal: init?.signal
+        ? AbortSignal.any([init.signal, deadline])
+        : deadline,
+      allowedHosts: policy.allowedHosts,
+      allowLoopback: policy.allowLoopback,
+      lookup: options.lookup,
+      fetchImpl: options.fetchImpl,
+    });
+    return capResponseBody(response, maxBytes);
+  };
+}
+
+/** The same response with a body that errors once it passes `maxBytes`. */
+function capResponseBody(response: Response, maxBytes: number): Response {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    void response.body?.cancel().catch(() => undefined);
+    throw new OutboundResponseTooLargeError(response.url, maxBytes);
+  }
+  if (!response.body) return response;
+  let total = 0;
+  const counted = response.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          controller.error(
+            new OutboundResponseTooLargeError(response.url, maxBytes),
+          );
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Response(counted, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }

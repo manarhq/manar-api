@@ -16,6 +16,14 @@ export interface ToolInvocationResult {
   /** A short, credential-free error summary — present only when `success` is `false` (e.g. `"HTTP 503"`, `"request timed out"`, never a raw response body). */
   errorMessage?: string;
   /**
+   * Text the tool itself returned with a failure (an MCP `isError` result).
+   * Untrusted: `CredentialBrokerService` caps it, runs DLP and the
+   * prompt-injection check on it, then appends what survives to the stored
+   * and returned `errorMessage`. It never goes into audit data and is never
+   * returned as a separate field.
+   */
+  errorDetail?: string;
+  /**
    * Set (with `success: false`) when a mutating or destructive action's
    * request may have reached the tool but no definite answer came back: a
    * timeout, a connection lost after sending, a 5xx. The side effect may or

@@ -525,6 +525,12 @@ export class AuthorizationService {
   ): Promise<Evaluation> {
     const redemption = stage === 'GRANT_REDEMPTION';
 
+    // "*" is the wildcard of grants and policy rules, never a target: a
+    // request naming it would match no resource-scoped rule.
+    if (request.resource === ANY_RESOURCE_PATTERN) {
+      return deny('invalid_resource');
+    }
+
     // Step 0 (kill-switch phase, Section 32): platform → tenant → agent →
     // agent-group(s) → tool, then AI-system lifecycle. Runs before the task
     // is even resolved — none of these checks need it, and this is the

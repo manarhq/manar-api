@@ -98,6 +98,8 @@ export interface CallRecord {
 export interface AdmittedCall<T> {
   tenantClient: TenantPrismaClient;
   task: TaskRecord;
+  /** Where tokens are counted: the root of the task's delegation chain, so children share one budget. */
+  budgetTask: Pick<TaskRecord, 'id' | 'expiresAt'>;
   /** The tenant's catalog model; null = the deployment default. */
   route: LlmRouteOverride | null;
   limit: number;
@@ -210,10 +212,8 @@ export class LlmProxyService {
       fixed?: { external: boolean; uaeResident: boolean; model: string };
     }>,
   ): Promise<AdmittedCall<T>> {
-    const { tenantClient, task } = await this.access.assertTaskAccess(
-      agent,
-      taskId,
-    );
+    const { tenantClient, task, budgetTask } =
+      await this.access.assertTaskAccess(agent, taskId);
     const after = await afterAccess?.();
     const fixed = after?.fixed;
     prompt = after?.prompt ?? prompt;
@@ -225,7 +225,7 @@ export class LlmProxyService {
 
     const limit = this.config.get('LLM_TASK_TOKEN_BUDGET', { infer: true });
     const used = await failClosed('limits-store', () =>
-      this.budget.used(agent.tenant.id, task.id),
+      this.budget.used(agent.tenant.id, budgetTask.id),
     );
     record.budget = { used, limit };
     if (used >= limit) throw new LlmBudgetExhaustedException();
@@ -247,22 +247,22 @@ export class LlmProxyService {
       throw new EnforcementDependencyUnavailableException('dlp-advisory');
     }
     if (dlp.blocked) throw denied('dlp_policy_violation');
-    return { tenantClient, task, route, limit, dlp };
+    return { tenantClient, task, budgetTask, route, limit, dlp };
   }
 
   /** Adds the tokens a call used to the task budget and the tenant's monthly count (fail closed). */
   async charge(
     agent: AgentContext,
-    call: Pick<AdmittedCall<unknown>, 'task' | 'limit'>,
+    call: Pick<AdmittedCall<unknown>, 'budgetTask' | 'limit'>,
     record: CallRecord,
     tokens: number,
   ): Promise<void> {
     const total = await failClosed('limits-store', () =>
       this.budget.add(
         agent.tenant.id,
-        call.task.id,
+        call.budgetTask.id,
         tokens,
-        call.task.expiresAt,
+        call.budgetTask.expiresAt,
       ),
     );
     record.totalTokens = tokens;

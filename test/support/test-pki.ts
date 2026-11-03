@@ -194,7 +194,7 @@ export async function makeCsrPem(
   uri: string,
 ): Promise<string> {
   const csr = await x509.Pkcs10CertificateRequestGenerator.create({
-    name: 'CN=host',
+    name: `CN=${uri}`,
     keys,
     signingAlgorithm: RSA,
     extensions: [

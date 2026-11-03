@@ -63,17 +63,23 @@ function setup(
     budget?: number;
     killSwitchDown?: boolean;
     catalog?: CatalogService;
+    root?: TaskRecord;
   } = {},
 ) {
   const catalog = opts.catalog ?? allowAllCatalog();
   const task = opts.task === undefined ? makeTask() : opts.task;
   const tenantClient = {
-    task: { findUnique: vi.fn().mockResolvedValue(task) },
+    task: {
+      findUnique: vi.fn(({ where }: { where: { id: string } }) =>
+        Promise.resolve(where.id === opts.root?.id ? opts.root : task),
+      ),
+    },
   };
   const tenantDatabaseManager = {
     getClient: vi.fn().mockResolvedValue(tenantClient),
   } as unknown as TenantDatabaseManager;
   const killSwitchService = {
+    checkAgent: vi.fn().mockResolvedValue({ killed: false }),
     checkAll: opts.killSwitchDown
       ? vi.fn().mockRejectedValue(new Error('control db down'))
       : vi
@@ -528,5 +534,27 @@ describe('LlmProxyService', () => {
         'enforcement_dependency_unavailable',
       );
     });
+  });
+});
+
+describe('LlmProxyService token budget under delegation', () => {
+  it('reads and charges the root task budget, so children share it', async () => {
+    const root = makeTask({
+      id: 'root-task',
+      assignedAgentId: 'agent-root',
+      expiresAt: new Date(Date.now() + 7_200_000),
+    });
+    const { service, budget } = setup({
+      task: makeTask({ parentTaskId: 'root-task' }),
+      root,
+    });
+    await service.complete(AGENT, 'task-1', body('hello'));
+    expect(budget.used).toHaveBeenCalledWith(AGENT.tenant.id, 'root-task');
+    expect(budget.add).toHaveBeenCalledWith(
+      AGENT.tenant.id,
+      'root-task',
+      expect.any(Number),
+      root.expiresAt,
+    );
   });
 });

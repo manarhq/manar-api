@@ -1,3 +1,4 @@
+import { CsrValidationError } from './certificate-authority.errors';
 import 'reflect-metadata';
 import { webcrypto } from 'node:crypto';
 import * as x509 from '@peculiar/x509';
@@ -135,14 +136,17 @@ describe('CertificateAuthorityService.revoke (S10: local first)', () => {
 
 describe('CertificateAuthorityService CSR names', () => {
   x509.cryptoProvider.set(webcrypto as unknown as Crypto);
-  async function csrWith(names: x509.JsonGeneralName[]): Promise<string> {
+  async function csrWith(
+    names: x509.JsonGeneralName[],
+    subject = 'CN=host://t/m1',
+  ): Promise<string> {
     const alg = { name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' };
     const keys = (await webcrypto.subtle.generateKey(alg, true, [
       'sign',
       'verify',
     ])) as unknown as CryptoKeyPair;
     const csr = await x509.Pkcs10CertificateRequestGenerator.create({
-      name: 'CN=test',
+      name: subject,
       keys,
       signingAlgorithm: alg,
       extensions: [new x509.SubjectAlternativeNameExtension(names)],
@@ -173,6 +177,104 @@ describe('CertificateAuthorityService CSR names', () => {
         ),
       ).rejects.toThrow(/Subject Alternative Name/);
     }
+  });
+});
+
+describe('CertificateAuthorityService CSR subject', () => {
+  x509.cryptoProvider.set(webcrypto as unknown as Crypto);
+  async function csr(identifier: string, subject: string): Promise<string> {
+    const alg = { name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' };
+    const keys = (await webcrypto.subtle.generateKey(alg, true, [
+      'sign',
+      'verify',
+    ])) as unknown as CryptoKeyPair;
+    const request = await x509.Pkcs10CertificateRequestGenerator.create({
+      name: subject,
+      keys,
+      signingAlgorithm: alg,
+      extensions: [
+        new x509.SubjectAlternativeNameExtension([
+          { type: 'url', value: identifier },
+        ]),
+      ],
+    });
+    return request.toString('pem');
+  }
+
+  const AGENT = { id: 'a1', identifier: 'agent://acme/triage' };
+  /** Reaching OpenBao means validation passed; the sentinel stops the call there. */
+  function caReachingOpenBao() {
+    const signVerbatim = vi.fn(() =>
+      Promise.reject(new Error('reached-openbao')),
+    );
+    return {
+      ca: new CertificateAuthorityService({
+        signVerbatim,
+      } as unknown as OpenBaoPkiClient),
+      signVerbatim,
+    };
+  }
+
+  it('signs an agent CSR whose only subject attribute is CN=<its agent:// identifier>', async () => {
+    const { ca } = caReachingOpenBao();
+    await expect(
+      ca.issueCertificate(
+        {} as never,
+        AGENT,
+        await csr(AGENT.identifier, `CN=${AGENT.identifier}`),
+      ),
+    ).rejects.toThrow('reached-openbao');
+  });
+
+  it.each([
+    ['a service name', 'CN=manar-api'],
+    ['a service name behind a prefix', 'CN=evil:manar-api'],
+    ['the bare agent slug', 'CN=triage'],
+    ['a second CN', `CN=${AGENT.identifier}, CN=manar-api`],
+    ['a multi-valued CN', `CN=${AGENT.identifier}+CN=manar-api`],
+    ['an extra attribute', `CN=${AGENT.identifier}, O=manar`],
+    ['no subject at all', ''],
+  ])(
+    'refuses an agent CSR whose subject carries %s, before OpenBao',
+    async (_l, subject) => {
+      const { ca, signVerbatim } = caReachingOpenBao();
+      await expect(
+        ca.issueCertificate(
+          {} as never,
+          AGENT,
+          await csr(AGENT.identifier, subject),
+        ),
+      ).rejects.toThrow(CsrValidationError);
+      expect(signVerbatim).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts a host CSR with the full identifier or the bare machine id as CN', async () => {
+    const ca = new CertificateAuthorityService({} as OpenBaoPkiClient);
+    for (const subject of ['CN=host://t/0f3a9c', 'CN=0f3a9c']) {
+      await expect(
+        ca.assertCsrNames(
+          await csr('host://t/0f3a9c', subject),
+          'host://t/0f3a9c',
+        ),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it('refuses a host CSR whose bare machine id looks like a service name, or another CN', async () => {
+    const ca = new CertificateAuthorityService({} as OpenBaoPkiClient);
+    await expect(
+      ca.assertCsrNames(
+        await csr('host://t/manar-api', 'CN=manar-api'),
+        'host://t/manar-api',
+      ),
+    ).rejects.toThrow(CsrValidationError);
+    await expect(
+      ca.assertCsrNames(
+        await csr('host://t/0f3a9c', 'CN=manar-api'),
+        'host://t/0f3a9c',
+      ),
+    ).rejects.toThrow(CsrValidationError);
   });
 });
 

@@ -97,6 +97,14 @@ mTLS-guarded (`src/delegation/`), the caller must be `:id`'s
    `min(parent riskCeiling, 20)` and the parent's remaining executions.
 6. Returns `{ childTask, childAgent, enrollmentToken }`.
 
+Budgets are shared, not copied: an execution counts on the task and on
+every ancestor, each under its own `maxExecutions`
+(`TasksService.incrementExecutionCount`), and LLM tokens are counted
+against the chain's root task. The tree is bounded: at most 3 levels below
+the human-created task (`delegation_depth_exceeded`) and 5 children per
+task over its lifetime, revoked ones included (`delegation_limit_reached`),
+both 403 before any write.
+
 ### Root requester: who does a delegated task/agent belong to?
 
 Both the child `Task.requesterId` and the child `Agent.createdBy` resolve
