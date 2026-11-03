@@ -86,7 +86,7 @@ describe('evaluateFullLiveness: the agents of ancestor tasks', () => {
     });
     await expect(
       service.evaluateFullLiveness(client(), 't', base, now),
-    ).resolves.toEqual({ ok: true });
+    ).resolves.toMatchObject({ ok: true });
     expect(checkAgent).toHaveBeenCalledWith(
       expect.anything(),
       't',

@@ -12,6 +12,8 @@ import { CatalogService } from '../platform/catalog.service';
 export interface TaskAccess {
   tenantClient: TenantPrismaClient;
   task: TaskRecord;
+  /** The root of `task`'s delegation chain (`task` itself when it has none): delegated tasks share its LLM token budget. */
+  budgetTask: Pick<TaskRecord, 'id' | 'expiresAt'>;
   /** Tools the tenant's catalog keeps out of the manifest (the watcher's connector when off). */
   hiddenTools: string[];
 }
@@ -89,6 +91,11 @@ export class AgentTaskAccessService {
       this.catalog.hiddenTools(agent.tenant.id),
     );
 
-    return { tenantClient, task, hiddenTools };
+    return {
+      tenantClient,
+      task,
+      budgetTask: liveness.root ?? task,
+      hiddenTools,
+    };
   }
 }
