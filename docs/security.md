@@ -265,6 +265,9 @@ Redis-backed (`IdempotencyStoreService`, `IDEMPOTENCY_KEY_TTL_MS` default
 24h), applied per-route (`@UseInterceptors(IdempotencyInterceptor)`) —
 never blanket-applied globally, and opt-in via the `Idempotency-Key`
 request header (a request with no such header is completely unaffected).
+The cached answer is keyed by tenant (or agent), route, the key itself and a
+hash of the caller, route params and body, so the same key sent for another
+target runs that request instead of replaying the first one's answer.
 
 **Applied to** (read from the real controllers, not assumed): `POST /agents`
 (agent creation — a genuinely new `Agent` row per call), `POST
