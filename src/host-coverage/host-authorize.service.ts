@@ -4,6 +4,7 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import {
   findLiveAllowGrant,
+  findLiveBlock,
   markAllowGrantUsed,
 } from '../approvals/allow-grants';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
@@ -163,6 +164,16 @@ export class HostAuthorizeService {
     });
     if (kill.killed)
       return { decision: 'DENY', reason: kill.reason ?? 'kill_switch' };
+
+    // Revoked after use (3 Nov 2026): refused until a person lifts the block.
+    if (
+      await findLiveBlock(
+        client,
+        { hostId: host.hostId },
+        { toolId: request.toolId, actionId, resource: request.resource },
+      )
+    )
+      return { decision: 'DENY', reason: 'revoked_after_use' };
 
     // "Approve for 8 hours" (spec 4.6): looked up before the policy runs, used only to satisfy an
     // approval requirement below. A policy DENY and the kill switches above are never overridden.

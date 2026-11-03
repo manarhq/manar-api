@@ -17,9 +17,11 @@ import { ApprovalRequestNotFoundError } from './approvals.errors';
 
 export interface ListApprovalRequestsInput {
   /** Section 65's approvals list filter. */
-  status?: 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED';
+  status?: 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED' | 'REVOKED';
   limit: number;
   cursor?: DecodedCursor;
+  /** Not an approver: only requests of agents this `UserProfile.id` created. */
+  agentCreatedBy?: string;
 }
 
 export interface CreateApprovalRequestInput {
@@ -155,10 +157,12 @@ export class ApprovalRequestService {
   async expireIfPending(
     tenantClient: TenantPrismaClient,
     id: string,
+    /** Kept on the row so the history can say why: `superseded`, `no_answer`, `no_workflow`. */
+    endReason: string,
   ): Promise<{ expired: boolean; status: string | null }> {
     const { count } = await tenantClient.approvalRequest.updateMany({
       where: { id, status: 'PENDING' },
-      data: { status: 'EXPIRED' },
+      data: { status: 'EXPIRED', endReason },
     });
     if (count === 1) return { expired: true, status: 'EXPIRED' };
     const current = await tenantClient.approvalRequest.findUnique({
@@ -192,12 +196,24 @@ export class ApprovalRequestService {
   ) {
     const where = {
       ...(input.status ? { status: input.status } : {}),
+      ...(input.agentCreatedBy
+        ? { agent: { createdBy: input.agentCreatedBy } }
+        : {}),
       ...cursorWhereClause('requestedAt', input.cursor),
     };
     const rows = await tenantClient.approvalRequest.findMany({
       where,
       orderBy: [{ requestedAt: 'desc' }, { id: 'desc' }],
       take: input.limit + 1,
+      include: {
+        agent: {
+          select: {
+            createdBy: true,
+            displayName: true,
+            creator: { select: { displayName: true } },
+          },
+        },
+      },
     });
     return toCursorPage(rows, input.limit, (row) => row.requestedAt);
   }
@@ -318,6 +334,13 @@ export class ApprovalRequestService {
 
       grantIssued: row.grant !== null,
       grantConsumedAt: row.grant?.consumedAt ?? null,
+
+      releasedAt: row.releasedAt,
+      revokedAt: row.revokedAt,
+      revokedBy: row.revokedBy,
+      revokeNote: row.revokeNote,
+      usedBeforeRevoke: row.usedBeforeRevoke,
+      endReason: row.endReason,
     };
   }
 }
@@ -369,4 +392,11 @@ export interface ApprovalRequestDetail {
 
   grantIssued: boolean;
   grantConsumedAt: Date | null;
+
+  releasedAt: Date | null;
+  revokedAt: Date | null;
+  revokedBy: string | null;
+  revokeNote: string | null;
+  usedBeforeRevoke: boolean | null;
+  endReason: string | null;
 }

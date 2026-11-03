@@ -11,10 +11,18 @@ const host: HostContext = {
   status: 'APPROVED',
 };
 
-function make(opts: { grant?: boolean; policy?: unknown }) {
+function make(opts: { grant?: boolean; block?: boolean; policy?: unknown }) {
   const grants = {
-    findFirst: vi.fn(() =>
-      Promise.resolve(opts.grant ? { id: 'g1', expiresAt: new Date() } : null),
+    findFirst: vi.fn((args?: { where?: { effect?: string } }) =>
+      Promise.resolve(
+        args?.where?.effect === 'BLOCK'
+          ? opts.block
+            ? { id: 'b1' }
+            : null
+          : opts.grant
+            ? { id: 'g1', expiresAt: new Date() }
+            : null,
+      ),
     ),
     update: vi.fn(() => Promise.resolve({})),
   };
@@ -68,6 +76,12 @@ describe('8-hour grants on /host/v1/authorize', () => {
   it('never overrides a policy DENY', async () => {
     const w = make({ grant: true, policy: { effect: 'DENY' } });
     expect((await w.svc.authorize(host, shell)).decision).toBe('DENY');
+  });
+
+  it('a block from a revoked-after-use approval denies, even with a live grant', async () => {
+    const w = make({ grant: true, block: true });
+    const r = await w.svc.authorize(host, shell);
+    expect(r).toMatchObject({ decision: 'DENY', reason: 'revoked_after_use' });
   });
 
   it('a failing grant lookup denies', async () => {

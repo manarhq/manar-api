@@ -144,7 +144,7 @@ export class TelegramBotHandler {
         decision: v.choice === 'y' ? 'approve_once' : 'deny',
         via: 'telegram',
       });
-      await answer(t.outcome[r.decision]);
+      await answer(t.outcome[r.decision ?? 'deny']);
     } catch {
       // Already decided or timed out: the message is closed by the decide path or the sweeper.
       await answer(t.gone);

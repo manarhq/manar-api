@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { HostApprovalsController } from './host-approvals.controller';
 import { HostApprovalsService } from './host-approvals.service';
 import { buildRuleDraft } from './rule-draft';
+import { ApproverDirectory } from './approver-directory';
 import type { HostContext } from '../host-mtls/host-context';
 
 type Row = {
@@ -24,6 +25,8 @@ function world(opts: {
   paused?: boolean;
   highRisk?: boolean;
   recent?: number;
+  /** The workspace's "admins only" switch (a COMPANY workspace). */
+  adminsOnly?: boolean;
 }) {
   const rows: Row[] = [
     {
@@ -44,6 +47,14 @@ function world(opts: {
   const nonces = new Set<string>();
   const client: Record<string, unknown> = {
     $queryRaw: () => Promise.resolve([{ now: new Date() }]),
+    host: {
+      findUnique: ({ where }: { where: { id: string } }) =>
+        Promise.resolve(
+          where.id === 'h1'
+            ? { ownerSubject: 'owner' }
+            : { ownerSubject: 'other-owner' },
+        ),
+    },
     workspacePause: {
       findUnique: () => Promise.resolve(opts.paused ? { paused: true } : null),
     },
@@ -130,17 +141,28 @@ function world(opts: {
     Promise.resolve(fn(client));
   const audit = { recordSafely: vi.fn().mockResolvedValue(undefined) };
   const push = { notifyApprovers: vi.fn().mockResolvedValue(0) };
-  const service = new HostApprovalsService(audit as never, push as never);
-  const approvers = {
-    canApprove: (_t: string, _c: unknown, subject: string | null) =>
-      Promise.resolve(
-        subject !== null && opts.approverSubjects.includes(subject),
-      ),
+  // The real rule, over a control database without the memberships table (role bindings decide)
+  // and with this workspace's "admins only" switch.
+  const control = {
+    $queryRaw: () => Promise.resolve([{ t: null }]),
+    tenant: {
+      findUnique: () =>
+        Promise.resolve({
+          kind: 'COMPANY',
+          approvalsAdminsOnly: opts.adminsOnly ?? false,
+        }),
+    },
   };
+  const approvers = new ApproverDirectory(control as never);
+  const service = new HostApprovalsService(
+    audit as never,
+    push as never,
+    approvers,
+  );
   const controller = new HostApprovalsController(
     service,
     { getClient: () => Promise.resolve(client) } as never,
-    approvers as never,
+    approvers,
   );
   return { controller, service, rows, grants, audit, push, client, nonces };
 }
@@ -201,7 +223,7 @@ describe('device decisions (spec 4.6)', () => {
         via: 'push',
         nonce,
       }),
-    ).rejects.toThrow('action_already_used');
+    ).rejects.toMatchObject({ response: { reason: 'action_already_used' } });
     await expect(
       w.service.decide(w.client as never, 't1', {
         approvalId: 'ap1',
@@ -255,12 +277,126 @@ describe('device decisions (spec 4.6)', () => {
     );
   });
 
-  it('refuses when the host owner may not approve in this workspace', async () => {
+  const consoleAsOwner = (
+    w: ReturnType<typeof world>,
+    decision: 'approve_once' | 'approve_8h' | 'deny',
+    over: { ownerMayOperate?: boolean } = {},
+  ) =>
+    w.service.decide(w.client as never, 't1', {
+      approvalId: 'ap1',
+      subject: 'owner',
+      decision,
+      via: 'console',
+      ownerMayOperate: over.ownerMayOperate ?? true,
+    });
+
+  it('the device channel never approves for an owner without an approver role', async () => {
+    // A process on the device can answer a device prompt: the device credential alone is not consent.
     const w = world({ approverSubjects: ['someone-else'] });
     await expect(
       w.controller.decide(host(), 'ap1', { decision: 'approve_once' }),
-    ).rejects.toThrow('owner_is_not_an_approver');
+    ).rejects.toBeInstanceOf(ForbiddenException);
     expect(w.rows[0]!.status).toBe('PENDING');
+    expect((await w.controller.pending(host())).ownerMayApprove).toBe(false);
+  });
+
+  it('the owner answers their own routine request in the signed-in console', async () => {
+    const w = world({ approverSubjects: ['someone-else'] });
+    expect((await consoleAsOwner(w, 'approve_once')).status).toBe('APPROVED');
+  });
+
+  it('a demoted owner (no role that operates devices) cannot decide', async () => {
+    const w = world({ approverSubjects: [] });
+    await expect(
+      consoleAsOwner(w, 'approve_once', { ownerMayOperate: false }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('"admins only" stops the owner', async () => {
+    const w = world({ approverSubjects: ['someone-else'], adminsOnly: true });
+    await expect(consoleAsOwner(w, 'approve_once')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(w.rows[0]!.status).toBe('PENDING');
+  });
+
+  it('an owner cannot approve a high-risk request, but can deny it', async () => {
+    const w = world({ approverSubjects: [], highRisk: true });
+    await expect(consoleAsOwner(w, 'approve_once')).rejects.toThrow(
+      'needs a workspace approver because it is high risk',
+    );
+    expect((await consoleAsOwner(w, 'deny')).status).toBe('DENIED');
+  });
+
+  it('an owner cannot approve a secret handover (vault secret use)', async () => {
+    const w = world({ approverSubjects: [] });
+    w.rows[0]!.actionId = 'secret.use';
+    await expect(consoleAsOwner(w, 'approve_once')).rejects.toThrow(
+      'it hands over a secret',
+    );
+  });
+
+  it('an approver cannot approve a sensitive request from their own device, and is told to ask another', async () => {
+    const w = world({ approverSubjects: ['owner', 'admin'], highRisk: true });
+    await expect(consoleAsOwner(w, 'approve_once')).rejects.toThrow(
+      'Ask another approver',
+    );
+    // Another approver can.
+    const r = await w.service.decide(w.client as never, 't1', {
+      approvalId: 'ap1',
+      subject: 'admin',
+      decision: 'approve_once',
+      via: 'console',
+    });
+    expect(r.status).toBe('APPROVED');
+  });
+
+  it("a member cannot decide someone else's device, through any channel", async () => {
+    const w = world({ approverSubjects: ['admin'] });
+    for (const via of ['console', 'push', 'telegram'] as const) {
+      await expect(
+        w.service.decide(w.client as never, 't1', {
+          approvalId: 'ap1',
+          subject: 'a-member',
+          decision: 'approve_once',
+          via,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    }
+    expect(w.rows[0]!.status).toBe('PENDING');
+  });
+
+  it('an owner who is not an approver cannot give 8 hours, even in the console', async () => {
+    const w = world({ approverSubjects: [] });
+    await expect(consoleAsOwner(w, 'approve_8h')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(w.grants).toHaveLength(0);
+  });
+
+  it('an approver decides any device', async () => {
+    const w = world({ approverSubjects: ['admin'], adminsOnly: true });
+    const r = await w.service.decide(w.client as never, 't1', {
+      approvalId: 'ap1',
+      subject: 'admin',
+      decision: 'approve_8h',
+      via: 'console',
+    });
+    expect(r.status).toBe('APPROVED');
+  });
+
+  it('the device giving up is recorded as withdrawn, not as a deny by a person', async () => {
+    const w = world({ approverSubjects: [], adminsOnly: true });
+    const r = await w.controller.decide(host(), 'ap1', {
+      decision: 'deny',
+      withdraw: true,
+    });
+    expect(r.status).toBe('EXPIRED');
+    expect(w.rows[0]).toMatchObject({
+      status: 'EXPIRED',
+      endReason: 'withdrawn',
+    });
+    expect(w.rows[0]).not.toHaveProperty('decidedBy');
   });
 
   it('refuses a host with no owner or one still waiting for approval', async () => {
@@ -278,7 +414,7 @@ describe('device decisions (spec 4.6)', () => {
   });
 
   it('refuses high-risk actions from the device ("open in console")', async () => {
-    const w = world({ approverSubjects: ['owner'], highRisk: true });
+    const w = world({ approverSubjects: ['owner', 'admin'], highRisk: true });
     await expect(
       w.controller.decide(host(), 'ap1', { decision: 'approve_once' }),
     ).rejects.toThrow('high_risk_open_in_console');
@@ -287,10 +423,10 @@ describe('device decisions (spec 4.6)', () => {
       highRisk: true,
       decidableHere: false,
     });
-    // the console can still decide it
+    // the console can still decide it (another approver: it is high risk and the owner's own)
     const r = await w.service.decide(w.client as never, 't1', {
       approvalId: 'ap1',
-      subject: 'owner',
+      subject: 'admin',
       decision: 'approve_once',
       via: 'console',
     });
@@ -314,7 +450,7 @@ describe('device decisions (spec 4.6)', () => {
     await w.controller.decide(host(), 'ap1', { decision: 'deny' });
     await expect(
       w.controller.decide(host(), 'ap1', { decision: 'approve_once' }),
-    ).rejects.toThrow('already decided');
+    ).rejects.toMatchObject({ response: { reason: 'already_decided' } });
   });
 
   it('rejects unknown decision values', async () => {

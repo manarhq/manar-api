@@ -105,6 +105,9 @@ describe('Manar edge (e2e)', () => {
   let t2: Tenant;
   let admin1: string;
   let admin2: string;
+  // A different person from the agent's creator: a sensitive request is never approved by the
+  // person whose agent asked (decision-rights.ts, 3 Nov 2026).
+  let approver2: string;
   let readOnly1: string;
   let temporalConnection: NativeConnection;
   let temporalWorker: Worker;
@@ -356,6 +359,7 @@ describe('Manar edge (e2e)', () => {
     await onCompanyPlan(control, t2.id);
     admin1 = await userToken(t1, 'SECURITY_ADMIN');
     admin2 = await userToken(t2, 'SECURITY_ADMIN');
+    approver2 = await userToken(t2, 'APPROVER');
     readOnly1 = await userToken(t1, 'READ_ONLY');
   }, 240_000);
 
@@ -1325,7 +1329,7 @@ describe('Manar edge (e2e)', () => {
       });
       await http()
         .post(`/approvals/${pending.approvalId}/decide`)
-        .set('Authorization', `Bearer ${admin2}`)
+        .set('Authorization', `Bearer ${approver2}`)
         .send({ decision: 'APPROVE' })
         .expect(201);
       expect((await poll()).status).toBe('APPROVED');

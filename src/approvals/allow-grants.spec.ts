@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALLOW_GRANT_TTL_MS,
+  BLOCK_TTL_MS,
   createAllowGrant,
+  createBlock,
   findLiveAllowGrant,
+  findLiveBlock,
 } from './allow-grants';
 
 type Row = Record<string, unknown> & { expiresAt: Date };
@@ -13,7 +16,12 @@ function fakeTenantDb() {
   const client = {
     approvalAllowGrant: {
       create: ({ data }: { data: Row }) => {
-        const row = { id: `g${rows.length + 1}`, revokedAt: null, ...data };
+        const row = {
+          id: `g${rows.length + 1}`,
+          revokedAt: null,
+          effect: 'ALLOW',
+          ...data,
+        };
         rows.push(row);
         return Promise.resolve(row);
       },
@@ -38,6 +46,27 @@ const target = {
   actionId: 'file.read',
   resource: '/home/u/.aws/credentials',
 };
+
+describe('blocks (revoked after use)', () => {
+  it('a block is never an allow, and lasts BLOCK_TTL_MS', async () => {
+    const db = fakeTenantDb();
+    const b = await createBlock(db, {
+      scope: { hostId: 'h1' },
+      target,
+      createdBy: 'u',
+      sourceId: 's',
+      now: T0,
+    });
+    expect(b.expiresAt.getTime() - T0.getTime()).toBe(BLOCK_TTL_MS);
+    expect(
+      await findLiveAllowGrant(db, { hostId: 'h1' }, target, T0),
+    ).toBeNull();
+    expect(
+      await findLiveBlock(db, { hostId: 'h1' }, target, T0),
+    ).not.toBeNull();
+    expect(await findLiveBlock(db, { hostId: 'h2' }, target, T0)).toBeNull();
+  });
+});
 
 describe('allow grants', () => {
   it('lives for exactly 8 hours', async () => {

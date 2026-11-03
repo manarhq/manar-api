@@ -1,7 +1,7 @@
-import { PAUSED_REASON, isWorkspacePaused } from '../pause/pause-state';
+import { isWorkspacePaused } from '../pause/pause-state';
 import {
+  BadRequestException,
   Body,
-  ConflictException,
   Controller,
   Get,
   ForbiddenException,
@@ -42,7 +42,29 @@ import {
   parseCursor,
   parseLimit,
 } from '../common/pagination/cursor-pagination';
-import { ApprovalRequestNotFoundError } from './approvals.errors';
+import {
+  ApprovalRequestNotFoundError,
+  PAUSED_CONFLICT_MESSAGE,
+  approvalConflict,
+  notPendingConflict,
+} from './approvals.errors';
+import {
+  APPROVER_ROLES,
+  ApproverDirectory,
+  isApproverRole,
+  isOperatorRole,
+} from './approver-directory';
+import {
+  decisionRights,
+  refusalMessage,
+  sensitiveReason,
+  type DecisionRights,
+} from './decision-rights';
+import { ApprovalRevokeService } from './approval-revoke.service';
+import {
+  listApprovalHistory,
+  type ApprovalHistoryStatus,
+} from './approval-history';
 import { HandoverStore } from '../tools/handover.store';
 import { failClosed } from '../common/fail-closed/fail-closed';
 import { AuditService } from '../audit/audit.service';
@@ -50,13 +72,27 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ApprovalRequestService } from './approval-request.service';
 import { createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
-import { DecideApprovalRequestSchema } from './approvals.validation';
+import {
+  DecideApprovalRequestSchema,
+  RevokeApprovalSchema,
+} from './approvals.validation';
 import {
   ApprovalRequestListResponseDto,
   DecideApprovalRequestDto,
   DecideApprovalResponseDto,
   ApprovalRequestDetailDto,
+  ApprovalHistoryResponseDto,
+  RevokeApprovalRequestDto,
+  RevokeApprovalResponseDto,
 } from './approvals.dto';
+
+const HISTORY_STATUSES = [
+  'PENDING',
+  'APPROVED',
+  'DENIED',
+  'EXPIRED',
+  'REVOKED',
+] as const;
 
 /**
  * `POST /approvals/:id/decide` — Section 27/28/31's human decision surface
@@ -124,7 +160,9 @@ import {
 @ApiBearerAuth('jwt')
 @Controller('approvals')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@RequireRole('APPROVER', 'SECURITY_ADMIN', 'TENANT_OWNER')
+// Every member may open Approvals (founder decision, 3 Nov 2026): approvers see and decide
+// everything; anyone else sees, and may decide, only the requests of agents they created (unless
+// the workspace is "admins only"). Checked per request below.
 export class ApprovalsController {
   private readonly logger = new Logger(ApprovalsController.name);
   private readonly decideResultTimeoutMs: number;
@@ -136,6 +174,8 @@ export class ApprovalsController {
     configService: ConfigService<AppConfig, true>,
     private readonly handoverStore: HandoverStore,
     private readonly auditService: AuditService,
+    private readonly approvers: ApproverDirectory,
+    private readonly revokeService: ApprovalRevokeService,
   ) {
     this.decideResultTimeoutMs = configService.get(
       'APPROVAL_DECIDE_RESULT_TIMEOUT_MS',
@@ -152,7 +192,7 @@ export class ApprovalsController {
   @ApiQuery({
     name: 'status',
     required: false,
-    enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED'],
+    enum: ['PENDING', 'APPROVED', 'DENIED', 'EXPIRED', 'REVOKED'],
   })
   @ApiQuery({
     name: 'limit',
@@ -170,23 +210,37 @@ export class ApprovalsController {
   @ApiResponse({ status: 403, type: ErrorResponseDto })
   async list(
     @CurrentAuth() auth: AuthContext,
-    @Query('status') status?: 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED',
+    @Query('status')
+    status?: 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED' | 'REVOKED',
     @Query('limit') limit?: string,
     @Query('cursor') cursor?: string,
   ): Promise<ApprovalRequestListResponseDto> {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
+    const admin = isApproverRole(auth.roles);
+    // Not an approver and no role that operates agents (demoted, or never had one): nothing.
+    if (!admin && !isOperatorRole(auth.roles))
+      return { items: [], nextCursor: null };
     const page = await this.approvalRequestService.listApprovalRequests(
       tenantClient,
       {
         status,
         limit: parseLimit(limit),
         cursor: parseCursor(cursor),
+        ...(admin ? {} : { agentCreatedBy: auth.user.id }),
       },
     );
+    const ws = await this.approvers.workspace(auth.tenant.id);
+    const names = await this.actionNames(
+      tenantClient,
+      page.items.map((r) => r.actionId),
+    );
+    const rights = page.items.map((r) =>
+      this.rightsFor(auth, ws, r, r.agent.createdBy, names.get(r.actionId)),
+    );
     return {
-      items: page.items.map((request) => ({
+      items: page.items.map((request, i) => ({
         id: request.id,
         taskId: request.taskId,
         agentId: request.agentId,
@@ -198,6 +252,12 @@ export class ApprovalsController {
         status: request.status,
         requestedAt: request.requestedAt,
         expiresAt: request.expiresAt,
+        agentName: request.agent.displayName,
+        ownerName: request.agent.creator.displayName,
+        allowedDecisions:
+          request.status === 'PENDING' ? agentChoices(rights[i]!) : [],
+        needs: rights[i]!.needs,
+        why: rights[i]!.why,
       })),
       nextCursor: page.nextCursor,
     };
@@ -230,6 +290,17 @@ export class ApprovalsController {
         tenantClient,
         id,
       );
+      const access = await this.access(auth, tenantClient, {
+        ...detail,
+        actionName: detail.expectedEffect?.actionName,
+      });
+      if (!access.visible) throw new ApprovalRequestNotFoundError(id);
+      const revoker = detail.revokedBy
+        ? await tenantClient.userProfile.findUnique({
+            where: { id: detail.revokedBy },
+            select: { displayName: true },
+          })
+        : null;
       return {
         id: detail.id,
         taskId: detail.taskId,
@@ -256,6 +327,19 @@ export class ApprovalsController {
         decisions: detail.decisions as unknown as Record<string, unknown>[],
         grantIssued: detail.grantIssued,
         grantConsumedAt: detail.grantConsumedAt,
+        allowedDecisions:
+          detail.status === 'PENDING' ? agentChoices(access.rights) : [],
+        needs: access.rights.needs,
+        why: access.rights.why,
+        canRevoke: detail.status === 'APPROVED' && access.rights.canRevoke,
+        releasedAt: detail.releasedAt,
+        revokedAt: detail.revokedAt,
+        revokedByName: detail.revokedBy
+          ? (revoker?.displayName ?? 'A former member')
+          : null,
+        revokeNote: detail.revokeNote,
+        usedBeforeRevoke: detail.usedBeforeRevoke,
+        endReason: detail.endReason,
       };
     } catch (error) {
       if (error instanceof ApprovalRequestNotFoundError) {
@@ -316,15 +400,30 @@ export class ApprovalsController {
       throw error;
     }
 
+    const access = await this.access(auth, tenantClient, approvalRequest);
+    if (!access.visible)
+      throw new NotFoundException('That approval was not found.');
+    const choice =
+      input.decision === 'DENY'
+        ? 'deny'
+        : input.extended
+          ? 'approve_8h'
+          : 'approve_once';
+    if (!access.rights.choices.includes(choice))
+      throw new ForbiddenException(refusalMessage(access.rights));
+    // A rule is a standing approval: only an approver, and only when they may approve outright.
+    if (input.makeRule && !access.rights.choices.includes('approve_8h'))
+      throw new ForbiddenException(
+        'Only a workspace approver can turn an approval into a rule. Nothing was changed.',
+      );
+
     // No approval is granted while AI is paused; a deny stays possible.
     if (input.decision !== 'DENY' && (await isWorkspacePaused(tenantClient))) {
-      throw new ConflictException(PAUSED_REASON);
+      throw approvalConflict('paused', PAUSED_CONFLICT_MESSAGE);
     }
 
     if (approvalRequest.status !== 'PENDING') {
-      throw new ConflictException(
-        `ApprovalRequest "${id}" is not PENDING (current status: "${approvalRequest.status}") — it has already been decided or has expired`,
-      );
+      throw notPendingConflict(approvalRequest.status);
     }
 
     try {
@@ -343,8 +442,11 @@ export class ApprovalsController {
         tenantClient,
         id,
       );
-      throw new ConflictException(
-        `ApprovalRequest "${id}" could not be signaled — its workflow may have already completed (current status: "${refreshed.status}")`,
+      if (refreshed.status !== 'PENDING')
+        throw notPendingConflict(refreshed.status);
+      throw approvalConflict(
+        'not_signaled',
+        'Your answer could not be delivered. Nothing was changed. Try again in a moment.',
       );
     }
 
@@ -399,7 +501,192 @@ export class ApprovalsController {
     };
   }
 
+  @Get('history')
+  @ApiOperation({
+    summary: 'Every approval, agent and device, in every state (3 Nov 2026)',
+    description:
+      'Newest first, one cursor over agent and device approvals: who decided, when, through which channel, what it created (8-hour grant, site rule, block), whether the device or agent had received it, and whether it was revoked. A person who is not an approver sees only their own devices and agents. `allowedDecisions` and `canRevoke` say what the signed-in person may do.',
+  })
+  @ApiQuery({ name: 'status', required: false, enum: HISTORY_STATUSES })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'cursor', required: false })
+  @ApiResponse({ status: 200, type: ApprovalHistoryResponseDto })
+  async history(
+    @CurrentAuth() auth: AuthContext,
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ): Promise<ApprovalHistoryResponseDto> {
+    if (
+      status !== undefined &&
+      !(HISTORY_STATUSES as readonly string[]).includes(status)
+    )
+      throw new BadRequestException('Unknown status filter.');
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const admin = isApproverRole(auth.roles);
+    if (!admin && !isOperatorRole(auth.roles))
+      return { items: [], nextCursor: null, seesAll: false };
+    const ws = await this.approvers.workspace(auth.tenant.id);
+    const page = await listApprovalHistory(tenantClient, {
+      limit: parseLimit(limit),
+      cursor: parseCursor(cursor),
+      status: status as ApprovalHistoryStatus | undefined,
+      viewer: {
+        userId: auth.user.id,
+        subject: auth.user.keycloakSubject,
+        admin,
+        // The owner path: a role that may operate agents and devices now.
+        operator: isOperatorRole(auth.roles),
+        ...ws,
+      },
+    });
+    return { ...page, seesAll: admin };
+  }
+
+  @Post('allow-grants/:grantId/revoke')
+  @HttpCode(200)
+  @RequireRole(...APPROVER_ROLES)
+  @ApiOperation({
+    summary:
+      'Withdraw an 8-hour approval, or lift a block left by a revoked-after-use approval',
+    description:
+      'Takes effect on the very next request: both authorize paths look grants and blocks up live, and nothing is cached on the device. Approvers only.',
+  })
+  @ApiParam({ name: 'grantId', format: 'uuid' })
+  async revokeGrant(
+    @CurrentAuth() auth: AuthContext,
+    @Param('grantId') grantId: string,
+  ) {
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    return this.revokeService.revokeGrant(
+      tenantClient,
+      auth.tenant.id,
+      grantId,
+      {
+        userId: auth.user.id,
+        subject: auth.user.keycloakSubject,
+      },
+    );
+  }
+
+  @Post(':id/revoke')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Revoke an approval given by mistake',
+    description:
+      'Not yet received by the agent: cancelled at once; the one-use grant is revoked and the agent sees REVOKED. Already received: marked revoked after use, the admins are alerted (push and an incident) and this exact action is blocked until someone lifts the block. Either way any 8-hour grant it created is withdrawn. Approvers, or the agent\'s creator unless the workspace is "admins only".',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiBody({ type: RevokeApprovalRequestDto })
+  @ApiResponse({ status: 200, type: RevokeApprovalResponseDto })
+  @ApiResponse({ status: 409, type: ErrorResponseDto })
+  async revoke(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ): Promise<RevokeApprovalResponseDto> {
+    const input = parseBodyOrThrow(RevokeApprovalSchema, body ?? {});
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const row = await tenantClient.approvalRequest.findUnique({
+      where: { id },
+      select: { agentId: true, actionId: true, riskScore: true },
+    });
+    const access = row ? await this.access(auth, tenantClient, row) : null;
+    if (!access?.visible)
+      throw new NotFoundException('That approval was not found.');
+    if (!access.rights.canRevoke)
+      throw new ForbiddenException(
+        'Only a workspace approver can revoke this approval. Nothing was changed.',
+      );
+    return this.revokeService.revokeAgent(
+      tenantClient,
+      auth.tenant.id,
+      id,
+      { userId: auth.user.id, subject: auth.user.keycloakSubject },
+      input.note,
+    );
+  }
+
+  /**
+   * The rights of the signed-in person over one agent request (decision-rights.ts). The owner path
+   * is the agent's creator who holds a role that may operate agents *now*: `Agent.createdBy` never
+   * changes, so a demoted or removed creator must not keep deciding.
+   */
+  private rightsFor(
+    auth: AuthContext,
+    ws: { adminsOnly: boolean; company: boolean },
+    request: { actionId: string; riskScore: number },
+    createdBy: string | null | undefined,
+    actionName?: string | null,
+  ): DecisionRights {
+    return decisionRights({
+      admin: isApproverRole(auth.roles),
+      owner: createdBy === auth.user.id && isOperatorRole(auth.roles),
+      adminsOnly: ws.adminsOnly,
+      company: ws.company,
+      sensitive: sensitiveReason({
+        actionId: request.actionId,
+        actionName,
+        riskScore: request.riskScore,
+      }),
+      actionId: request.actionId,
+    });
+  }
+
+  /** Whether the person may see this agent's request, and what they may do with it. */
+  private async access(
+    auth: AuthContext,
+    tenantClient: Awaited<ReturnType<TenantDatabaseManager['getClient']>>,
+    request: {
+      agentId: string;
+      actionId: string;
+      riskScore: number;
+      actionName?: string | null;
+    },
+  ): Promise<{ visible: boolean; rights: DecisionRights }> {
+    const agent = await tenantClient.agent.findUnique({
+      where: { id: request.agentId },
+      select: { createdBy: true },
+    });
+    const name =
+      request.actionName ??
+      (await this.actionNames(tenantClient, [request.actionId])).get(
+        request.actionId,
+      );
+    const rights = this.rightsFor(
+      auth,
+      await this.approvers.workspace(auth.tenant.id),
+      request,
+      agent?.createdBy,
+      name,
+    );
+    const owner =
+      agent?.createdBy === auth.user.id && isOperatorRole(auth.roles);
+    return { visible: isApproverRole(auth.roles) || owner, rights };
+  }
+
+  /** Action names by id, for the handover check (an action id may be a uuid or the name itself). */
+  private async actionNames(
+    tenantClient: Awaited<ReturnType<TenantDatabaseManager['getClient']>>,
+    ids: string[],
+  ): Promise<Map<string, string>> {
+    if (ids.length === 0) return new Map();
+    const rows = await tenantClient.toolAction.findMany({
+      where: { id: { in: [...new Set(ids)] } },
+      select: { id: true, name: true },
+    });
+    return new Map(rows.map((r) => [r.id, r.name]));
+  }
+
   @Post(':id/handover')
+  // A handover releases a secret (a temporary password): approvers only, whatever else changes.
+  @RequireRole(...APPROVER_ROLES)
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
   @ApiOperation({
@@ -488,11 +775,17 @@ export class ApprovalsController {
         `ApprovalWorkflow "${temporalWorkflowId}" for ApprovalRequest "${approvalRequestId}" failed while awaiting its result after a successful signal: ${error instanceof Error ? error.message : String(error)}`,
         error instanceof Error ? error.stack : undefined,
       );
-      throw new ConflictException(
-        `ApprovalRequest "${approvalRequestId}" was signaled but its workflow ended in an unexpected error`,
+      throw approvalConflict(
+        'not_signaled',
+        'Your answer was sent but we could not confirm the result. Check this request again in a moment before answering again.',
       );
     } finally {
       clearTimeout(timer);
     }
   }
+}
+
+/** An agent request has no "always" (that is for a new site on a device). */
+function agentChoices(rights: DecisionRights): string[] {
+  return rights.choices.filter((c) => c !== 'approve_always');
 }

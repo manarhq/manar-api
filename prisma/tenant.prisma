@@ -967,6 +967,9 @@ enum ApprovalStatus {
   APPROVED
   DENIED
   EXPIRED
+  /// A person withdrew the approval (3 Nov 2026). `usedBeforeRevoke` says whether the agent had
+  /// already received it; see `ApprovalRevokeService`.
+  REVOKED
 }
 
 /// `ApprovalDecision.decision` -- a human's raw input to `ApprovalWorkflow`
@@ -1122,6 +1125,19 @@ model ApprovalRequest {
   /// comment for why a *replay* of an already-consumed grant is rejected
   /// rather than a new one being issued).
   grant AuthorizationGrant?
+
+  /// The first time the agent read this request as APPROVED (`GET /agent/v1/approvals/:id`). From
+  /// then on the agent may have acted: a revoke is recorded as after use.
+  releasedAt       DateTime?
+  revokedAt        DateTime?
+  /// `UserProfile.id` of the person who revoked it.
+  revokedBy        String?
+  revokeNote       String?
+  /// Set with `revokedAt`: true when the agent had already received the approval.
+  usedBeforeRevoke Boolean?
+  /// Why it ended the way it did, in a word: `no_answer`, `paused`, `superseded`, a
+  /// re-evaluation failure reason (`task_not_live`, `policy_denied`, ...), or null (a person decided).
+  endReason        String?
 
   createdAt DateTime @default(now())
 
@@ -2468,8 +2484,13 @@ model ApprovalAllowGrant {
   revokedAt  DateTime?
   useCount   Int       @default(0)
   lastUsedAt DateTime?
+  /// ALLOW: satisfies an approval requirement. BLOCK: an approval of this exact action was revoked
+  /// after it was used; the next matching request is denied (`revoked_after_use`) until a person
+  /// lifts the block (sets `revokedAt`).
+  effect     String    @default("ALLOW")
 
   @@index([hostId, toolId, actionId, expiresAt])
+  @@index([sourceId])
   @@index([agentId, toolId, actionId, expiresAt])
   @@map("approval_allow_grants")
 }
@@ -2479,6 +2500,8 @@ enum HostApprovalStatus {
   APPROVED
   DENIED
   EXPIRED
+  /// A person withdrew the approval; `usedBeforeRevoke` says whether the device had read it.
+  REVOKED
 }
 
 /// An approval opened for a device by the host authorize path (a tool without a task or agent
@@ -2503,8 +2526,18 @@ model HostApproval {
   decidedAt  DateTime?
   expiresAt  DateTime
   createdAt  DateTime           @default(now())
+  /// The first time the device read this approval as APPROVED: from then on the action may have run.
+  usedAt           DateTime?
+  revokedAt        DateTime?
+  /// Keycloak subject of the person who revoked it.
+  revokedBy        String?
+  revokeNote       String?
+  usedBeforeRevoke Boolean?
+  /// `no_answer`, `paused`, `withdrawn` (the device stopped waiting), or null (a person decided).
+  endReason        String?
 
   @@index([hostId, status, expiresAt])
+  @@index([createdAt, id])
   @@map("host_approvals")
 }
 

@@ -13,6 +13,26 @@ export const APPROVER_ROLES = [
   'APPROVER',
 ] as const;
 
+/**
+ * Roles that may operate agents and devices. The owner path (deciding one's own device's or agent's
+ * routine requests) needs one of these *now*: a person demoted to READ_ONLY or AUDITOR, or removed,
+ * loses it even though `Agent.createdBy` / `Host.ownerSubject` still name them.
+ */
+export const OPERATOR_ROLES = [
+  ...APPROVER_ROLES,
+  'AI_GOVERNANCE_MANAGER',
+  'SOC_OPERATOR',
+  'DEVELOPER',
+] as const;
+
+export function isApproverRole(roles: readonly string[]): boolean {
+  return roles.some((r) => (APPROVER_ROLES as readonly string[]).includes(r));
+}
+
+export function isOperatorRole(roles: readonly string[]): boolean {
+  return roles.some((r) => (OPERATOR_ROLES as readonly string[]).includes(r));
+}
+
 export async function listApproverSubjects(
   client: Pick<TenantPrismaClient, 'roleBinding'>,
 ): Promise<string[]> {
@@ -72,6 +92,26 @@ export class ApproverDirectory {
       WHERE "tenantId" = ${tenantId} AND "status"::text = 'ACTIVE'
         AND ("role"::text = ANY(${roles}) OR "extraRoles"::text[] && ${roles})`;
     return rows.map((r) => r.subject);
+  }
+
+  /**
+   * "Admins only" (founder decision, 3 Nov 2026): a company workspace can stop device owners from
+   * deciding their own approvals. Fail closed: a failed read is "admins only".
+   */
+  async workspace(
+    tenantId: string,
+  ): Promise<{ adminsOnly: boolean; company: boolean }> {
+    try {
+      const t = await this.control.tenant.findUnique({
+        where: { id: tenantId },
+        select: { kind: true, approvalsAdminsOnly: true },
+      });
+      if (!t) return { adminsOnly: true, company: true };
+      const company = t.kind === 'COMPANY';
+      return { adminsOnly: company && t.approvalsAdminsOnly, company };
+    } catch {
+      return { adminsOnly: true, company: true };
+    }
   }
 
   /** Fail closed: no subject, or any lookup failure, is "no". */

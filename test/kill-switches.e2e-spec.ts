@@ -85,6 +85,9 @@ describe('Kill Switches (e2e)', () => {
   >;
   let tenant: ProvisionedTenant;
   let adminToken: string;
+  // A different person from the agent's creator: a sensitive request is never approved by the
+  // person whose agent asked (decision-rights.ts, 3 Nov 2026).
+  let approverToken: string;
   let tenant2: ProvisionedTenant;
   let adminToken2: string;
 
@@ -134,7 +137,11 @@ describe('Kill Switches (e2e)', () => {
   async function provisionTestTenant(
     slugLabel: string,
     username: string,
-  ): Promise<{ tenant: ProvisionedTenant; token: string }> {
+  ): Promise<{
+    tenant: ProvisionedTenant;
+    token: string;
+    approverToken: string;
+  }> {
     const provisioned = await provisioning.provisionTenant({
       slug: shortSlug(slugLabel),
       name: `Kill Switch Test Tenant ${slugLabel}`,
@@ -159,7 +166,21 @@ describe('Kill Switches (e2e)', () => {
       username,
       password: USER_PASSWORD,
     });
-    return { tenant: provisioned, token };
+    const approverName = `${username}-ap`;
+    const approverId = await createRealmUser(provisioned.keycloakRealm, {
+      username: approverName,
+      email: `${approverName}@example.test`,
+      password: USER_PASSWORD,
+    });
+    await assignRealmRole(provisioned.keycloakRealm, approverId, 'APPROVER');
+    const approverToken = await getUserToken({
+      realm: provisioned.keycloakRealm,
+      clientId: provisioned.keycloakClientId!,
+      clientSecret: clientSecretRef.reference,
+      username: approverName,
+      password: USER_PASSWORD,
+    });
+    return { tenant: provisioned, token, approverToken };
   }
 
   /** Creates a PENDING_ENROLLMENT agent + enrollment token via the real human HTTP API, then enrolls it via the real SDK — same pattern as test/task-delegation.e2e-spec.ts. */
@@ -481,7 +502,7 @@ describe('Kill Switches (e2e)', () => {
   async function decideApproval(
     approvalId: string,
     decision: 'APPROVE' | 'DENY',
-    token: string = adminToken,
+    token: string = approverToken,
   ): Promise<RawResponse> {
     const res = await request(humanApp.getHttpServer() as App)
       .post(`/approvals/${approvalId}/decide`)
@@ -593,6 +614,7 @@ describe('Kill Switches (e2e)', () => {
     const first = await provisionTestTenant('t1', ADMIN_USERNAME);
     tenant = first.tenant;
     adminToken = first.token;
+    approverToken = first.approverToken;
 
     const second = await provisionTestTenant('t2', ADMIN_USERNAME_2);
     tenant2 = second.tenant;

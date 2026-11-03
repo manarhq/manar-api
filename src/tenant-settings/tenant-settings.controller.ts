@@ -58,7 +58,7 @@ export class TenantSettingsController {
   @ApiOperation({
     summary: "Update the caller's tenant settings",
     description:
-      'Partial update -- only residency/allowExternalAi/allowOutboundTelemetry/allowCloudStorage are writable; every other field GET returns is read-only. Requires TENANT_OWNER or SECURITY_ADMIN. Audited. allowExternalAi takes effect immediately on the very next AI-advisory-eligible request (AiAdvisoryClient reads the live Tenant row, no caching).',
+      'Partial update -- only residency/allowExternalAi/allowOutboundTelemetry/allowCloudStorage/approvalsAdminsOnly (company workspaces) are writable; every other field GET returns is read-only. Requires TENANT_OWNER or SECURITY_ADMIN. Audited. allowExternalAi takes effect immediately on the very next AI-advisory-eligible request (AiAdvisoryClient reads the live Tenant row, no caching).',
   })
   @ApiBody({ type: UpdateTenantSettingsRequestDto })
   @ApiResponse({ status: 200, type: TenantSettingsResponseDto })

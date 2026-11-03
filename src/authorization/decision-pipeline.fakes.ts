@@ -35,6 +35,8 @@ export interface DecisionHarnessOptions {
   grantConsumeCount?: number;
   /** A live 8-hour allow grant the lookup returns (spec 4.6). */
   allowGrant?: { id: string; expiresAt: Date } | null;
+  /** A live "revoked after use" block for this action (`effect: 'BLOCK'`). */
+  block?: { id: string } | null;
   /** Default: an unmanaged tenant (everything on). */
   catalog?: CatalogService;
 }
@@ -98,7 +100,13 @@ export function makeDecisionHarness(options: DecisionHarnessOptions = {}) {
       }),
     },
     approvalAllowGrant: {
-      findFirst: vi.fn(() => Promise.resolve(options.allowGrant ?? null)),
+      findFirst: vi.fn((args?: { where?: { effect?: string } }) =>
+        Promise.resolve(
+          args?.where?.effect === 'BLOCK'
+            ? (options.block ?? null)
+            : (options.allowGrant ?? null),
+        ),
+      ),
       update: vi.fn(() => {
         log('grant-use');
         return Promise.resolve({});

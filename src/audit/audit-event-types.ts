@@ -36,6 +36,10 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_HANDOVER_COLLECTED: 'approval.handover_collected',
   /** A device approval got no answer in time and was denied ("denied: no answer"). */
   APPROVAL_EXPIRED: 'approval.expired',
+  /** A person revoked an approval: cancelled before use, or flagged after use (`usedBeforeRevoke`). */
+  APPROVAL_REVOKED: 'approval.revoked',
+  /** A person withdrew an 8-hour grant, or lifted a block left by a revoked-after-use approval. */
+  APPROVAL_GRANT_REVOKED: 'approval.grant.revoked',
   /** "Pause all AI" was turned on / off for the workspace. */
   WORKSPACE_AI_PAUSED: 'workspace.ai.paused',
   WORKSPACE_AI_RESUMED: 'workspace.ai.resumed',

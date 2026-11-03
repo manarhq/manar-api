@@ -300,7 +300,11 @@ export class ToolInvocationService {
     // A decision that landed first wins (ADR-0006 then applies to that
     // exact, already-approved request); the lost supersede is audited.
     const superseded = await failClosed('tenant-db', () =>
-      this.approvalRequestService.expireIfPending(tenantClient, open.id),
+      this.approvalRequestService.expireIfPending(
+        tenantClient,
+        open.id,
+        'superseded',
+      ),
     );
     await this.auditService.recordSafely(tenantClient, agent.tenant.id, {
       eventType: AUDIT_EVENT_TYPES.APPROVAL_SUPERSEDED,
@@ -428,7 +432,7 @@ export class ToolInvocationService {
       // ADR-0007: a request with no workflow can never be decided. Expire it
       // so a repeated call opens a fresh one instead of waiting out the TTL.
       await this.approvalRequestService
-        .expireIfPending(tenantClient, approvalRequest.id)
+        .expireIfPending(tenantClient, approvalRequest.id, 'no_workflow')
         .catch((expireError: unknown) =>
           this.logger.warn(
             `ApprovalRequest "${approvalRequest.id}" has no workflow and could not be expired: ${String(expireError)}`,

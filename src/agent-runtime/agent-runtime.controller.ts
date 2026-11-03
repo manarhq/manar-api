@@ -114,6 +114,12 @@ export function describeApproval(row: ApprovalRow): Record<string, unknown> {
         nextStep:
           'Refused, by a person or by Manar re-checking it at approval time. Do not retry; tell the user.',
       };
+    case 'REVOKED':
+      return {
+        ...base,
+        nextStep:
+          'A person withdrew this approval. Do not run the action; tell the user.',
+      };
     default:
       return {
         ...base,

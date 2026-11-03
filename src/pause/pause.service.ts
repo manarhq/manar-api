@@ -148,7 +148,7 @@ export class PauseService {
     for (const row of host) {
       const won = await client.hostApproval.updateMany({
         where: { id: row.id, status: 'PENDING' },
-        data: { status: 'EXPIRED' },
+        data: { status: 'EXPIRED', endReason: 'paused' },
       });
       if (won.count === 0) continue;
       n++;
@@ -172,7 +172,7 @@ export class PauseService {
     for (const row of agent) {
       const won = await client.approvalRequest.updateMany({
         where: { id: row.id, status: 'PENDING' },
-        data: { status: 'EXPIRED' },
+        data: { status: 'EXPIRED', endReason: 'paused' },
       });
       if (won.count === 0) continue;
       n++;
