@@ -249,30 +249,61 @@ describe('CertificateAuthorityService CSR subject', () => {
     },
   );
 
-  it('accepts a host CSR with the full identifier or the bare machine id as CN', async () => {
-    const ca = new CertificateAuthorityService({} as OpenBaoPkiClient);
-    for (const subject of ['CN=host://t/0f3a9c', 'CN=0f3a9c']) {
+  it.each([
+    ['manar-edge hashed id', 'm-0123456789abcdef0123456789abcdef'],
+    ['Linux machine-id', '0123456789abcdef0123456789abcdef'],
+    ['Windows MachineGuid', '6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f'],
+  ])(
+    'accepts a host CSR with the full identifier or a bare %s as CN',
+    async (_l, mid) => {
+      const ca = new CertificateAuthorityService({} as OpenBaoPkiClient);
+      for (const subject of [`CN=host://t/${mid}`, `CN=${mid}`]) {
+        await expect(
+          ca.assertCsrNames(
+            await csr(`host://t/${mid}`, subject),
+            `host://t/${mid}`,
+          ),
+        ).resolves.toBeUndefined();
+      }
+    },
+  );
+
+  it.each([
+    'manar-api',
+    'pc01.corp.example',
+    '10.0.0.1',
+    'localhost',
+    'DEV-LAPTOP-042',
+    'm-0123',
+    '0123456789abcdef0123456789abcdef0',
+    'g123456789abcdef0123456789abcdef',
+  ])(
+    'refuses a bare host CN that is not a hex or GUID machine id (%s)',
+    async (mid) => {
+      const ca = new CertificateAuthorityService({} as OpenBaoPkiClient);
       await expect(
         ca.assertCsrNames(
-          await csr('host://t/0f3a9c', subject),
-          'host://t/0f3a9c',
+          await csr(`host://t/${mid}`, `CN=${mid}`),
+          `host://t/${mid}`,
+        ),
+      ).rejects.toThrow(CsrValidationError);
+      // The full identifier as CN still works for any machine id.
+      await expect(
+        ca.assertCsrNames(
+          await csr(`host://t/${mid}`, `CN=host://t/${mid}`),
+          `host://t/${mid}`,
         ),
       ).resolves.toBeUndefined();
-    }
-  });
+    },
+  );
 
-  it('refuses a host CSR whose bare machine id looks like a service name, or another CN', async () => {
+  it('refuses a host CSR whose CN names a different machine id', async () => {
     const ca = new CertificateAuthorityService({} as OpenBaoPkiClient);
+    const mid = '0123456789abcdef0123456789abcdef';
     await expect(
       ca.assertCsrNames(
-        await csr('host://t/manar-api', 'CN=manar-api'),
-        'host://t/manar-api',
-      ),
-    ).rejects.toThrow(CsrValidationError);
-    await expect(
-      ca.assertCsrNames(
-        await csr('host://t/0f3a9c', 'CN=manar-api'),
-        'host://t/0f3a9c',
+        await csr(`host://t/${mid}`, 'CN=fedcba9876543210fedcba9876543210'),
+        `host://t/${mid}`,
       ),
     ).rejects.toThrow(CsrValidationError);
   });

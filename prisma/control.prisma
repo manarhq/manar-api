@@ -111,6 +111,10 @@ model Tenant {
   ownerSubject      String?
   /// The issuer of `ownerSubject`: a `sub` is only unique within one issuer.
   ownerIssuer       String?
+  /// Who asked for this workspace (issuer + `sub`), kept when ownership moves: per-person
+  /// creation limits count by it, for the tenant's whole life. Null for tenants created before it.
+  createdByIssuer   String?
+  createdBySubject  String?
   /// Provisioning retries: failed attempts so far, and when the queue may try again.
   provisionAttempts Int        @default(0)
   nextProvisionAt   DateTime?
@@ -161,6 +165,7 @@ model Tenant {
   entitlement      TenantEntitlement?
   installCodes     InstallCode[]
 
+  @@index([createdByIssuer, createdBySubject, kind])
   @@map("tenants")
 }
 

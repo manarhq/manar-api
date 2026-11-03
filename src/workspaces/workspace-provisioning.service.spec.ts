@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/require-await -- in-memory fakes of the control DB */
 import { describe, expect, it, vi } from 'vitest';
 import {
+  TenantCreatorLimitError,
   TenantProvisioningError,
   TenantSlugConflictError,
 } from '../database/tenant-database.errors';
@@ -68,27 +69,52 @@ function make(
   };
 }
 
+const OK = {
+  totalHits: 1,
+  timeToExpire: 30,
+  isBlocked: false,
+  timeToBlockExpire: 0,
+};
+const OVER = {
+  totalHits: 999,
+  timeToExpire: 30,
+  isBlocked: true,
+  timeToBlockExpire: 30,
+};
+
+/** A throttle that refuses only the named buckets, recording every spend in order. */
+function throttleRefusing(...buckets: string[]) {
+  const spent: string[] = [];
+  return {
+    spent,
+    increment: vi.fn(
+      async (
+        key: string,
+        _ttl: number,
+        _limit: number,
+        _b: number,
+        bucket: string,
+      ) => {
+        spent.push(`${bucket}:${key.split(':')[0]}`);
+        return buckets.includes(bucket) ? OVER : OK;
+      },
+    ),
+  };
+}
+
 describe('WorkspaceProvisioningService creation rate', () => {
-  const blocked = {
-    totalHits: 121,
-    timeToExpire: 30,
-    isBlocked: true,
-    timeToBlockExpire: 30,
+  const counts = { total: 1, inflight: 0, backlog: 0 };
+  const personal = {
+    ownerSubject: 's',
+    kind: 'PERSONAL' as const,
+    displayName: 'P',
   };
 
   it('refuses over the hourly deployment-wide rate with a friendly 429, creating nothing', async () => {
-    const throttle = { increment: vi.fn().mockResolvedValue(blocked) };
-    const { svc, manager } = make(
-      { total: 1, inflight: 0, backlog: 0 },
-      {},
-      throttle,
-    );
+    const throttle = throttleRefusing('workspace-create');
+    const { svc, manager } = make(counts, {}, throttle);
     const refused = await svc
-      .createWorkspace({
-        ownerSubject: 's',
-        kind: 'PERSONAL',
-        displayName: 'P',
-      })
+      .createWorkspace(personal)
       .catch((e: unknown) => e);
     expect(refused).toMatchObject({
       status: 429,
@@ -102,7 +128,7 @@ describe('WorkspaceProvisioningService creation rate', () => {
       },
     });
     expect(manager.provisionTenant).not.toHaveBeenCalled();
-    expect(throttle.increment).toHaveBeenCalledWith(
+    expect(throttle.increment).toHaveBeenLastCalledWith(
       'global',
       3_600_000,
       120,
@@ -111,42 +137,96 @@ describe('WorkspaceProvisioningService creation rate', () => {
     );
   });
 
-  it('uses the configured rate', async () => {
-    const { svc, manager } = make(
-      { total: 1, inflight: 0, backlog: 0 },
-      { WORKSPACE_CREATE_PER_HOUR: 5 },
-      {
-        increment: vi
-          .fn()
-          .mockResolvedValue({ ...blocked, isBlocked: false, totalHits: 6 }),
-      },
-    );
+  it("spends the person's own bucket first, so one account cannot drain the global budget", async () => {
+    const throttle = throttleRefusing('workspace-create-person');
+    const { svc, manager } = make(counts, {}, throttle);
+    await expect(svc.createWorkspace(personal)).rejects.toMatchObject({
+      status: 429,
+      response: { reason: 'workspace_creation_rate_limited' },
+    });
+    expect(throttle.spent).toEqual(['workspace-create-person:PERSONAL']);
+    expect(manager.provisionTenant).not.toHaveBeenCalled();
+  });
+
+  it('bounds re-creating the sample workspace per person, per day', async () => {
+    const throttle = throttleRefusing();
+    const { svc } = make(counts, {}, throttle);
+    await svc.createWorkspace({
+      ownerSubject: 's',
+      kind: 'SAMPLE',
+      displayName: 'S',
+    });
+    expect(throttle.increment.mock.calls[0]!.slice(1, 3)).toEqual([
+      86_400_000, 3,
+    ]);
+  });
+
+  it('spends the Entra tenant bucket for a company trial', async () => {
+    const throttle = throttleRefusing('workspace-create-entra');
+    const { svc } = make(counts, {}, throttle);
     await expect(
       svc.createWorkspace({
         ownerSubject: 's',
-        kind: 'SAMPLE',
-        displayName: 'S',
+        kind: 'COMPANY',
+        displayName: 'C',
+        entraTenantId: 'TID-1',
       }),
     ).rejects.toMatchObject({ status: 429 });
-    expect(manager.provisionTenant).not.toHaveBeenCalled();
+    expect(throttle.spent).toEqual([
+      'workspace-create-person:COMPANY',
+      'workspace-create-entra:tid-1',
+    ]);
+  });
+
+  it('uses the configured global rate', async () => {
+    const throttle = throttleRefusing();
+    const { svc } = make(counts, { WORKSPACE_CREATE_PER_HOUR: 5 }, throttle);
+    await svc.createWorkspace(personal);
+    expect(throttle.increment).toHaveBeenLastCalledWith(
+      'global',
+      3_600_000,
+      5,
+      0,
+      'workspace-create',
+    );
   });
 
   it('fails closed (503) when the limits store is down', async () => {
     const { svc, manager } = make(
-      { total: 1, inflight: 0, backlog: 0 },
+      counts,
       {},
       {
         increment: vi.fn().mockRejectedValue(new Error('redis down')),
       },
     );
+    await expect(svc.createWorkspace(personal)).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(manager.provisionTenant).not.toHaveBeenCalled();
+  });
+
+  it('passes the creator and the per-creator cap into the tenant transaction, and maps its refusal', async () => {
+    const { svc, manager } = make(counts, {}, throttleRefusing());
+    manager.provisionTenant.mockRejectedValueOnce(
+      new TenantCreatorLimitError(3),
+    );
     await expect(
       svc.createWorkspace({
         ownerSubject: 's',
-        kind: 'PERSONAL',
-        displayName: 'P',
+        kind: 'COMPANY',
+        displayName: 'C',
+        entraTenantId: 'tid',
+        maxPerCreator: 3,
       }),
-    ).rejects.toMatchObject({ status: 503 });
-    expect(manager.provisionTenant).not.toHaveBeenCalled();
+    ).rejects.toMatchObject({
+      status: 403,
+      response: { reason: 'company_trial_limit_reached' },
+    });
+    expect(manager.provisionTenant.mock.calls[0]![0].creator).toEqual({
+      issuer: ISSUER,
+      subject: 's',
+      maxOfKind: 3,
+    });
   });
 });
 
