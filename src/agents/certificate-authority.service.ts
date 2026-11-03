@@ -335,23 +335,6 @@ export class CertificateAuthorityService {
       );
     }
 
-    const attributes = csr.subjectName
-      .toJSON()
-      .flatMap((rdn) =>
-        Object.entries(rdn).flatMap(([type, values]) =>
-          values.map((value) => ({ type, value })),
-        ),
-      );
-    if (
-      attributes.length !== 1 ||
-      attributes[0]!.type !== 'CN' ||
-      !allowedCommonNames.includes(attributes[0]!.value)
-    ) {
-      throw new CsrValidationError(
-        `CSR subject must be exactly "CN=${expectedIdentifier}"`,
-      );
-    }
-
     const sanExtension = csr.extensions.find(
       (extension): extension is x509.SubjectAlternativeNameExtension =>
         extension instanceof x509.SubjectAlternativeNameExtension,
@@ -370,6 +353,23 @@ export class CertificateAuthorityService {
     ) {
       throw new CsrValidationError(
         `CSR Subject Alternative Name (URI) does not match this agent's expected identifier. Expected exactly one URI SAN equal to "${expectedIdentifier}", got: ${JSON.stringify(uriNames)}`,
+      );
+    }
+
+    const attributes = csr.subjectName
+      .toJSON()
+      .flatMap((rdn) =>
+        Object.entries(rdn).flatMap(([type, values]) =>
+          values.map((value) => ({ type, value })),
+        ),
+      );
+    if (
+      attributes.length !== 1 ||
+      attributes[0]!.type !== 'CN' ||
+      !allowedCommonNames.includes(attributes[0]!.value)
+    ) {
+      throw new CsrValidationError(
+        `CSR subject must be exactly "CN=${expectedIdentifier}"`,
       );
     }
   }

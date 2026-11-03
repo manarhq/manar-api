@@ -5,6 +5,7 @@ import { KeycloakModule } from '../keycloak/keycloak.module';
 import { ReportCardService } from '../workspace/report-card.service';
 import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { DataCollectionModule } from '../data-collection/data-collection.module';
+import { RedisThrottlerStorageModule } from '../rate-limit/redis-throttler-storage.module';
 import { AccountService } from './account.service';
 import { ContactFlowService } from './contact-flow.service';
 import { DigestService } from './digest.service';
@@ -33,7 +34,12 @@ const SHARED = [
 
 /** Growth track, HTTP app: launch offer, badge, invites and auto-join, account deletion. */
 @Module({
-  imports: [BillingHttpModule, DataCollectionModule],
+  imports: [
+    BillingHttpModule,
+    DataCollectionModule,
+    // WorkspaceProvisioningService's creation gate.
+    RedisThrottlerStorageModule,
+  ],
   controllers: [
     GrowthPublicController,
     GrowthWorkspaceController,
@@ -52,7 +58,7 @@ export class GrowthModule {}
 
 /** Growth track, worker: the hourly digest, trial reminder and account-deletion activities. */
 @Module({
-  imports: [KeycloakModule, DataCollectionModule],
+  imports: [KeycloakModule, DataCollectionModule, RedisThrottlerStorageModule],
   providers: [...SHARED, StripeGateway],
   exports: [
     DigestService,
