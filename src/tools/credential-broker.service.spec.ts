@@ -907,6 +907,10 @@ describe('LLM proxy and tool-result DLP classify identically', () => {
         assertTaskAccess: vi.fn().mockResolvedValue({
           tenantClient: {},
           task: { id: 'task-1', expiresAt: new Date(Date.now() + 60_000) },
+          budgetTask: {
+            id: 'task-1',
+            expiresAt: new Date(Date.now() + 60_000),
+          },
         }),
       } as unknown as AgentTaskAccessService,
       {
@@ -1221,6 +1225,43 @@ describe('CredentialBrokerService resource binding (HTTP and MCP)', () => {
 });
 
 describe('CredentialBrokerService params DLP floor', () => {
+  async function blockedTypes(params: unknown) {
+    const { service, invokeHttp, recordSafely } = makeService({
+      toolResult: { success: true, data: {} },
+      analyzeDlp: vi.fn().mockResolvedValue(null),
+    });
+    await expect(
+      service.invoke(fakeTenantClient().tenantClient, { ...baseInput, params }),
+    ).rejects.toThrow();
+    expect(invokeHttp).not.toHaveBeenCalled();
+    const blocked = recordSafely.mock.calls
+      .map((c) => c[2])
+      .find((e) => e.eventType === AUDIT_EVENT_TYPES.DLP_BLOCKED);
+    return (blocked!.data as { floorCredentialTypes: string[] })
+      .floorCredentialTypes;
+  }
+
+  it('sees a value that JSON escaping would hide from the serialized scan', async () => {
+    // A tab serializes as "\\t", so the serialized text has no whitespace after "Bearer".
+    expect(await blockedTypes({ auth: 'Bearer\t' + 'k'.repeat(32) })).toEqual([
+      'bearer_token',
+    ]);
+  });
+
+  it('sees a key nested in an array', async () => {
+    expect(
+      await blockedTypes({
+        items: [[{ v: '-----BEGIN RSA PRIVATE KEY-----\nMIIE' }]],
+      }),
+    ).toEqual(['private_key']);
+  });
+
+  it('still sees a JSON-shaped secret only the serialized form shows', async () => {
+    expect(await blockedTypes({ password: 'hunter22' })).toEqual([
+      'json_secret_value',
+    ]);
+  });
+
   it('blocks a credential-shaped param even when manar-ai is unreachable', async () => {
     const { service, invokeHttp, recordSafely } = makeService({
       toolResult: { success: true, data: {} },

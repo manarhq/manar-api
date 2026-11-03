@@ -49,6 +49,13 @@ describe('assertSafeOutboundUrl', () => {
     ['link-local', 'fe80::1'],
     ['unique-local', 'fd00::1'],
     ['IPv4-mapped private', '::ffff:10.0.0.1'],
+    ['IPv4-mapped loopback', '::ffff:127.0.0.1'],
+    ['IPv4-compatible loopback', '::127.0.0.1'],
+    ['NAT64 metadata service', '64:ff9b::a9fe:a9fe'],
+    ['6to4 loopback', '2002:7f00:1::'],
+    ['IPv4-translated loopback', '::ffff:0:7f00:1'],
+    ['uncompressed IPv4-mapped loopback', '0:0:0:0:0:ffff:7f00:1'],
+    ['other ::/80 address', '::abcd:1:2'],
     ['6to4', '2002:a9fe:a9fe::1'],
     ['Teredo', '2001:0:4136:e378:8000:63bf:3fff:fdd2'],
     ['Teredo, compressed', '2001::1'],
@@ -64,6 +71,33 @@ describe('assertSafeOutboundUrl', () => {
       ).rejects.toThrow(UnsafeOutboundUrlError);
     },
   );
+
+  it('classifies a mapped public IPv4 as public', async () => {
+    await expect(
+      assertSafeOutboundUrl('https://example.com/', {
+        lookup: fixedLookup({ address: '::ffff:93.184.216.34', family: 6 }),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('lets an allow-listed host reach a private IPv4 through a mapped form, not the metadata service', async () => {
+    const options = (address: string) => ({
+      lookup: fixedLookup({ address, family: 6 }),
+      allowedHosts: new Set(['siem.internal']),
+    });
+    await expect(
+      assertSafeOutboundUrl(
+        'http://siem.internal/',
+        options('::ffff:10.1.2.3'),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertSafeOutboundUrl(
+        'http://siem.internal/',
+        options('2002:a9fe:a9fe::'),
+      ),
+    ).rejects.toThrow(UnsafeOutboundUrlError);
+  });
 
   it('still accepts a public IPv6 address', async () => {
     await expect(

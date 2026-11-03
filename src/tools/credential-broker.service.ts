@@ -9,7 +9,11 @@ import { AuditService } from '../audit/audit.service';
 import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
 import type { DataClassification } from '../common/data-classification';
 import { redactedToolResultPlaceholder } from './dlp-redaction.util';
-import { classifyDlp, credentialTypes } from '../common/dlp/dlp-classification';
+import {
+  applyDlpFloor,
+  classifyDlp,
+  credentialTypes,
+} from '../common/dlp/dlp-classification';
 import {
   DlpBlockedError,
   ToolActionNotFoundError,
@@ -329,8 +333,15 @@ export class CredentialBrokerService {
     // the caller" contract.
     // The deterministic credential floor runs whatever manar-ai's state, so
     // an outage never lets a credential-shaped param through unscanned.
+    // It reads every raw string leaf (JSON escapes or a nested array cannot
+    // hide a value) and the serialized form, which `json_secret_value` needs.
     const paramsText = JSON.stringify(input.params ?? null);
-    const floorCredentialTypes = credentialTypes(paramsText);
+    const floorCredentialTypes = [
+      ...new Set([
+        ...applyDlpFloor(input.params ?? null).credentialTypes,
+        ...credentialTypes(paramsText),
+      ]),
+    ].sort();
     const dlpBefore = await this.aiAdvisoryClient.analyzeDlp({
       content: paramsText,
       tenantId: input.tenantId,

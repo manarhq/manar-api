@@ -59,61 +59,14 @@ function isPrivateOrReservedIpv4(address: string): boolean {
   return false;
 }
 
-/**
- * IPv6 ranges rejected: loopback (::1), unspecified (::), link-local
- * (fe80::/10 — the IPv6 analogue of 169.254.0.0/16), unique-local
- * (fc00::/7, RFC 4193's non-globally-routable space), and any IPv4-mapped
- * address (`::ffff:a.b.c.d`) whose embedded IPv4 address is itself
- * private/reserved per `isPrivateOrReservedIpv4`.
- */
-function isPrivateOrReservedIpv6(address: string): boolean {
-  const lower = address.toLowerCase();
-  if (lower === '::1' || lower === '::') return true;
-
-  const embedded = embeddedIpv4(lower);
-  if (embedded) return isPrivateOrReservedIpv4(embedded);
-
-  // fc00::/7 -- first 7 bits are 1111 110x, i.e. the first hex nibble is c-f
-  // and covers "fc"/"fd" as the first byte.
-  if (/^f[cd][0-9a-f]{2}:/.test(lower)) return true;
-  // fe80::/10 -- first byte fe, second byte's top 6 bits 10xxxxxx (80-bf).
-  if (/^fe[89ab][0-9a-f]:/.test(lower)) return true;
-
-  return false;
-}
-
-/**
- * The IPv4 address carried inside an IPv4-mapped (`::ffff:0:0/96`),
- * IPv4-compatible (`::/96`) or NAT64 (`64:ff9b::/96`) IPv6 address, in
- * either the dotted form or the hex form the WHATWG URL parser produces
- * (`new URL('http://[::ffff:127.0.0.1]/').hostname` is `[::ffff:7f00:1]`).
- * Gate 0 finding S1: only the dotted mapped form used to be recognised, so
- * `http://[::ffff:7f00:1]/` reached loopback and `[::ffff:a9fe:a9fe]` the
- * metadata service.
- */
-function embeddedIpv4(lowerIpv6: string): string | null {
-  const match =
-    /^(?:::ffff:|::|64:ff9b::)(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(
-      lowerIpv6,
-    );
-  if (!match) return null;
-  if (match[1]) return match[1];
-  const high = parseInt(match[2] as string, 16);
-  const low = parseInt(match[3] as string, 16);
-  return [high >> 8, high & 0xff, low >> 8, low & 0xff].join('.');
-}
-
 /** The eight 16-bit groups of an IPv6 address (a dotted IPv4 tail included), or null if malformed. */
 function ipv6Groups(address: string): number[] | null {
   let text = address;
   const dotted = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
   if (dotted) {
-    const [a, b, c, d] = dotted.slice(1).map(Number) as [
-      number,
-      number,
-      number,
-      number,
-    ];
+    const octets = dotted.slice(1).map(Number);
+    if (octets.some((o) => o > 255)) return null;
+    const [a, b, c, d] = octets as [number, number, number, number];
     text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
   }
   const halves = text.split('::');
@@ -124,7 +77,9 @@ function ipv6Groups(address: string): number[] | null {
     halves.length === 2
       ? [
           ...head,
-          ...Array<string>(8 - head.length - tail.length).fill('0'),
+          ...Array<string>(Math.max(0, 8 - head.length - tail.length)).fill(
+            '0',
+          ),
           ...tail,
         ]
       : head;
@@ -134,45 +89,35 @@ function ipv6Groups(address: string): number[] | null {
   return groups.map((g) => parseInt(g, 16));
 }
 
+const dottedQuad = (high: number, low: number): string =>
+  [high >> 8, high & 0xff, low >> 8, low & 0xff].join('.');
+
 /**
- * Ranges that carry an IPv4 address the IPv4 checks never see, or reach
- * more than one host: 6to4 (2002::/16), Teredo (2001::/32), local-use NAT64
- * (64:ff9b:1::/48) and multicast (ff00::/8). Malformed counts as unsafe.
+ * The IPv4 address an IPv6 address carries, for every form that carries one:
+ * IPv4-compatible (`::/96`), IPv4-mapped (`::ffff:0:0/96`), IPv4-translated
+ * (`::ffff:0:0:0/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`, bits
+ * 16-48). Works on groups, so dotted, hex (`[::ffff:7f00:1]`, what the URL
+ * parser produces) and uncompressed spellings all land here (Gate 0 S1).
  */
-function tunnelsOrMulticast(lowerIpv6: string): boolean {
-  const g = ipv6Groups(lowerIpv6);
-  if (!g) return true;
-  const [g0, g1, g2] = g as [number, number, number];
-  return (
-    g0 >= 0xff00 ||
-    g0 === 0x2002 ||
-    (g0 === 0x2001 && g1 === 0) ||
-    (g0 === 0x64 && g1 === 0xff9b && g2 === 1)
-  );
+function embeddedIpv4(g: number[]): string | null {
+  const zero = (from: number, to: number) =>
+    g.slice(from, to).every((x) => x === 0);
+  if (zero(0, 6)) return dottedQuad(g[6]!, g[7]!);
+  if (zero(0, 5) && g[5] === 0xffff) return dottedQuad(g[6]!, g[7]!);
+  if (zero(0, 4) && g[4] === 0xffff && g[5] === 0) {
+    return dottedQuad(g[6]!, g[7]!);
+  }
+  if (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) {
+    return dottedQuad(g[6]!, g[7]!);
+  }
+  if (g[0] === 0x2002) return dottedQuad(g[1]!, g[2]!);
+  return null;
 }
 
 type AddressClass = 'public' | 'private' | 'loopback' | 'never';
 
-/**
- * `private` (RFC 1918, CGNAT, benchmarking, unique-local) may be reached
- * through an allow-listed hostname. `loopback` only with `allowLoopback`
- * as well (local development). `never` (link-local and the metadata
- * service, unspecified, multicast, reserved) is never reachable.
- */
-function classifyAddress(address: string): AddressClass {
-  let v4: string | null = isIPv4(address) ? address : null;
-  if (!v4 && isIPv6(address)) {
-    const lower = address.toLowerCase();
-    if (lower === '::1') return 'loopback';
-    v4 = embeddedIpv4(lower);
-    if (!v4) {
-      if (/^fe[89ab][0-9a-f]:/.test(lower) || lower === '::') return 'never';
-      if (/^f[cd][0-9a-f]{2}:/.test(lower)) return 'private';
-      if (tunnelsOrMulticast(lower)) return 'never';
-      return isPrivateOrReservedIpv6(lower) ? 'never' : 'public';
-    }
-  }
-  if (!v4) return 'never';
+/** IPv4 classes; see `isPrivateOrReservedIpv4` for the ranges. */
+function classifyIpv4(v4: string): AddressClass {
   if (!isPrivateOrReservedIpv4(v4)) return 'public';
   const [a, b] = v4.split('.').map(Number) as [number, number];
   if (a === 127) return 'loopback';
@@ -185,6 +130,42 @@ function classifyAddress(address: string): AddressClass {
   ) {
     return 'private';
   }
+  return 'never';
+}
+
+/**
+ * IPv6: `::` and malformed are never reachable, `::1` is loopback; any
+ * address carrying an IPv4 is classified by that IPv4; anything else left in
+ * `::/80` is never reachable (a backstop for mapped forms not listed above),
+ * nor are link-local (fe80::/10), multicast (ff00::/8), Teredo (2001::/32)
+ * and local-use NAT64 (64:ff9b:1::/48, whose IPv4 position depends on a
+ * prefix length this process cannot know). Unique-local (fc00::/7) is
+ * private.
+ */
+function classifyIpv6(lower: string): AddressClass {
+  const g = ipv6Groups(lower);
+  if (!g || g.every((x) => x === 0)) return 'never';
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return 'loopback';
+  const v4 = embeddedIpv4(g);
+  if (v4) return classifyIpv4(v4);
+  const [g0, g1, g2] = g as [number, number, number];
+  if (g.slice(0, 5).every((x) => x === 0)) return 'never';
+  if ((g0 & 0xffc0) === 0xfe80 || g0 >= 0xff00) return 'never';
+  if (g0 === 0x2001 && g1 === 0) return 'never';
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 1) return 'never';
+  if ((g0 & 0xfe00) === 0xfc00) return 'private';
+  return 'public';
+}
+
+/**
+ * `private` (RFC 1918, CGNAT, benchmarking, unique-local) may be reached
+ * through an allow-listed hostname. `loopback` only with `allowLoopback`
+ * as well (local development). `never` (link-local and the metadata
+ * service, unspecified, multicast, reserved) is never reachable.
+ */
+function classifyAddress(address: string): AddressClass {
+  if (isIPv4(address)) return classifyIpv4(address);
+  if (isIPv6(address)) return classifyIpv6(address.toLowerCase());
   return 'never';
 }
 
