@@ -132,7 +132,7 @@ describe('staff RBAC (e2e)', () => {
     const broken = new OpenFgaClientService(config);
     const brokenRbac = new StaffRbacService(control, broken, audit); // never initialised: every call throws
     const before = await control.staffRoleAssignment.count({
-      where: { principalId: support },
+      where: { principalId: support, revokedAt: null },
     });
     await expect(
       brokenRbac.grant({
@@ -145,7 +145,7 @@ describe('staff RBAC (e2e)', () => {
     ).rejects.toThrow();
     expect(
       await control.staffRoleAssignment.count({
-        where: { principalId: support },
+        where: { principalId: support, revokedAt: null },
       }),
     ).toBe(before);
     await expect(brokenRbac.can(owner, 'people.view')).rejects.toThrow();
