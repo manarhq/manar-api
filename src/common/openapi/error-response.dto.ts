@@ -1,14 +1,17 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+
+export class FieldProblemDto {
+  @ApiProperty({ example: 'name' })
+  field!: string;
+
+  @ApiProperty({ example: 'must not be empty' })
+  message!: string;
+}
 
 /**
- * The shape Nest's built-in `HttpException` subclasses (`BadRequestException`,
- * `NotFoundException`, `ConflictException`, `ForbiddenException`,
- * `UnauthorizedException`, ...) serialize to by default — this codebase
- * never installs a custom exception filter that changes it (see every
- * controller's `mapXErrors`/`try`/`catch` blocks, which all just `throw`
- * one of these). Documented once here and referenced by every module's
- * `@ApiResponse({ type: ErrorResponseDto })` rather than redefined per
- * module.
+ * The error envelope every route returns (`src/common/errors/error-envelope.filter.ts`).
+ * Documented once here and referenced by every module's `@ApiResponse({ type: ErrorResponseDto })`.
+ * Some routes add fields of their own (`reason`, `decision`, ...); they are kept as thrown.
  */
 export class ErrorResponseDto {
   @ApiProperty({ example: 400 })
@@ -16,12 +19,29 @@ export class ErrorResponseDto {
 
   @ApiProperty({
     description:
-      'A human-readable message, or (only for class-validator-style array errors, which this codebase does not use) an array of them.',
-    oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
-    example: 'Invalid request body',
+      'Plain words for a person: what happened and what to do. Never a stack trace or driver text.',
+    example: 'Some details need fixing: name must not be empty.',
   })
-  message!: string | string[];
+  message!: string;
 
   @ApiProperty({ example: 'Bad Request' })
   error!: string;
+
+  @ApiProperty({
+    description:
+      'Reference code for this occurrence; support finds the full details in the logs with it.',
+    example: 'MNR-7F3K2Q',
+  })
+  reference!: string;
+
+  @ApiPropertyOptional({
+    description: 'The request correlation id (x-correlation-id).',
+  })
+  correlationId?: string;
+
+  @ApiPropertyOptional({
+    type: [FieldProblemDto],
+    description: 'Validation failures, one per field (400 only).',
+  })
+  fields?: FieldProblemDto[];
 }

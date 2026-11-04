@@ -43,6 +43,7 @@ import {
   getUserToken,
 } from './support/keycloak-test-helpers';
 import { onCompanyPlan } from './support/free-entitlements';
+import { HUMAN_DEFAULTS } from '../src/common/errors/error-envelope.filter';
 
 /**
  * Manar edge (docs/edge.md) against the real stack: enrollment with a WireGuard key, address
@@ -505,7 +506,15 @@ describe('Manar edge (e2e)', () => {
         .post('/agents/enroll')
         .send({ token, csr: 'x', edge: { wgPublicKey: wgKey() } })
         .expect(401);
-      expect(withEdge.body).toEqual(plain.body);
+      // Same answer apart from the per-occurrence reference and correlation id.
+      const sameShape = (b: Record<string, unknown>) => ({
+        ...b,
+        reference: undefined,
+        correlationId: undefined,
+      });
+      expect(sameShape(withEdge.body as Record<string, unknown>)).toEqual(
+        sameShape(plain.body as Record<string, unknown>),
+      );
       const added = (await failures()).slice(before);
       expect(added).toHaveLength(2);
       expect(added[1]!.actor).toEqual(added[0]!.actor);
@@ -575,7 +584,18 @@ describe('Manar edge (e2e)', () => {
         const req = http().get('/internal/v1/edge/peers?after=0');
         if (auth) void req.set('Authorization', auth);
         const res = await req.expect(401);
-        expect(res.body).toEqual({ statusCode: 401, message: 'Unauthorized' });
+        // The error envelope: the generic sign-in text and a reference, nothing about why.
+        expect(Object.keys(res.body as object).sort()).toEqual([
+          'correlationId',
+          'error',
+          'message',
+          'reference',
+          'statusCode',
+        ]);
+        expect(res.body).toMatchObject({
+          statusCode: 401,
+          message: HUMAN_DEFAULTS[401],
+        });
       }
       await http()
         .post('/internal/v1/edge/events')

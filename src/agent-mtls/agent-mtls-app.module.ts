@@ -1,10 +1,11 @@
 import { HostAiUsageModule } from '../ai-spend/ai-spend.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { JailMtlsModule } from '../jail/jail.module';
-import { APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
 import { AppConfigModule } from '../config/config.module';
 import { CorrelationIdMiddleware } from '../logging/correlation-id.middleware';
 import { LoggingInterceptor } from '../logging/logging.interceptor';
+import { ErrorEnvelopeFilter } from '../common/errors/error-envelope.filter';
 import { LoggingModule } from '../logging/logging.module';
 import { DatabaseModule } from '../database/database.module';
 import { OpenBaoModule } from '../openbao/openbao.module';
@@ -89,7 +90,10 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     EdgeModule,
   ],
   controllers: [AgentWhoamiController],
-  providers: [{ provide: APP_INTERCEPTOR, useClass: LoggingInterceptor }],
+  providers: [
+    { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+    { provide: APP_FILTER, useClass: ErrorEnvelopeFilter },
+  ],
 })
 export class AgentMtlsAppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
