@@ -57,6 +57,24 @@ export class RestrictionEnforcement {
     }
   }
 
+  /**
+   * For side doors that know only a subject (a linked Telegram chat): restricted under any issuer.
+   * Matching more than one person is the safe side.
+   */
+  async activeForSubject(subject: string): Promise<boolean> {
+    try {
+      const rows = await this.control.$queryRaw<{ n: number }[]>`
+        SELECT 1 AS n FROM staff_restrictions r JOIN accounts a ON a.id = r."accountId"
+        WHERE a.subject = ${subject}
+          AND r.kind IN ('SUSPEND', 'BAN') AND r."liftedAt" IS NULL AND r."startsAt" <= now()
+          AND (r.kind = 'BAN' OR r.until > now())
+        LIMIT 1`;
+      return rows.length > 0;
+    } catch (error) {
+      throwFailClosed('restrictions', error);
+    }
+  }
+
   async refuseIfRestricted(issuer: string, subject: string): Promise<void> {
     const r = await this.activeFor(issuer, subject);
     if (!r) return;

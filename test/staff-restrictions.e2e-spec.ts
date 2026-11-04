@@ -367,6 +367,16 @@ describe('staff restrictions (e2e)', () => {
         ),
     ).resolves.toBeUndefined();
 
+    // An install code from before the ban cannot enrol a new device into the banned owner's workspace.
+    await expect(
+      human
+        .get(ResignupService)
+        .checkDevice(
+          { keyFingerprint: `fresh-${STAFF_E2E_SUFFIX}` },
+          c.tenantId,
+        ),
+    ).rejects.toMatchObject({ response: { code: 'account_suspended' } });
+
     // A card of the banned account on a new paying workspace bans its owner.
     const key = process.env.RESTRICTION_FINGERPRINT_KEY!;
     await staff.control.staffRestrictionFingerprint.create({

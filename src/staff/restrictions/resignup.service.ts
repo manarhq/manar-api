@@ -8,7 +8,18 @@ import { ControlPrismaService } from '../../database/control-prisma.service';
 import type { StaffFingerprintKind } from '../../generated/control-client/client';
 import { StaffAuditService } from '../audit/staff-audit.service';
 import { fingerprint, normalizeEmail } from './fingerprints';
-import { AccountSuspendedException } from './restriction-enforcement';
+import {
+  ACCOUNT_SUSPENDED,
+  AccountSuspendedException,
+  RestrictionEnforcement,
+} from './restriction-enforcement';
+
+const workspaceSuspended = () =>
+  new ForbiddenException({
+    statusCode: 403,
+    code: ACCOUNT_SUSPENDED,
+    message: 'The Manar account that owns this workspace is suspended.',
+  });
 
 const yymm = () => new Date().toISOString().slice(2, 7).replace('-', '');
 
@@ -25,6 +36,7 @@ export class ResignupService {
     private readonly control: ControlPrismaService,
     private readonly config: ConfigService<AppConfig, true>,
     private readonly audit: StaffAuditService,
+    private readonly enforcement: RestrictionEnforcement,
   ) {}
 
   private key(): string | null {
@@ -173,6 +185,22 @@ export class ResignupService {
     device: { keyFingerprint: string; tpmEk?: string | null },
     tenantId: string,
   ): Promise<void> {
+    // An install code made before a restriction must not enrol a new device for that owner: the
+    // same refusal HostAuthGuard gives every later call (DESK spec §9.2).
+    const tenant = await this.control.tenant.findUnique({
+      where: { id: tenantId },
+    });
+    if (tenant?.status === 'SUSPENDED') throw workspaceSuspended();
+    if (
+      tenant?.kind === 'PERSONAL' &&
+      tenant.ownerIssuer &&
+      tenant.ownerSubject &&
+      (await this.enforcement.activeFor(
+        tenant.ownerIssuer,
+        tenant.ownerSubject,
+      ))
+    )
+      throw workspaceSuspended();
     const key = this.key();
     if (!key) return;
     const signals: { kind: StaffFingerprintKind; valueHash: string }[] = [

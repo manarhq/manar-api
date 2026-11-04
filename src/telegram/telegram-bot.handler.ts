@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ApproverDirectory } from '../approvals/approver-directory';
+import { RestrictionEnforcement } from '../staff/restrictions/restriction-enforcement';
 import { HostApprovalsService } from '../approvals/host-approvals.service';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
@@ -40,6 +41,7 @@ export class TelegramBotHandler {
     private readonly approvers: ApproverDirectory,
     private readonly approvals: HostApprovalsService,
     private readonly audit: AuditService,
+    private readonly restrictions: RestrictionEnforcement,
   ) {}
 
   async handle(update: TelegramUpdate): Promise<void> {
@@ -131,6 +133,9 @@ export class TelegramBotHandler {
     if (!v) return void (await answer(t.gone));
     const client = await this.tenants.getClient(link.tenantId);
     if (!(await this.approvers.canApprove(link.tenantId, client, link.subject)))
+      return void (await answer(t.notApprover));
+    // DESK spec §9.2: a suspended or banned person decides nothing, by any channel.
+    if (await this.restrictions.activeForSubject(link.subject))
       return void (await answer(t.notApprover));
     const row = await this.approvals
       .get(client, v.approvalId)
