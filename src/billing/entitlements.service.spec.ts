@@ -41,39 +41,81 @@ describe('EntitlementsService', () => {
     const e = await make().svc.get('t1');
     expect(e.plan).toBe('free');
     expect(e.limits).toEqual({
-      devices: 3,
+      devices: 1,
       agents: 10,
-      cloudAgents: 1,
+      cloudAgents: 0,
       auditDays: 30,
     });
+    expect(e.allowance).toEqual({ ai: 20, cloudMinutes: 0 });
   });
 
-  it('a free tenant with 3 devices cannot add a 4th', async () => {
+  it('a free tenant with 1 device cannot add a 2nd', async () => {
     const { svc } = make();
-    await expect(svc.assertWithin('t1', 'devices', 2)).resolves.toBeUndefined();
+    await expect(svc.assertWithin('t1', 'devices', 0)).resolves.toBeUndefined();
     const err = (await svc
-      .assertWithin('t1', 'devices', 3)
+      .assertWithin('t1', 'devices', 1)
       .catch((e: unknown) => e)) as PlanLimitError;
     expect(err).toBeInstanceOf(PlanLimitError);
     expect(err.getStatus()).toBe(403);
     expect(err.getResponse()).toMatchObject({
       code: 'plan_limit_reached',
       limit: 'devices',
-      current: 3,
-      max: 3,
+      current: 1,
+      max: 1,
       upgradeUrl: 'https://console.example/settings/billing',
     });
   });
 
-  it('pro has unlimited agents and 10 devices', async () => {
+  it('pro has no device cap (extra active devices are billed) and 300 AI actions', async () => {
     const { svc } = make({ plan: 'pro', status: 'active' });
     await expect(
       svc.assertWithin('t1', 'agents', 5000),
     ).resolves.toBeUndefined();
-    await expect(svc.assertWithin('t1', 'devices', 10)).rejects.toBeInstanceOf(
-      PlanLimitError,
-    );
-    expect((await svc.get('t1')).features).toContain('tls_inspection');
+    await expect(
+      svc.assertWithin('t1', 'devices', 40),
+    ).resolves.toBeUndefined();
+    const e = await svc.get('t1');
+    expect(e.features).toContain('tls_inspection');
+    expect(e.allowance).toEqual({ ai: 300, cloudMinutes: 300 });
+  });
+
+  it('the personal trial unlocks only 3 devices, then drops softly to Free', async () => {
+    const live = make({
+      plan: 'trial',
+      status: 'active',
+      trialEndsAt: new Date(Date.now() + 86_400_000),
+    });
+    const t = await live.svc.get('t1');
+    expect(t.plan).toBe('trial');
+    expect(t.limits).toMatchObject({
+      devices: 3,
+      cloudAgents: 0,
+      auditDays: 30,
+    });
+    expect(t.allowance.ai).toBe(20);
+    expect(t.features).not.toContain('tls_inspection');
+    await expect(
+      live.svc.assertWithin('t1', 'devices', 3),
+    ).rejects.toBeInstanceOf(PlanLimitError);
+    const ended = make({
+      plan: 'trial',
+      status: 'active',
+      trialEndsAt: new Date(Date.now() - 1000),
+    });
+    const f = await ended.svc.get('t1');
+    expect(f.plan).toBe('free');
+    expect(f.status).toBe('active');
+    expect(f.limits.devices).toBe(1);
+  });
+
+  it('a dispute freezes paid features to Free limits, keeping the plan name', async () => {
+    const { svc } = make({ plan: 'pro', status: 'frozen' });
+    const e = await svc.get('t1');
+    expect(e.plan).toBe('pro');
+    expect(e.status).toBe('frozen');
+    expect(e.limits.devices).toBe(1);
+    expect(e.features).toEqual([]);
+    expect(e.allowance.ai).toBe(20);
   });
 
   it('company has no Enterprise-only features and no device cap', async () => {
@@ -111,7 +153,7 @@ describe('EntitlementsService', () => {
       PlanLimitError,
     );
     // Nothing removes the 8; below the cap enrolment works again.
-    await expect(svc.assertWithin('t1', 'devices', 2)).resolves.toBeUndefined();
+    await expect(svc.assertWithin('t1', 'devices', 0)).resolves.toBeUndefined();
   });
 
   it('audits billing.plan.changed only when the plan moves', async () => {
@@ -134,15 +176,6 @@ describe('EntitlementsService', () => {
     );
   });
 
-  it('starts one company trial only', async () => {
-    const { svc } = make();
-    const a = await svc.startCompanyTrial('t1', { type: 'human', id: 'u' });
-    expect(a.plan).toBe('company_trial');
-    expect(a.limits.devices).toBe(25);
-    const days = (a.trialEndsAt!.getTime() - Date.now()) / 86_400_000;
-    expect(days).toBeGreaterThan(29.9);
-  });
-
   it('hides audit older than the plan window', async () => {
     const floor = await make().svc.auditSearchFloor('t1');
     const days = (Date.now() - floor!.getTime()) / 86_400_000;
@@ -150,7 +183,11 @@ describe('EntitlementsService', () => {
   });
 
   it('withinLimit: N+1 parallel creates against a cap of N let exactly N through', async () => {
-    const { svc } = make(); // free: 3 devices
+    const { svc } = make({
+      plan: 'trial',
+      status: 'active',
+      trialEndsAt: new Date(Date.now() + 86_400_000),
+    }); // 3 devices
     const rows: number[] = [];
     // Stand-in for Postgres: pg_advisory_xact_lock queues transactions, released at commit.
     let tail: Promise<void> = Promise.resolve();
@@ -196,25 +233,5 @@ describe('EntitlementsService', () => {
       PlanLimitError,
     );
     expect(rows).toHaveLength(3);
-  });
-
-  it('a workspace that ever had a trial cannot start another, even after cancelling', async () => {
-    const { svc } = make();
-    await svc.startCompanyTrial('t1', { type: 'human', id: 'u' });
-    await svc.change(
-      't1',
-      { plan: 'company' },
-      { type: 'system', id: 's' },
-      'stripe',
-    );
-    await svc.change(
-      't1',
-      { plan: 'free' },
-      { type: 'system', id: 's' },
-      'stripe',
-    );
-    const again = await svc.startCompanyTrial('t1', { type: 'human', id: 'u' });
-    expect(again.plan).toBe('free');
-    expect(again.trialEndsAt).toBeUndefined();
   });
 });

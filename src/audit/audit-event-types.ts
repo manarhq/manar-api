@@ -169,6 +169,8 @@ export const AUDIT_EVENT_TYPES = {
   HOST_TPM_VERIFIED: 'host.tpm_verified',
   /** A tenant's plan changed (Stripe, trial start or end). Data: from, to, source. */
   BILLING_PLAN_CHANGED: 'billing.plan.changed',
+  /** A card dispute opened or closed: paid features frozen or restored. Data: disputeStatus, entitlementStatus. */
+  BILLING_DISPUTE_CHANGED: 'billing.dispute.changed',
   /** The owner removed a device (console "Remove device"): certificates revoked, record kept as REMOVED; it can be installed again. */
   HOST_REMOVED: 'host.removed',
   /** A known machineId registered with a new key: a separate PENDING host, never a key swap. */

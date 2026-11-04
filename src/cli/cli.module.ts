@@ -29,6 +29,8 @@ import {
 } from './commands/workspaces-drain.command';
 import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { LicenseVerifyCommand } from './commands/license-verify.command';
+import { BillingRetireLaunchOfferCommand } from './commands/billing-retire-launch-offer.command';
+import { StripeGateway } from '../billing/stripe.gateway';
 
 /**
  * Root module for the `pnpm manar` CLI (see src/cli.ts). Deliberately
@@ -89,6 +91,8 @@ import { LicenseVerifyCommand } from './commands/license-verify.command';
     WorkspacesDrainCommand,
     WorkspacesRetryCommand,
     WorkspaceProvisioningService,
+    BillingRetireLaunchOfferCommand,
+    StripeGateway,
   ],
 })
 export class CliModule {}

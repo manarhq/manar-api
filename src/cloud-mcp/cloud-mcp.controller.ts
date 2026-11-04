@@ -1,3 +1,4 @@
+import { UsageMeterService } from '../billing/usage-meter.service';
 import {
   Body,
   Controller,
@@ -61,6 +62,7 @@ export class CloudMcpController {
     private readonly control: ControlPrismaService,
     private readonly runtime: AgentRuntimeController,
     @InjectThrottlerStorage() private readonly limits: ThrottlerStorage,
+    private readonly meter: UsageMeterService,
   ) {}
 
   // ponytail: per-process cache of active tenants' issuers, one minute; a suspended tenant's
@@ -148,6 +150,15 @@ export class CloudMcpController {
     @Res() reply: FastifyReply,
   ): Promise<void> {
     const { context, taskId } = request.cloudAgent!;
+    // Billed per running minute (paid extra): one key per agent per UTC minute, so ten calls in
+    // a minute cost one. After the guard, so an unauthenticated call never costs anything. A
+    // refusal pauses the agent with a 402; protection of devices is not involved.
+    const minute = new Date().toISOString().slice(0, 16);
+    await this.meter.consume(
+      context.tenant.id,
+      'cloud_minute',
+      `cm:${context.agent.id}:${minute}`,
+    );
     await this.runtime.serveMcp(context, taskId, body, request, reply);
   }
 

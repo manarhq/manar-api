@@ -15,13 +15,13 @@ import { PlanLimitError } from './plan-limit.error';
 import {
   ENTERPRISE_ONLY_FEATURES,
   PLAN_TABLE,
-  TRIAL_DAYS,
+  type Allowance,
   type LimitName,
   type Limits,
   type PlanName,
 } from './plans';
 
-export type EntitlementState = 'active' | 'past_due' | 'read_only';
+export type EntitlementState = 'active' | 'past_due' | 'read_only' | 'frozen';
 
 export interface Entitlement {
   plan: PlanName;
@@ -29,7 +29,11 @@ export interface Entitlement {
   /** `null` = unlimited. */
   limits: Limits;
   features: string[];
+  /** Included per month; per seat on Company plans. */
+  allowance: Allowance;
   trialEndsAt?: Date;
+  /** Company yearly: seats paid for the year. */
+  committedSeats?: number;
 }
 
 export interface EntitlementPatch {
@@ -39,6 +43,7 @@ export interface EntitlementPatch {
   stripeCustomerId?: string;
   stripeSubscriptionId?: string | null;
   billingInterval?: string | null;
+  committedSeats?: number | null;
 }
 
 const DAY_MS = 86_400_000;
@@ -65,21 +70,24 @@ export class EntitlementsService {
       where: { tenantId },
     });
     if (!row) return { plan: 'free', status: 'active', ...PLAN_TABLE.free };
+    const ended = !!row.trialEndsAt && row.trialEndsAt.getTime() <= Date.now();
+    // The personal trial drops softly to Free at its end, with no job to flip it.
+    if (row.plan === 'trial' && (ended || !row.trialEndsAt))
+      return { plan: 'free', status: 'active', ...PLAN_TABLE.free };
     let status: EntitlementState = row.status;
-    if (
-      row.plan === 'company_trial' &&
-      row.trialEndsAt &&
-      row.trialEndsAt.getTime() <= Date.now()
-    )
-      status = 'read_only';
-    const base = await this.planBase(row.plan);
+    if (row.plan === 'company_trial' && ended) status = 'read_only';
+    // A dispute freezes paid features: Free limits and allowance, safety untouched.
+    const base =
+      status === 'frozen' ? PLAN_TABLE.free : await this.planBase(row.plan);
     return {
       plan: row.plan,
       status,
       ...base,
-      ...(row.plan === 'company_trial' && row.trialEndsAt
+      ...((row.plan === 'company_trial' || row.plan === 'trial') &&
+      row.trialEndsAt
         ? { trialEndsAt: row.trialEndsAt }
         : {}),
+      ...(row.committedSeats ? { committedSeats: row.committedSeats } : {}),
     };
   }
 
@@ -146,29 +154,6 @@ export class EntitlementsService {
       : new Date(Date.now() - limits.auditDays * DAY_MS);
   }
 
-  /** Starts the 30-day company trial. A tenant that already had one (or pays) is left alone. */
-  async startCompanyTrial(
-    tenantId: string,
-    actor: AuditActor,
-  ): Promise<Entitlement> {
-    const row = await this.control.tenantEntitlement.findUnique({
-      where: { tenantId },
-    });
-    // One trial per workspace, ever: trialEndsAt is kept after the trial, a plan change or a cancel.
-    if (row && (row.plan !== 'free' || row.trialEndsAt))
-      return this.get(tenantId);
-    return this.change(
-      tenantId,
-      {
-        plan: 'company_trial',
-        status: 'active',
-        trialEndsAt: new Date(Date.now() + TRIAL_DAYS * DAY_MS),
-      },
-      actor,
-      'trial',
-    );
-  }
-
   /** Writes the patch and audits `billing.plan.changed` when the plan moved. */
   async change(
     tenantId: string,
@@ -209,7 +194,7 @@ export class EntitlementsService {
 
   private async planBase(
     plan: PlanName,
-  ): Promise<{ limits: Limits; features: string[] }> {
+  ): Promise<{ limits: Limits; features: string[]; allowance: Allowance }> {
     if (plan !== 'enterprise') return PLAN_TABLE[plan];
     // Enterprise comes from the signed licence; without a valid one it is as small as Free.
     // LicenseService lives in the HTTP app only (LicensingModule), so it is looked up, not injected.
@@ -227,6 +212,8 @@ export class EntitlementsService {
         auditDays: null,
       },
       features: [...new Set([...lic.features, ...ENTERPRISE_ONLY_FEATURES])],
+      // The contract's credit pool is a `contract` lot; the monthly allowance is Company's.
+      allowance: PLAN_TABLE.company.allowance,
     };
   }
 }

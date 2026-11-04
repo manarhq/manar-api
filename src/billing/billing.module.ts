@@ -1,23 +1,24 @@
 import { Global, Module } from '@nestjs/common';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { BillableUsageService } from './billable-usage.service';
+import { BillingTickService } from './billing-tick.service';
 import {
   BillingController,
   StripeWebhookController,
 } from './billing.controller';
 import { BillingService } from './billing.service';
-import { CompanyQuantityService } from './company-quantity.service';
-import { KeepProService } from './keep-pro.service';
 import { EntitlementsService } from './entitlements.service';
 import { ReadOnlyInterceptor } from './read-only.interceptor';
 import { StripeWebhookService } from './stripe-webhook.service';
 import { StripeGateway } from './stripe.gateway';
+import { UsageMeterService } from './usage-meter.service';
+import { WalletService } from './wallet.service';
 
-/** Plans and limits, for every module that enforces them. */
+/** Plans, limits and the usage meter, for every module that enforces or meters them. */
 @Global()
 @Module({
-  providers: [EntitlementsService],
-  exports: [EntitlementsService],
+  providers: [EntitlementsService, UsageMeterService],
+  exports: [EntitlementsService, UsageMeterService],
 })
 export class BillingModule {}
 
@@ -27,18 +28,16 @@ export class BillingModule {}
   providers: [
     BillingService,
     BillableUsageService,
+    BillingTickService,
     StripeGateway,
     StripeWebhookService,
-    KeepProService,
+    WalletService,
     { provide: APP_INTERCEPTOR, useClass: ReadOnlyInterceptor },
   ],
   exports: [BillingService, StripeGateway],
 })
 export class BillingHttpModule {}
 
-/** The daily Company quantity job. Imported only into the worker. */
-@Module({
-  imports: [BillingModule],
-  providers: [BillableUsageService, StripeGateway, CompanyQuantityService],
-})
+/** Worker: plans and the meter. The hourly billing tick runs in the Growth worker module. */
+@Module({ imports: [BillingModule] })
 export class BillingWorkerModule {}

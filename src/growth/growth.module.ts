@@ -15,10 +15,11 @@ import {
   GrowthPublicController,
   GrowthWorkspaceController,
 } from './growth.controller';
-import { LaunchOfferService } from './launch-offer.service';
 import { MailerService } from './mailer.service';
 import { MembersService } from './members.service';
-import { TrialReminderService } from './trial-reminder.service';
+import { PersonalTrialService } from './personal-trial.service';
+import { BillingTickService } from '../billing/billing-tick.service';
+import { UsageAlertsService } from '../billing/usage-alerts.service';
 import { ProfileService } from './profile.service';
 
 const SHARED = [
@@ -26,13 +27,13 @@ const SHARED = [
   MailerService,
   ReportCardService,
   DigestService,
-  TrialReminderService,
+  PersonalTrialService,
   // Account deletion removes the workspace; the queue loop is not started here.
   WorkspaceProvisioningService,
   AccountService,
 ];
 
-/** Growth track, HTTP app: launch offer, badge, invites and auto-join, account deletion. */
+/** Growth track, HTTP app: personal trial, badge, invites and auto-join, account deletion. */
 @Module({
   imports: [
     BillingHttpModule,
@@ -45,25 +46,21 @@ const SHARED = [
     GrowthWorkspaceController,
     GrowthIdentityController,
   ],
-  providers: [
-    ...SHARED,
-    ContactFlowService,
-    LaunchOfferService,
-    ProfileService,
-    MembersService,
-  ],
-  exports: [LaunchOfferService],
+  providers: [...SHARED, ContactFlowService, ProfileService, MembersService],
+  exports: [PersonalTrialService],
 })
 export class GrowthModule {}
 
-/** Growth track, worker: the hourly digest, trial reminder and account-deletion activities. */
+/** Growth track, worker: the hourly digest, trial reminders, billing tick and account deletion. */
 @Module({
   imports: [KeycloakModule, DataCollectionModule, RedisThrottlerStorageModule],
-  providers: [...SHARED, StripeGateway],
+  providers: [...SHARED, StripeGateway, BillingTickService, UsageAlertsService],
   exports: [
     DigestService,
     AccountService,
-    TrialReminderService,
+    PersonalTrialService,
+    BillingTickService,
+    UsageAlertsService,
     DataCollectionModule,
   ],
 })
