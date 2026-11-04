@@ -98,7 +98,7 @@ export const AllowUnboundStaff = () => SetMetadata(ALLOW_UNBOUND_KEY, true);
 
 /**
  * Staff listener guard (spec §16): verifies the staff token, then requires an ACTIVE staff row
- * whose Entra object id is the token's `entra_oid`. Rows are bound only by an immutable id: an
+ * whose Entra object id is the token's `entra_oid`. Rows are bound only by a stable id: an
  * object id recorded at invite time, or a one-time invite token claimed out of band
  * (`POST /staff/v1/invites/claim`); an email claim alone never binds anything (security review,
  * 4 Nov). The staff member's address comes from DESK only when DESK is the TCP peer. Any database

@@ -112,7 +112,7 @@ describe('staff listener (e2e)', () => {
     await ctx.http().get('/staff/v1/me').expect(401);
   });
 
-  describe('invites bind by an immutable id, never by email (security review, 4 Nov)', () => {
+  describe('invites bind by a stable id, never by email (security review, 4 Nov)', () => {
     const invite = async (name: string) => {
       const email = `${name}-${STAFF_E2E_SUFFIX}@fixio.test`;
       const { token, hash, expiresAt } = newInviteToken();

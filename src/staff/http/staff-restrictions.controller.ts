@@ -143,26 +143,30 @@ export class StaffRestrictionsController {
       where: { id },
       data: { resolution, resolvedBy: s.staffId, resolvedAt: new Date() },
     });
-    // A wrong block is undone by lifting the ban it created (spec §9.5); the pair stops matching.
+    // A wrong block is undone by un-banning the ban it created (spec §9.5). A ban is never lifted
+    // by one person (founder: un-ban needs a different Owner), so this opens the un-ban request.
+    const unbans: string[] = [];
     if (resolution === 'false_positive' && m.newAccountId) {
       const system = await this.control.staffRestriction.findMany({
         where: {
           accountId: m.newAccountId,
           createdBy: 'system:resignup',
           liftedAt: null,
+          kind: 'BAN',
         },
       });
       for (const r of system)
-        await this.control.staffRestriction.update({
-          where: { id: r.id },
-          data: {
-            liftedAt: new Date(),
-            liftedBy: s.staffId,
-            liftReason: 'Re-signup match marked false positive',
-          },
-        });
+        unbans.push(
+          (
+            await this.restrictions.proposeUnban(
+              s,
+              r.id,
+              'Re-signup match marked false positive',
+            )
+          ).id,
+        );
     }
-    return { ok: true };
+    return { ok: true, unbanRequests: unbans };
   }
 
   @Get('change-requests')

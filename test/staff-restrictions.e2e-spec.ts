@@ -278,6 +278,25 @@ describe('staff restrictions (e2e)', () => {
       }),
     ).toBe(1);
 
+    // A false positive opens an un-ban for a second person; it never lifts the ban by itself.
+    const match = await staff.control.staffRestrictionMatch.findFirstOrThrow({
+      where: { matchedRestrictionId: r.body.restriction.id, kind: 'EMAIL' },
+    });
+    const resolved = await staff
+      .http()
+      .post(`/staff/v1/matches/${match.id}/resolve`)
+      .set(await as(trustSafety))
+      .send({ resolution: 'false_positive' })
+      .expect(200);
+    expect(resolved.body.unbanRequests).toHaveLength(1);
+    expect(
+      (
+        await api()
+          .post('/workspaces/bootstrap')
+          .set({ Authorization: `Bearer ${await customerToken(username)}` })
+      ).status,
+    ).toBe(403);
+
     // The same machine enrolling anywhere: refused before a certificate exists (AC-26).
     await expect(
       human

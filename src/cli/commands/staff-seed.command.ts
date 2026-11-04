@@ -51,7 +51,7 @@ export class StaffSeedCommand extends CommandRunner {
       where: { email },
     });
     if (!member) {
-      // Bound by an immutable id only (security review, 4 Nov): the Entra object id when the
+      // Bound by a stable id only (security review, 4 Nov): the Entra object id when the
       // operator has it (Entra admin centre, Users, Object ID), else a one-time invite token.
       const invite = o.entraOid ? null : newInviteToken();
       member = await this.control.staffMember.create({
