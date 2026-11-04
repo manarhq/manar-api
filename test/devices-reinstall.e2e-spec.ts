@@ -13,11 +13,7 @@ import { freeEntitlements } from './support/free-entitlements';
 import { generateInstallCode } from '../src/hosts/install-code.util';
 import { InstallCodesService } from '../src/hosts/install-codes.service';
 import { HostsAdminService } from '../src/hosts/hosts-admin.service';
-import {
-  HostRefusedError,
-  HostRekeyPendingError,
-  HostsService,
-} from '../src/hosts/hosts.service';
+import { HostRefusedError, HostsService } from '../src/hosts/hosts.service';
 import { InstallKeysService } from '../src/hosts/install-keys.service';
 import type { TpmAttestationService } from '../src/hosts/tpm/tpm-attestation.service';
 import { fakeConfigService } from './support/audit-test-config';
@@ -331,6 +327,56 @@ describe('Add device re-install (e2e)', () => {
     ).rejects.toThrow();
   }, 60_000);
 
+  it('a device that moved itself to another workspace is REMOVED as moved, certificates and standing vault grants withdrawn', async () => {
+    const t = await tenant();
+    const u = await t.person('sub-mv');
+    const first = await newCode(t, u.id);
+    const { result } = await install(t, first.code, 'm-mv');
+    await admin.decide(
+      t.client,
+      t.id,
+      { type: 'human', id: u.id },
+      result.hostId,
+      'approve',
+    );
+    const grant = await t.client.secretVaultAccess.create({
+      data: {
+        hostId: result.hostId,
+        kind: 'aws',
+        ref: 'default',
+        program: 'aws',
+        status: 'ALLOW_ALWAYS',
+        decidedAt: new Date(),
+      },
+    });
+    revokeHostCertificates.mockClear();
+    await admin.markMoved(t.client, t.id, result.hostId);
+    const host = await t.client.host.findUniqueOrThrow({
+      where: { id: result.hostId },
+    });
+    expect(host.status).toBe('REMOVED');
+    expect(host.removedReason).toBe('moved');
+    expect(revokeHostCertificates).toHaveBeenCalledWith(
+      expect.anything(),
+      result.hostId,
+    );
+    expect(
+      (
+        await t.client.secretVaultAccess.findUniqueOrThrow({
+          where: { id: grant.id },
+        })
+      ).withdrawnAt,
+    ).not.toBeNull();
+    expect(
+      recorded.some(
+        (e) =>
+          e.tenantId === t.id &&
+          e.eventType === 'host.moved' &&
+          e.data.hostId === result.hostId,
+      ),
+    ).toBe(true);
+  }, 60_000);
+
   it('a revive revokes every certificate the removed record still had', async () => {
     const t = await tenant();
     const u = await t.person('sub-rev');
@@ -406,7 +452,7 @@ describe('Add device re-install (e2e)', () => {
     const t = await tenant();
     const u = await t.person('sub-race');
     const first = await newCode(t, u.id);
-    const { result } = await install(t, first.code, 'm-race');
+    const { csr, result } = await install(t, first.code, 'm-race');
     const revokeSerial = vi.fn(
       (client: typeof t.client, serialNumber: string) =>
         client.hostCertificate
@@ -453,11 +499,11 @@ describe('Add device re-install (e2e)', () => {
       codes,
     );
     const again = await newCode(t, u.id);
-    const made = (await generateAgentCsr(`host://${t.slug}/m-race`)).csrPem;
+    // The same key re-installing (a new key would be its own device, untouched by this remove).
     await expect(
       racing.register({
         installKey: again.code,
-        csr: made,
+        csr,
         machineId: 'm-race',
         hostname: 'LAPTOP',
         os: 'linux',
@@ -539,7 +585,7 @@ describe('Add device re-install (e2e)', () => {
     ).toBe('APPROVED');
   }, 60_000);
 
-  it("the owner's new key replaces the old one and waits for approval; anyone else's is a pending rekey", async () => {
+  it("a new key for a known machine never replaces its key or certificates, the owner's own key included: it waits as a separate possible clone", async () => {
     const t = await tenant();
     const owner = await t.person('sub-owner');
     const other = await t.person('sub-other');
@@ -556,28 +602,51 @@ describe('Add device re-install (e2e)', () => {
       where: { id: result.hostId },
     });
 
-    const stranger = await newCode(t, other.id);
-    await expect(install(t, stranger.code, 'm-5')).rejects.toBeInstanceOf(
-      HostRekeyPendingError,
-    );
-    expect(
-      (await t.client.host.findUniqueOrThrow({ where: { id: result.hostId } }))
-        .keyFingerprint,
-    ).toBe(before.keyFingerprint);
-
     revokeHostCertificates.mockClear();
-    const mine = await newCode(t, owner.id);
-    await install(t, mine.code, 'm-5'); // a fresh key: generateAgentCsr makes a new pair
+    for (const who of [other, owner]) {
+      const c = await newCode(t, who.id);
+      const again = await install(t, c.code, 'm-5'); // a fresh key: generateAgentCsr makes a new pair
+      expect(again.result.hostId).not.toBe(result.hostId);
+      expect(again.result.status).toBe('PENDING');
+      const clone = await t.client.host.findUniqueOrThrow({
+        where: { id: again.result.hostId },
+      });
+      expect(clone.cloneOfHostId).toBe(result.hostId);
+      expect(clone.machineId).toBe('m-5');
+    }
+    // The machine already in place is untouched: same key, still approved, certificates alive.
     const after = await t.client.host.findUniqueOrThrow({
       where: { id: result.hostId },
     });
-    expect(after.keyFingerprint).not.toBe(before.keyFingerprint);
-    expect(after.status).toBe('PENDING');
-    expect(after.installKeyId).toBe(mine.key.id);
-    expect(revokeHostCertificates).toHaveBeenCalledWith(
-      expect.anything(),
-      result.hostId,
-    );
+    expect(after.keyFingerprint).toBe(before.keyFingerprint);
+    expect(after.status).toBe('APPROVED');
+    expect(after.pendingKeyFingerprint).toBeNull();
+    expect(revokeHostCertificates).not.toHaveBeenCalled();
+    expect(
+      recorded.filter(
+        (e) => e.tenantId === t.id && e.eventType === 'host.possible_clone',
+      ),
+    ).toHaveLength(2);
+    // Each counts as a device.
+    expect(
+      await t.client.host.count({
+        where: { machineId: 'm-5', status: { in: ['PENDING', 'APPROVED'] } },
+      }),
+    ).toBe(3);
+  }, 120_000);
+
+  it('a possible clone that installs again with its own key merges into its own record, not a third one', async () => {
+    const t = await tenant();
+    const u = await t.person('sub-twin');
+    const first = await newCode(t, u.id);
+    const { result } = await install(t, first.code, 'm-6');
+    const second = await newCode(t, u.id);
+    const clone = await install(t, second.code, 'm-6');
+    const third = await newCode(t, u.id);
+    const again = await install(t, third.code, 'm-6', clone.csr);
+    expect(again.result.hostId).toBe(clone.result.hostId);
+    expect(again.result.hostId).not.toBe(result.hostId);
+    expect(await t.client.host.count({ where: { machineId: 'm-6' } })).toBe(2);
   }, 120_000);
 
   describe('workspace kind', () => {
@@ -611,7 +680,7 @@ describe('Add device re-install (e2e)', () => {
       });
     }, 60_000);
 
-    it('a re-install of a known machine with a valid code waits PENDING for the owner', async () => {
+    it('a re-install of a known machine with a valid code waits PENDING for the owner as its own device', async () => {
       const t = await tenant('PERSONAL');
       const u = await t.person('sub-p2');
       const first = await newCode(t, u.id);
@@ -623,13 +692,19 @@ describe('Add device re-install (e2e)', () => {
       const again = await newCode(t, u.id);
       const second = await install(t, again.code, 'p-2'); // same machineId, a fresh key pair
       expect(second.result.status).toBe('PENDING');
+      // The new key gets no decisions, tools or config until the owner approves it, and the
+      // device already enrolled keeps working: nothing about it changed.
+      const clone = await t.client.host.findUniqueOrThrow({
+        where: { id: second.result.hostId },
+      });
+      expect(clone.status).toBe('PENDING');
+      expect(clone.approvedBy).toBeNull();
+      expect(clone.cloneOfHostId).toBe(result.hostId);
       const host = await t.client.host.findUniqueOrThrow({
         where: { id: result.hostId },
       });
-      // PENDING: the new key gets no decisions, tools or config until the owner approves it.
-      expect(host.status).toBe('PENDING');
-      expect(host.approvedBy).toBeNull();
-      expect(host.keyFingerprint).not.toBe(before.keyFingerprint);
+      expect(host.status).toBe('APPROVED');
+      expect(host.keyFingerprint).toBe(before.keyFingerprint);
       const afterEvents = recorded
         .filter((e) => e.tenantId === t.id && e.eventType.startsWith('host.'))
         .map((e) => e.eventType);
@@ -637,6 +712,7 @@ describe('Add device re-install (e2e)', () => {
         'host.registered',
         'host.approved',
         'host.registered',
+        'host.possible_clone',
       ]);
     }, 60_000);
 

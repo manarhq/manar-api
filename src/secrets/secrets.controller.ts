@@ -4,6 +4,7 @@ import {
   ConflictException,
   Controller,
   Get,
+  HttpCode,
   NotFoundException,
   Param,
   ParseUUIDPipe,
@@ -32,9 +33,15 @@ import {
 } from '../common/pagination/cursor-pagination';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import {
+  ApproverDirectory,
+  isApproverRole,
+} from '../approvals/approver-directory';
+import { freshSignIn } from '../approvals/decision-rights';
+import {
   SecretsConflictError,
   SecretsNotFoundError,
   SecretsService,
+  type VaultDecider,
 } from './secrets.service';
 import {
   AccessDecisionSchema,
@@ -77,7 +84,18 @@ export class SecretsController {
   constructor(
     private readonly tenants: TenantDatabaseManager,
     private readonly secrets: SecretsService,
+    private readonly approvers: ApproverDirectory,
   ) {}
+
+  /** The person deciding, for the approval rights (fail closed: an unknown workspace is a company). */
+  private async decider(auth: AuthContext): Promise<VaultDecider> {
+    return {
+      subject: auth.user.keycloakSubject,
+      admin: isApproverRole(auth.roles),
+      company: (await this.approvers.workspace(auth.tenant.id)).company,
+      freshSignIn: freshSignIn(auth.authTime),
+    };
+  }
 
   @Get('timeline')
   @RequireRole(...READ)
@@ -228,11 +246,50 @@ export class SecretsController {
 
   @Get('access')
   @RequireRole(...WRITE)
-  @ApiOperation({ summary: 'Programs waiting for a vaulted secret' })
+  @ApiOperation({
+    summary: 'Programs waiting for a vaulted secret',
+    description:
+      'Each request carries allowedDecisions (what this person may answer), needs (why not, if nothing) and stepUpNeeded (sign in again before allowing).',
+  })
   async access(@CurrentAuth() auth: AuthContext) {
     return this.secrets.listAccess(
       await this.tenants.getClient(auth.tenant.id),
+      await this.decider(auth),
     );
+  }
+
+  @Get('grants')
+  @RequireRole(...WRITE)
+  @ApiOperation({
+    summary: 'Standing secret permissions ("8 hours" and "Always") per device',
+  })
+  async grants(@CurrentAuth() auth: AuthContext) {
+    return this.secrets.listGrants(
+      await this.tenants.getClient(auth.tenant.id),
+    );
+  }
+
+  @Post('grants/:id/withdraw')
+  @HttpCode(200)
+  @RequireRole(...WRITE)
+  @ApiOperation({
+    summary: 'Withdraw a standing secret permission',
+    description:
+      'The device drops it at its next config read (within about a minute) or when it next connects. Audited as secret.vault.grant_withdrawn.',
+  })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async withdraw(
+    @CurrentAuth() auth: AuthContext,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    return this.secrets
+      .withdrawGrant(
+        await this.tenants.getClient(auth.tenant.id),
+        auth.tenant.id,
+        actorOf(auth),
+        id,
+      )
+      .catch(http);
   }
 
   @Post('access/:id/decide')
@@ -240,9 +297,11 @@ export class SecretsController {
   @ApiOperation({
     summary: 'Allow once, 8 hours, always for this program, or deny',
     description:
-      'Body { decision: "ALLOW_ONCE"|"ALLOW_8H"|"ALLOW_ALWAYS"|"DENY" }. Audited as secret.vault.released or secret.vault.denied.',
+      'Body { decision: "ALLOW_ONCE"|"ALLOW_8H"|"ALLOW_ALWAYS"|"DENY" }. The approval rights apply: 403 for an answer this person may not give (a company approver never releases a secret to their own device; a personal owner never answers always), 401 reauth_required when a fresh sign-in is needed first. Audited as secret.vault.released or secret.vault.denied.',
   })
   @ApiResponse({ status: 409, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
   async decide(
     @CurrentAuth() auth: AuthContext,
     @Param('id', new ParseUUIDPipe()) id: string,
@@ -251,7 +310,14 @@ export class SecretsController {
     const b = parseBodyOrThrow(AccessDecisionSchema, body);
     const client = await this.tenants.getClient(auth.tenant.id);
     return this.secrets
-      .decideAccess(client, auth.tenant.id, actorOf(auth), id, b.decision)
+      .decideAccess(
+        client,
+        auth.tenant.id,
+        actorOf(auth),
+        id,
+        b.decision,
+        await this.decider(auth),
+      )
       .catch(http);
   }
 }

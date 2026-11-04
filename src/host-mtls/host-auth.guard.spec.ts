@@ -1,6 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import type { ExecutionContext } from '@nestjs/common';
-import { GoneException, UnauthorizedException } from '@nestjs/common';
+import {
+  GoneException,
+  HttpException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import * as x509 from '@peculiar/x509';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { HostAuthGuard } from './host-auth.guard';
@@ -83,10 +87,18 @@ function world() {
       hostCertificate: { findUnique: vi.fn(() => Promise.resolve(null)) },
     },
   };
+  const deleted: Record<string, { slug: string; reason: string }> = {
+    gone: { slug: 'gone', reason: 'account_deleted' },
+  };
   const control = {
     tenant: {
       findUnique: vi.fn(({ where }: { where: Record<string, string> }) =>
         Promise.resolve(tenantsBySlug[where.slug ?? ''] ?? null),
+      ),
+    },
+    deletedWorkspace: {
+      findUnique: vi.fn(({ where }: { where: Record<string, string> }) =>
+        Promise.resolve(deleted[where.slug ?? ''] ?? null),
       ),
     },
   };
@@ -97,7 +109,20 @@ function world() {
     guard: new HostAuthGuard(control as never, manager as never),
     hostA,
     dbs,
+    tenantsBySlug,
   };
+}
+
+/** The refusal a valid device certificate gets: never a 401, which manar-edge 0.1.6 counts (three
+ * in a row) as "take Manar's hooks out". 423 is read by every edge as "cannot ask: deny, keep". */
+async function refusal(guard: HostAuthGuard, context: ExecutionContext) {
+  const error: unknown = await guard
+    .canActivate(context)
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(HttpException);
+  expect(error).not.toBeInstanceOf(UnauthorizedException);
+  const e = error as HttpException;
+  return { status: e.getStatus(), body: e.getResponse() as { code: string } };
 }
 
 describe('HostAuthGuard', () => {
@@ -136,9 +161,10 @@ describe('HostAuthGuard', () => {
     const { guard, dbs } = world();
     // A certificate that claims tenant B for a machine that exists only in tenant A.
     const { request, context } = ctx(await hostCert('host://b/m-1', '0A0A'));
-    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
-      UnauthorizedException,
-    );
+    expect(await refusal(guard, context)).toMatchObject({
+      status: 423,
+      body: { code: 'certificate_revoked' },
+    });
     expect(request.hostContext).toBeUndefined();
     // Tenant A's database was never consulted for it.
     expect(
@@ -147,19 +173,75 @@ describe('HostAuthGuard', () => {
     ).not.toHaveBeenCalled();
   });
 
-  it('refuses a serial that was not issued to this host, and a revoked one', async () => {
+  it('refuses a serial that was not issued to this host, and a revoked one, with 423 (keep protecting)', async () => {
     const { guard } = world();
     for (const serial of ['0C0C', '0B0B']) {
       const { context } = ctx(await hostCert('host://a/m-1', serial));
-      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      expect(await refusal(guard, context)).toMatchObject({
+        status: 423,
+        body: { code: 'certificate_revoked' },
+      });
     }
   });
 
-  it('refuses an agent certificate, an unknown tenant, an unknown machine, and no certificate', async () => {
+  it('a certificate whose SAN names another machine than the one it was issued to is refused', async () => {
     const { guard } = world();
-    for (const id of ['agent://a/x', 'host://zzz/m-1', 'host://a/other']) {
+    const { context } = ctx(await hostCert('host://a/other', '0A0A'));
+    expect(await refusal(guard, context)).toMatchObject({
+      status: 423,
+      body: { code: 'certificate_revoked' },
+    });
+  });
+
+  it('a suspended workspace, or one being deleted, is 423 with its own code, never 401', async () => {
+    const { guard, tenantsBySlug } = world();
+    for (const [status, code] of [
+      ['SUSPENDED', 'account_suspended'],
+      ['DEPROVISIONING', 'workspace_deleted'],
+      ['DELETED', 'workspace_deleted'],
+    ] as const) {
+      tenantsBySlug.a!.status = status;
+      const { context } = ctx(await hostCert('host://a/m-1', '0A0A'));
+      expect(await refusal(guard, context)).toMatchObject({
+        status: 423,
+        body: { code },
+      });
+    }
+  });
+
+  it('a workspace whose owner deleted their account tells its devices 410 device_removed; any other missing workspace is 423', async () => {
+    const { guard } = world();
+    const gone: unknown = await guard
+      .canActivate(ctx(await hostCert('host://gone/m-1', '0A0A')).context)
+      .catch((e: unknown) => e);
+    expect(gone).toBeInstanceOf(GoneException);
+    expect((gone as GoneException).getResponse()).toMatchObject({
+      code: 'device_removed',
+    });
+    const { context } = ctx(await hostCert('host://zzz/m-1', '0A0A'));
+    expect(await refusal(guard, context)).toMatchObject({
+      status: 423,
+      body: { code: 'workspace_deleted' },
+    });
+  });
+
+  it('a database that cannot be read is 503, never a refusal the device acts on', async () => {
+    const { guard, dbs } = world();
+    (
+      dbs['tid-a'] as { hostCertificate: { findUnique: unknown } }
+    ).hostCertificate.findUnique = vi.fn(() =>
+      Promise.reject(new Error('connection lost')),
+    );
+    const { context } = ctx(await hostCert('host://a/m-1', '0A0A'));
+    const error: unknown = await guard
+      .canActivate(context)
+      .catch((e: unknown) => e);
+    expect((error as HttpException).getStatus()).toBe(503);
+  });
+
+  it('refuses an agent certificate and no certificate with 401 (not a device of ours)', async () => {
+    const { guard } = world();
+    for (const id of ['agent://a/x']) {
       const { context } = ctx(await hostCert(id, '0A0A'));
       await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
         UnauthorizedException,
@@ -175,14 +257,15 @@ describe('HostAuthGuard', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
-  it('refuses rejected and revoked hosts', async () => {
+  it('refuses rejected and revoked hosts with 423 device_revoked: the device locks, it does not unprotect', async () => {
     const { guard, hostA } = world();
     for (const status of ['REJECTED', 'REVOKED']) {
       hostA.status = status;
       const { context } = ctx(await hostCert('host://a/m-1', '0A0A'));
-      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      expect(await refusal(guard, context)).toMatchObject({
+        status: 423,
+        body: { code: 'device_revoked' },
+      });
     }
   });
 
@@ -200,11 +283,9 @@ describe('HostAuthGuard', () => {
         code: 'device_removed',
       });
     }
-    // A certificate the removed host never had learns nothing.
+    // A certificate the removed host never had is not told it was removed.
     const { context } = ctx(await hostCert('host://a/m-1', 'FFFF'));
-    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
-      UnauthorizedException,
-    );
+    expect(await refusal(guard, context)).toMatchObject({ status: 423 });
   });
 
   it('a random serial is unknown', async () => {
@@ -215,8 +296,9 @@ describe('HostAuthGuard', () => {
         randomBytes(8).toString('hex').toUpperCase(),
       ),
     );
-    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
-      UnauthorizedException,
-    );
+    expect(await refusal(guard, context)).toMatchObject({
+      status: 423,
+      body: { code: 'certificate_revoked' },
+    });
   });
 });

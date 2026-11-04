@@ -48,6 +48,7 @@ import {
   FileChangesService,
 } from './changes/file-changes.service';
 import { InstallCodesService } from './install-codes.service';
+import { InstallKeyLimitError, installKeyLimits } from './install-key.util';
 import {
   HostGroupNotFoundError,
   InstallKeysService,
@@ -296,13 +297,21 @@ export class InstallKeysController {
   @ApiOperation({
     summary: 'Create an install key',
     description:
-      'The key is in this response only, once. Audited (without the key).',
+      'The key is in this response only, once. Audited (without the key). Expires in 24 hours and is used once unless the body says otherwise: 1 hour to 30 days (365 days when locked to address ranges), 1 to 10,000 uses; 400 outside that.',
   })
   async create(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const input = parseBodyOrThrow(CreateInstallKeySchema, body);
+    let limits;
+    try {
+      limits = installKeyLimits(input);
+    } catch (error) {
+      if (error instanceof InstallKeyLimitError)
+        throw new BadRequestException(error.message);
+      throw error;
+    }
     const client = await this.tenants.getClient(auth.tenant.id);
     const { key, raw } = await this.keys
-      .create(client, auth.tenant, actorOf(auth), input)
+      .create(client, auth.tenant, actorOf(auth), { ...input, ...limits })
       .catch(http);
     return { ...shown(key), installKey: raw };
   }

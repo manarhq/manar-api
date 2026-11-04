@@ -1,4 +1,12 @@
-import { Controller, Get, Logger, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  Logger,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import { HostsAdminService } from '../hosts/hosts-admin.service';
 import { AiSpendService } from '../ai-spend/ai-spend.service';
 import { HostToolsService } from '../host-coverage/host-tools.service';
 import { ApiExcludeController, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -30,6 +38,7 @@ export class HostConfigController {
     private readonly secrets: SecretsService,
     private readonly jail: JailSitesService,
     private readonly data: DataCollectionService,
+    private readonly hosts: HostsAdminService,
   ) {}
 
   /** Secret blocking flags. Any failure reads as "off": a lookup problem must never lock a person out. */
@@ -90,6 +99,32 @@ export class HostConfigController {
       jail: await this.jail.config(host),
       // Product improvement data: the device owner's effective switches. Off on any failure.
       dataCollection: await this.dataCollection(host),
+      // Standing secret-vault grants ("8 hours", "Always") the device may keep: it drops any other.
+      // Not caught: a failed read fails the config, and the device keeps its last list for at most
+      // its offline lease, never a list it did not get.
+      vaultGrants:
+        host.status === 'APPROVED'
+          ? await this.secrets.vaultGrants(
+              await this.tenants.getClient(host.tenantId),
+              host.hostId,
+            )
+          : [],
     };
+  }
+
+  /**
+   * The device moved itself to another workspace (manar-edge install for a second workspace, after
+   * the person confirmed). Signed by this device's own certificate, so only the device can say it:
+   * this workspace marks it REMOVED with reason `moved` and withdraws its certificates and grants.
+   */
+  @Post('moved')
+  @HttpCode(204)
+  @ApiOperation({ summary: 'This device moved to another workspace' })
+  async moved(@CurrentHost() host: HostContext): Promise<void> {
+    await this.hosts.markMoved(
+      await this.tenants.getClient(host.tenantId),
+      host.tenantId,
+      host.hostId,
+    );
   }
 }

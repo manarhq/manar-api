@@ -164,6 +164,7 @@ describe('SecretsService.decideAccess', () => {
         }),
         updateMany: vi.fn().mockResolvedValue({ count: 0 }),
       },
+      host: { findUnique: vi.fn().mockResolvedValue({ ownerSubject: 'x' }) },
     };
     const s = new SecretsService(audit as never, new SecretAlertBus());
     await expect(
@@ -173,9 +174,167 @@ describe('SecretsService.decideAccess', () => {
         { type: 'human', id: 'u' },
         'a',
         'ALLOW_ONCE',
+        { subject: 'u', admin: true, company: true, freshSignIn: false },
       ),
     ).rejects.toBeInstanceOf(SecretsConflictError);
     expect(audit.recordSafely).not.toHaveBeenCalled();
+  });
+});
+
+describe('vault decisions run the approval rights (founder decisions, 3 and 4 Nov 2026)', () => {
+  function vault(ownerSubject: string | null) {
+    const updates: Record<string, unknown>[] = [];
+    const client = {
+      secretVaultAccess: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'a',
+          hostId: 'h',
+          kind: 'aws',
+          ref: 'default',
+          program: 'aws',
+        }),
+        updateMany: vi.fn(({ data }: { data: Record<string, unknown> }) => {
+          updates.push(data);
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+      host: { findUnique: vi.fn().mockResolvedValue({ ownerSubject }) },
+      secretEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const s = new SecretsService(
+      { recordSafely: vi.fn() } as never,
+      new SecretAlertBus(),
+    );
+    const decide = (
+      decision: 'ALLOW_ONCE' | 'ALLOW_8H' | 'ALLOW_ALWAYS' | 'DENY',
+      who: { company: boolean; freshSignIn?: boolean; subject?: string },
+    ) =>
+      s.decideAccess(
+        client as never,
+        't',
+        { type: 'human', id: 'u' },
+        'a',
+        decision,
+        {
+          subject: who.subject ?? 'me',
+          admin: true,
+          company: who.company,
+          freshSignIn: who.freshSignIn ?? false,
+        },
+      );
+    return { decide, updates };
+  }
+  const status = (e: unknown) => (e as { getStatus(): number }).getStatus();
+  const body = (e: unknown) =>
+    (e as { getResponse(): Record<string, unknown> }).getResponse();
+
+  it('a company admin cannot release a secret to their own device, not even once: another approver must', async () => {
+    const { decide, updates } = vault('me');
+    for (const d of ['ALLOW_ONCE', 'ALLOW_8H', 'ALLOW_ALWAYS'] as const) {
+      const e: unknown = await decide(d, {
+        company: true,
+        freshSignIn: true,
+      }).catch((x: unknown) => x);
+      expect(status(e)).toBe(403);
+    }
+    await expect(decide('DENY', { company: true })).resolves.toMatchObject({
+      status: 'DENY',
+    });
+    expect(updates).toHaveLength(1);
+  });
+
+  it("a company admin may allow someone else's device always, and the grant has no end", async () => {
+    const { decide, updates } = vault('someone-else');
+    await decide('ALLOW_ALWAYS', { company: true });
+    expect(updates[0]).toMatchObject({
+      status: 'ALLOW_ALWAYS',
+      expiresAt: null,
+    });
+  });
+
+  it('a personal owner: once or 8 hours after a fresh sign-in, never always', async () => {
+    const { decide, updates } = vault('me');
+    const stale: unknown = await decide('ALLOW_8H', { company: false }).catch(
+      (x: unknown) => x,
+    );
+    expect(status(stale)).toBe(401);
+    expect(body(stale)).toMatchObject({ code: 'reauth_required' });
+    const always: unknown = await decide('ALLOW_ALWAYS', {
+      company: false,
+      freshSignIn: true,
+    }).catch((x: unknown) => x);
+    expect(status(always)).toBe(403);
+    expect(updates).toHaveLength(0);
+    const before = Date.now();
+    await decide('ALLOW_8H', { company: false, freshSignIn: true });
+    const until = (updates[0]!.expiresAt as Date).getTime();
+    expect(until - before).toBeGreaterThanOrEqual(8 * 3_600_000 - 1_000);
+    expect(until - before).toBeLessThanOrEqual(8 * 3_600_000 + 1_000);
+  });
+
+  it("a personal device with no recorded owner is still the owner's own: no always", async () => {
+    const { decide } = vault(null);
+    const e: unknown = await decide('ALLOW_ALWAYS', {
+      company: false,
+      freshSignIn: true,
+    }).catch((x: unknown) => x);
+    expect(status(e)).toBe(403);
+  });
+});
+
+describe('standing vault grants: listed, withdrawn, and sent to the device', () => {
+  it('the device config lists only live, not withdrawn, standing grants', async () => {
+    const findMany = vi.fn().mockResolvedValue([
+      { id: 'g8', status: 'ALLOW_8H', expiresAt: new Date('2030-01-01') },
+      { id: 'ga', status: 'ALLOW_ALWAYS', expiresAt: null },
+    ]);
+    const s = new SecretsService(
+      { recordSafely: vi.fn() } as never,
+      new SecretAlertBus(),
+    );
+    const out = await s.vaultGrants(
+      { secretVaultAccess: { findMany } } as never,
+      'h',
+    );
+    expect(out).toEqual([
+      { id: 'g8', until: '2030-01-01T00:00:00.000Z' },
+      { id: 'ga', until: null },
+    ]);
+    const where = (
+      findMany.mock.calls[0]![0] as { where: Record<string, unknown> }
+    ).where;
+    expect(where).toMatchObject({ hostId: 'h', withdrawnAt: null });
+  });
+
+  it('withdrawing is audited once; a second withdraw changes nothing', async () => {
+    const audit = { recordSafely: vi.fn() };
+    let withdrawn = false;
+    const client = {
+      secretVaultAccess: {
+        updateMany: vi.fn(() => {
+          const count = withdrawn ? 0 : 1;
+          withdrawn = true;
+          return Promise.resolve({ count });
+        }),
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'g',
+          hostId: 'h',
+          kind: 'aws',
+          ref: 'default',
+          program: 'aws',
+          status: 'ALLOW_ALWAYS',
+        }),
+      },
+    };
+    const s = new SecretsService(audit as never, new SecretAlertBus());
+    const actor = { type: 'human' as const, id: 'u' };
+    await s.withdrawGrant(client as never, 't', actor, 'g');
+    await s.withdrawGrant(client as never, 't', actor, 'g');
+    expect(audit.recordSafely).toHaveBeenCalledTimes(1);
+    expect(audit.recordSafely.mock.calls[0]![2]).toMatchObject({
+      eventType: 'secret.vault.grant_withdrawn',
+      data: { hostId: 'h', grantId: 'g' },
+    });
   });
 });
 

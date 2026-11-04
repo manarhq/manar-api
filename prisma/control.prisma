@@ -627,6 +627,18 @@ model AccountDeletion {
   @@map("account_deletions")
 }
 
+/// A workspace whose database is gone, kept by slug (slugs are random and never reused). A device
+/// certificate that names it learns why: `account_deleted` means its owner deleted their account,
+/// and the device is told it was removed (410), so it gives the person their tools back. Without a
+/// row here a missing workspace is "cannot ask" (423) and the device keeps protecting.
+model DeletedWorkspace {
+  slug      String   @id
+  reason    String
+  deletedAt DateTime @default(now())
+
+  @@map("deleted_workspaces")
+}
+
 /// A person's own verified contact email (the shared realm stores a placeholder `@idp.invalid`
 /// for Microsoft and GitHub users). Receipts, alerts, the weekly email and Stripe use this and
 /// nothing else. `pending*` is an unconfirmed change: a 6-digit code, HMAC-stored, 10 minutes,

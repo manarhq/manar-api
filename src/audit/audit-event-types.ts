@@ -171,6 +171,14 @@ export const AUDIT_EVENT_TYPES = {
   BILLING_PLAN_CHANGED: 'billing.plan.changed',
   /** The owner removed a device (console "Remove device"): certificates revoked, record kept as REMOVED; it can be installed again. */
   HOST_REMOVED: 'host.removed',
+  /** A known machineId registered with a new key: a separate PENDING host, never a key swap. */
+  HOST_POSSIBLE_CLONE: 'host.possible_clone',
+  /** The device moved itself to another workspace (signed by its own certificate). */
+  HOST_MOVED: 'host.moved',
+  /** A company device's person left: it stays protected, unassigned. */
+  HOST_UNASSIGNED: 'host.unassigned',
+  /** A member of a company deleted their Manar account. */
+  MEMBER_ACCOUNT_DELETED: 'member.account_deleted',
 
   // AI tool coverage (launch spec 4.5).
   /** A device reported an AI tool for the first time. */
@@ -191,6 +199,8 @@ export const AUDIT_EVENT_TYPES = {
   SECRET_VAULT_RESTORED: 'secret.vault.restored',
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
+  /** A person withdrew a standing "8 hours" or "Always" vault grant; the device drops it. */
+  SECRET_VAULT_GRANT_WITHDRAWN: 'secret.vault.grant_withdrawn',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
 
   // Tampering a device saw (manar-edge protect; src/hosts/tamper.ts). Data: host, tool, kind, masked path.

@@ -113,7 +113,10 @@ export const RESTORE_WINDOW_MS = 30 * 24 * 3_600_000;
  * 4. the Host is created (status from the approval rules), or, for a
  *    machine already known in the tenant with the same key and group,
  *    merged (VDI) keeping its status; audited in the same transaction. A
- *    different key, or a key from another group, changes nothing: it is
+ *    different key for a known machine never touches the known host (its key
+ *    and certificates stay): it becomes a separate PENDING host flagged as a
+ *    possible clone or re-install, which an admin (or in a personal
+ *    workspace, its owner) approves or rejects. A key from another group is
  *    recorded as a pending rekey for an admin (no certificate meanwhile), so
  *    an install key alone can neither take over nor disturb a machine;
  * 5. a host certificate is issued for `host://<tenantSlug>/<machineId>`.
@@ -261,8 +264,9 @@ export class HostsService {
         // Serialises with "Remove device" (HostsAdminService.retire takes the same row lock), so a
         // removal and a registration of one machine never interleave.
         await tx.$queryRaw`SELECT 1 FROM "hosts" WHERE "machineId" = ${input.machineId} FOR UPDATE`;
-        const found = await tx.host.findUnique({
-          where: { machineId: input.machineId },
+        // The machine's original record (clones of it carry `cloneOfHostId`).
+        const found = await tx.host.findFirst({
+          where: { machineId: input.machineId, cloneOfHostId: null },
         });
         // A removed machine enrols as a new device would. Its owner re-installing it with an
         // install key within RESTORE_WINDOW_MS revives the old record (history continues), and
@@ -291,15 +295,36 @@ export class HostsService {
             });
           }
         }
-        const existing = found?.status === 'REMOVED' ? null : found;
+        const known = found?.status === 'REMOVED' ? null : found;
         if (
-          existing &&
-          (existing.status === 'REVOKED' || existing.status === 'REJECTED')
+          known &&
+          (known.status === 'REVOKED' || known.status === 'REJECTED')
         ) {
-          throw new HostRefusedError(
-            `host ${existing.id} is ${existing.status}`,
-          );
+          throw new HostRefusedError(`host ${known.id} is ${known.status}`);
         }
+        // A new key for a known machine (founder decision, 4 Nov 2026): never a key swap on the
+        // known host, whoever made the install key. It is its own device, PENDING, flagged as a
+        // possible clone or re-install. The same key again merges into that device.
+        let cloneOf: Host | null = null;
+        let twin: Host | null = null;
+        if (
+          known &&
+          ctx.method === 'INSTALL_KEY' &&
+          known.keyFingerprint !== keyFingerprint
+        ) {
+          twin = await tx.host.findFirst({
+            where: {
+              machineId: input.machineId,
+              keyFingerprint,
+              cloneOfHostId: { not: null },
+              status: { not: 'REMOVED' },
+            },
+          });
+          if (twin && (twin.status === 'REVOKED' || twin.status === 'REJECTED'))
+            throw new HostRefusedError(`host ${twin.id} is ${twin.status}`);
+          if (!twin) cloneOf = known;
+        }
+        const existing = cloneOf ? null : (twin ?? known);
         // One certificate identity, one host: a computer certificate cannot
         // register a second machineId, nor take over another host's machineId.
         if (ctx.adcs) {
@@ -326,16 +351,6 @@ export class HostsService {
         const targetGroupId = followsOu
           ? (ctx.hostGroupId ?? existing.hostGroupId)
           : (ctx.hostGroupId ?? ctx.defaultHostGroupId);
-        // The owner of this machine record re-installing (same person, same machine): replace the
-        // key, wait for approval again, and retire the old key's certificates. Anyone else showing
-        // a different key or group is a pending rekey for an admin.
-        const reenrol =
-          !!existing &&
-          ctx.method === 'INSTALL_KEY' &&
-          !!ctx.ownerSubject &&
-          existing.ownerSubject === ctx.ownerSubject &&
-          (existing.keyFingerprint !== keyFingerprint ||
-            existing.hostGroupId !== targetGroupId);
         // A new device counts against the plan, under a lock held until this transaction ends,
         // so N+1 parallel registrations cannot all pass. A known machine is not a new device.
         // This and the refusals above run BEFORE the install key is used.
@@ -355,7 +370,6 @@ export class HostsService {
         }
         if (
           existing &&
-          !reenrol &&
           (existing.keyFingerprint !== keyFingerprint ||
             // A host enrolled another way has no certificate identity: an
             // admin decides whether this certificate may take it over.
@@ -401,11 +415,15 @@ export class HostsService {
         }
         // A personal owner's own code approves a NEW device only. machineId is the installer's
         // claim, so a re-install of a known machine (new key) waits for the owner to confirm it.
-        // A revived record always waits for an admin: no owner or rule approval.
+        // A revived record and a possible clone always wait for a person: no owner or rule approval.
         const ownerApproved =
-          !!ctx.ownerApproves && ctx.autoApprove && !existing && !revive;
+          !!ctx.ownerApproves &&
+          ctx.autoApprove &&
+          !existing &&
+          !revive &&
+          !cloneOf;
         const rule =
-          existing || revive || !ctx.autoApprove || ownerApproved
+          existing || revive || cloneOf || !ctx.autoApprove || ownerApproved
             ? null
             : matchApprovalRule(
                 await tx.hostApprovalRule.findMany({
@@ -446,6 +464,7 @@ export class HostsService {
           lastSeenAt: new Date(),
           ownerSubject: ctx.ownerSubject ?? null,
           installKeyId: ctx.installKeyId,
+          ...(cloneOf ? { cloneOfHostId: cloneOf.id } : {}),
           ...adFacts,
           ...tpmFacts,
           ...(rule || ownerApproved
@@ -467,18 +486,6 @@ export class HostsService {
                 lastSeenAt: new Date(),
                 hostGroupId: targetGroupId,
                 installKeyId: ctx.installKeyId,
-                ...(reenrol
-                  ? {
-                      keyFingerprint,
-                      status: 'PENDING' as const,
-                      approvedBy: null,
-                      approvedAt: null,
-                      pendingKeyFingerprint: null,
-                      pendingHostGroupId: null,
-                      tpmVerified: false,
-                      tpmEkFingerprint: null,
-                    }
-                  : {}),
                 ...(followsOu ? adFacts : {}),
                 ...tpmFacts,
               },
@@ -516,7 +523,8 @@ export class HostsService {
             enrolmentMethod: ctx.method,
             merged: existing !== null,
             restored: revive !== null,
-            reenrolled: reenrol || revive !== null,
+            reenrolled: revive !== null,
+            possibleCloneOf: cloneOf?.id ?? null,
             status: saved.status,
             approvalRuleId: rule?.id ?? null,
             keyType: saved.keyType,
@@ -546,12 +554,26 @@ export class HostsService {
               },
             })
           : null;
-        const done = approved
-          ? () => {
-              registered();
-              approved();
-            }
-          : registered;
+        // Possible clone or re-install: its own event, so an alert can key on it.
+        const cloned = cloneOf
+          ? await this.audit.recordInTransaction(tx, tenant.id, {
+              eventType: AUDIT_EVENT_TYPES.HOST_POSSIBLE_CLONE,
+              actor: { type: 'system', id: 'system:host-registration' },
+              data: {
+                hostId: saved.id,
+                cloneOfHostId: cloneOf.id,
+                machineId: input.machineId,
+                installKeyId: ctx.installKeyId,
+                keyFingerprint,
+                ip: input.ip,
+              },
+            })
+          : null;
+        const done = () => {
+          registered();
+          approved?.();
+          cloned?.();
+        };
         if (moved) {
           // Followed its OU to another group: its own record, same transaction.
           const groupMoved = await this.audit.recordInTransaction(
@@ -576,14 +598,14 @@ export class HostsService {
               groupMoved();
             },
             rekeyPending: false,
-            reenrolled: reenrol || revive !== null,
+            reenrolled: revive !== null,
           };
         }
         return {
           host: saved,
           publish: done,
           rekeyPending: false,
-          reenrolled: reenrol || revive !== null,
+          reenrolled: revive !== null,
         };
       });
     publish();
@@ -593,7 +615,7 @@ export class HostsService {
       );
     }
 
-    // A re-install replaced the key (or revived a removed record): the old certificates stop now.
+    // A revived removed record: the certificates it still had stop now.
     if (reenrolled) await this.ca.revokeHostCertificates(client, host.id);
     const issued = await this.ca.issueHostCertificate(
       client,

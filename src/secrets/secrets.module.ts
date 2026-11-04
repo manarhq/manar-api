@@ -1,5 +1,6 @@
 import { forwardRef, Module } from '@nestjs/common';
 import { HostMtlsModule } from '../host-mtls/host-mtls.module';
+import { ApproverDirectory } from '../approvals/approver-directory';
 import { SecretAlertBus } from './secret-alert-bus';
 import { SecretsHostController } from './secrets-host.controller';
 import { SecretsController } from './secrets.controller';
@@ -13,7 +14,12 @@ import { SecretsService } from './secrets.service';
 export class SecretsModule {}
 
 /** Console routes (`/secrets/*`, JWT) on the human listener. */
-@Module({ imports: [SecretsModule], controllers: [SecretsController] })
+@Module({
+  imports: [SecretsModule],
+  controllers: [SecretsController],
+  // Who may decide a vault request: the same approval rights as device approvals.
+  providers: [ApproverDirectory],
+})
 export class SecretsHttpModule {}
 
 /**

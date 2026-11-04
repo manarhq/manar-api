@@ -2214,10 +2214,12 @@ enum HostKeyType {
   SOFTWARE
 }
 
-/// One machine, unique per tenant by `machineId` (its certificate names
-/// `host://<tenantSlug>/<machineId>`). Re-registration merges into this row
-/// (VDI golden images register on every boot); a different key or a key
-/// from another group waits as a pending rekey for an admin (docs/hosts.md).
+/// One machine as one device key. Its certificate names `host://<tenantSlug>/<machineId>`; the
+/// certificate row, not the machineId, says which host it is. Re-registration with the same key
+/// merges into this row (VDI golden images register on every boot). A different key for a known
+/// machineId never touches this row: it becomes its own PENDING host with `cloneOfHostId` set
+/// ("possible clone or re-install"), which an admin or the device's person approves. Only one host
+/// per machineId has no `cloneOfHostId` (a partial unique index in SQL, not expressible here).
 model Host {
   id                    String               @id @default(uuid())
   hostGroupId           String
@@ -2256,6 +2258,15 @@ model Host {
   /// device. Re-enrolling within 30 days revives this row; later, its `machineId` is rewritten to
   /// `removed:<id>` so the machine enrols as a new device (HostsService.completeRegistration).
   removedAt             DateTime?
+  /// Why it was removed: null for "Remove device", `moved` when the device moved itself to another
+  /// workspace, `account_deleted` when its owner deleted their account.
+  removedReason         String?
+  /// Set on a host registered for a machineId another host already holds with another key: a
+  /// possible clone, or a re-install. It waits PENDING and never replaces the other host.
+  cloneOfHostId         String?
+  /// The person this company device was assigned to left (deleted their account): it stays
+  /// protected and its approvals go to approvers. Cleared when someone is assigned again.
+  unassignedAt          DateTime?
   certificates          HostCertificate[]
   fileChanges           HostFileChange[]
   tools                 HostTool[]
@@ -2267,7 +2278,7 @@ model Host {
   aiUsage               AiUsageDaily[]
   siteRules             HostSiteRule[]
 
-  @@unique([machineId])
+  @@index([machineId])
   /// One computer identity, one host (lower-cased certificate DNS name; nulls repeat).
   @@unique([adcsDnsName])
   @@index([hostGroupId])
@@ -2606,6 +2617,12 @@ model SecretVaultAccess {
   status      String    @default("PENDING")
   decidedBy   String?
   decidedAt   DateTime?
+  /// ALLOW_8H: decidedAt + 8 hours. ALLOW_ALWAYS: null (no end). The device keeps a standing grant
+  /// only while it is listed in its config (`vaultGrants`).
+  expiresAt   DateTime?
+  /// A person withdrew the standing grant in the console; the device drops it at its next config.
+  withdrawnAt DateTime?
+  withdrawnBy String?
   createdAt   DateTime  @default(now())
 
   @@index([hostId, status])
