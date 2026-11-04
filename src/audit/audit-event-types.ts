@@ -1,3 +1,5 @@
+import { ENT_AUDIT_EVENT_TYPES } from '../enterprise/common/ent-audit-events';
+
 /**
  * Section 29's event-type catalog, restricted to the names this phase's
  * retrofit points actually produce (the full catalog has more entries for
@@ -265,6 +267,9 @@ export const AUDIT_EVENT_TYPES = {
   JAIL_SITE_RULE_CREATED: 'jail.site_rule.created',
   /** A person removed a site rule. */
   JAIL_SITE_RULE_REMOVED: 'jail.site_rule.removed',
+
+  // Enterprise and Government invisible mode (src/enterprise/common/ent-audit-events.ts).
+  ...ENT_AUDIT_EVENT_TYPES,
 } as const;
 
 export type AuditEventType =

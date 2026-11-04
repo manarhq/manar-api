@@ -2767,3 +2767,157 @@ model HostSiteRule {
   @@index([hostId])
   @@map("host_site_rules")
 }
+
+// ---------------------------------------------------------------------------------------------
+// Enterprise and Government "invisible mode" (src/enterprise/**). Every table is prefixed `ent_`.
+// Metadata only: prompt, answer and file content never land in these tables in clear.
+// ---------------------------------------------------------------------------------------------
+
+/// One row (id 1): branding, notice text, retention and exception timing for this organisation.
+model EntSettings {
+  id                     Int       @id @default(1)
+  orgNameEn              String
+  orgNameAr              String
+  orgShort               String
+  logo                   Bytes?
+  logoType               String?
+  noticeEn               String?
+  noticeAr               String?
+  noticeVersion          Int       @default(1)
+  dpoContact             String?
+  retentionDays          Int       @default(90)
+  summaryDays            Int       @default(365)
+  pendingRetentionDays   Int?
+  pendingRetentionAt     DateTime?
+  exceptionWindowMinutes Int       @default(30)
+  /// {"mon":["07:30","15:30"],...}; days absent are not working days.
+  workWeek               Json
+  timeZone               String    @default("Asia/Dubai")
+  defaultLanguage        String    @default("en")
+  /// "ASK" or "ALLOW_FLAG": what happens to files and items WATCH could not check.
+  unreadableFile         String    @default("ASK")
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@map("ent_settings")
+}
+
+/// An employee, synced from Entra (or created when a device first proves an email).
+model EntPerson {
+  id                String      @id @default(uuid())
+  /// Entra object id when synced.
+  externalId        String?     @unique
+  /// Lower-cased; one person per address in a tenant.
+  email             String      @unique
+  displayName       String
+  orgUnitId         String?
+  managerId         String?
+  manager           EntPerson?  @relation("EntManager", fields: [managerId], references: [id])
+  reports           EntPerson[] @relation("EntManager")
+  preferredLanguage String?
+  accountEnabled    Boolean     @default(true)
+  noticeSentVersion Int?
+  devices           EntDevice[]
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@index([managerId])
+  @@index([orgUnitId])
+  @@map("ent_people")
+}
+
+/// A browser enrolment key. Only its SHA-256 is stored; the key is shown once.
+model EntEnrolKey {
+  id        String    @id @default(uuid())
+  keyHash   String    @unique
+  label     String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdBy String
+  uses      Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  @@map("ent_enrol_keys")
+}
+
+/// A WATCH install: one browser profile holding its own non-extractable P-256 key.
+model EntDevice {
+  id               String     @id @default(uuid())
+  publicKeyJwk     Json
+  /// RFC 7638 thumbprint of the public key: the same key never enrols twice.
+  keyThumbprint    String     @unique
+  personId         String?
+  person           EntPerson? @relation(fields: [personId], references: [id])
+  /// True only after an id_token bound to a server-issued nonce proved the email.
+  identityVerified Boolean    @default(false)
+  profileEmail     String?
+  browser          String
+  extensionVersion String
+  policyVersion    String?
+  configHash       String?
+  lastHeartbeatAt  DateTime?
+  enrolKeyId       String
+  createdAt        DateTime   @default(now())
+
+  @@index([personId])
+  @@map("ent_devices")
+}
+
+/// Single-use nonce for the silent sign-in that proves a device's email (10-minute TTL).
+model EntIdentityNonce {
+  id        String    @id @default(uuid())
+  deviceId  String
+  nonceHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([deviceId])
+  @@map("ent_identity_nonces")
+}
+
+/// What happened to one send or file action: categories, counts and rule outcomes, never text.
+model EntEvent {
+  id            String   @id @default(uuid())
+  deviceId      String
+  personId      String?
+  clientEventId String
+  host          String
+  kind          String
+  outcome       String
+  ruleId        String?
+  trace         Json
+  counts        Json
+  packVersion   String?
+  at            DateTime
+  receivedAt    DateTime @default(now())
+
+  @@unique([deviceId, clientEventId])
+  @@index([receivedAt])
+  @@index([personId, receivedAt])
+  @@index([ruleId, receivedAt])
+  @@map("ent_events")
+}
+
+/// An open or closed tamper signal for a device (coverage health red while open).
+model EntTamperSignal {
+  id       String    @id @default(uuid())
+  deviceId String
+  kind     String
+  openedAt DateTime  @default(now())
+  closedAt DateTime?
+
+  @@index([deviceId, closedAt])
+  @@map("ent_tamper_signals")
+}
+
+/// Hostname-only visit counts per device and day, for the shadow AI view.
+model EntSiteVisit {
+  deviceId String
+  day      String
+  host     String
+  count    Int
+
+  @@id([deviceId, day, host])
+  @@map("ent_site_visits")
+}
