@@ -506,7 +506,15 @@ describe('Manar edge (e2e)', () => {
         .post('/agents/enroll')
         .send({ token, csr: 'x', edge: { wgPublicKey: wgKey() } })
         .expect(401);
-      expect(withEdge.body).toEqual(plain.body);
+      // Same answer apart from the per-occurrence reference and correlation id.
+      const sameShape = (b: Record<string, unknown>) => ({
+        ...b,
+        reference: undefined,
+        correlationId: undefined,
+      });
+      expect(sameShape(withEdge.body as Record<string, unknown>)).toEqual(
+        sameShape(plain.body as Record<string, unknown>),
+      );
       const added = (await failures()).slice(before);
       expect(added).toHaveLength(2);
       expect(added[1]!.actor).toEqual(added[0]!.actor);
