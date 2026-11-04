@@ -208,11 +208,11 @@ describe('staff RBAC (e2e)', () => {
     await fga.write({ deletes: [assigneeTuple(ownerRole, 'STAFF', owner)] });
     await fga.write({ writes: [assigneeTuple(ownerRole, 'STAFF', support)] });
     expect(await rbac.can(owner, 'restrict.ban')).toBe(false);
-    expect(await rbac.reconcile({ dryRun: true })).toEqual({ fixed: 2 });
-    expect(await rbac.reconcile({ dryRun: false })).toEqual({ fixed: 2 });
+    expect(await rbac.reconcile({ dryRun: true })).toMatchObject({ fixed: 2 });
+    expect(await rbac.reconcile({ dryRun: false })).toMatchObject({ fixed: 2 });
     expect(await rbac.can(owner, 'restrict.ban')).toBe(true);
     expect(await rbac.can(support, 'restrict.ban')).toBe(false);
-    expect(await rbac.reconcile({ dryRun: false })).toEqual({ fixed: 0 });
+    expect(await rbac.reconcile({ dryRun: false })).toMatchObject({ fixed: 0 });
   });
 
   describe('security review fixes (4 Nov)', () => {
@@ -303,7 +303,9 @@ describe('staff RBAC (e2e)', () => {
       });
       expect(rows.every((r) => r.revokedAt !== null)).toBe(true);
       expect(await rbac.can(support, 'tags.write')).toBe(false);
-      expect(await rbac.reconcile({ dryRun: true })).toEqual({ fixed: 0 });
+      expect(await rbac.reconcile({ dryRun: true })).toMatchObject({
+        fixed: 0,
+      });
     });
 
     it('a failed OpenFGA write on group add leaves no member row', async () => {
@@ -611,5 +613,99 @@ describe('staff RBAC (e2e)', () => {
           expect(await rbac.can(support, p)).toBe(newest.includes(p));
       }
     }, 180_000);
+  });
+
+  describe('reconciler full sweep (security review, 4 Nov)', () => {
+    it('removes a rogue assignee tuple written straight into OpenFGA', async () => {
+      const rogue = randomUUID();
+      await fga.write({
+        writes: [
+          {
+            user: `staff:${rogue}`,
+            relation: 'assignee',
+            object: `role:${await roleId('owner')}~platform~manar`,
+          },
+        ],
+      });
+      expect(await rbac.can(rogue, 'restrict.ban')).toBe(true);
+      const plan = await rbac.reconcile({ dryRun: true });
+      expect(plan.wouldDelete).toBeGreaterThanOrEqual(1);
+      expect(await rbac.can(rogue, 'restrict.ban')).toBe(true); // dry run changed nothing
+      await rbac.reconcile({ dryRun: false });
+      expect(await rbac.can(rogue, 'restrict.ban')).toBe(false);
+    });
+
+    it('removes every tuple of a role Postgres does not know', async () => {
+      const orphan = randomUUID();
+      const someone = randomUUID();
+      await fga.write({
+        writes: [
+          {
+            user: `role:${orphan}~platform~manar#assignee`,
+            relation: 'restrict_ban',
+            object: 'platform:manar',
+          },
+          {
+            user: `staff:${someone}`,
+            relation: 'assignee',
+            object: `role:${orphan}~platform~manar`,
+          },
+        ],
+      });
+      expect(await rbac.can(someone, 'restrict.ban')).toBe(true);
+      await rbac.reconcile({ dryRun: false });
+      expect(await rbac.can(someone, 'restrict.ban')).toBe(false);
+      expect(await fga.readObject(`role:${orphan}~platform~manar`)).toEqual([]);
+    });
+
+    it('removes a user shape the staff model never writes (a nested group)', async () => {
+      const group = await control.staffGroup.create({
+        data: { name: `sweep-${suffix}`, createdBy: owner },
+      });
+      const smuggled = randomUUID();
+      await fga.write({
+        writes: [
+          {
+            user: `group:${smuggled}#member`,
+            relation: 'member',
+            object: `group:${group.id}`,
+          },
+        ],
+      });
+      await rbac.reconcile({ dryRun: false });
+      expect(await fga.readObject(`group:${group.id}`)).toEqual([]);
+    });
+
+    it('refuses a mass delete without the explicit flag and records it', async () => {
+      const ownerRole = await roleId('owner');
+      const rogues = Array.from(
+        { length: StaffRbacService.MAX_RECONCILE_DELETES + 1 },
+        () => randomUUID(),
+      );
+      await fga.write({
+        writes: rogues.map((r) => ({
+          user: `staff:${r}`,
+          relation: 'assignee',
+          object: `role:${ownerRole}~platform~manar`,
+        })),
+      });
+      const blocked = await rbac.reconcile({ dryRun: false });
+      expect(blocked).toMatchObject({ blocked: true, fixed: 0 });
+      expect(blocked.wouldDelete).toBeGreaterThan(
+        StaffRbacService.MAX_RECONCILE_DELETES,
+      );
+      expect(await rbac.can(rogues[0]!, 'restrict.ban')).toBe(true);
+      const event = await control.staffAuditEvent.findFirst({
+        where: { action: 'rbac.reconcile_blocked' },
+        orderBy: { seq: 'desc' },
+      });
+      expect(event).not.toBeNull();
+      const done = await rbac.reconcile({
+        dryRun: false,
+        allowMassDelete: true,
+      });
+      expect(done.blocked).toBeFalsy();
+      expect(await rbac.can(rogues[0]!, 'restrict.ban')).toBe(false);
+    });
   });
 });

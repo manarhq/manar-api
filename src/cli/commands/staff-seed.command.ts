@@ -119,11 +119,26 @@ export class RbacReconcileCommand extends CommandRunner {
   constructor(private readonly rbac: StaffRbacService) {
     super();
   }
-  async run(_p: string[], o: { dryRun?: boolean }): Promise<void> {
-    const { fixed } = await this.rbac.reconcile({ dryRun: !!o.dryRun });
-    this.logger.log(`${o.dryRun ? 'would fix' : 'fixed'} ${fixed} tuple(s)`);
+  async run(
+    _p: string[],
+    o: { dryRun?: boolean; allowMassDelete?: boolean },
+  ): Promise<void> {
+    const r = await this.rbac.reconcile({
+      dryRun: !!o.dryRun,
+      allowMassDelete: !!o.allowMassDelete,
+    });
+    if (r.blocked)
+      throw new Error(
+        `would delete ${r.wouldDelete} tuples; check the plan with --dry-run, then pass --allow-mass-delete`,
+      );
+    this.logger.log(
+      `${o.dryRun ? 'would fix' : 'fixed'} ${r.fixed} tuple(s), ${r.wouldDelete} deletion(s)`,
+    );
   }
   @Option({ flags: '--dry-run' }) parseDry() {
+    return true;
+  }
+  @Option({ flags: '--allow-mass-delete' }) parseMassDelete() {
     return true;
   }
 }

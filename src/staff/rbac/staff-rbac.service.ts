@@ -1,7 +1,9 @@
 import {
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
+  Optional,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
@@ -32,6 +34,12 @@ import {
 } from './permissions';
 
 export const WITHIN_WINDOW = 'within_window';
+
+/** Tells the staff Owners about something that needs a person (email and push; spec §11.4). */
+export interface StaffAlerts {
+  alertOwners(kind: string, data: Record<string, unknown>): Promise<void>;
+}
+export const STAFF_ALERTS = Symbol('STAFF_ALERTS');
 /** `revokedBy` / `endedBy` when the OpenFGA projection of a grant failed and it was rolled back. */
 export const PROJECTION_FAILED = 'system:projection_failed';
 /** Spec §11.1: an elevation lasts at most one hour. */
@@ -43,6 +51,15 @@ const reconcileFixed = new Counter({
 });
 
 type Tx = Prisma.TransactionClient;
+interface Changes {
+  writes: number;
+  deletes: number;
+}
+const NO_CHANGES: Changes = { writes: 0, deletes: 0 };
+const plus = (a: Changes, b: Changes): Changes => ({
+  writes: a.writes + b.writes,
+  deletes: a.deletes + b.deletes,
+});
 type PrincipalType = 'STAFF' | 'GROUP';
 
 export interface GrantInput {
@@ -122,6 +139,7 @@ export class StaffRbacService {
     private readonly control: ControlPrismaService,
     private readonly fga: OpenFgaClientService,
     private readonly audit: StaffAuditService,
+    @Optional() @Inject(STAFF_ALERTS) private readonly alerts?: StaffAlerts,
   ) {}
 
   /** Throws when OpenFGA cannot answer: callers turn that into 503, never into an allow. */
@@ -227,26 +245,27 @@ export class StaffRbacService {
       : null;
   }
 
-  /** Makes OpenFGA hold exactly `desired` for this (user, object). Returns the number of changes. */
+  /** Makes OpenFGA hold exactly `desired` for this (user, object). Returns what it changed. */
   private async converge(
     user: string,
     object: string,
     desired: TupleKey | null,
     dryRun = false,
-  ): Promise<number> {
+  ): Promise<Changes> {
     const actual = await this.fga.readTuples({ object, user });
     const stale = actual.filter(
       (t) => !desired || tupleKey(t) !== tupleKey(desired),
     );
     const missing =
       !!desired && !actual.some((t) => tupleKey(t) === tupleKey(desired));
-    if (dryRun) return stale.length + (missing ? 1 : 0);
+    const changes = { writes: missing ? 1 : 0, deletes: stale.length };
+    if (dryRun) return changes;
     // Deletes first, in their own call: OpenFGA refuses a request that deletes and writes the
     // same (user, relation, object) with different conditions.
     if (stale.length)
       await this.fga.write({ deletes: stale, ignoreMissingDeletes: true });
     if (missing && desired) await this.fga.write({ writes: [desired] });
-    return stale.length + (missing ? 1 : 0);
+    return changes;
   }
 
   private async projectAssignee(
@@ -255,7 +274,7 @@ export class StaffRbacService {
     principalId: string,
     roleId: string,
     dryRun = false,
-  ): Promise<number> {
+  ): Promise<Changes> {
     const desired = await this.desiredAssignee(
       tx,
       principalType,
@@ -276,7 +295,7 @@ export class StaffRbacService {
     groupId: string,
     staffId: string,
     dryRun = false,
-  ): Promise<number> {
+  ): Promise<Changes> {
     const row = await tx.staffGroupMember.findUnique({
       where: { groupId_staffId: { groupId, staffId } },
     });
@@ -582,7 +601,7 @@ export class StaffRbacService {
           'STAFF',
           input.staffId,
           row.roleId,
-        ).catch(() => 0);
+        ).catch(() => NO_CHANGES);
       });
       throw error;
     }
@@ -679,7 +698,7 @@ export class StaffRbacService {
           },
           tx,
         );
-        await this.projectMember(tx, groupId, staffId).catch(() => 0);
+        await this.projectMember(tx, groupId, staffId).catch(() => NO_CHANGES);
       });
       throw error;
     }
@@ -866,7 +885,7 @@ export class StaffRbacService {
    * `currentVersion`: if the version moved while computing or writing, it goes round again, so
    * the last committed version is what OpenFGA ends on. Returns the number of tuples changed.
    */
-  async syncRolePermissions(roleId: string, dryRun = false): Promise<number> {
+  async syncRolePermissions(roleId: string, dryRun = false): Promise<Changes> {
     const versionNow = async () =>
       (
         await this.control.staffRole.findUniqueOrThrow({
@@ -874,7 +893,7 @@ export class StaffRbacService {
           select: { currentVersion: true },
         })
       ).currentVersion;
-    let changed = 0;
+    let changed = NO_CHANGES;
     for (let attempt = 0; attempt < 10; attempt++) {
       const role = await this.control.staffRole.findUniqueOrThrow({
         where: { id: roleId },
@@ -894,7 +913,8 @@ export class StaffRbacService {
       const want = new Set(wanted.map(tupleKey));
       const writes = wanted.filter((t) => !have.has(tupleKey(t)));
       const deletes = actual.filter((t) => !want.has(tupleKey(t)));
-      if (dryRun) return writes.length + deletes.length;
+      const step = { writes: writes.length, deletes: deletes.length };
+      if (dryRun) return step;
       if ((await versionNow()) !== version) continue; // moved before we wrote: recompute
       try {
         await this.fga.write({ writes, deletes, ignoreMissingDeletes: true });
@@ -903,7 +923,7 @@ export class StaffRbacService {
         if (isFgaConflict(error)) continue;
         throw error;
       }
-      changed += writes.length + deletes.length;
+      changed = plus(changed, step);
       if ((await versionNow()) === version) return changed; // still current after the write
     }
     throw new ConflictException({
@@ -916,71 +936,145 @@ export class StaffRbacService {
   // Reconciler (AC-29)
   // ---------------------------------------------------------------------------------------------
 
-  /**
-   * Repairs OpenFGA towards Postgres through the same locked projection every write path uses, for
-   * every (principal, role) and (staff, group) pair either side knows about.
-   */
-  async reconcile(opts: { dryRun: boolean }): Promise<{ fixed: number }> {
-    let fixed = 0;
-    const roles = await this.control.staffRole.findMany({
-      select: { id: true },
-    });
-    for (const r of roles)
-      fixed += await this.syncRolePermissions(r.id, opts.dryRun);
+  /** A run that would delete more than this many tuples stops and alerts unless told to go on. */
+  static MAX_RECONCILE_DELETES = 20;
 
+  /**
+   * Repairs OpenFGA towards Postgres. Sweeps every tuple on `platform:manar`, on every staff role
+   * object and on every group object (those Postgres knows, and those the tuples name), with no
+   * user filter. Recognised (principal, role) and (staff, group) pairs are repaired through the
+   * same locked projection the write paths use; anything else (unknown user shapes, unknown
+   * relations, roles or groups Postgres does not have) is deleted under a lock.
+   *
+   * It plans first. If the plan deletes more than MAX_RECONCILE_DELETES tuples, a real run stops,
+   * records `rbac.reconcile_blocked` and alerts the Owners, unless `allowMassDelete` is set: a bug
+   * in the desired state must not silently remove everyone's access.
+   */
+  async reconcile(opts: {
+    dryRun: boolean;
+    allowMassDelete?: boolean;
+  }): Promise<{ fixed: number; wouldDelete: number; blocked?: boolean }> {
+    const plan = await this.sweep(true);
+    if (opts.dryRun)
+      return { fixed: plan.writes + plan.deletes, wouldDelete: plan.deletes };
+    if (
+      plan.deletes > StaffRbacService.MAX_RECONCILE_DELETES &&
+      !opts.allowMassDelete
+    ) {
+      await this.audit.append({
+        staffId: null,
+        action: 'rbac.reconcile_blocked',
+        data: { wouldDelete: plan.deletes, wouldWrite: plan.writes },
+      });
+      this.logger.error(
+        `RBAC reconcile would delete ${plan.deletes} staff tuples; stopped. Run rbac:reconcile --allow-mass-delete after checking.`,
+      );
+      await this.alerts?.alertOwners('rbac_reconcile_blocked', {
+        wouldDelete: plan.deletes,
+      });
+      return { fixed: 0, wouldDelete: plan.deletes, blocked: true };
+    }
+    const done = await this.sweep(false);
+    const fixed = done.writes + done.deletes;
+    if (fixed) {
+      reconcileFixed.inc(fixed);
+      this.logger.warn(`RBAC reconcile repaired ${fixed} staff tuple(s)`);
+    }
+    return { fixed, wouldDelete: done.deletes };
+  }
+
+  private async sweep(dryRun: boolean): Promise<Changes> {
+    let total = NO_CHANGES;
+    const [roles, groups] = await Promise.all([
+      this.control.staffRole.findMany({
+        select: { id: true, archivedAt: true },
+      }),
+      this.control.staffGroup.findMany({ select: { id: true } }),
+    ]);
+    const liveRoles = new Set(
+      roles.filter((r) => !r.archivedAt).map((r) => r.id),
+    );
+    const knownRoles = new Set(roles.map((r) => r.id));
+    const knownGroups = new Set(groups.map((g) => g.id));
+
+    // 1. platform:manar: each live role's permissions by compare-and-set; the rest is foreign.
+    const roleIds = new Set(knownRoles);
+    const foreign: TupleKey[] = [];
+    for (const t of await this.fga.readObject(PLATFORM_OBJECT)) {
+      const m = /^role:(.+)~platform~manar#assignee$/.exec(t.user);
+      if (m && liveRoles.has(m[1]!)) continue; // owned by syncRolePermissions below
+      if (m) roleIds.add(m[1]!);
+      foreign.push(t);
+    }
+    for (const id of liveRoles)
+      total = plus(total, await this.syncRolePermissions(id, dryRun));
+
+    // 2. Every role object, known or named by a tuple.
     const pairs = new Map<
       string,
       { type: PrincipalType; id: string; roleId: string }
     >();
-    const add = (type: PrincipalType, id: string, roleId: string) =>
+    const addPair = (type: PrincipalType, id: string, roleId: string) =>
       pairs.set(`${type}|${id}|${roleId}`, { type, id, roleId });
+    const groupIds = new Set(knownGroups);
+    for (const roleId of roleIds)
+      for (const t of await this.fga.readObject(roleObject(roleId))) {
+        const staff = /^staff:([^#]+)$/.exec(t.user);
+        const group = /^group:([^#]+)#member$/.exec(t.user);
+        if (t.relation === 'assignee' && staff)
+          addPair('STAFF', staff[1]!, roleId);
+        else if (t.relation === 'assignee' && group) {
+          addPair('GROUP', group[1]!, roleId);
+          groupIds.add(group[1]!);
+        } else foreign.push(t);
+      }
     for (const a of await this.control.staffRoleAssignment.findMany({
       where: { revokedAt: null },
       select: { principalType: true, principalId: true, roleId: true },
     }))
-      add(a.principalType, a.principalId, a.roleId);
+      addPair(a.principalType, a.principalId, a.roleId);
     for (const e of await this.control.staffElevation.findMany({
       where: { endedAt: null },
       select: { staffId: true, roleId: true },
     }))
-      add('STAFF', e.staffId, e.roleId);
-    for (const r of roles)
-      for (const t of await this.fga.readObject(roleObject(r.id))) {
-        const staff = /^staff:(.+)$/.exec(t.user);
-        const group = /^group:(.+)#member$/.exec(t.user);
-        if (staff) add('STAFF', staff[1]!, r.id);
-        else if (group) add('GROUP', group[1]!, r.id);
-      }
+      addPair('STAFF', e.staffId, e.roleId);
     for (const p of pairs.values())
-      fixed += await this.withLock(this.assignmentLock(p.id, p.roleId), (tx) =>
-        this.projectAssignee(tx, p.type, p.id, p.roleId, opts.dryRun),
+      total = plus(
+        total,
+        await this.withLock(this.assignmentLock(p.id, p.roleId), (tx) =>
+          this.projectAssignee(tx, p.type, p.id, p.roleId, dryRun),
+        ),
       );
 
+    // 3. Every group object, known or named by a tuple.
     const members = new Map<string, { groupId: string; staffId: string }>();
     for (const m of await this.control.staffGroupMember.findMany())
       members.set(`${m.groupId}|${m.staffId}`, m);
-    for (const g of await this.control.staffGroup.findMany({
-      select: { id: true },
-    }))
-      for (const t of await this.fga.readObject(`group:${g.id}`)) {
-        const staff = /^staff:(.+)$/.exec(t.user);
-        if (staff)
-          members.set(`${g.id}|${staff[1]}`, {
-            groupId: g.id,
+    for (const groupId of groupIds)
+      for (const t of await this.fga.readObject(`group:${groupId}`)) {
+        const staff = /^staff:([^#]+)$/.exec(t.user);
+        if (t.relation === 'member' && staff)
+          members.set(`${groupId}|${staff[1]}`, {
+            groupId,
             staffId: staff[1]!,
           });
+        else foreign.push(t);
       }
     for (const m of members.values())
-      fixed += await this.withLock(
-        this.memberLock(m.staffId, m.groupId),
-        (tx) => this.projectMember(tx, m.groupId, m.staffId, opts.dryRun),
+      total = plus(
+        total,
+        await this.withLock(this.memberLock(m.staffId, m.groupId), (tx) =>
+          this.projectMember(tx, m.groupId, m.staffId, dryRun),
+        ),
       );
 
-    if (fixed && !opts.dryRun) {
-      reconcileFixed.inc(fixed);
-      this.logger.warn(`RBAC reconcile repaired ${fixed} staff tuple(s)`);
-    }
-    return { fixed };
+    // 4. Foreign tuples: nothing in Postgres stands behind them.
+    if (!dryRun)
+      for (const t of foreign)
+        await this.withLock(`staff_rbac:sweep:${t.object}`, async () => {
+          await this.fga.write({ deletes: [t], ignoreMissingDeletes: true });
+        });
+    return plus(total, { writes: 0, deletes: foreign.length });
   }
 }
 
