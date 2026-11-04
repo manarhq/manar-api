@@ -1,4 +1,9 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  Optional,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   decodeJwt,
@@ -9,6 +14,7 @@ import {
 import type { AppConfig } from '../config/env.validation';
 import { JwksCacheService } from './jwks-cache.service';
 import { KnownIssuerRegistry } from './known-issuer-registry.service';
+import { AccountsService } from '../staff/index/accounts.service';
 
 /** Only RSA family; see the history in JwtAuthGuard's old doc comment (algorithm confusion). */
 export const ACCEPTED_SIGNING_ALGORITHMS = ['RS256', 'RS384', 'RS512'] as const;
@@ -52,6 +58,7 @@ export class TokenVerifierService {
     private readonly issuers: KnownIssuerRegistry,
     private readonly jwksCache: JwksCacheService,
     private readonly configService: ConfigService<AppConfig, true>,
+    @Optional() private readonly accounts?: AccountsService,
   ) {}
 
   async verify(token: string): Promise<VerifiedIdentity> {
@@ -101,7 +108,7 @@ export class TokenVerifierService {
       throw new UnauthorizedException('Token has no subject claim');
     }
 
-    return {
+    const identity: VerifiedIdentity = {
       subject: payload.sub,
       issuer: trusted.issuerUrl,
       email: str(payload.email),
@@ -114,6 +121,9 @@ export class TokenVerifierService {
       authTime:
         typeof payload.auth_time === 'number' ? payload.auth_time : undefined,
     };
+    // DESK account index (spec §17.1): at most once per 10 minutes, never fails the request.
+    void this.accounts?.touch(identity);
+    return identity;
   }
 
   /** For callers that only partition by identity (throttler): null instead of throwing. */

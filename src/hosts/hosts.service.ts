@@ -14,6 +14,7 @@ import type {
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import { DeviceIndexService } from '../staff/index/device-index.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { matchApprovalRule, type VerifiedFacts } from './host-approval';
@@ -633,6 +634,21 @@ export class HostsService {
     ) {
       await this.ca.revokeHostCertificateSerial(client, issued.serialNumber);
       throw new HostRefusedError(`host ${host.id} changed during registration`);
+    }
+    // DESK staff search (spec §7.4): find this device by hostname. Never blocks registration.
+    try {
+      void this.moduleRef
+        ?.get(DeviceIndexService, { strict: false })
+        .upsert(tenant.id, {
+          hostId: host.id,
+          machineId: input.machineId,
+          hostname: input.hostname,
+          os: input.os,
+          status: host.status,
+          ownerSubject: host.ownerSubject,
+        });
+    } catch {
+      // No index in this process (it is optional).
     }
     return {
       hostId: host.id,

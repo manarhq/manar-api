@@ -34,6 +34,11 @@ import {
   StaffSeedCommand,
 } from './commands/staff-seed.command';
 import { StaffCoreModule } from '../staff/staff-core.module';
+import {
+  AccountsBackfillCommand,
+  DevicesIndexCommand,
+} from './commands/staff-index.command';
+import { DeviceIndexService } from '../staff/index/device-index.service';
 
 /**
  * Root module for the `pnpm manar` CLI (see src/cli.ts). Deliberately
@@ -71,6 +76,9 @@ import { StaffCoreModule } from '../staff/staff-core.module';
   providers: [
     StaffSeedCommand,
     RbacReconcileCommand,
+    AccountsBackfillCommand,
+    DevicesIndexCommand,
+    DeviceIndexService,
     TenantCreateCommand,
     AuditReindexCommand,
     AuditVerifyCommand,
