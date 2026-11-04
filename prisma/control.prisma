@@ -111,6 +111,10 @@ model Tenant {
   ownerSubject      String?
   /// The issuer of `ownerSubject`: a `sub` is only unique within one issuer.
   ownerIssuer       String?
+  /// Who asked for this workspace (issuer + `sub`), kept when ownership moves: per-person
+  /// creation limits count by it, for the tenant's whole life. Null for tenants created before it.
+  createdByIssuer   String?
+  createdBySubject  String?
   /// Provisioning retries: failed attempts so far, and when the queue may try again.
   provisionAttempts Int        @default(0)
   nextProvisionAt   DateTime?
@@ -125,6 +129,8 @@ model Tenant {
   allowExternalAi        Boolean         @default(false)
   allowOutboundTelemetry Boolean         @default(false)
   allowCloudStorage      Boolean         @default(false)
+  /// COMPANY: only approver roles decide approvals; a device owner can no longer decide their own.
+  approvalsAdminsOnly    Boolean         @default(false)
 
   /// Product improvement data, workspace switches (COMPANY only; default on). Org off overrides every member.
   dataImproveManar Boolean @default(true)
@@ -159,6 +165,7 @@ model Tenant {
   entitlement      TenantEntitlement?
   installCodes     InstallCode[]
 
+  @@index([createdByIssuer, createdBySubject, kind])
   @@map("tenants")
 }
 

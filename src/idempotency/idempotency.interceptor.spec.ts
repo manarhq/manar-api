@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ConflictException, type ExecutionContext } from '@nestjs/common';
 import { EnforcementDependencyUnavailableException } from '../common/fail-closed/fail-closed';
@@ -37,10 +38,15 @@ function fakeConfigService(): ConfigService<AppConfig, true> {
   } as unknown as ConfigService<AppConfig, true>;
 }
 
-function fakeContext(headers: Record<string, string> = {}): ExecutionContext {
+function fakeContext(
+  headers: Record<string, string> = {},
+  target: { params?: unknown; body?: unknown; userId?: string } = {},
+): ExecutionContext {
   const request = {
     headers,
-    authContext: { tenant: { id: 'tenant-1' } },
+    params: target.params,
+    body: target.body,
+    authContext: { tenant: { id: 'tenant-1' }, user: { id: target.userId } },
   };
   return {
     switchToHttp: () => ({
@@ -136,7 +142,7 @@ describe('IdempotencyInterceptor', () => {
   it('a concurrent duplicate (claimed but not yet cached) is rejected with 409, not silently dropped or blocked', async () => {
     const store = fakeStore();
     await store.claim(
-      'manar:idempotency:tenant-1:TestController.testHandler:key-1',
+      `manar:idempotency:tenant-1:TestController.testHandler:key-1:${createHash('sha256').update('[null,null,null]').digest('hex')}`,
       1000,
     );
     const interceptor = new IdempotencyInterceptor(store, fakeConfigService());
@@ -294,5 +300,43 @@ describe('IdempotencyInterceptor when Redis fails (review, 9 Oct)', () => {
       ),
     ).rejects.toBeInstanceOf(EnforcementDependencyUnavailableException);
     expect(calls.n).toBe(0);
+  });
+});
+
+describe('IdempotencyInterceptor binds a key to its request', () => {
+  it('the same key on a different target, body or user runs that request', async () => {
+    const interceptor = new IdempotencyInterceptor(
+      fakeStore(),
+      fakeConfigService(),
+    );
+    const calls = { n: 0 };
+    const run = async (target: {
+      params?: unknown;
+      body?: unknown;
+      userId?: string;
+    }) =>
+      firstValue(
+        await interceptor.intercept(
+          fakeContext({ 'idempotency-key': 'k' }, target),
+          handlerReturning(target, calls),
+        ),
+      );
+    await run({ params: { id: 'agent-a' }, userId: 'u1' });
+    await expect(
+      run({ params: { id: 'agent-b' }, userId: 'u1' }),
+    ).resolves.toEqual({
+      params: { id: 'agent-b' },
+      userId: 'u1',
+    });
+    await run({ params: { id: 'agent-a' }, userId: 'u2' });
+    await run({
+      params: { id: 'agent-a' },
+      body: { reason: 'x' },
+      userId: 'u1',
+    });
+    expect(calls.n).toBe(4);
+    // An exact replay still answers from the cache.
+    await run({ params: { id: 'agent-a' }, userId: 'u1' });
+    expect(calls.n).toBe(4);
   });
 });

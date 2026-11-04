@@ -967,6 +967,9 @@ enum ApprovalStatus {
   APPROVED
   DENIED
   EXPIRED
+  /// A person withdrew the approval (3 Nov 2026). `usedBeforeRevoke` says whether the agent had
+  /// already received it; see `ApprovalRevokeService`.
+  REVOKED
 }
 
 /// `ApprovalDecision.decision` -- a human's raw input to `ApprovalWorkflow`
@@ -1122,6 +1125,22 @@ model ApprovalRequest {
   /// comment for why a *replay* of an already-consumed grant is rejected
   /// rather than a new one being issued).
   grant AuthorizationGrant?
+
+  /// The first time the agent read this request as APPROVED (`GET /agent/v1/approvals/:id`). From
+  /// then on the agent may have acted: a revoke is recorded as after use.
+  releasedAt       DateTime?
+  revokedAt        DateTime?
+  /// `UserProfile.id` of the person who revoked it.
+  revokedBy        String?
+  revokeNote       String?
+  /// Set with `revokedAt`: true when the agent had already received the approval.
+  usedBeforeRevoke Boolean?
+  /// Why it ended the way it did, in a word: `no_answer`, `paused`, `superseded`, a
+  /// re-evaluation failure reason (`task_not_live`, `policy_denied`, ...), or null (a person decided).
+  endReason        String?
+  /// Self-approved, high risk, re-confirmed: the personal workspace's owner approved their own
+  /// sensitive request after a fresh sign-in (decision-rights.ts `stepUp`), at this time.
+  selfConfirmedAt  DateTime?
 
   createdAt DateTime @default(now())
 
@@ -2186,6 +2205,8 @@ enum HostStatus {
   APPROVED
   REJECTED
   REVOKED
+  /// "Remove device": certificates revoked, history kept; the machine may enrol again.
+  REMOVED
 }
 
 enum HostKeyType {
@@ -2231,6 +2252,10 @@ model Host {
   /// The install key that enrolled (or last re-enrolled) it: the first-run screen matches the
   /// device it waits for by this, never by time.
   installKeyId          String?
+  /// Set by "Remove device". The row stays so sessions, approvals and events still name the
+  /// device. Re-enrolling within 30 days revives this row; later, its `machineId` is rewritten to
+  /// `removed:<id>` so the machine enrols as a new device (HostsService.completeRegistration).
+  removedAt             DateTime?
   certificates          HostCertificate[]
   fileChanges           HostFileChange[]
   tools                 HostTool[]
@@ -2462,8 +2487,13 @@ model ApprovalAllowGrant {
   revokedAt  DateTime?
   useCount   Int       @default(0)
   lastUsedAt DateTime?
+  /// ALLOW: satisfies an approval requirement. BLOCK: an approval of this exact action was revoked
+  /// after it was used; the next matching request is denied (`revoked_after_use`) until a person
+  /// lifts the block (sets `revokedAt`).
+  effect     String    @default("ALLOW")
 
   @@index([hostId, toolId, actionId, expiresAt])
+  @@index([sourceId])
   @@index([agentId, toolId, actionId, expiresAt])
   @@map("approval_allow_grants")
 }
@@ -2473,6 +2503,8 @@ enum HostApprovalStatus {
   APPROVED
   DENIED
   EXPIRED
+  /// A person withdrew the approval; `usedBeforeRevoke` says whether the device had read it.
+  REVOKED
 }
 
 /// An approval opened for a device by the host authorize path (a tool without a task or agent
@@ -2497,8 +2529,20 @@ model HostApproval {
   decidedAt  DateTime?
   expiresAt  DateTime
   createdAt  DateTime           @default(now())
+  /// The first time the device read this approval as APPROVED: from then on the action may have run.
+  usedAt           DateTime?
+  revokedAt        DateTime?
+  /// Keycloak subject of the person who revoked it.
+  revokedBy        String?
+  revokeNote       String?
+  usedBeforeRevoke Boolean?
+  /// `no_answer`, `paused`, `withdrawn` (the device stopped waiting), or null (a person decided).
+  endReason        String?
+  /// Self-approved, high risk, re-confirmed (see `ApprovalRequest.selfConfirmedAt`).
+  selfConfirmedAt  DateTime?
 
   @@index([hostId, status, expiresAt])
+  @@index([createdAt, id])
   @@map("host_approvals")
 }
 

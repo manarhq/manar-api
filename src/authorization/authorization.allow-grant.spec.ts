@@ -124,6 +124,21 @@ describe('8-hour allow grants in the decision path (spec 4.6)', () => {
     expect(where).not.toHaveProperty('hostId');
   });
 
+  it('a block from a revoked-after-use approval denies, even with a live grant', async () => {
+    const h = makeDecisionHarness({
+      policy: needsApproval,
+      allowGrant: GRANT,
+      block: { id: 'block-1' },
+    });
+    const r = await h.service.authorize(
+      h.tenantClient,
+      't1',
+      'agent-1',
+      REQUEST,
+    );
+    expect(r).toMatchObject({ decision: 'DENY', reason: 'revoked_after_use' });
+  });
+
   it('a failing grant lookup fails closed', async () => {
     const h = makeDecisionHarness({ policy: needsApproval });
     h.client.approvalAllowGrant.findFirst.mockRejectedValueOnce(

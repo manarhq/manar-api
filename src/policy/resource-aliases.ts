@@ -47,9 +47,11 @@ export function resourceKindFor(
 ): ResourceKind {
   const a = actionId.toLowerCase();
   if (toolId === HOST_CLAUDE_CODE_TOOL) {
-    return (
-      HOST_CLAUDE_CODE_ACTIONS.find((x) => x.name === a)?.resourceKind ?? 'path'
-    );
+    const kind = HOST_CLAUDE_CODE_ACTIONS.find(
+      (x) => x.name === a,
+    )?.resourceKind;
+    if (kind) return kind;
+    // Not an agent-mode name: the device hook's generic ids, read like any host tool's.
   }
   if (KNOWN_HOST_TOOL_IDS.includes(toolId) && COMMAND_ACTIONS.has(a))
     return 'command';

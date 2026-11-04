@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TAMPER_EVENT_TYPES } from '../hosts/tamper';
 
 /** Event types a device may send. The two `watch` types set the device's watcher status. */
 export const SECRET_EVENT_TYPES = [
@@ -31,16 +32,26 @@ const text = (max: number) =>
     // eslint-disable-next-line no-control-regex
     .regex(/^[^\u0000-\u001f\u007f]*$/);
 
+/**
+ * manar-edge 0.1.1 sends a missing field as "" (its watcher notices have no tool or path class);
+ * newer devices leave it out. Both mean absent. Pinned by src/contract/host-contract.json.
+ */
+const absentIfEmpty = <T extends z.ZodType>(t: T) =>
+  z.preprocess((v) => (v === '' ? undefined : v), t.optional());
+
 export const HostEventSchema = z
   .object({
-    type: z.enum(SECRET_EVENT_TYPES),
-    toolId: z
-      .string()
-      .regex(/^(host\.[a-z0-9-]{1,40}|other)$/)
-      .optional(),
-    process: text(128).optional(),
-    pathClass: z.enum(PATH_CLASSES).optional(),
-    maskedPath: text(1024).optional(),
+    type: z.enum([...SECRET_EVENT_TYPES, ...TAMPER_EVENT_TYPES]),
+    toolId: absentIfEmpty(z.string().regex(/^(host\.[a-z0-9-]{1,40}|other)$/)),
+    process: absentIfEmpty(text(128)),
+    // 0.1.1 also sends the vault's request kind: an SSH key restore is about SSH keys; a refused
+    // file carries no path class there.
+    pathClass: z.preprocess(
+      (v) =>
+        v === 'ssh-restore' ? 'ssh' : v === 'file' || v === '' ? undefined : v,
+      z.enum(PATH_CLASSES).optional(),
+    ),
+    maskedPath: absentIfEmpty(text(1024)),
     blocked: z.boolean().optional(),
     at: z.coerce.date(),
   })

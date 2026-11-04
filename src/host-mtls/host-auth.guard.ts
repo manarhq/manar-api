@@ -2,6 +2,7 @@ import type { TLSSocket } from 'node:tls';
 import {
   CanActivate,
   ExecutionContext,
+  GoneException,
   Injectable,
   Logger,
   UnauthorizedException,
@@ -21,7 +22,9 @@ import { parseHostIdentifier, type RequestWithHost } from './host-context';
  * exact certificate serial was issued to that host and is not revoked. The tenant therefore comes
  * only from the verified certificate: a host of tenant A cannot name, reach or be mistaken for a
  * host of tenant B. Rejected and revoked hosts are refused; a PENDING host may call (it needs its
- * config to know when it is approved) and handlers see its status.
+ * config to know when it is approved) and handlers see its status. A certificate issued to a host
+ * the workspace removed gets 410 `device_removed` (revoked or not), so the device stops protecting
+ * instead of retrying; nothing else returns that.
  */
 @Injectable()
 export class HostAuthGuard implements CanActivate {
@@ -74,16 +77,28 @@ export class HostAuthGuard implements CanActivate {
       }
       throwFailClosed('tenant-db', error);
     }
-    const host = await failClosed('tenant-db', () =>
-      client.host.findUnique({ where: { machineId: parsed.machineId } }),
+    const serialNumber = normalizeSerialNumber(certificate.serialNumber);
+    const [host, row] = await failClosed('tenant-db', () =>
+      Promise.all([
+        client.host.findUnique({ where: { machineId: parsed.machineId } }),
+        client.hostCertificate.findUnique({
+          where: { serialNumber },
+          include: { host: { select: { status: true } } },
+        }),
+      ]),
     );
+    // By the certificate, not the machineId: a machine removed long ago may have enrolled again
+    // as a new host, and this certificate still belongs to the removed one.
+    if (row?.host.status === 'REMOVED') {
+      throw new GoneException({
+        statusCode: 410,
+        code: 'device_removed',
+        message: 'This device was removed from the workspace',
+      });
+    }
     if (!host || (host.status !== 'PENDING' && host.status !== 'APPROVED')) {
       throw new UnauthorizedException('Host is not active');
     }
-    const serialNumber = normalizeSerialNumber(certificate.serialNumber);
-    const row = await failClosed('tenant-db', () =>
-      client.hostCertificate.findUnique({ where: { serialNumber } }),
-    );
     if (!row || row.hostId !== host.id || row.revokedAt) {
       throw new UnauthorizedException(
         'Certificate is unknown or has been revoked',

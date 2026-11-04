@@ -10,11 +10,17 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type { AuditActor } from '../audit/audit-event-types';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { ensureHostTools, hostTool } from '../tools/host-actions';
+import { latestTamper } from '../hosts/tamper';
 import type { ProtectMode } from '../tools/host-actions';
 import {
   parseMcpServers,
   replaceHostMcpServers,
 } from '../mcp-inventory/mcp-inventory';
+
+/** A tampered tool keeps at most observed-only. */
+function capObserved(label: EnforcementLabel): EnforcementLabel {
+  return label === 'governed' ? 'observed-only' : label;
+}
 
 /** A device that has not reported for this long is shown as `monitoring unavailable`. */
 export const MONITORING_STALE_MS = 30 * 60 * 1000;
@@ -229,10 +235,16 @@ export class HostToolsService {
       take: 200,
     });
     const now = Date.now();
+    const tampered = await latestTamper(
+      client,
+      hosts.map((h) => h.id),
+      now,
+    );
     return {
       devices: hosts.map((h) => {
         const online =
           !!h.lastSeenAt && now - h.lastSeenAt.getTime() <= MONITORING_STALE_MS;
+        const tamper = tampered.get(h.id) ?? null;
         return {
           hostId: h.id,
           hostname: h.hostname,
@@ -240,6 +252,8 @@ export class HostToolsService {
           status: h.status,
           online,
           lastSeenAt: h.lastSeenAt?.toISOString() ?? null,
+          /** The latest tampering the device reported in the last 7 days, or null. */
+          tamper,
           tools: h.tools.map((t) => ({
             toolId: t.toolId,
             name: t.name,
@@ -250,7 +264,11 @@ export class HostToolsService {
             desiredProtection: t.desiredProtection,
             changes: t.changes,
             supportedModes: hostTool(t.toolId)?.modes ?? [],
-            enforcement: enforcementLabel(t.toolId, t, online),
+            // A hook something took out of play recently is not counted as governing the tool.
+            enforcement:
+              tamper && tamper.toolId === t.toolId
+                ? capObserved(enforcementLabel(t.toolId, t, online))
+                : enforcementLabel(t.toolId, t, online),
           })),
         };
       }),

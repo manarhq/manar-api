@@ -48,6 +48,7 @@ describe.skipIf(!url)('insight on PostgreSQL', () => {
   });
   afterAll(async () => {
     await db.$executeRaw`DELETE FROM audit_events`;
+    await db.hostApproval.deleteMany();
     await db.host.deleteMany();
     await db.hostGroup.deleteMany();
     await db.$disconnect();
@@ -113,5 +114,52 @@ describe.skipIf(!url)('insight on PostgreSQL', () => {
       (s) => s.hostId === 'hB',
     );
     expect(again).toHaveLength(2);
+  });
+
+  it('links device approvals by hostApprovalId and names the site of a JAIL ask', async () => {
+    await db.hostApproval.create({
+      data: {
+        id: 'site-ask-1',
+        hostId: 'hB',
+        toolId: 'host.cursor',
+        actionId: 'site.connect',
+        resource: 'play.googleapis.com',
+        summary: 's',
+        expiresAt: new Date(),
+      },
+    });
+    await ev('hB', 40, 'approval.approved', {
+      actionId: 'site.connect',
+      hostApprovalId: 'site-ask-1',
+    });
+    await ev('hB', 41, 'host.action_decided', {
+      actionId: 'edit',
+      resource: '/p/a.ts',
+      decision: 'APPROVAL_REQUIRED',
+      approvalId: 'ap2',
+      caller: 'uid:1000',
+    });
+    await ev('hB', 42, 'approval.expired', { hostApprovalId: 'ap2' });
+    const svc = new SessionsService(
+      { getClient: vi.fn(() => Promise.resolve(db)) } as never,
+      { recordSafely: vi.fn() } as never,
+      {} as never,
+    );
+    const steps = (await svc.list('t', 14)).sessions
+      .filter((s) => s.hostId === 'hB')
+      .map((s) => s.id);
+    const all = (
+      await Promise.all(steps.map((id) => svc.get('t', id)))
+    ).flatMap((d) => d.steps);
+    expect(all).toContainEqual(
+      expect.objectContaining({
+        kind: 'site',
+        label: 'play.googleapis.com',
+        outcome: 'approved',
+      }),
+    );
+    expect(all).toContainEqual(
+      expect.objectContaining({ kind: 'approval', outcome: 'expired' }),
+    );
   });
 });

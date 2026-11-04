@@ -2,7 +2,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AccountService, realmOf } from './account.service';
 
-function setup(opts: { soleOwner?: boolean } = {}) {
+function setup(
+  opts: { soleOwner?: boolean; deployment?: 'hosted' | 'customer' } = {},
+) {
   const calls: string[] = [];
   const row = {
     id: 'd1',
@@ -67,7 +69,10 @@ function setup(opts: { soleOwner?: boolean } = {}) {
     } as never,
     { send: async () => true } as never,
     { verified: async () => 'me@acme.io' } as never,
-    { get: () => undefined } as never,
+    {
+      get: (k: string) =>
+        k === 'MANAR_DEPLOYMENT' ? (opts.deployment ?? 'hosted') : undefined,
+    } as never,
     { deleteUserData: async () => void calls.push('data') } as never,
   );
   return { svc, calls, row };
@@ -100,6 +105,11 @@ describe('account deletion', () => {
       refused: 'sole_owner',
     });
     expect(await svc.executeDue()).toEqual({ done: 0, failed: 0 });
+  });
+  it('never deletes the sign-in account from a customer-hosted realm', async () => {
+    const { svc, calls } = setup({ deployment: 'customer' });
+    expect(await svc.executeDue()).toEqual({ done: 1, failed: 0 });
+    expect(calls.some((c) => c.startsWith('kc:'))).toBe(false);
   });
   it('lets the person cancel a request that is retrying after a failure', async () => {
     const { svc, row } = setup();

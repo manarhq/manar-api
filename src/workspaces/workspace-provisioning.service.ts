@@ -1,7 +1,9 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   ConflictException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   OnModuleDestroy,
@@ -13,11 +15,65 @@ import { ownerRoles, type WorkspaceKind } from '../auth/membership.service';
 import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import {
+  TenantCreatorLimitError,
   TenantProvisioningError,
   TenantSlugConflictError,
 } from '../database/tenant-database.errors';
 import type { SampleDirectory, WorkspaceProvisioning } from './workspace-ports';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { RedisThrottlerStorageService } from '../rate-limit/redis-throttler-storage.service';
+import { failClosed } from '../common/fail-closed/fail-closed';
+
+/** One window for the deployment-wide workspace creation rate (GCRA: a burst of the limit, then a steady refill). */
+const CREATION_WINDOW_MS = 60 * 60_000;
+
+/**
+ * Per-person creations per day, by kind, spent before the deployment-wide budget so one account
+ * cannot drain it. SAMPLE also bounds deleting and re-creating the sample workspace.
+ */
+const PER_PERSON_DAILY: Record<WorkspaceKind, number> = {
+  PERSONAL: 2,
+  SAMPLE: 3,
+  COMPANY: 3,
+};
+/** Company trial attempts per Entra tenant per day, whoever asks. */
+const PER_ENTRA_TENANT_DAILY = 3;
+const DAY_MS = 24 * 60 * 60_000;
+
+/**
+ * A refusal people see in the console, in both languages, with a stable `reason` for code.
+ * `status` 429 means "try again later"; 403 means a per-person limit.
+ */
+const LIMIT_MESSAGES = {
+  workspace_creation_busy: {
+    en: 'A lot of people are setting up workspaces right now. Please try again in a few minutes.',
+    ar: 'يُنشئ كثيرون مساحات عمل الآن. يُرجى المحاولة مرة أخرى بعد بضع دقائق.',
+  },
+  workspace_creation_rate_limited: {
+    en: 'You have set up several workspaces recently. Please try again later.',
+    ar: 'لقد أنشأت عدة مساحات عمل مؤخرًا. يُرجى المحاولة مرة أخرى لاحقًا.',
+  },
+  company_trial_limit_reached: {
+    en: 'You have already started the maximum number of company trials (3). Ask an administrator of an existing company workspace to invite you.',
+    ar: 'لقد بدأت الحد الأقصى من التجارب للشركات (3). اطلب من مسؤول مساحة عمل شركة قائمة أن يدعوك.',
+  },
+} as const;
+
+export function workspaceLimitError(
+  reason: keyof typeof LIMIT_MESSAGES,
+  retryAfterSeconds?: number,
+): HttpException {
+  return new HttpException(
+    {
+      reason,
+      message: LIMIT_MESSAGES[reason],
+      ...(retryAfterSeconds ? { retryAfterSeconds } : {}),
+    },
+    reason === 'company_trial_limit_reached'
+      ? HttpStatus.FORBIDDEN
+      : HttpStatus.TOO_MANY_REQUESTS,
+  );
+}
 
 export interface CreateWorkspaceInput {
   /** Issuer of `ownerSubject`. Absent: the deployment's primary issuer (first of AUTH_ISSUERS). */
@@ -30,6 +86,8 @@ export interface CreateWorkspaceInput {
   /** Display hints for the owner's Membership; never used for access decisions. */
   ownerEmail?: string;
   ownerDisplayName?: string;
+  /** At most this many workspaces of `kind` may ever be created by this person (atomic). */
+  maxPerCreator?: number;
 }
 
 /** A PROVISIONING attempt not touched for this long has lost its worker. */
@@ -66,16 +124,17 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     private readonly manager: TenantDatabaseManager,
     private readonly control: ControlPrismaService,
     private readonly config: ConfigService<AppConfig, true>,
+    private readonly throttle: RedisThrottlerStorageService,
   ) {}
 
   async createWorkspace(
     input: CreateWorkspaceInput,
   ): Promise<CreateWorkspaceResult> {
+    const issuer = this.issuerFor(input.ownerIssuer);
+    await this.admitCreation(input, issuer);
     const queued = await this.shouldQueue();
     const slug = `${SLUG_PREFIX[input.kind]}-${randomBytes(8).toString('hex')}`;
     const name = input.displayName.trim().slice(0, 120) || 'Workspace';
-
-    const issuer = this.issuerFor(input.ownerIssuer);
     const roles = ownerRoles();
 
     try {
@@ -89,6 +148,11 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
           input.kind === 'COMPANY' ? input.entraTenantId : undefined,
         queued,
         retryOnFailure: true,
+        creator: {
+          issuer,
+          subject: input.ownerSubject,
+          maxOfKind: input.maxPerCreator,
+        },
         // Same transaction as the tenant rows: no tenant without its owner.
         owner: {
           issuer,
@@ -104,6 +168,9 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
         status: tenant.status === 'ACTIVE' ? 'ACTIVE' : 'QUEUED',
       };
     } catch (error) {
+      if (error instanceof TenantCreatorLimitError) {
+        throw workspaceLimitError('company_trial_limit_reached');
+      }
       if (error instanceof TenantSlugConflictError) {
         // The slug is random, so a conflict is the one-per-owner / one-per-Entra-tenant index.
         if (input.kind !== 'COMPANY') {
@@ -131,6 +198,66 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
         if (row) return { tenantId: row.id, status: 'QUEUED' };
       }
       throw error;
+    }
+  }
+
+  /**
+   * The gate every new workspace passes (personal, company trial, sample): each one is a database.
+   * The person's own daily bucket for the kind (and, for a company trial, the Entra tenant's) is
+   * spent first, so one account cannot drain the deployment-wide WORKSPACE_CREATE_PER_HOUR. Callers
+   * run their cheap "already exists" checks before calling, so a replay spends nothing. A refused
+   * creation leaves nothing behind; the limits store being down refuses too (503).
+   *
+   * A human check (Turnstile) belongs here as well: verify the token before any budget is spent.
+   */
+  private async admitCreation(
+    input: CreateWorkspaceInput,
+    issuer: string,
+  ): Promise<void> {
+    const person = createHash('sha256')
+      .update(`${issuer}\n${input.ownerSubject}`)
+      .digest('hex');
+    await this.spend(
+      `${input.kind}:${person}`,
+      DAY_MS,
+      PER_PERSON_DAILY[input.kind],
+      'workspace-create-person',
+      'workspace_creation_rate_limited',
+    );
+    if (input.kind === 'COMPANY' && input.entraTenantId) {
+      await this.spend(
+        input.entraTenantId.toLowerCase(),
+        DAY_MS,
+        PER_ENTRA_TENANT_DAILY,
+        'workspace-create-entra',
+        'workspace_creation_rate_limited',
+      );
+    }
+    await this.spend(
+      'global',
+      CREATION_WINDOW_MS,
+      authSetting(this.config, 'WORKSPACE_CREATE_PER_HOUR'),
+      'workspace-create',
+      'workspace_creation_busy',
+    );
+  }
+
+  private async spend(
+    key: string,
+    windowMs: number,
+    limit: number,
+    bucket: string,
+    reason: 'workspace_creation_busy' | 'workspace_creation_rate_limited',
+  ): Promise<void> {
+    const record = await failClosed('limits-store', () =>
+      this.throttle.increment(key, windowMs, limit, 0, bucket),
+    );
+    if (record.isBlocked || record.totalHits > limit) {
+      this.logger.warn(`capacity=${bucket} refused: over ${limit}`);
+      throw workspaceLimitError(
+        reason,
+        Math.max(60, record.timeToBlockExpire || record.timeToExpire),
+      );
     }
   }
 

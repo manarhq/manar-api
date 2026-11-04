@@ -94,6 +94,8 @@ export interface LivenessResult {
   ok: boolean;
   /** Present only when `ok` is false — a specific, non-leaky reason (this is app-layer deterministic state, never an OpenFGA decision, so there's nothing to avoid leaking — see AuthorizationService). */
   reason?: string;
+  /** `evaluateFullLiveness` only, when `ok`: the chain's root task (the task itself when it has no parent). Delegated tasks charge shared budgets to it. */
+  root?: TaskRecord;
 }
 
 /** A bound on ancestor-chain depth (see AncestorChainTooDeepError) — comfortably deeper than any legitimate delegation chain this phase's product surface could produce, while still catching a cyclic parentTaskId in finite time. */
@@ -339,7 +341,14 @@ export class TasksService {
   ): Promise<LivenessResult> {
     const ancestors = await this.getAncestorChain(tenantClient, task);
     for (const ancestor of ancestors) {
-      const liveness = this.evaluateLiveness(ancestor, now);
+      // An execution counts on every ancestor too (`incrementExecutionCount`),
+      // so a grant redemption's already-counted execution is discounted there as well.
+      const liveness = this.evaluateLiveness(
+        options.executionAlreadyCounted
+          ? { ...ancestor, executionCount: ancestor.executionCount - 1 }
+          : ancestor,
+        now,
+      );
       if (!liveness.ok) {
         return { ok: false, reason: `ancestor_${liveness.reason}` };
       }
@@ -363,12 +372,13 @@ export class TasksService {
         return { ok: false, reason: `ancestor_${stopped.reason}` };
       }
     }
-    return this.evaluateLiveness(
+    const own = this.evaluateLiveness(
       options.executionAlreadyCounted
         ? { ...task, executionCount: task.executionCount - 1 }
         : task,
       now,
     );
+    return own.ok ? { ...own, root: ancestors.at(-1) ?? task } : own;
   }
 
   /**
@@ -386,6 +396,41 @@ export class TasksService {
     /** A client or an interactive-transaction client (`AuthorizationService.commit`). */
     tenantClient: Pick<TenantPrismaClient, 'task'>,
     task: TaskRecord,
+  ): Promise<boolean> {
+    // A delegated task shares its ancestors' execution budget rather than
+    // getting a copy of it: one execution counts on the task and on every
+    // ancestor, each under its own limit. If any is full, the counts already
+    // taken are given back and nothing runs.
+    const counted: string[] = [];
+    let current: Pick<TaskRecord, 'id' | 'maxExecutions' | 'parentTaskId'> =
+      task;
+    for (let hops = 0; ; hops += 1) {
+      if (hops > MAX_ANCESTOR_DEPTH) {
+        throw new AncestorChainTooDeepError(task.id, MAX_ANCESTOR_DEPTH);
+      }
+      if (!(await this.incrementOne(tenantClient, current))) {
+        for (const id of counted) {
+          await tenantClient.task.update({
+            where: { id },
+            data: { executionCount: { decrement: 1 } },
+          });
+        }
+        return false;
+      }
+      counted.push(current.id);
+      if (!current.parentTaskId) return true;
+      const parent = await tenantClient.task.findUnique({
+        where: { id: current.parentTaskId },
+        select: { id: true, maxExecutions: true, parentTaskId: true },
+      });
+      if (!parent) throw new TaskNotFoundError(current.parentTaskId);
+      current = parent;
+    }
+  }
+
+  private async incrementOne(
+    tenantClient: Pick<TenantPrismaClient, 'task'>,
+    task: Pick<TaskRecord, 'id' | 'maxExecutions'>,
   ): Promise<boolean> {
     if (task.maxExecutions == null) {
       await tenantClient.task.update({

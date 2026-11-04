@@ -4,12 +4,14 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import {
   findLiveAllowGrant,
+  findLiveBlock,
   markAllowGrantUsed,
 } from '../approvals/allow-grants';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { KNOWN_HOST_TOOL_IDS, hostActionRisk } from '../tools/host-actions';
+import { redactForStorage } from '../contract/redact';
 import type { HostContext } from '../host-mtls/host-context';
 
 /** `POST /host/v1/authorize`: the `/agent/v1/authorize` body without a task (a device has none). */
@@ -114,11 +116,13 @@ export class HostAuthorizeService {
           hostId: host.hostId,
           toolId: request.toolId,
           actionId: request.actionId.toLowerCase(),
-          resource: request.resource.slice(0, 512),
+          resource: redactForStorage(request.resource),
         },
       });
     }
-    // The audit record is the evidence of governance: no record, no ALLOW.
+    // The audit record is the evidence of governance: no record, no ALLOW. The command is kept
+    // redacted (secrets, tokens, URL credentials and queries, home folders): the Sessions view
+    // shows it, and secret values are never stored. The decision above used the real one.
     const recorded = await this.audit.recordSafely(client, host.tenantId, {
       eventType: AUDIT_EVENT_TYPES.HOST_ACTION_DECIDED,
       actor: { type: 'system', id: `host:${host.hostId}` },
@@ -126,7 +130,7 @@ export class HostAuthorizeService {
         hostId: host.hostId,
         toolId: request.toolId,
         actionId: request.actionId,
-        resource: request.resource.slice(0, 512),
+        resource: redactForStorage(request.resource),
         decision: result.decision,
         reason: result.reason ?? null,
         riskScore: result.riskScore ?? null,
@@ -160,6 +164,16 @@ export class HostAuthorizeService {
     });
     if (kill.killed)
       return { decision: 'DENY', reason: kill.reason ?? 'kill_switch' };
+
+    // Revoked after use (3 Nov 2026): refused until a person lifts the block.
+    if (
+      await findLiveBlock(
+        client,
+        { hostId: host.hostId },
+        { toolId: request.toolId, actionId, resource: request.resource },
+      )
+    )
+      return { decision: 'DENY', reason: 'revoked_after_use' };
 
     // "Approve for 8 hours" (spec 4.6): looked up before the policy runs, used only to satisfy an
     // approval requirement below. A policy DENY and the kill switches above are never overridden.

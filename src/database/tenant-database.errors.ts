@@ -21,6 +21,16 @@ export class TenantSlugConflictError extends Error {
   }
 }
 
+/** Thrown by `provisionTenant` when the creator already made `max` workspaces of this kind. Nothing is written. */
+export class TenantCreatorLimitError extends Error {
+  constructor(public readonly max: number) {
+    super(
+      `The creator has reached the limit of ${max} workspaces of this kind`,
+    );
+    this.name = 'TenantCreatorLimitError';
+  }
+}
+
 /**
  * Thrown by `provisionTenant` when database creation or the tenant schema
  * migration fails after the control-DB rows were created. The tenant is

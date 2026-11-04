@@ -25,6 +25,11 @@ import {
   DelegationTaskNotLiveError,
 } from './delegation.errors';
 
+/** Levels of delegation below a human-created task (its children are level 1). */
+export const MAX_DELEGATION_DEPTH = 3;
+/** Child tasks one task may ever delegate, revoked ones included. */
+export const MAX_DELEGATIONS_PER_TASK = 5;
+
 export interface DelegationResult {
   childTask: TaskRecord;
   childAgent: { id: string; slug: string; identifier: string };
@@ -115,6 +120,22 @@ export class DelegationService {
       );
     }
 
+    // Bounded fan-out: executions and the LLM token budget are shared with
+    // the root task, but every child is a new agent with its own rate
+    // limit, so the tree itself is capped too.
+    const ancestors = await failClosed('tenant-db', () =>
+      this.tasksService.getAncestorChain(tenantClient, parentTask),
+    );
+    if (ancestors.length + 1 > MAX_DELEGATION_DEPTH) {
+      throw new DelegationDeniedError('delegation_depth_exceeded');
+    }
+    if (
+      (await this.countChildren(tenantClient, parentTask.id)) >=
+      MAX_DELEGATIONS_PER_TASK
+    ) {
+      throw new DelegationDeniedError('delegation_limit_reached');
+    }
+
     // Deterministic subset check (step 1 of the design spec's Delegation
     // section): the requested child grant set must already be within the
     // parent's *effective* grant set -- itself already narrowed by every
@@ -142,8 +163,8 @@ export class DelegationService {
     // rejected like a broader grant; an omitted value is clamped. The
     // liveness check above guarantees parentRemaining >= 1. Only the direct
     // parent is compared: it was itself clamped against its own parent when
-    // delegated. Drawing the parent's budget down on child executions is
-    // Phase 3.
+    // delegated. Every child execution also counts on the parent and each
+    // ancestor (TasksService.incrementExecutionCount), so the budget is shared.
     const parentRemaining =
       parentTask.maxExecutions == null
         ? null
@@ -227,6 +248,19 @@ export class DelegationService {
       },
     );
 
+    // Concurrent requests can all pass the count above; the late ones are
+    // revoked here before anyone learns their ids.
+    if (
+      (await this.countChildren(tenantClient, parentTask.id)) >
+      MAX_DELEGATIONS_PER_TASK
+    ) {
+      await tenantClient.task.update({
+        where: { id: childTask.id },
+        data: { status: 'REVOKED' },
+      });
+      throw new DelegationDeniedError('delegation_limit_reached');
+    }
+
     this.logger.log(
       `Task "${parentTaskId}" delegated to new agent "${childAgent.identifier}" (child task "${childTask.id}")`,
     );
@@ -260,6 +294,15 @@ export class DelegationService {
         expiresAt: enrollmentToken.expiresAt,
       },
     };
+  }
+
+  private countChildren(
+    tenantClient: TenantPrismaClient,
+    parentTaskId: string,
+  ): Promise<number> {
+    return failClosed('tenant-db', () =>
+      tenantClient.task.count({ where: { parentTaskId } }),
+    );
   }
 }
 

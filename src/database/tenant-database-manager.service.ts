@@ -21,6 +21,7 @@ import {
   TenantLifecycleConflictError,
   TenantNotFoundError,
   TenantProvisioningError,
+  TenantCreatorLimitError,
   TenantSlugConflictError,
 } from './tenant-database.errors';
 
@@ -45,6 +46,13 @@ export interface ProvisionTenantInput {
    * (and FAILED after `MAX_PROVISION_ATTEMPTS`) instead of leaving it PROVISIONING for ever.
    */
   retryOnFailure?: boolean;
+  /**
+   * Who asked for the workspace, recorded on the tenant. With `maxOfKind`, at most that many
+   * tenants of `kind` may ever carry this creator (deleted and transferred ones count): checked
+   * and written in the same transaction under a lock on the creator, so parallel requests cannot
+   * pass it together. Over it: `TenantCreatorLimitError`, nothing written.
+   */
+  creator?: { issuer: string; subject: string; maxOfKind?: number };
   /** Created with the tenant rows in ONE transaction, so a crash cannot leave an unreachable workspace. */
   owner?: {
     issuer: string;
@@ -619,12 +627,29 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     databaseName: string,
   ) {
     return this.control.$transaction(async (tx) => {
+      const creator = input.creator;
+      const kind = input.kind ?? 'COMPANY';
+      if (creator?.maxOfKind !== undefined) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace-creator:${creator.issuer}\n${creator.subject}`}, 0))`;
+        const made = await tx.tenant.count({
+          where: {
+            createdByIssuer: creator.issuer,
+            createdBySubject: creator.subject,
+            kind,
+          },
+        });
+        if (made >= creator.maxOfKind) {
+          throw new TenantCreatorLimitError(creator.maxOfKind);
+        }
+      }
       const tenant = await tx.tenant.create({
         data: {
           slug: input.slug,
           name: input.name,
           status: input.queued ? 'QUEUED' : 'PROVISIONING',
-          kind: input.kind ?? 'COMPANY',
+          kind,
+          createdByIssuer: creator?.issuer ?? null,
+          createdBySubject: creator?.subject ?? null,
           ownerSubject: input.ownerSubject ?? null,
           ownerIssuer: input.ownerIssuer ?? null,
           entraTenantId: input.entraTenantId ?? null,

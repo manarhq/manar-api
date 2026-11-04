@@ -74,6 +74,21 @@ what the MCP ecosystem itself expects a tool's declared input contract to
 look like. `null`/absent means "no schema declared — skip validation
 entirely," not "reject everything."
 
+Authorization, policy rules and approvals decide on the request's
+`resource`. An HTTP or MCP tool receives it next to free-form `params`, so
+an action whose target travels in `params` names that param with the
+schema keyword `"x-manar-resource-param": "<param>"`. The broker then
+requires `params.<param>` to equal `resource` (filling it in when absent)
+and refuses the call otherwise (`resource_param_mismatch`). Without the
+keyword, resource-scoped policy holds only as far as the tool acts on the
+`resource` field itself. A request naming the wildcard `*` as its resource
+is denied (`invalid_resource`).
+
+Text a tool returns with a failure (an MCP `isError` result) is capped and
+screened like a result (DLP floor, manar-ai DLP, injection check) before it
+is appended to the stored and returned error; if any check flags it or
+cannot run, only the fixed error code is kept. Audit records the code only.
+
 ## Credential resolution: `OpenBaoSecretProvider`
 
 Phase 2 defined the `SecretProvider` interface

@@ -36,6 +36,12 @@ export const AUDIT_EVENT_TYPES = {
   APPROVAL_HANDOVER_COLLECTED: 'approval.handover_collected',
   /** A device approval got no answer in time and was denied ("denied: no answer"). */
   APPROVAL_EXPIRED: 'approval.expired',
+  /** A person revoked an approval: cancelled before use, or flagged after use (`usedBeforeRevoke`). */
+  APPROVAL_REVOKED: 'approval.revoked',
+  /** A person withdrew an 8-hour grant, or lifted a block left by a revoked-after-use approval. */
+  APPROVAL_GRANT_REVOKED: 'approval.grant.revoked',
+  /** A personal workspace's owner approved their own sensitive request after a fresh sign-in. */
+  APPROVAL_SELF_CONFIRMED: 'approval.self_confirmed',
   /** "Pause all AI" was turned on / off for the workspace. */
   WORKSPACE_AI_PAUSED: 'workspace.ai.paused',
   WORKSPACE_AI_RESUMED: 'workspace.ai.resumed',
@@ -163,7 +169,7 @@ export const AUDIT_EVENT_TYPES = {
   HOST_TPM_VERIFIED: 'host.tpm_verified',
   /** A tenant's plan changed (Stripe, trial start or end). Data: from, to, source. */
   BILLING_PLAN_CHANGED: 'billing.plan.changed',
-  /** The owner removed a device (console "Remove device"): its record and certificates are gone, so it can be installed again. */
+  /** The owner removed a device (console "Remove device"): certificates revoked, record kept as REMOVED; it can be installed again. */
   HOST_REMOVED: 'host.removed',
 
   // AI tool coverage (launch spec 4.5).
@@ -186,6 +192,18 @@ export const AUDIT_EVENT_TYPES = {
   /** A program was let have a vaulted secret (the decision and its scope are in the data). */
   SECRET_VAULT_RELEASED: 'secret.vault.released',
   SECRET_VAULT_DENIED: 'secret.vault.denied',
+
+  // Tampering a device saw (manar-edge protect; src/hosts/tamper.ts). Data: host, tool, kind, masked path.
+  /** A hook refused an AI tool's change to a hook or settings file. */
+  PROTECT_TAMPER_SETTINGS_WRITE: 'protect.tamper.settings_write',
+  /** Manar's hook was taken out of a settings file it protects; the device put it back. */
+  PROTECT_TAMPER_HOOK_REMOVED: 'protect.tamper.hook_removed',
+  /** A project's Claude Code settings switch all hooks off (disableAllHooks). */
+  PROTECT_TAMPER_HOOKS_DISABLED: 'protect.tamper.hooks_disabled',
+  /** Claude Code was started with --settings. */
+  PROTECT_TAMPER_SETTINGS_FLAG: 'protect.tamper.settings_flag',
+  /** Claude Code ran with CLAUDE_CONFIG_DIR away from ~/.claude. */
+  PROTECT_TAMPER_CONFIG_DIR: 'protect.tamper.config_dir',
 
   // AI spend tracker and secrets-in-prompt guard (DOOR).
   /** DOOR replaced a secret in an outbound prompt with a mask. Data: tool, kind, count, masked sample; never the prompt. */

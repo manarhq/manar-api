@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
@@ -16,6 +20,7 @@ export interface TenantSettings {
   allowExternalAi: boolean;
   allowOutboundTelemetry: boolean;
   allowCloudStorage: boolean;
+  approvalsAdminsOnly: boolean;
   updatedAt: Date;
   sso: {
     realm: string;
@@ -101,6 +106,16 @@ export class TenantSettingsService {
     updatedByUserId: string,
     input: UpdateTenantSettingsRequest,
   ): Promise<TenantSettings> {
+    if (input.approvalsAdminsOnly !== undefined) {
+      const current = await this.control.tenant.findUnique({
+        where: { id: tenantId },
+        select: { kind: true },
+      });
+      if (current?.kind !== 'COMPANY')
+        throw new BadRequestException(
+          '"Admins only" approvals are for company workspaces. Nothing was changed.',
+        );
+    }
     const tenant = await this.control.tenant.update({
       where: { id: tenantId },
       data: {
@@ -115,6 +130,9 @@ export class TenantSettingsService {
           : {}),
         ...(input.allowCloudStorage !== undefined
           ? { allowCloudStorage: input.allowCloudStorage }
+          : {}),
+        ...(input.approvalsAdminsOnly !== undefined
+          ? { approvalsAdminsOnly: input.approvalsAdminsOnly }
           : {}),
       },
     });
@@ -149,6 +167,8 @@ export class TenantSettingsService {
     allowExternalAi: boolean;
     allowOutboundTelemetry: boolean;
     allowCloudStorage: boolean;
+    approvalsAdminsOnly: boolean;
+    kind: string;
     updatedAt: Date;
     keycloakRealm: string | null;
     keycloakIssuerUrl: string | null;
@@ -185,6 +205,8 @@ export class TenantSettingsService {
       allowExternalAi: tenant.allowExternalAi,
       allowOutboundTelemetry: tenant.allowOutboundTelemetry,
       allowCloudStorage: tenant.allowCloudStorage,
+      approvalsAdminsOnly:
+        tenant.kind === 'COMPANY' && tenant.approvalsAdminsOnly,
       updatedAt: tenant.updatedAt,
       sso,
       aiProvider: { provider, isExternal: isExternalAiProvider(provider) },

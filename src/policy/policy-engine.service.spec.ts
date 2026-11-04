@@ -334,6 +334,24 @@ describe('PolicyEngine', () => {
     expect(result.policyVersionId).toBe('v2');
   });
 
+  it('fails closed (DENY) when the action classification cannot be looked up', async () => {
+    const client = {
+      policyVersion: { findMany: () => Promise.resolve([]) },
+    } as unknown as TenantPrismaClient;
+    const engine = new PolicyEngine({
+      findToolAction: () => Promise.reject(new Error('connection refused')),
+    } as unknown as ToolRegistryService);
+    const result = await engine.evaluate(client, 'tenant-1', {
+      toolId: 'fs',
+      actionId: 'read',
+      resource: 'anything',
+    });
+    expect(result).toEqual({
+      effect: 'DENY',
+      failureReason: 'classification_lookup_failed',
+    });
+  });
+
   it('fails closed (DENY) when the database load itself throws', async () => {
     const brokenClient = {
       policyVersion: {

@@ -82,6 +82,11 @@ master prompt:
    name-constraint enforcement of its own by design (that's what
    "verbatim" means) — trusting it to reject a mismatched CSR would be
    trusting a system that was never asked to check in the first place.
+   Because the subject is copied verbatim too, it is pinned: exactly one
+   attribute, `CN=<agent:// identifier>` (hosts may also send their bare
+   machine id, but only in a known form: manar-edge's `m-` + 32 hex, a
+   32-hex Linux machine-id or a Windows MachineGuid). No other SAN, no
+   other attribute.
 2. Enforces a **24-hour leaf-certificate TTL**
    (`AGENT_LEAF_CERTIFICATE_TTL`) — short-lived by design, so a
    certificate compromised outside Manar's own revocation path

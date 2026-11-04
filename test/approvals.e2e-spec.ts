@@ -73,6 +73,11 @@ describe('Approval Engine (e2e)', () => {
   >;
   let tenant: ProvisionedTenant;
   let adminToken: string;
+  /**
+   * The person who decides. Not the admin who created the agents: a sensitive (high-risk)
+   * request is never approved by the person whose agent asked (3 Nov 2026, decision-rights.ts).
+   */
+  let approverToken: string;
 
   /** approvalRequestId -> promise the worker's finalize Activity awaits first (test 9). */
   const heldFinalizations = new Map<string, Promise<void>>();
@@ -408,7 +413,7 @@ describe('Approval Engine (e2e)', () => {
   ): Promise<RawResponse> {
     const res = await request(humanApp.getHttpServer() as App)
       .post(`/approvals/${approvalId}/decide`)
-      .set('Authorization', `Bearer ${adminToken}`)
+      .set('Authorization', `Bearer ${approverToken}`)
       .send({ decision, reason });
     return { status: res.status, body: res.body as unknown };
   }
@@ -621,6 +626,20 @@ describe('Approval Engine (e2e)', () => {
       clientId: tenant.keycloakClientId!,
       clientSecret: clientSecretRef.reference,
       username: ADMIN_USERNAME,
+      password: USER_PASSWORD,
+    });
+
+    const approverUserId = await createRealmUser(tenant.keycloakRealm, {
+      username: `${ADMIN_USERNAME}-approver`,
+      email: `${ADMIN_USERNAME}-approver@example.test`,
+      password: USER_PASSWORD,
+    });
+    await assignRealmRole(tenant.keycloakRealm, approverUserId, 'APPROVER');
+    approverToken = await getUserToken({
+      realm: tenant.keycloakRealm,
+      clientId: tenant.keycloakClientId!,
+      clientSecret: clientSecretRef.reference,
+      username: `${ADMIN_USERNAME}-approver`,
       password: USER_PASSWORD,
     });
   }, 180_000);

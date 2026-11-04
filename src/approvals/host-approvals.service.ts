@@ -1,8 +1,8 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   HttpException,
+  UnauthorizedException,
   Injectable,
   NotFoundException,
   Optional,
@@ -23,6 +23,18 @@ import {
 } from '../jail/jail-sites.service';
 import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
+import { ApproverDirectory } from './approver-directory';
+import {
+  STEP_UP_MAX_AGE_SECONDS,
+  decisionRights,
+  refusalMessage,
+  sensitiveReason,
+} from './decision-rights';
+import {
+  PAUSED_CONFLICT_MESSAGE,
+  approvalConflict,
+  notPendingConflict,
+} from './approvals.errors';
 
 /** `approve_always` exists for a new site only (JAIL): it makes a permanent site rule. */
 export type HostDecision =
@@ -74,6 +86,23 @@ export interface DecideHostApprovalInput {
   nonce?: { value: string; expiresAt: Date };
   /** Console only: the caller may write site rules (owner / security admin). Absent means no. */
   canWriteSiteRules?: boolean;
+  /**
+   * Device only: the device stopped waiting (its 2 minutes ran out). Recorded as EXPIRED
+   * `withdrawn`, never as a person's deny. A device `deny` of a new site is always this: WARDEN
+   * never shows buttons for sites, so only JAIL's own timeout sends it (edges before 3 Nov 2026
+   * do not set the flag).
+   */
+  withdraw?: boolean;
+  /**
+   * Console only: the signed-in person currently holds a role that may operate devices
+   * (`OPERATOR_ROLES`). The owner path needs it, so a demoted owner cannot decide.
+   */
+  ownerMayOperate?: boolean;
+  /**
+   * Console only: the signed-in person's `auth_time` is within `STEP_UP_MAX_AGE_SECONDS`. Needed
+   * for a personal workspace's owner approving their own sensitive request.
+   */
+  freshSignIn?: boolean;
 }
 
 @Injectable()
@@ -81,6 +110,7 @@ export class HostApprovalsService {
   constructor(
     private readonly audit: AuditService,
     private readonly push: PushService,
+    private readonly approvers: ApproverDirectory,
     @Optional() private readonly telegram?: TelegramService,
   ) {}
 
@@ -226,7 +256,7 @@ export class HostApprovalsService {
     for (const row of due) {
       const won = await client.hostApproval.updateMany({
         where: { id: row.id, status: 'PENDING' },
-        data: { status: 'EXPIRED' },
+        data: { status: 'EXPIRED', endReason: 'no_answer' },
       });
       if (won.count === 0) continue;
       n++;
@@ -249,14 +279,20 @@ export class HostApprovalsService {
     client: TenantPrismaClient,
     hostId: string | undefined,
     at?: Date,
+    /** Only devices this Keycloak subject owns (a person who is not an approver). */
+    opts: { ownerSubject?: string } = {},
   ) {
     const now = at ?? (await dbNow(client));
     return client.hostApproval.findMany({
       where: {
         ...(hostId ? { hostId } : {}),
+        ...(opts.ownerSubject
+          ? { host: { ownerSubject: opts.ownerSubject } }
+          : {}),
         status: 'PENDING',
         expiresAt: { gt: now },
       },
+      include: { host: { select: { hostname: true, ownerSubject: true } } },
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
@@ -267,6 +303,52 @@ export class HostApprovalsService {
     if (!row || (hostId && row.hostId !== hostId))
       throw new NotFoundException('no such approval');
     return row;
+  }
+
+  /** The device stopped waiting: EXPIRED `withdrawn`, so a late answer cannot allow anything. */
+  private async withdraw(
+    client: TenantPrismaClient,
+    tenantId: string,
+    row: { id: string; hostId: string; toolId: string; actionId: string },
+  ) {
+    const won = await client.hostApproval.updateMany({
+      where: { id: row.id, status: 'PENDING' },
+      data: { status: 'EXPIRED', endReason: 'withdrawn' },
+    });
+    if (won.count === 1)
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.APPROVAL_EXPIRED,
+        actor: { type: 'system', id: row.hostId },
+        data: {
+          hostApprovalId: row.id,
+          hostId: row.hostId,
+          toolId: row.toolId,
+          actionId: row.actionId,
+          reason: 'withdrawn',
+        },
+      });
+    return {
+      id: row.id,
+      status: 'EXPIRED' as const,
+      decision: null,
+      grantId: null,
+      remembered: false,
+      note: null,
+      ruleDraft: null,
+    };
+  }
+
+  /**
+   * The device read this approval. The first read of an APPROVED one marks it used: from then on
+   * the action may have run, so a revoke can only flag it. Conditional, so it races a revoke
+   * cleanly: whichever lands first decides whether the device sees APPROVED or REVOKED.
+   */
+  async readForDevice(client: TenantPrismaClient, id: string, hostId: string) {
+    await client.hostApproval.updateMany({
+      where: { id, hostId, status: 'APPROVED', usedAt: null },
+      data: { usedAt: await dbNow(client) },
+    });
+    return this.get(client, id, hostId);
   }
 
   /**
@@ -295,6 +377,60 @@ export class HostApprovalsService {
       throw new ForbiddenException('site_in_console');
     if (input.decision === 'approve_always' && !isSite)
       throw new BadRequestException('always is for a new site only');
+    if (
+      input.via === 'device' &&
+      input.decision === 'deny' &&
+      (input.withdraw || isSite)
+    )
+      return this.withdraw(client, tenantId, row);
+    // Founder decisions, 3 Nov 2026 (decision-rights.ts): an approver decides anything, but not a
+    // sensitive request from their own device in a company workspace; the device's owner answers
+    // their own routine requests in the signed-in console only. Off the console (WARDEN on the
+    // device, push, Telegram) only an approver decides: a process on the device can answer a
+    // device prompt, so the device credential alone is never consent. Checked here, where every
+    // channel arrives, so no caller can skip it.
+    const admin = await this.approvers.canApprove(
+      tenantId,
+      client,
+      input.subject,
+    );
+    if (input.via !== 'console' && !admin)
+      throw new ForbiddenException(
+        'Answer this in the Manar console. Only a workspace approver can answer from a device or a phone. Nothing was changed.',
+      );
+    const owner = await client.host.findUnique({
+      where: { id: row.hostId },
+      select: { ownerSubject: true },
+    });
+    const ws = await this.approvers.workspace(tenantId);
+    const rights = decisionRights({
+      admin,
+      owner:
+        !!owner?.ownerSubject &&
+        owner.ownerSubject === input.subject &&
+        (admin || input.ownerMayOperate === true),
+      adminsOnly: ws.adminsOnly,
+      company: ws.company,
+      sensitive: sensitiveReason(row),
+      actionId: row.actionId,
+    });
+    if (!rights.choices.includes(input.decision))
+      throw new ForbiddenException(refusalMessage(rights));
+    // Self-approval of something sensitive (personal workspace): only in the signed-in console,
+    // and only right after a fresh sign-in, checked here on the server.
+    const selfConfirmed = rights.stepUp && input.decision !== 'deny';
+    if (selfConfirmed && input.via !== 'console')
+      throw new ForbiddenException(
+        'Approving your own high-risk request needs the Manar console. Nothing was changed.',
+      );
+    if (selfConfirmed && !input.freshSignIn)
+      throw new UnauthorizedException({
+        statusCode: 401,
+        code: 'reauth_required',
+        maxAge: STEP_UP_MAX_AGE_SECONDS,
+        message:
+          'Confirm it is you (sign in again) to approve your own high-risk request. Nothing was changed.',
+      });
     // A permanent site rule needs the role that may write site rules; an approver without it
     // gets "once" (fail closed: an absent flag is "no").
     let decision: HostDecision = input.decision;
@@ -314,7 +450,7 @@ export class HostApprovalsService {
       // Inside the transaction, so a pause that lands between the check and the write cannot be
       // missed. A deny is always allowed; an approval is refused while AI is paused.
       if (input.decision !== 'deny' && (await isWorkspacePaused(tx)))
-        throw new ConflictException(PAUSED_REASON);
+        throw approvalConflict('paused', PAUSED_CONFLICT_MESSAGE);
       const now = at ?? (await dbNow(tx));
       // A person's answer to "may this tool connect to this site?" is remembered per device and
       // tool, unless a DENY or a rule made by hand already speaks for this site: then it is
@@ -340,10 +476,19 @@ export class HostApprovalsService {
           decidedBy: input.subject,
           decidedVia: input.via,
           decidedAt: now,
+          ...(selfConfirmed ? { selfConfirmedAt: now } : {}),
         },
       });
-      if (won.count === 0)
-        throw new ConflictException('already decided or expired');
+      if (won.count === 0) {
+        const current = await tx.hostApproval.findUnique({
+          where: { id: row.id },
+          select: { status: true },
+        });
+        // PENDING past its expiry is expired; the sweeper has not written it yet.
+        throw notPendingConflict(
+          !current || current.status === 'PENDING' ? 'EXPIRED' : current.status,
+        );
+      }
       if (input.nonce) {
         try {
           await tx.phoneActionUse.create({
@@ -355,7 +500,10 @@ export class HostApprovalsService {
         } catch {
           // Unique violation: the token was spent. This aborts the transaction, so the decision
           // above is rolled back with it.
-          throw new ConflictException('action_already_used');
+          throw approvalConflict(
+            'action_already_used',
+            'This button was already used. Nothing was changed.',
+          );
         }
       }
       if (wantsRemember && note !== 'site_rule_exists') {
@@ -400,6 +548,10 @@ export class HostApprovalsService {
         hostId: row.hostId,
         decision,
         via: input.via,
+        // "Self-approved, high risk, re-confirmed".
+        ...(selfConfirmed
+          ? { selfApproved: true, sensitive: rights.why, reconfirmed: true }
+          : {}),
         toolId: row.toolId,
         actionId: row.actionId,
       },

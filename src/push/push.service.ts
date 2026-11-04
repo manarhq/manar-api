@@ -13,7 +13,7 @@ import { signPushAction } from '../phone/phone-token';
  * (encrypted) payload, and the console shows the details after sign-in.
  */
 export interface PushPayload {
-  kind: 'approval' | 'approval_closed' | 'secret_alert';
+  kind: 'approval' | 'approval_closed' | 'approval_revoked' | 'secret_alert';
   title: string;
   body: string;
   /** Console path to open, e.g. `/approvals`. */

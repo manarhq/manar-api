@@ -10,6 +10,7 @@ import {
 } from './workspace-provisioning.service';
 import { SAMPLE_DIRECTORY, WORKSPACE_PROVISIONING } from './workspace-ports';
 import { WorkspacesService } from './workspaces.service';
+import { RedisThrottlerStorageModule } from '../rate-limit/redis-throttler-storage.module';
 
 /**
  * Hosted workspaces (spec 4.1, 4.2, 7a). `AuthModule`, `DatabaseModule` and `ConfigModule` are
@@ -17,6 +18,7 @@ import { WorkspacesService } from './workspaces.service';
  * workspace) consumes.
  */
 @Module({
+  imports: [RedisThrottlerStorageModule],
   controllers: [WorkspacesController, CurrentWorkspaceController],
   providers: [
     WorkspaceProvisioningService,

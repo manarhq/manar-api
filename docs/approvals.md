@@ -362,3 +362,54 @@ already boots both Nest apps in-process), and the real
   itself, a postinstall script) shares that desktop and is not fully isolated from it. Mitigations:
   only the installed, root-owned binary may connect as the helper; the device can only approve
   once; anything standing or touching secrets is decided in the console.
+
+## History, revoke and who decides (3 Nov 2026)
+
+**Who decides** (`src/approvals/decision-rights.ts`).
+
+- An approver role (`TENANT_OWNER`, `SECURITY_ADMIN`, `APPROVER`) decides any request, except a
+  _sensitive_ request from their own device or agent in a company workspace: another approver must
+  answer it ("Ask another approver, or deny it"). There is no bypass. A personal workspace has one person: its owner may approve their own sensitive
+  request (once, never 8 hours or always) only in the console and only within
+  `STEP_UP_MAX_AGE_SECONDS` (15 min) of an interactive sign-in (`auth_time`, checked on the server;
+  otherwise 401 `reauth_required` and the console sends them through sign-in and back). It is
+  recorded as `selfConfirmedAt` and audited as self-approved, high risk, re-confirmed.
+- The device owner, or the agent's creator, may approve once or deny their own _routine_ requests
+  in the signed-in console, if they hold a role that operates agents now (`OPERATOR_ROLES`; a
+  demoted or removed person loses it even though `createdBy` still names them), and unless the
+  company workspace set `approvalsAdminsOnly` (`PATCH /tenant/settings`). A sensitive request they
+  can only deny. 8 hours, always and "make rule" stay with approvers.
+- Sensitive: a device approval flagged `highRisk`, an agent request scoring
+  `AGENT_HIGH_RISK_SCORE` (60) or more, or an action that hands over a secret (`HANDOVER_ACTIONS`).
+  Collecting a handover (`POST /approvals/:id/handover`) stays approver-only.
+- Off the console (WARDEN on the device, push, Telegram) only an approver decides: a process on the
+  device can answer a device prompt, so the device credential alone is never consent.
+
+`HostApprovalsService.decide` enforces this for every device channel and `ApprovalsController` for
+agent requests. Lists, history and detail show a person who is not an approver only their own
+devices and agents; each item carries `allowedDecisions`, `needs` and `why` so the console shows
+only what the person may do and says why not.
+
+**History.** `GET /approvals/history`: agent and device approvals in one cursor, every state
+(`PENDING`, `APPROVED`, `DENIED`, `EXPIRED`, `REVOKED`), with who decided, when, through which
+channel, the end reason (`no_answer`, `paused`, `withdrawn`, `superseded`, or a re-evaluation
+reason), when the device or agent received it, and what it created (8-hour grant, site rule, block).
+A device that stops waiting now withdraws its prompt (`withdraw: true`); it is recorded as
+EXPIRED `withdrawn`, not as a person's deny; older rows written as a device deny of a new site
+are shown the same way (the rows are not rewritten).
+
+**Revoke.** `POST /approvals/:id/revoke`, `POST /host-approvals/:id/revoke`:
+
+| State when revoked                                                | Result                                                                                                                                                                                                                |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Not yet received (`releasedAt` / `usedAt` null, grant unconsumed) | `REVOKED`, `usedBeforeRevoke: false`. The grant is revoked; the device or agent reads `REVOKED` and refuses. Nothing ran.                                                                                             |
+| Already received                                                  | `REVOKED`, `usedBeforeRevoke: true`. An incident (HIGH) and a push to approvers; this exact action is blocked (`ApprovalAllowGrant.effect = BLOCK`, 30 days, or a DENY site rule for a site) until a person lifts it. |
+| Either                                                            | Any 8-hour grant or remembered site rule it created is withdrawn.                                                                                                                                                     |
+
+"Received" is one conditional update racing the device's or agent's own read, so a revoke is never
+reported as "cancelled" for an approval the device already saw. `POST
+/approvals/allow-grants/:id/revoke` withdraws an 8-hour grant or lifts a block at any time; both
+authorize paths read grants and blocks live, so it applies on the next request.
+
+409 responses carry a `reason` (`paused`, `already_decided`, `expired`, `revoked`, `not_approved`,
+`action_already_used`, `not_signaled`) next to a plain `message`.

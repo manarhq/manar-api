@@ -18,6 +18,8 @@ export const UpdateTenantSettingsSchema = z
     allowExternalAi: z.boolean().optional(),
     allowOutboundTelemetry: z.boolean().optional(),
     allowCloudStorage: z.boolean().optional(),
+    /** Company workspaces: only approver roles decide approvals (3 Nov 2026). */
+    approvalsAdminsOnly: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: 'At least one field must be provided',

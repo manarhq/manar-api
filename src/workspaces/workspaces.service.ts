@@ -15,8 +15,12 @@ import { failClosed } from '../common/fail-closed/fail-closed';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import {
   WorkspaceProvisioningService,
+  workspaceLimitError,
   type CreateWorkspaceResult,
 } from './workspace-provisioning.service';
+
+/** Company trials one person may ever start (founder decision), transferred or deleted ones included. */
+export const MAX_COMPANY_TRIALS_PER_PERSON = 3;
 
 /** Microsoft's tenant for personal (consumer) accounts: not an organisation. */
 export const CONSUMER_TENANT_ID = '9188040d-6c67-4c5b-b112-36a304b66dad';
@@ -203,6 +207,28 @@ export class WorkspacesService {
     if (!tid) throw new ForbiddenException('work_account_required');
     if (!isEntraAdmin(identity))
       throw new ForbiddenException('entra_admin_required');
+    // Cheap refusals first, so a replay or a capped person spends no creation budget. The cap is
+    // enforced again, atomically, where the tenant row is written (`maxPerCreator`).
+    const issuer = identity.issuer.replace(/\/+$/, '');
+    const [made, existing] = await failClosed('control-db', () =>
+      Promise.all([
+        this.control.tenant.count({
+          where: {
+            createdByIssuer: issuer,
+            createdBySubject: identity.subject,
+            kind: 'COMPANY',
+          },
+        }),
+        this.control.tenant.findFirst({
+          where: { kind: 'COMPANY', entraTenantId: tid },
+          select: { id: true },
+        }),
+      ]),
+    );
+    if (made >= MAX_COMPANY_TRIALS_PER_PERSON) {
+      throw workspaceLimitError('company_trial_limit_reached');
+    }
+    if (existing) throw new ConflictException('workspace_exists');
     return this.provisioning.createWorkspace({
       ownerIssuer: identity.issuer,
       ownerSubject: identity.subject,
@@ -211,6 +237,7 @@ export class WorkspacesService {
       entraTenantId: tid,
       ownerEmail: identity.email,
       ownerDisplayName: identity.displayName,
+      maxPerCreator: MAX_COMPANY_TRIALS_PER_PERSON,
     });
   }
 

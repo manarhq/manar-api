@@ -376,7 +376,7 @@ export class AccountService {
         const db = await this.tenants.getClient(t.id);
         summary.devicesRevoked += (
           await db.host.updateMany({
-            where: { status: { not: 'REVOKED' } },
+            where: { status: { notIn: ['REVOKED', 'REMOVED'] } },
             data: { status: 'REVOKED' },
           })
         ).count;
@@ -393,8 +393,12 @@ export class AccountService {
     await this.control.userDataPreference.deleteMany({
       where: { issuer, subject },
     });
-    // 5. The sign-in account itself.
-    const realm = realmOf(issuer);
+    // 5. The sign-in account itself, in the hosted realm only. A customer-hosted install's realm
+    //    belongs to the customer (and may write through to their directory): its users stay.
+    const realm =
+      this.config.get('MANAR_DEPLOYMENT', { infer: true }) === 'hosted'
+        ? realmOf(issuer)
+        : null;
     if (realm) {
       await this.keycloak.deleteUser(realm, subject);
       summary.keycloakUserRemoved = true;

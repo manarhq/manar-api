@@ -82,3 +82,23 @@ describe('AuthorizationService.authorize fails closed (S32, S61)', () => {
     });
   });
 });
+
+describe('AuthorizationService.authorize resource', () => {
+  it('denies a request naming the wildcard "*" as its resource, before anything else is read', async () => {
+    const checkAll = vi.fn(() => Promise.resolve({ killed: false }));
+    const getTaskOrThrow = vi.fn();
+    const { service } = makeService({ checkAll, getTaskOrThrow });
+
+    await expect(
+      service.authorize(tenantClient, 't1', 'agent-1', {
+        ...REQUEST,
+        resource: '*',
+      }),
+    ).resolves.toEqual({
+      decision: 'DENY',
+      reason: 'invalid_resource',
+      decisionId: 'decision-1',
+    });
+    expect(getTaskOrThrow).not.toHaveBeenCalled();
+  });
+});

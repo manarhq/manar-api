@@ -101,8 +101,6 @@ describe('assistant reads respect the caller role (real RolesGuard metadata)', (
     expect(await run('get_decision', { correlationId: ID }, ctx)).toEqual(
       DENIED,
     );
-    expect(await run('list_pending_approvals', {}, ctx)).toEqual(DENIED);
-    expect(await run('get_approval', { approvalId: ID }, ctx)).toEqual(DENIED);
     expect(await run('get_policy_rule', { policyId: ID }, ctx)).toEqual(DENIED);
     expect(await run('get_agent_activity', { agent: ID }, ctx)).toEqual(DENIED);
   });
@@ -120,7 +118,14 @@ describe('assistant reads respect the caller role (real RolesGuard metadata)', (
     expect(await run('search_decisions', {}, ctx)).toMatchObject({
       decisions: [],
     });
-    expect(await run('list_pending_approvals', {}, ctx)).toEqual(DENIED);
+  });
+
+  it('approvals have no role gate: the controller itself narrows a non-approver to their own', async () => {
+    // Founder decision, 3 Nov 2026: a device or agent owner sees and answers their own requests.
+    // The narrowing is inside ApprovalsController (approvals.controller.access.spec.ts), which
+    // this fake route does not run, so only the absence of a role gate is checked here.
+    const ctx = ctxFor('Bearer roles=READ_ONLY;tenant=acme');
+    expect(await run('list_pending_approvals', {}, ctx)).not.toEqual(DENIED);
   });
 
   it('no token, no data', async () => {

@@ -65,6 +65,20 @@ jobs:
           persist-credentials: false
       - run: sh deploy/ci/validate-fleet-inputs.test.sh
 
+  # src/contract/host-contract.json is shared with manar-edge (testdata/contract/host-contract.json):
+  # both test suites read it, so the copies must stay byte-identical.
+  contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          code="$(curl -sS -o edge.json -w '%{http_code}' https://raw.githubusercontent.com/manarhq/manar-edge/main/testdata/contract/host-contract.json)"
+          if [ "$code" = 404 ]; then echo "manar-edge has no copy yet"; exit 0; fi
+          test "$code" = 200
+          cmp src/contract/host-contract.json edge.json || { echo "host-contract.json differs from manar-edge main: change both repos together"; exit 1; }
+
   unit:
     runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
@@ -121,6 +135,21 @@ jobs:
       DEMO_TOOLS_API_KEY: manar-dev-demo-tools-key
     runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
+      # manar-ai at the pinned commit, fetched FIRST: no code from this repo (pnpm lifecycle scripts,
+      # earlier steps writing GITHUB_ENV/GITHUB_PATH) has run yet, so nothing can intercept the
+      # token. The source stays outside the checkout; the "manar-ai" step below builds and starts it.
+      # While manar-ai is private, MANAR_AI_READ_TOKEN (read-only, contents:read on manarhq/manar-ai)
+      # is needed; once it is public the anonymous download works. Never an artifact: this repo is public.
+      - name: Fetch manar-ai
+        env:
+          MANAR_AI_READ_TOKEN: ${{ secrets.MANAR_AI_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          auth=(); [ -z "$MANAR_AI_READ_TOKEN" ] || auth=(-H "Authorization: Bearer $MANAR_AI_READ_TOKEN")
+          mkdir -p "$RUNNER_TEMP/manar-ai"
+          /usr/bin/curl -fsSL "${auth[@]}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/manarhq/manar-ai/tarball/$MANAR_AI_REF" \
+            | /usr/bin/tar xz -C "$RUNNER_TEMP/manar-ai" --strip-components=1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -191,19 +220,11 @@ jobs:
           echo "TEMPORAL_ADDRESS=127.0.0.1:$TEMPORAL_PORT" >>"$GITHUB_ENV"
           timeout 60 bash -c "until $RUNNER_TEMP/temporal operator cluster health --address 127.0.0.1:$TEMPORAL_PORT >/dev/null 2>&1; do sleep 1; done"
       # manar-ai: ai-advisory.e2e-spec.ts runs its DLP scenarios against the real service (no
-      # image is published), so run its gRPC server from source at a pinned commit, outside the
-      # checkout and with a clean env. While manar-ai is private, MANAR_AI_READ_TOKEN (read-only,
-      # contents:read on manarhq/manar-ai) is needed; once it is public the anonymous download works.
+      # image is published), so run its gRPC server from the source fetched in the first step,
+      # outside the checkout and with a clean env. No token in this step.
       - name: manar-ai
-        env:
-          MANAR_AI_READ_TOKEN: ${{ secrets.MANAR_AI_READ_TOKEN }}
         run: |
           set -e
-          auth=(); [ -z "$MANAR_AI_READ_TOKEN" ] || auth=(-H "Authorization: Bearer $MANAR_AI_READ_TOKEN")
-          mkdir -p "$RUNNER_TEMP/manar-ai"
-          curl -fsSL "${auth[@]}" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/manarhq/manar-ai/tarball/$MANAR_AI_REF" \
-            | tar xz -C "$RUNNER_TEMP/manar-ai" --strip-components=1
           uv sync --project "$RUNNER_TEMP/manar-ai" --locked --no-dev --quiet
           (cd "$RUNNER_TEMP/manar-ai" && env -i PATH="$PATH" HOME="$HOME" \
             PORT="$AI_HTTP_PORT" ENVIRONMENT=local LOG_LEVEL=INFO GRPC_PORT="$AI_GRPC_PORT" AI_PROVIDER=ollama \

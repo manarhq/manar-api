@@ -103,6 +103,52 @@ describe('groupSessions', () => {
     expect(s[0]!.steps[1]!.outcome).toBe('approved');
   });
 
+  it('links device approvals by hostApprovalId, as the approvals service records them', () => {
+    // The shape on production (2 Nov 2026): approval events carry hostApprovalId only.
+    const s = groupSessions([
+      act(0, 'shell', 'git push --force', {
+        sessionId: 'S1',
+        decision: 'APPROVAL_REQUIRED',
+        approvalId: 'h-a1',
+      }),
+      {
+        id: 'ex',
+        eventType: 'approval.expired',
+        timestamp: new Date(T0 + 120_000),
+        data: { hostApprovalId: 'h-a1', hostId: 'h1', toolId: 'host.cursor' },
+      },
+    ]);
+    expect(s[0]!.counts.approvals).toBe(1);
+    expect(s[0]!.steps[1]).toMatchObject({
+      kind: 'approval',
+      outcome: 'expired',
+    });
+  });
+
+  it('shows a JAIL site question as a site the person was asked about', () => {
+    const ask = (min: number, type: string, site: string): RawEvent => ({
+      id: `j${n++}`,
+      eventType: type,
+      timestamp: new Date(T0 + min * 60_000),
+      data: {
+        hostId: 'h1',
+        toolId: 'host.claude-code',
+        actionId: 'site.connect',
+        hostApprovalId: `ha${n}`,
+        resource: site,
+      },
+    });
+    const [s] = groupSessions([
+      ask(0, 'approval.approved', 'github.com'),
+      ask(1, 'approval.denied', 'evil.example'),
+    ]);
+    expect(s!.counts).toMatchObject({ sites: 2, approvals: 2, blocked: 1 });
+    expect(s!.steps.map((x) => [x.kind, x.label, x.outcome])).toEqual([
+      ['site', 'github.com', 'approved'],
+      ['site', 'evil.example', 'denied'],
+    ]);
+  });
+
   it('round-trips the session id and refuses junk', () => {
     const [s] = groupSessions([act(0, 'shell', 'ls', { sessionId: 'S1' })]);
     expect(parseSessionId(s!.id)).toMatchObject({

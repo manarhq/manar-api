@@ -47,6 +47,8 @@ export class HostApprovalsController {
     const client = await this.tenants.getClient(host.tenantId);
     await this.approvals.expireDue(client, host.tenantId);
     const [ownerMayApprove, rows] = await Promise.all([
+      // The device decides only for an owner who is an approver: anyone else answers in the
+      // signed-in console (a process on the device can answer a device prompt).
       this.approvers.canApprove(host.tenantId, client, host.ownerSubject),
       this.approvals.listPending(client, host.hostId),
     ]);
@@ -93,7 +95,11 @@ export class HostApprovalsController {
   async status(@CurrentHost() host: HostContext, @Param('id') id: string) {
     const client = await this.tenants.getClient(host.tenantId);
     await this.approvals.expireDue(client, host.tenantId);
-    const row = await this.approvals.get(client, id, host.hostId);
+    // While AI is paused an APPROVED answer does not run, so reading it is not a use.
+    const paused = await isWorkspacePaused(client);
+    const row = paused
+      ? await this.approvals.get(client, id, host.hostId)
+      : await this.approvals.readForDevice(client, id, host.hostId);
     const expired =
       row.status === 'PENDING' && row.expiresAt <= (await dbNow(client));
     const status = expired ? 'EXPIRED' : row.status;
@@ -101,10 +107,15 @@ export class HostApprovalsController {
       id: row.id,
       status,
       decision: row.decision,
-      // The hook tells the agent "denied: no answer".
-      reason: status === 'EXPIRED' ? 'no_answer' : null,
+      // The hook tells the agent "denied: no answer"; REVOKED: a person withdrew the approval.
+      reason:
+        status === 'EXPIRED'
+          ? (row.endReason ?? 'no_answer')
+          : status === 'REVOKED'
+            ? 'revoked'
+            : null,
       // "paused": AI is paused, so an APPROVED answer that landed anyway must not let the call run.
-      paused: await isWorkspacePaused(client),
+      paused,
     };
   }
 
@@ -119,15 +130,8 @@ export class HostApprovalsController {
       throw new ForbiddenException('device_not_allowed_to_decide');
     }
     const client = await this.tenants.getClient(host.tenantId);
-    if (
-      !(await this.approvers.canApprove(
-        host.tenantId,
-        client,
-        host.ownerSubject,
-      ))
-    ) {
-      throw new ForbiddenException('owner_is_not_an_approver');
-    }
+    // Who may decide (an approver owner, routine requests only) is checked in
+    // HostApprovalsService.decide.
     const row = await this.approvals.get(client, id, host.hostId);
     if (row.highRisk) throw new ForbiddenException('high_risk_open_in_console');
     if (row.actionId === SITE_CONNECT_ACTION && input.decision !== 'deny')
@@ -138,6 +142,7 @@ export class HostApprovalsController {
       subject: host.ownerSubject,
       decision: input.decision,
       via: 'device',
+      withdraw: input.withdraw,
     });
     return { id: result.id, status: result.status, decision: result.decision };
   }
