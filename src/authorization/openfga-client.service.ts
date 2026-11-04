@@ -6,6 +6,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   ClientWriteRequestOnDuplicateWrites,
+  ClientWriteRequestOnMissingDeletes,
   OpenFgaClient,
   type Condition,
   type TypeDefinition,
@@ -119,6 +120,8 @@ export class OpenFgaClientService implements OnModuleInit {
   async write(input: {
     writes?: TupleKey[];
     deletes?: TupleKey[];
+    /** Staff RBAC: deleting a tuple that is already gone is the desired state, not an error. */
+    ignoreMissingDeletes?: boolean;
   }): Promise<void> {
     if (!input.writes?.length && !input.deletes?.length) return;
     // A revoked tuple must not be served from this process's cache.
@@ -129,11 +132,42 @@ export class OpenFgaClientService implements OnModuleInit {
         authorizationModelId: this.requireModelId(),
         conflict: {
           onDuplicateWrites: ClientWriteRequestOnDuplicateWrites.Ignore,
+          ...(input.ignoreMissingDeletes
+            ? { onMissingDeletes: ClientWriteRequestOnMissingDeletes.Ignore }
+            : {}),
         },
       },
     );
     // Again after the commit: a check that raced the write may have cached the old answer.
     if (input.deletes?.length) this.allowed.clear();
+  }
+
+  /** Every tuple on one object (staff RBAC reconciler). Throws on any failure. */
+  async readObject(object: string): Promise<TupleKey[]> {
+    const out: TupleKey[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const page = await this.requireClient().read(
+        { object },
+        { pageSize: 100, continuationToken },
+      );
+      for (const t of page.tuples)
+        out.push({
+          user: t.key.user,
+          relation: t.key.relation,
+          object: t.key.object,
+          ...(t.key.condition
+            ? {
+                condition: {
+                  name: t.key.condition.name,
+                  context: t.key.condition.context as Record<string, unknown>,
+                },
+              }
+            : {}),
+        });
+      continuationToken = page.continuation_token || undefined;
+    } while (continuationToken);
+    return out;
   }
 
   /** A single relationship check — throws on any transport/server failure, deliberately not swallowed here (see class doc comment). */
