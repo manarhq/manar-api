@@ -737,14 +737,17 @@ model CreditLot {
   expiresAt DateTime
   /// Checkout session or invoice id that paid for it: a webhook replay adds nothing.
   stripeRef String?      @unique
-  /// The payment intent that paid for it, so a refund or a lost dispute finds it.
-  paymentIntentId String?
+  /// Every payment intent and charge that paid for it, so a refund or a lost dispute finds it.
+  paymentRefs String[]   @default([])
+  /// Credits spent from it (a use given back takes one off).
+  spent     Int          @default(0)
   /// Credits taken back by refunds or a lost dispute (cumulative, so a replay takes nothing more).
+  /// Always: remaining = max(0, credits - revoked - spent).
   revoked   Int          @default(0)
   createdAt DateTime     @default(now())
 
   @@index([tenantId, expiresAt])
-  @@index([paymentIntentId])
+  @@index([paymentRefs], type: Gin)
   @@map("credit_lots")
 }
 

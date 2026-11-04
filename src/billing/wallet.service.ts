@@ -227,7 +227,7 @@ export class WalletService implements OnModuleInit {
     source: 'purchase' | 'top_up',
     lines: { lookupKey: string | null; quantity: number | null }[],
     paidAt = new Date(),
-    paymentIntentId: string | null = null,
+    paymentRefs: string[] = [],
   ): Promise<number> {
     const packs = lines
       .filter((l) => l.lookupKey === PRICE.CREDITS_1000)
@@ -243,7 +243,7 @@ export class WalletService implements OnModuleInit {
           remaining: credits,
           expiresAt: addMonths(paidAt, CREDIT_VALID_MONTHS),
           stripeRef,
-          paymentIntentId,
+          paymentRefs,
         },
       ],
       skipDuplicates: true,
@@ -264,27 +264,35 @@ export class WalletService implements OnModuleInit {
    */
   async revokeForPayment(
     tenantId: string,
-    paymentIntentId: string,
+    refs: string[],
     fraction: number,
-  ): Promise<void> {
+  ): Promise<number> {
     const share = Math.min(1, Math.max(0, fraction));
-    await this.control.$transaction(async (tx) => {
+    const keys = refs.filter(Boolean);
+    if (!keys.length) return 0;
+    return this.control.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`wallet:${tenantId}`}))`;
-      const lots = await tx.creditLot.findMany({
-        where: { tenantId, paymentIntentId },
-      });
+      // Found by any payment intent, charge or invoice/session id that paid for the lot; rows
+      // locked so a spend or a release on them waits.
+      const lots = await tx.$queryRaw<
+        { id: string; credits: number; revoked: number; spent: number }[]
+      >`
+        SELECT "id", "credits", "revoked", "spent" FROM "credit_lots"
+        WHERE "tenantId" = ${tenantId}
+          AND ("paymentRefs" && ${keys}::text[] OR "stripeRef" = ANY(${keys}::text[]))
+        FOR UPDATE`;
       for (const lot of lots) {
         const target = Math.ceil(lot.credits * share);
-        const more = target - lot.revoked;
-        if (more <= 0) continue;
+        if (target <= lot.revoked) continue;
         await tx.creditLot.update({
           where: { id: lot.id },
           data: {
             revoked: target,
-            remaining: Math.max(0, lot.remaining - more),
+            remaining: Math.max(0, lot.credits - target - lot.spent),
           },
         });
       }
+      return lots.length;
     });
   }
 

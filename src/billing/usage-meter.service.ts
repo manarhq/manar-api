@@ -168,14 +168,15 @@ export class UsageMeterService {
     const cap = wallet ? wallet.capCredits : defaultCap(e.plan);
     if (cap !== null && m.creditsSpent + 1 > cap)
       throw new UsagePausedError('spend_cap_reached', upgradeUrl);
-    const lot = await tx.creditLot.findFirst({
-      where: { tenantId, remaining: { gt: 0 }, expiresAt: { gt: now } },
-      orderBy: [{ expiresAt: 'asc' }, { createdAt: 'asc' }],
-    });
+    // The lot row is locked too, so a refund or a release on it waits for this spend.
+    const [lot] = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "credit_lots"
+      WHERE "tenantId" = ${tenantId} AND "remaining" > 0 AND "expiresAt" > ${now}
+      ORDER BY "expiresAt" ASC, "createdAt" ASC LIMIT 1 FOR UPDATE`;
     if (!lot) throw new UsagePausedError('credits_exhausted', upgradeUrl);
     await tx.creditLot.update({
       where: { id: lot.id },
-      data: { remaining: { decrement: 1 } },
+      data: { remaining: { decrement: 1 }, spent: { increment: 1 } },
     });
     await tx.usageMonth.update({
       where: { tenantId_month: { tenantId, month } },
@@ -233,11 +234,17 @@ export class UsageMeterService {
               : {}),
           },
         });
+        // The credit goes back only as far as the lot is still worth after refunds: refunded
+        // value never comes back (remaining = max(0, credits - revoked - spent)).
         if (ev.lotId)
-          await tx.creditLot.updateMany({
-            where: { id: ev.lotId, tenantId },
-            data: { remaining: { increment: 1 } },
-          });
+          await tx.$executeRaw`
+            UPDATE "credit_lots" SET
+              "spent" = GREATEST(0, "spent" - 1),
+              "remaining" = GREATEST(0, "credits" - "revoked" - GREATEST(0, "spent" - 1))
+            WHERE "id" = (
+              SELECT "id" FROM "credit_lots"
+              WHERE "id" = ${ev.lotId} AND "tenantId" = ${tenantId} FOR UPDATE
+            )`;
       });
     } catch (error) {
       this.logger.warn(

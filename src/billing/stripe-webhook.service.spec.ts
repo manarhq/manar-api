@@ -159,12 +159,20 @@ function make(rows: Record<string, Record<string, unknown>>) {
         ),
       },
     },
+    invoicePayments: {
+      list: vi.fn(() => Promise.resolve({ data: [{ invoice: 'in_paid' }] })),
+    },
     invoices: {
       retrieve: vi.fn(() =>
         Promise.resolve({
           id: 'in_top',
           status: 'paid',
-          payments: { data: [{ payment: { payment_intent: 'pi_top' } }] },
+          payments: {
+            data: [
+              { payment: { payment_intent: 'pi_top', charge: 'ch_top' } },
+              { payment: { payment_intent: 'pi_top2' } },
+            ],
+          },
           lines: {
             data: [
               {
@@ -470,7 +478,7 @@ describe('StripeWebhookService', () => {
       'purchase',
       [{ lookupKey: PRICE.CREDITS_1000, quantity: 3 }],
       expect.any(Date),
-      'pi_cs_1',
+      ['pi_cs_1'],
     );
   });
 
@@ -492,7 +500,7 @@ describe('StripeWebhookService', () => {
   });
 
   it('a paid auto top-up invoice adds a top_up lot from the live invoice lines', async () => {
-    const { send, wallet, sub } = make(row());
+    const { send, wallet, sub, stripe } = make(row());
     await send({
       id: 'evt_t',
       type: 'invoice.paid',
@@ -510,8 +518,12 @@ describe('StripeWebhookService', () => {
       'top_up',
       [{ lookupKey: PRICE.CREDITS_1000, quantity: 2 }],
       expect.any(Date),
-      'pi_top',
+      ['pi_top', 'ch_top', 'pi_top2'],
     );
+    // The payments are only there when expanded.
+    expect(stripe.invoices.retrieve).toHaveBeenCalledWith('in_top', {
+      expand: ['payments'],
+    });
     expect(sub).not.toHaveBeenCalled();
   });
 
@@ -567,7 +579,11 @@ describe('StripeWebhookService', () => {
     disputes.push({ id: 'dp_l', charge: 'ch_l', status: 'lost' });
     await send(disputeEvent('evt_l1', 'charge.dispute.closed', disputes[0]!));
     expect(rows.t1!.status).toBe('frozen');
-    expect(wallet.revokeForPayment).toHaveBeenCalledWith('t1', 'pi_ch_l', 1);
+    expect(wallet.revokeForPayment).toHaveBeenCalledWith(
+      't1',
+      ['ch_l', 'pi_ch_l', 'in_paid'],
+      1,
+    );
   });
 
   it('a refund takes back the unspent credits in proportion (partial refunds too)', async () => {
@@ -585,7 +601,55 @@ describe('StripeWebhookService', () => {
         },
       },
     });
-    expect(wallet.revokeForPayment).toHaveBeenCalledWith('t1', 'pi_r', 0.25);
+    // By the charge, its payment intent and the invoice it paid (a top-up).
+    expect(wallet.revokeForPayment).toHaveBeenCalledWith(
+      't1',
+      ['ch_r', 'pi_r', 'in_paid'],
+      0.25,
+    );
+  });
+
+  it('a paid top-up with no payment link still adds the lot (keyed by invoice) and logs loudly', async () => {
+    const { send, wallet, stripe, svc } = make(row());
+    stripe.invoices.retrieve.mockResolvedValueOnce({
+      id: 'in_bare',
+      status: 'paid',
+      payments: { data: [] },
+      lines: {
+        data: [
+          {
+            pricing: { price_details: { price: 'price_credits' } },
+            quantity: 2,
+          },
+        ],
+      },
+    });
+    const error = vi.spyOn(
+      (svc as unknown as { logger: { error: (m: string) => void } }).logger,
+      'error',
+    );
+    await send({
+      id: 'evt_bare',
+      type: 'invoice.paid',
+      data: {
+        object: {
+          id: 'in_bare',
+          customer: 'cus_1',
+          metadata: { purpose: 'credit_top_up' },
+        },
+      },
+    });
+    expect(wallet.addPaidLot).toHaveBeenCalledWith(
+      't1',
+      'in_bare',
+      'top_up',
+      expect.anything(),
+      expect.any(Date),
+      [],
+    );
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('no payment link'),
+    );
   });
 
   const trialSub = (o: Record<string, unknown>) =>

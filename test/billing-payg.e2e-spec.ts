@@ -119,7 +119,7 @@ describe('pay-as-you-go metering (e2e)', () => {
     expect(res.body).toMatchObject({
       plan: 'free',
       allowance: { ai: { included: 20 }, cloudMinutes: { included: 0 } },
-      wallet: { available: false },
+      wallet: { available: true, balance: 0, capCredits: null },
     });
     await http()
       .get('/billing/usage')
@@ -146,7 +146,7 @@ describe('pay-as-you-go metering (e2e)', () => {
       .set('Authorization', `Bearer ${owner}`)
       .send({ title: 'Odd sign-in', description: 'A sign-in from a new place' })
       .expect(402);
-    expect(JSON.stringify(paused.body)).toContain('allowance_used');
+    expect(JSON.stringify(paused.body)).toContain('credits_exhausted');
     expect(JSON.stringify(paused.body)).toContain('Protection is still on');
   });
 
@@ -167,10 +167,16 @@ describe('pay-as-you-go metering (e2e)', () => {
       .expect(200);
   });
 
-  it('Free cannot buy credits; only the owner sets the cap', async () => {
+  it('Free may buy credits (a contact email first); only the owner sets the cap', async () => {
+    // Free may buy packs; without a confirmed contact email the receipt has nowhere to go.
     await http()
       .post('/billing/credits')
       .set('Authorization', `Bearer ${owner}`)
+      .send({ packs: 1 })
+      .expect(409);
+    await http()
+      .post('/billing/credits')
+      .set('Authorization', `Bearer ${reader}`)
       .send({ packs: 1 })
       .expect(403);
     await control.tenantEntitlement.upsert({

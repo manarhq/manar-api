@@ -161,11 +161,11 @@ export class StripeWebhookService {
         return;
       case 'charge.refunded': {
         const c = event.data.object;
-        const pi = id(c.payment_intent);
-        if (pi && c.amount > 0)
-          await this.wallet.revokeForPayment(
+        if (c.amount > 0)
+          await this.revokeCharge(
             tenantId,
-            pi,
+            c.id,
+            id(c.payment_intent),
             c.amount_refunded / c.amount,
           );
         return;
@@ -199,14 +199,30 @@ export class StripeWebhookService {
         quantity: i.quantity,
       })),
       new Date(),
-      id(session.payment_intent),
+      [id(session.payment_intent)].filter((x): x is string => !!x),
     );
   }
 
-  /** An auto top-up invoice was paid. The invoice is re-read so only Stripe's own lines count. */
+  /**
+   * An auto top-up invoice was paid. The invoice is re-read (with its payments expanded) so only
+   * Stripe's own lines count, and every payment intent and charge that paid it is recorded, so a
+   * later refund or dispute finds the credits. The invoice id itself is the lot's key too.
+   */
   private async topUpPaid(tenantId: string, invoice: Stripe.Invoice) {
-    const live = await this.stripe.client().invoices.retrieve(invoice.id);
+    const live = await this.stripe
+      .client()
+      .invoices.retrieve(invoice.id, { expand: ['payments'] });
     if (live.status !== 'paid') return;
+    const refs = (live.payments?.data ?? []).flatMap((p) =>
+      [
+        id(p.payment.payment_intent ?? null),
+        id(p.payment.charge ?? null),
+      ].filter((x): x is string => !!x),
+    );
+    if (!refs.length)
+      this.logger.error(
+        `paid top-up invoice ${live.id} for tenant "${tenantId}" has no payment link: a refund will match it by invoice id only`,
+      );
     const pack = await this.stripe.price(PRICE.CREDITS_1000);
     await this.wallet.addPaidLot(
       tenantId,
@@ -218,8 +234,30 @@ export class StripeWebhookService {
         quantity: l.quantity,
       })),
       new Date(),
-      id(live.payments?.data[0]?.payment.payment_intent ?? null),
+      refs,
     );
+  }
+
+  /**
+   * Takes back credits a refunded or lost charge paid for. Lots are matched by the charge, its
+   * payment intent, and the invoice that payment intent paid (top-ups).
+   */
+  private async revokeCharge(
+    tenantId: string,
+    chargeId: string,
+    paymentIntent: string | null,
+    fraction: number,
+  ) {
+    const refs = [chargeId];
+    if (paymentIntent) {
+      refs.push(paymentIntent);
+      const paid = await this.stripe.client().invoicePayments.list({
+        payment: { type: 'payment_intent', payment_intent: paymentIntent },
+        limit: 10,
+      });
+      for (const p of paid.data) refs.push(id(p.invoice)!);
+    }
+    await this.wallet.revokeForPayment(tenantId, refs, fraction);
   }
 
   /**
@@ -233,11 +271,19 @@ export class StripeWebhookService {
     const customer = id(
       (await stripe.charges.retrieve(id(d.charge)!)).customer,
     );
-    const all: { status: string; paymentIntent: string | null }[] = [];
+    const all: {
+      status: string;
+      charge: string;
+      paymentIntent: string | null;
+    }[] = [];
     for await (const c of stripe.charges.list({ customer: customer! }))
       if (c.disputed)
         for (const x of (await stripe.disputes.list({ charge: c.id })).data)
-          all.push({ status: x.status, paymentIntent: id(c.payment_intent) });
+          all.push({
+            status: x.status,
+            charge: c.id,
+            paymentIntent: id(c.payment_intent),
+          });
     const frozen = all.some((x) => FREEZING.has(x.status));
     const status = frozen ? 'frozen' : 'active';
     const current = await this.entitlements.get(tenantId);
@@ -245,8 +291,7 @@ export class StripeWebhookService {
     if (frozen || current.status === 'frozen')
       await this.entitlements.change(tenantId, { status }, ACTOR, 'dispute');
     for (const lost of all.filter((x) => x.status === 'lost'))
-      if (lost.paymentIntent)
-        await this.wallet.revokeForPayment(tenantId, lost.paymentIntent, 1);
+      await this.revokeCharge(tenantId, lost.charge, lost.paymentIntent, 1);
     try {
       const client = await this.tenants.getClient(tenantId);
       await this.audit.recordSafely(client, tenantId, {

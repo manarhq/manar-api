@@ -34,7 +34,8 @@ CREATE TABLE "credit_lots" (
     "remaining" INTEGER NOT NULL,
     "expiresAt" TIMESTAMP(3) NOT NULL,
     "stripeRef" TEXT,
-    "paymentIntentId" TEXT,
+    "paymentRefs" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "spent" INTEGER NOT NULL DEFAULT 0,
     "revoked" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -116,7 +117,7 @@ CREATE UNIQUE INDEX "credit_lots_stripeRef_key" ON "credit_lots"("stripeRef");
 CREATE INDEX "credit_lots_tenantId_expiresAt_idx" ON "credit_lots"("tenantId", "expiresAt");
 
 -- CreateIndex
-CREATE INDEX "credit_lots_paymentIntentId_idx" ON "credit_lots"("paymentIntentId");
+CREATE INDEX "credit_lots_paymentRefs_idx" ON "credit_lots" USING GIN ("paymentRefs");
 
 -- CreateIndex
 CREATE INDEX "usage_events_createdAt_idx" ON "usage_events"("createdAt");
@@ -153,7 +154,7 @@ CREATE UNIQUE INDEX "trial_claims_issuer_subject_kind_key" ON "trial_claims"("is
 
 -- A lot never goes below zero or above what was bought.
 ALTER TABLE "credit_lots" ADD CONSTRAINT "credit_lots_remaining_check"
-  CHECK ("remaining" >= 0 AND "remaining" <= "credits");
+  CHECK ("remaining" >= 0 AND "remaining" <= "credits" AND "spent" >= 0 AND "revoked" >= 0);
 
 -- The launch offer is retired: whoever claimed it has had their free period, so the 14-day trial
 -- is not given again to the same person, device or TPM key. Same hash inputs as the launch offer.

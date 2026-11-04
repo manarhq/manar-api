@@ -4,6 +4,7 @@ import { ControlPrismaService } from '../database/control-prisma.service';
 import { EntitlementsService } from './entitlements.service';
 import { BillingTickService } from './billing-tick.service';
 import { PLAN_TABLE, monthOf } from './plans';
+import { UsageMeterService } from './usage-meter.service';
 import { WalletService } from './wallet.service';
 
 /** Real Postgres (the unit job's control DB with migrations applied); skipped without it. */
@@ -338,32 +339,118 @@ describe.skipIf(!url)(
           'purchase',
           [{ lookupKey: 'manar_credits_1000_v2', quantity: 2 }],
           new Date(),
-          `pi_rf_${t}`,
+          [`pi_rf_${t}`, `ch_rf_${t}`],
         );
         // 2,000 bought, 1,700 already spent.
         await control.creditLot.updateMany({
           where: { tenantId: t },
-          data: { remaining: 300 },
+          data: { remaining: 300, spent: 1700 },
         });
-        await wallet.revokeForPayment(t, `pi_rf_${t}`, 0.1); // 200 credits taken back
+        await wallet.revokeForPayment(t, [`pi_rf_${t}`], 0.1); // 200 credits taken back
         let lot = await control.creditLot.findFirstOrThrow({
           where: { tenantId: t },
         });
         expect(lot).toMatchObject({ remaining: 100, revoked: 200 });
         // The same refund event again changes nothing.
-        await wallet.revokeForPayment(t, `pi_rf_${t}`, 0.1);
+        await wallet.revokeForPayment(t, [`pi_rf_${t}`], 0.1);
         lot = await control.creditLot.findFirstOrThrow({
           where: { tenantId: t },
         });
         expect(lot.remaining).toBe(100);
         // A full refund (or a lost dispute) leaves 0, not a negative balance.
-        await wallet.revokeForPayment(t, `pi_rf_${t}`, 1);
+        await wallet.revokeForPayment(t, [`pi_rf_${t}`], 1);
         lot = await control.creditLot.findFirstOrThrow({
           where: { tenantId: t },
         });
         expect(lot).toMatchObject({ remaining: 0, revoked: 2000 });
+        // Found by the charge as well, and by the session/invoice id the lot is keyed by.
+        expect(await wallet.revokeForPayment(t, [`ch_rf_${t}`], 1)).toBe(1);
+        expect(await wallet.revokeForPayment(t, [`cs_rf_${t}`], 1)).toBe(1);
         // Another tenant's payment id never touches this wallet.
-        await wallet.revokeForPayment('someone-else', `pi_rf_${t}`, 1);
+        await wallet.revokeForPayment('someone-else', [`pi_rf_${t}`], 1);
+      });
+
+      describe('refunds against spends and releases (real meter)', () => {
+        const meter = new UsageMeterService(control, entitlements);
+        const paid = async (t: string, ref: string, packs = 1) => {
+          await control.usageMonth.upsert({
+            where: { tenantId_month: { tenantId: t, month: monthOf() } },
+            create: { tenantId: t, month: monthOf(), aiUsed: 300 },
+            update: { aiUsed: 300 },
+          });
+          await wallet.addPaidLot(
+            t,
+            `cs_${ref}`,
+            'purchase',
+            [{ lookupKey: 'manar_credits_1000_v2', quantity: packs }],
+            new Date(),
+            [ref],
+          );
+        };
+        const lotOf = (t: string) =>
+          control.creditLot.findFirstOrThrow({ where: { tenantId: t } });
+
+        it('a partial refund after a partial spend leaves exactly what is still owed', async () => {
+          const t = await tenant('pro');
+          await paid(t, `pi_ps_${t}`);
+          for (let i = 0; i < 30; i++) await meter.consume(t, 'ai', `s${i}`);
+          await wallet.revokeForPayment(t, [`pi_ps_${t}`], 0.5); // 500 back, 500 owed
+          expect(await lotOf(t)).toMatchObject({
+            remaining: 470,
+            spent: 30,
+            revoked: 500,
+          });
+          await wallet.revokeForPayment(t, [`pi_ps_${t}`], 0.98); // 980 back, 20 owed
+          // Entitled 20, spent 30: nothing left, and no further spend is possible.
+          expect(await lotOf(t)).toMatchObject({
+            remaining: 0,
+            spent: 30,
+            revoked: 980,
+          });
+          await expect(meter.consume(t, 'ai', 'more')).rejects.toMatchObject({
+            reason: 'credits_exhausted',
+          });
+        });
+
+        it('a release after a refund cannot bring back refunded value', async () => {
+          const t = await tenant('pro');
+          await paid(t, `pi_rr_${t}`);
+          for (let i = 0; i < 10; i++) await meter.consume(t, 'ai', `r${i}`);
+          await wallet.revokeForPayment(t, [`pi_rr_${t}`], 1); // fully refunded
+          await meter.release(t, 'r0');
+          await meter.release(t, 'r1');
+          expect(await lotOf(t)).toMatchObject({
+            remaining: 0,
+            revoked: 1000,
+            spent: 8,
+          });
+          // 95% refunded (entitled 50) with 60 spent: the 10 over are a debt that releases pay first.
+          const t2 = await tenant('pro');
+          await paid(t2, `pi_rr2_${t2}`);
+          for (let i = 0; i < 60; i++) await meter.consume(t2, 'ai', `q${i}`);
+          await wallet.revokeForPayment(t2, [`pi_rr2_${t2}`], 0.95);
+          expect((await lotOf(t2)).remaining).toBe(0);
+          for (let i = 0; i < 10; i++) await meter.release(t2, `q${i}`);
+          expect((await lotOf(t2)).remaining).toBe(0); // 50 spent, 50 owed
+          await meter.release(t2, 'q10');
+          expect((await lotOf(t2)).remaining).toBe(1);
+        });
+
+        it('concurrent refund and releases end in the same place as any order', async () => {
+          const t = await tenant('pro');
+          await paid(t, `pi_cc_${t}`);
+          for (let i = 0; i < 100; i++) await meter.consume(t, 'ai', `c${i}`);
+          await Promise.all([
+            wallet.revokeForPayment(t, [`pi_cc_${t}`], 0.5),
+            ...Array.from({ length: 20 }, (_, i) => meter.release(t, `c${i}`)),
+          ]);
+          // 1000 bought, 500 refunded, 80 spent after releases: 420 left.
+          expect(await lotOf(t)).toMatchObject({
+            spent: 80,
+            revoked: 500,
+            remaining: 420,
+          });
+        });
       });
 
       it('cap settings: USD to credits, null for no cap', async () => {
