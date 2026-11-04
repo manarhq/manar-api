@@ -59,6 +59,7 @@ import { AssistantModule } from './assistant/assistant.module';
 import { CloudMcpModule } from './cloud-mcp/cloud-mcp.module';
 import { EdgeModule } from './edge/edge.module';
 import { EdgeHttpModule } from './edge/edge-http.module';
+import { EnterpriseModule } from './enterprise/enterprise.module';
 
 @Module({
   imports: [
@@ -128,6 +129,8 @@ import { EdgeHttpModule } from './edge/edge-http.module';
     // docs/edge.md: edge peer registry, gateway sync API, egress allow-list.
     EdgeModule,
     EdgeHttpModule,
+    // Enterprise and Government invisible mode; inert until a tenant's `enterprise` flag is on.
+    EnterpriseModule,
   ],
   controllers: [AppController],
   providers: [

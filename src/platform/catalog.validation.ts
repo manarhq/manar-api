@@ -15,6 +15,11 @@ export const CATALOG_FEATURES = [
   'packs',
   /** The agent LLM proxy (`/agent/v1/llm/chat/completions` and `/agent/v1/llm/anthropic/v1/messages`). */
   'llm_proxy',
+  /**
+   * Enterprise and Government "invisible mode" (`src/enterprise/**`: `/watch/v1/*`, `/ent/v1/*`,
+   * the public page). Off unless staff turn it on: the only flag whose default is false.
+   */
+  'enterprise',
 ] as const;
 export type CatalogFeature = (typeof CATALOG_FEATURES)[number];
 
@@ -24,6 +29,7 @@ export const FEATURE_DEFAULTS: Record<CatalogFeature, boolean> = {
   watcher: true,
   packs: true,
   llm_proxy: true,
+  enterprise: false,
 };
 
 export const PACK_ID = z.string().regex(/^[a-z][a-z0-9-]{1,62}$/);

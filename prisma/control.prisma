@@ -839,3 +839,23 @@ model TrialClaim {
   @@index([claimedAt])
   @@map("trial_claims")
 }
+
+
+enum EnterpriseSector {
+  ENTERPRISE
+  GOVERNMENT
+}
+
+/// Enterprise and Government "invisible mode" (spec 2026-11-04): a tenant is in this mode when this
+/// row exists AND its catalog flag `enterprise` is on. Kept apart from `Tenant` (ruling R1).
+/// `tenantId` is checked in code; no Prisma relation, so `Tenant` stays untouched.
+model EnterpriseProfile {
+  tenantId   String           @id
+  sector     EnterpriseSector
+  /// The public "What my organisation can see" page: /<locale>/see/<publicSlug>.
+  publicSlug String           @unique
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@map("enterprise_profiles")
+}

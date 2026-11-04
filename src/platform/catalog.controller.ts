@@ -33,6 +33,10 @@ class CatalogFeaturesDto {
   @ApiProperty() watcher!: boolean;
   @ApiProperty() packs!: boolean;
   @ApiProperty() llm_proxy!: boolean;
+  @ApiProperty({
+    description: 'Enterprise and Government invisible mode; off by default',
+  })
+  enterprise!: boolean;
 }
 
 class CatalogPackDto {
