@@ -71,23 +71,22 @@ export class StripeWebhookService {
       throw new BadRequestException('tenant_mismatch');
     }
 
+    // The id is recorded only after the event has been applied. apply() re-derives state from
+    // Stripe, so applying twice is harmless, while recording first lost the payment for good if
+    // the process died (rollout, OOM) or the clean-up failed between the two: Stripe's retry was
+    // then answered "duplicate" and the plan never changed.
+    const seen = await this.control.stripeEvent.findUnique({
+      where: { id: event.id },
+    });
+    if (seen) return { received: true, duplicate: true };
+    await this.apply(event, claimed.tenantId, claimed.stripeSubscriptionId);
     try {
       await this.control.stripeEvent.create({
         data: { id: event.id, type: event.type },
       });
     } catch (error) {
-      if ((error as { code?: string }).code === 'P2002')
-        return { received: true, duplicate: true };
-      throw error;
-    }
-    try {
-      await this.apply(event, claimed.tenantId, claimed.stripeSubscriptionId);
-    } catch (error) {
-      // Free the id so Stripe's retry is applied rather than skipped as a duplicate.
-      await this.control.stripeEvent
-        .delete({ where: { id: event.id } })
-        .catch(() => undefined);
-      throw error;
+      // A concurrent delivery of the same event recorded it first; both applied the same state.
+      if ((error as { code?: string }).code !== 'P2002') throw error;
     }
     return { received: true };
   }
