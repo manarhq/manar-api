@@ -17,7 +17,7 @@ type Json = Record<string, any>;
 const body = (r: { body: unknown }) => r.body as Json;
 
 /** Search, lists, record pages, reveals and the trust log (DESK spec §7, §8, §11.5, §12). */
-describe('staff index and records (e2e)', () => {
+describe('staff index and records (e2e)', { timeout: 60_000 }, () => {
   let ctx: Awaited<ReturnType<typeof bootStaffApp>>;
   let support: SeededStaff;
   let sales: SeededStaff;

@@ -314,7 +314,9 @@ describe('HostAuthGuard', () => {
       await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
         HttpException,
       );
-      await expect(guard.canActivate(context)).rejects.toMatchObject({ status: 423 });
+      await expect(guard.canActivate(context)).rejects.toMatchObject({
+        status: 423,
+      });
     });
 
     it('a personal workspace whose owner is restricted answers 423 account_suspended', async () => {

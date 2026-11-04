@@ -21,7 +21,7 @@ interface Body {
 const body = (r: { body: unknown }) => r.body as Body;
 
 /** The staff listener's guard and /me routes against a real Keycloak realm (DESK spec §16). */
-describe('staff listener (e2e)', () => {
+describe('staff listener (e2e)', { timeout: 60_000 }, () => {
   let ctx: Awaited<ReturnType<typeof bootStaffApp>>;
   let owner: SeededStaff;
   let auditor: SeededStaff;

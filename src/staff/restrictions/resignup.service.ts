@@ -135,6 +135,17 @@ export class ResignupService {
     const hit = await this.match(signals, { accountId: account.id });
     if (!hit) return;
     const ban = await this.control.$transaction(async (tx) => {
+      // Concurrent first requests of one new account create one ban and one match.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`resignup:account:${account.id}`}))`;
+      const existing = await tx.staffRestriction.findFirst({
+        where: {
+          accountId: account.id,
+          createdBy: 'system:resignup',
+          kind: 'BAN',
+          liftedAt: null,
+        },
+      });
+      if (existing) return existing;
       const r = await tx.staffRestriction.create({
         data: {
           code: `RS-${yymm()}-${String(randomInt(100_000)).padStart(5, '0')}`,
@@ -232,15 +243,13 @@ export class ResignupService {
       return;
     }
     // The device's own restricted owner re-installing in the same personal workspace is still blocked.
-    await this.control.staffRestrictionMatch.create({
-      data: {
-        kind: hit.kind,
-        valueHash: hit.valueHash,
-        matchedRestrictionId: hit.restriction.id,
-        newTenantId: tenantId,
-        action: 'blocked',
-      },
-    });
+    // Once per (signal, value, restriction, workspace): a retrying installer is refused every time
+    // but recorded once.
+    await this.control.$executeRaw`
+      INSERT INTO staff_restriction_matches (id, kind, "valueHash", "matchedRestrictionId", "newTenantId", action, at)
+      VALUES (gen_random_uuid()::text, ${hit.kind}::"StaffFingerprintKind", ${hit.valueHash}, ${hit.restriction.id}, ${tenantId}, 'blocked', now())
+      ON CONFLICT ("kind", "valueHash", "matchedRestrictionId", "newTenantId") WHERE "newTenantId" IS NOT NULL
+      DO NOTHING`;
     await this.audit.append({
       staffId: null,
       action: 'resignup.device_blocked',
@@ -272,38 +281,34 @@ export class ResignupService {
       { tenantId },
     );
     if (!hit) return;
-    const already = await this.control.staffRestrictionMatch.findFirst({
-      where: {
-        kind: 'MACHINE_ID',
-        valueHash: hit.valueHash,
-        matchedRestrictionId: hit.restriction.id,
-        newTenantId: tenantId,
-      },
-    });
-    if (already) return;
-    await this.control.staffRestrictionMatch.create({
-      data: {
-        kind: 'MACHINE_ID',
-        valueHash: hit.valueHash,
-        matchedRestrictionId: hit.restriction.id,
-        newTenantId: tenantId,
-        action: 'flagged',
-      },
-    });
-    const owner = await this.control.membership.findFirst({
-      where: { tenantId, role: 'TENANT_OWNER', status: 'ACTIVE' },
-      orderBy: { createdAt: 'asc' },
-    });
-    if (owner)
-      await this.control.$executeRaw`
-        UPDATE accounts SET "riskScore" = LEAST(100, "riskScore" + 40)
-        WHERE issuer = ${owner.issuer} AND subject = ${owner.subject}`;
-    await this.audit.append({
-      staffId: null,
-      action: 'resignup.device_flagged',
-      targetType: 'TENANT',
-      targetId: tenantId,
-      data: { matched: hit.restriction.code },
+    // One row per (signal, value, restriction, workspace), and the risk effect only when this call
+    // inserted it, in the same transaction: concurrent enrolments and retries count once.
+    await this.control.$transaction(async (tx) => {
+      const inserted = await tx.$queryRaw<{ id: string }[]>`
+        INSERT INTO staff_restriction_matches (id, kind, "valueHash", "matchedRestrictionId", "newTenantId", action, at)
+        VALUES (gen_random_uuid()::text, 'MACHINE_ID', ${hit.valueHash}, ${hit.restriction.id}, ${tenantId}, 'flagged', now())
+        ON CONFLICT ("kind", "valueHash", "matchedRestrictionId", "newTenantId") WHERE "newTenantId" IS NOT NULL
+        DO NOTHING
+        RETURNING id`;
+      if (!inserted.length) return;
+      const owner = await tx.membership.findFirst({
+        where: { tenantId, role: 'TENANT_OWNER', status: 'ACTIVE' },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (owner)
+        await tx.$executeRaw`
+          UPDATE accounts SET "riskScore" = LEAST(100, "riskScore" + 40)
+          WHERE issuer = ${owner.issuer} AND subject = ${owner.subject}`;
+      await this.audit.append(
+        {
+          staffId: null,
+          action: 'resignup.device_flagged',
+          targetType: 'TENANT',
+          targetId: tenantId,
+          data: { matched: hit.restriction.code },
+        },
+        tx,
+      );
     });
   }
 
@@ -341,6 +346,17 @@ export class ResignupService {
         })
       : null;
     await this.control.$transaction(async (tx) => {
+      // Stripe retries and parallel webhooks: one ban and one match per workspace and card.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`resignup:card:${tenantId}`}))`;
+      const already = await tx.staffRestrictionMatch.findFirst({
+        where: {
+          kind: 'CARD',
+          valueHash: hit.valueHash,
+          matchedRestrictionId: hit.restriction.id,
+          newTenantId: tenantId,
+        },
+      });
+      if (already) return;
       const created =
         account && account.id !== hit.restriction.accountId
           ? await tx.staffRestriction.create({

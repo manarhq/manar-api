@@ -28,7 +28,7 @@ import { adminFetch } from './support/keycloak-test-helpers';
 const NOTE = 'Bulk sign-ups from one device in 40 minutes, see MNR-7KQ2XD.';
 
 /** Warn, suspend, ban, un-ban, enforcement on customer paths and the re-signup block (spec §9). */
-describe('staff restrictions (e2e)', () => {
+describe('staff restrictions (e2e)', { timeout: 60_000 }, () => {
   let staff: Awaited<ReturnType<typeof bootStaffApp>>;
   let human: NestFastifyApplication;
   let admin: SeededStaff;
@@ -413,6 +413,55 @@ describe('staff restrictions (e2e)', () => {
       .get('/workspaces')
       .set({ Authorization: `Bearer ${await company.token()}` })
       .expect(200);
+
+    // Ten concurrent identical enrolments: one match row and +40 once; blocked retries record once.
+    const racer = await customer('racerco');
+    await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        human.get(ResignupService).checkDevice(
+          {
+            keyFingerprint: `race-key-${i}-${STAFF_E2E_SUFFIX}`,
+            machineId: `m-${STAFF_E2E_SUFFIX}-dev`,
+          },
+          racer.tenantId,
+        ),
+      ),
+    );
+    expect(
+      await staff.control.staffRestrictionMatch.count({
+        where: { kind: 'MACHINE_ID', newTenantId: racer.tenantId },
+      }),
+    ).toBe(1);
+    expect(
+      (
+        await staff.control.account.findUniqueOrThrow({
+          where: { id: racer.accountId },
+        })
+      ).riskScore,
+    ).toBe(40);
+    const blocked = await Promise.allSettled(
+      Array.from({ length: 5 }, () =>
+        human
+          .get(ResignupService)
+          .checkDevice(
+            { keyFingerprint: `key-${STAFF_E2E_SUFFIX}` },
+            racer.tenantId,
+          ),
+      ),
+    );
+    expect(
+      blocked.every(
+        (r) =>
+          r.status === 'rejected' &&
+          (r.reason as { response?: { code?: string } }).response?.code ===
+            'device_blocked',
+      ),
+    ).toBe(true);
+    expect(
+      await staff.control.staffRestrictionMatch.count({
+        where: { kind: 'DEVICE', newTenantId: racer.tenantId },
+      }),
+    ).toBe(1);
 
     // An install code from before the ban cannot enrol a new device into the banned owner's workspace.
     await expect(

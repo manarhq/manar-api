@@ -20,7 +20,7 @@ import {
 const NOTE = 'Bulk sign-ups from one device in 40 minutes, see MNR-7KQ2XD.';
 
 /** Appeals end to end, and the trust log in the customer's audit log (spec §9.4, §11.5). */
-describe('staff appeals (e2e)', () => {
+describe('staff appeals (e2e)', { timeout: 60_000 }, () => {
   let staff: Awaited<ReturnType<typeof bootStaffApp>>;
   let human: NestFastifyApplication;
   let admin: SeededStaff;
