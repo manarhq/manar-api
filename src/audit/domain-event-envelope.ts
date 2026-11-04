@@ -26,7 +26,11 @@ export interface DomainEventEnvelope {
   /** ISO-8601 — same value as the source `AuditEvent.timestamp`. */
   timestamp: string;
   correlationId: string;
-  actor: { type: 'human' | 'agent' | 'system'; id: string };
+  actor: {
+    type: 'human' | 'agent' | 'system' | 'staff';
+    id: string;
+    display?: string;
+  };
   data: unknown;
   /**
    * Phase 9b addition — the same tamper-evident hash-chain linkage fields

@@ -28,6 +28,7 @@ import { HostMtlsModule } from '../host-mtls/host-mtls.module';
 import { HostApprovalsMtlsModule } from '../approvals/host-approvals-mtls.module';
 import { SecretsHostModule } from '../secrets/secrets.module';
 import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
+import { RestrictionEnforcementModule } from '../staff/restrictions/restriction-enforcement.module';
 
 /**
  * Root module for the *second*, agent-facing Nest application
@@ -68,6 +69,7 @@ import { AgentMtlsGuardModule } from './agent-mtls-guard.module';
     DatabaseModule,
     OpenBaoModule,
     AuditModule,
+    RestrictionEnforcementModule,
     KillSwitchesModule,
     AgentRateLimitModule,
     AgentMtlsGuardModule,

@@ -3,8 +3,11 @@ import {
   createParamDecorator,
   ExecutionContext,
   Injectable,
+  Optional,
+  SetMetadata,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import type { FastifyRequest } from 'fastify';
 import {
   extractBearerToken,
@@ -21,9 +24,19 @@ export type RequestWithIdentity = FastifyRequest & {
  * (`/workspaces/*`: first sign-in, company discovery, request to join). It attaches a verified
  * identity and nothing else: no tenant, no roles, no tenant database access.
  */
+export const ALLOW_RESTRICTED_KEY = 'auth:allow-restricted';
+/**
+ * A suspended or banned person may still call this route (their restriction, appeal, data
+ * export; DESK spec §9.2). Only on IdentityGuard routes; JwtAuthGuard never admits them.
+ */
+export const AllowRestricted = () => SetMetadata(ALLOW_RESTRICTED_KEY, true);
+
 @Injectable()
 export class IdentityGuard implements CanActivate {
-  constructor(private readonly tokenVerifier: TokenVerifierService) {}
+  constructor(
+    private readonly tokenVerifier: TokenVerifierService,
+    @Optional() private readonly reflector?: Reflector,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithIdentity>();
@@ -33,7 +46,13 @@ export class IdentityGuard implements CanActivate {
         'Missing or malformed Authorization header',
       );
     }
-    request.identity = await this.tokenVerifier.verify(token);
+    const allowRestricted = !!this.reflector?.getAllAndOverride<boolean>(
+      ALLOW_RESTRICTED_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    request.identity = await this.tokenVerifier.verify(token, {
+      allowRestricted,
+    });
     return true;
   }
 }

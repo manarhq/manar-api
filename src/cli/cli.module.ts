@@ -29,6 +29,16 @@ import {
 } from './commands/workspaces-drain.command';
 import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { LicenseVerifyCommand } from './commands/license-verify.command';
+import {
+  RbacReconcileCommand,
+  StaffSeedCommand,
+} from './commands/staff-seed.command';
+import { StaffCoreModule } from '../staff/staff-core.module';
+import {
+  AccountsBackfillCommand,
+  DevicesIndexCommand,
+} from './commands/staff-index.command';
+import { DeviceIndexService } from '../staff/index/device-index.service';
 
 /**
  * Root module for the `pnpm manar` CLI (see src/cli.ts). Deliberately
@@ -61,8 +71,14 @@ import { LicenseVerifyCommand } from './commands/license-verify.command';
     KeycloakModule,
     OpenSearchIndexModule,
     FleetHeartbeatModule,
+    StaffCoreModule,
   ],
   providers: [
+    StaffSeedCommand,
+    RbacReconcileCommand,
+    AccountsBackfillCommand,
+    DevicesIndexCommand,
+    DeviceIndexService,
     TenantCreateCommand,
     AuditReindexCommand,
     AuditVerifyCommand,

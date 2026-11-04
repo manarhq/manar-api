@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { AppModule } from './app.module';
 import { AgentMtlsAppModule } from './agent-mtls/agent-mtls-app.module';
+import { StaffAppModule } from './staff/staff-app.module';
 import { allowLargeLlmBodies } from './agent-runtime/llm-proxy.controller';
 import { validate } from './config/env.validation';
 import { httpAdapterOptions } from './config/trusted-proxy';
@@ -93,6 +94,19 @@ async function bootstrap(): Promise<void> {
   setupHelmet(agentMtlsApp);
   enableGracefulShutdown(agentMtlsApp);
   await agentMtlsApp.listen(bootstrapConfig.AGENT_MTLS_PORT, '0.0.0.0');
+  if (bootstrapConfig.STAFF_ENABLED === 'true') {
+    // DESK spec AC-6: the staff API on its own port, reachable only from DESK pods.
+    const staffApp = await NestFactory.create<NestFastifyApplication>(
+      StaffAppModule,
+      new FastifyAdapter(),
+      { bufferLogs: true },
+    );
+    staffApp.useLogger(staffApp.get(WINSTON_MODULE_NEST_PROVIDER));
+    instrumentHttp(staffApp.getHttpAdapter().getInstance(), 'staff');
+    setupHelmet(staffApp);
+    enableGracefulShutdown(staffApp);
+    await staffApp.listen(bootstrapConfig.STAFF_PORT, '0.0.0.0');
+  }
   startMetricsServer(bootstrapConfig.METRICS_PORT);
 }
 

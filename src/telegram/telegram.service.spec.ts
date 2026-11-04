@@ -147,7 +147,18 @@ function world() {
   });
   const approvals: any = { get: () => Promise.resolve(approval), decide };
   const audit: any = { recordSafely: vi.fn().mockResolvedValue(undefined) };
-  const bot = new TelegramBotHandler(tg, tenants, approvers, approvals, audit);
+  let restricted = false;
+  const restrictions: any = {
+    activeForSubject: () => Promise.resolve(restricted),
+  };
+  const bot = new TelegramBotHandler(
+    tg,
+    tenants,
+    approvers,
+    approvals,
+    audit,
+    restrictions,
+  );
   const private_ = (id: number) => ({ id, type: 'private' });
   return {
     tg,
@@ -160,6 +171,7 @@ function world() {
     decide,
     audit,
     setApprover: (v: boolean) => (approver = v),
+    setRestricted: (v: boolean) => (restricted = v),
     start: (chat: number, text: string) =>
       bot.handle({
         message: { chat: private_(chat), text, from: { language_code: 'en' } },
@@ -380,6 +392,13 @@ describe('approvals over Telegram', () => {
     expect(sent(w, 'answerCallbackQuery').at(-1)!.body.text).toMatch(
       /Already decided/,
     );
+  });
+
+  it('a person Manar suspended or banned cannot decide from Telegram (DESK spec §9.2)', async () => {
+    const w = await linked();
+    w.setRestricted(true);
+    await w.press(111, button(w, 0));
+    expect(w.decide).not.toHaveBeenCalled();
   });
 
   it('a person who is no longer an approver cannot decide', async () => {

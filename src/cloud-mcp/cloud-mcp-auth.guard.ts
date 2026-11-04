@@ -6,6 +6,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Optional,
   Logger,
   NotFoundException,
   UnauthorizedException,
@@ -22,6 +23,7 @@ import { AuditService } from '../audit/audit.service';
 import { JwksCacheService } from '../auth/jwks-cache.service';
 import { ACCEPTED_SIGNING_ALGORITHMS } from '../auth/jwt-auth.guard';
 import { KnownIssuerRegistry } from '../auth/known-issuer-registry.service';
+import { RestrictionEnforcement } from '../staff/restrictions/restriction-enforcement';
 import { MembershipService } from '../auth/membership.service';
 import type { RoleName } from '../auth/roles';
 import { failClosed, throwFailClosed } from '../common/fail-closed/fail-closed';
@@ -126,6 +128,7 @@ export class CloudMcpAuthGuard implements CanActivate {
     @InjectThrottlerStorage() private readonly limits: ThrottlerStorage,
     private readonly membership: MembershipService,
     private readonly control: ControlPrismaService,
+    @Optional() private readonly restrictions?: RestrictionEnforcement,
   ) {}
 
   // ponytail: per-process, one minute; only decides which scope name to hint and which issuer to
@@ -441,6 +444,12 @@ export class CloudMcpAuthGuard implements CanActivate {
       reason,
       tenantId: known.tenantId,
     });
+    // DESK spec §9.2: a suspended or banned person's cloud agents stop too (503 if unknown).
+    if (
+      typeof payload.sub === 'string' &&
+      (await this.restrictions?.activeFor(known.issuerUrl, payload.sub))
+    )
+      return forbidden('account_suspended');
     const tenantClient = await failClosed('tenant-db', () =>
       this.tenants.getClient(known.tenantId),
     );

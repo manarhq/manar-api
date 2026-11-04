@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import type Stripe from 'stripe';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import {
@@ -7,6 +12,7 @@ import {
 } from './entitlements.service';
 import { KeepProService } from './keep-pro.service';
 import { StripeGateway } from './stripe.gateway';
+import { ResignupService } from '../staff/restrictions/resignup.service';
 
 const ACTOR = { type: 'system', id: 'stripe' } as const;
 const HANDLED = new Set([
@@ -16,6 +22,8 @@ const HANDLED = new Set([
   'customer.subscription.deleted',
   'invoice.paid',
   'invoice.payment_failed',
+  // DESK spec §9.5: a card of a restricted account blocks the new paying workspace.
+  'payment_method.attached',
 ]);
 const ENDED = new Set(['canceled', 'incomplete_expired', 'unpaid']);
 
@@ -30,7 +38,8 @@ export class StripeWebhookService {
     private readonly control: ControlPrismaService,
     private readonly entitlements: EntitlementsService,
     private readonly stripe: StripeGateway,
-    private readonly keepPro?: KeepProService,
+    @Optional() private readonly keepPro?: KeepProService,
+    @Optional() private readonly resignup?: ResignupService,
   ) {}
 
   /** Verifies the signature on the raw body, then applies the event once. */
@@ -101,6 +110,17 @@ export class StripeWebhookService {
     // read live from Stripe and that state is applied. Replays and reordering converge.
     let subscriptionId: string | null = null;
     switch (event.type) {
+      case 'payment_method.attached': {
+        const fp = event.data.object.card?.fingerprint;
+        const matched = fp
+          ? await this.resignup?.checkCard(fp, tenantId)
+          : null;
+        if (matched && storedSubscription)
+          await this.stripe
+            .client()
+            .subscriptions.cancel(storedSubscription, { prorate: false });
+        return;
+      }
       case 'checkout.session.completed': {
         const session = event.data.object;
         if (session.mode === 'setup') {

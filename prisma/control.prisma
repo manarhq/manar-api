@@ -1,8 +1,9 @@
-// Control DB schema — provisioning/routing metadata only.
+// Control DB schema: provisioning and routing metadata, plus platform metadata that every token
+// verification must read: staff RBAC, staff audit and account restrictions (DESK, 4 Nov 2026).
 //
-// No business/security data (agents, tasks, policies, audit, etc.) is ever
-// stored here — enforced by review, not by a runtime check, since Prisma
-// schemas are compile-time-fixed. See docs/tenant-isolation.md.
+// No tenant business or security data (agents, tasks, policies, tenant audit, etc.) is ever
+// stored here; enforced by review, not by a runtime check, since Prisma schemas are
+// compile-time-fixed. See docs/tenant-isolation.md.
 //
 // The datasource block intentionally has no `url` — Prisma 7 driver
 // adapters resolve the connection at runtime (see
@@ -697,4 +698,442 @@ model ProductSample {
   @@index([tenantId])
   @@index([createdAt])
   @@map("product_samples")
+}
+
+// ---------------------------------------------------------------------------------------------
+// DESK (staff console) Phase 1: the account index, staff RBAC, staff audit chain, restrictions.
+// Spec: docs/superpowers/specs/2026-11-04-admin-console-rbac-design.md (workspace repo), §17.1.
+// ---------------------------------------------------------------------------------------------
+
+/// One row per person who ever signed in to the hosted product (issuer + subject).
+model Account {
+  id              String    @id @default(uuid())
+  issuer          String
+  subject         String
+  displayName     String    @default("")
+  /// normalizeEmail() of the best known address (verified contact email first, then the token's).
+  normalizedEmail String?
+  emailVerified   Boolean   @default(false)
+  /// microsoft | github | email
+  idp             String?
+  /// HMAC of the IdP's stable id (Microsoft tid:oid), for the re-signup check; never the raw id.
+  idpUserHash     String?
+  createdAt       DateTime  @default(now())
+  lastSeenAt      DateTime  @default(now())
+  lastCountry     String?
+  /// Display only (0 to 100). Never acts by itself.
+  riskScore       Int       @default(0)
+
+  restrictions StaffRestriction[]
+
+  @@unique([issuer, subject])
+  @@index([createdAt, id])
+  @@map("accounts")
+}
+
+/// Hosted devices across every workspace, for search and the re-signup device check.
+model StaffDeviceIndex {
+  tenantId     String
+  hostId       String
+  machineId    String
+  deviceHash   String?
+  ekHash       String?
+  hostname     String?
+  os           String?
+  status       String
+  ownerIssuer  String?
+  ownerSubject String?
+  lastSeenAt   DateTime?
+  updatedAt    DateTime  @updatedAt
+
+  @@id([tenantId, hostId])
+  @@index([ownerIssuer, ownerSubject])
+  @@index([deviceHash])
+  @@map("staff_device_index")
+}
+
+enum StaffTeam {
+  DEV
+  SALES
+  PARTNERSHIPS
+  SUPPORT
+  BILLING
+  TRUST_SAFETY
+  LEADERSHIP
+}
+
+enum StaffStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+}
+
+model StaffMember {
+  id          String      @id @default(uuid())
+  /// Set when the first staff sign-in binds the row (AC-43); never changed after.
+  issuer      String?
+  subject     String?
+  entraOid    String?     @unique
+  email       String      @unique
+  displayName String
+  title       String      @default("")
+  team        StaffTeam
+  status      StaffStatus @default(INVITED)
+  createdAt   DateTime    @default(now())
+  boundAt     DateTime?
+  /// sha256 of a one-time invite token, handed to the person out of band. Binding needs it (or an
+  /// Entra object id recorded at invite time); an email claim alone never binds a row.
+  inviteTokenHash String?   @unique
+  inviteExpiresAt DateTime?
+
+  @@map("staff_members")
+}
+
+model StaffRole {
+  id             String    @id @default(uuid())
+  /// Built-in: owner, admin, ... ; custom: a slug chosen by the editor.
+  key            String    @unique
+  name           String
+  description    String    @default("")
+  builtIn        Boolean   @default(false)
+  currentVersion Int       @default(1)
+  createdAt      DateTime  @default(now())
+  archivedAt     DateTime?
+
+  versions    StaffRoleVersion[]
+  assignments StaffRoleAssignment[]
+
+  @@map("staff_roles")
+}
+
+model StaffRoleVersion {
+  id          String    @id @default(uuid())
+  roleId      String
+  role        StaffRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  version     Int
+  permissions String[]
+  createdBy   String
+  createdAt   DateTime  @default(now())
+
+  @@unique([roleId, version])
+  @@map("staff_role_versions")
+}
+
+enum StaffPrincipalType {
+  STAFF
+  GROUP
+}
+
+enum StaffAssignmentKind {
+  ACTIVE
+  ELIGIBLE
+}
+
+model StaffRoleAssignment {
+  id              String              @id @default(uuid())
+  roleId          String
+  role            StaffRole           @relation(fields: [roleId], references: [id])
+  principalType   StaffPrincipalType
+  principalId     String
+  /// Phase 1 ships platform scope only; the model allows org scope later.
+  scopeType       String              @default("PLATFORM")
+  scopeId         String              @default("manar")
+  kind            StaffAssignmentKind
+  expiresAt       DateTime?
+  grantedBy       String
+  changeRequestId String?
+  createdAt       DateTime            @default(now())
+  revokedAt       DateTime?
+  revokedBy       String?
+
+  @@index([principalType, principalId])
+  @@map("staff_role_assignments")
+}
+
+model StaffGroup {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String   @default("")
+  createdBy   String
+  createdAt   DateTime @default(now())
+
+  members StaffGroupMember[]
+
+  @@map("staff_groups")
+}
+
+model StaffGroupMember {
+  groupId String
+  group   StaffGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  staffId String
+  addedBy String
+  addedAt DateTime   @default(now())
+
+  @@id([groupId, staffId])
+  @@map("staff_group_members")
+}
+
+model StaffElevation {
+  id           String    @id @default(uuid())
+  staffId      String
+  assignmentId String
+  roleId       String
+  reason       String
+  startedAt    DateTime  @default(now())
+  expiresAt    DateTime
+  endedAt      DateTime?
+  endedBy      String?
+
+  @@index([staffId, expiresAt])
+  @@map("staff_elevations")
+}
+
+model StaffReveal {
+  id         String   @id @default(uuid())
+  staffId    String
+  /// ACCOUNT | TENANT
+  targetType String
+  targetId   String
+  reason     String
+  startedAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([staffId, targetType, targetId, expiresAt])
+  @@map("staff_reveals")
+}
+
+enum StaffChangeStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+  EXPIRED
+  EXECUTED
+  FAILED
+}
+
+/// Two-person rule (spec §11.3). One open request per (kind, targetId): partial unique index in
+/// the migration.
+model StaffChangeRequest {
+  id         String            @id @default(uuid())
+  code       String            @unique
+  kind       String
+  targetId   String
+  payload    Json
+  reason     String
+  proposedBy String
+  status     StaffChangeStatus @default(PENDING)
+  decidedBy  String?
+  decidedAt  DateTime?
+  decisionNote String?
+  outcome    Json?
+  expiresAt  DateTime
+  createdAt  DateTime          @default(now())
+
+  @@index([status, expiresAt])
+  @@map("staff_change_requests")
+}
+
+/// Hash-chained staff audit log (spec §11.5). Append-only; `seq` is assigned under an advisory lock.
+model StaffAuditEvent {
+  seq          BigInt   @id
+  id           String   @unique @default(uuid())
+  at           DateTime @default(now())
+  staffId      String?
+  action       String
+  targetType   String?
+  targetId     String?
+  data         Json
+  ip           String?
+  requestId    String?
+  previousHash String?
+  hash         String
+
+  @@index([staffId, at])
+  @@index([targetId, at])
+  @@map("staff_audit_events")
+}
+
+/// Signed checkpoints of the staff audit chain head (Ed25519 via CheckpointSigner, key in
+/// OpenBao). The newest checkpoint is also named in OpenBao (`audit/staff-audit-head/<chain>`), so
+/// truncating the table, deleting the last rows or rewriting the chain is detected by verify().
+model StaffAuditCheckpoint {
+  seq                    BigInt   @id
+  createdAt              DateTime @default(now())
+  headSeq                BigInt
+  headHash               String
+  previousCheckpointHash String?
+  checkpointHash         String   @unique
+  signature              String
+  keyId                  String
+
+  @@map("staff_audit_checkpoints")
+}
+
+enum StaffRestrictionKind {
+  WARNING
+  SUSPEND
+  BAN
+}
+
+model StaffRestriction {
+  id              String               @id @default(uuid())
+  code            String               @unique
+  /// ACCOUNT | TENANT
+  targetType      String
+  accountId       String?
+  account         Account?             @relation(fields: [accountId], references: [id])
+  tenantId        String?
+  kind            StaffRestrictionKind
+  category        String
+  internalNote    String
+  startsAt        DateTime             @default(now())
+  /// SUSPEND only. Checked at read time: `until <= now` is not in force (no job needed).
+  until           DateTime?
+  /// A staff id, or `system:resignup`.
+  createdBy       String
+  changeRequestId String?
+  liftedAt        DateTime?
+  liftedBy        String?
+  liftReason      String?
+  /// Effects that ran, for the "in force" screen (sessions ended, devices told, Stripe, handovers).
+  effects         Json?
+
+  fingerprints StaffRestrictionFingerprint[]
+  appeals      StaffAppeal[]
+
+  @@index([accountId, liftedAt])
+  @@index([tenantId, liftedAt])
+  @@map("staff_restrictions")
+}
+
+enum StaffFingerprintKind {
+  EMAIL
+  IDP_EMAIL
+  IDP_IDENTITY
+  CARD
+  /// Strong: the enrolled certificate key.
+  DEVICE
+  /// Strong: a TPM endorsement key that passed attestation.
+  TPM_EK
+  ENTRA_TID
+  /// Weak: the self-reported machine id. A match never blocks; it queues "possible ban evasion".
+  MACHINE_ID
+}
+
+model StaffRestrictionFingerprint {
+  id            String               @id @default(uuid())
+  restrictionId String
+  restriction   StaffRestriction     @relation(fields: [restrictionId], references: [id], onDelete: Cascade)
+  kind          StaffFingerprintKind
+  /// HMAC-SHA256(RESTRICTION_FINGERPRINT_KEY, normalised value), hex.
+  valueHash     String
+
+  @@unique([restrictionId, kind, valueHash])
+  @@index([kind, valueHash])
+  @@map("staff_restriction_fingerprints")
+}
+
+model StaffRestrictionMatch {
+  id                   String               @id @default(uuid())
+  kind                 StaffFingerprintKind
+  matchedRestrictionId String
+  newAccountId         String?
+  newTenantId          String?
+  /// blocked | flagged
+  action               String
+  /// The exact fingerprint that matched, and the ban this match created: a false-positive
+  /// clearance applies to this (subject, value) pair only, never to future accounts.
+  valueHash            String?
+  createdRestrictionId String?
+  at                   DateTime             @default(now())
+  resolvedBy           String?
+  resolvedAt           DateTime?
+  /// confirmed | false_positive
+  resolution           String?
+
+  @@index([at])
+  @@map("staff_restriction_matches")
+}
+
+enum StaffAppealStatus {
+  OPEN
+  UPHELD
+  OVERTURNED
+}
+
+model StaffAppeal {
+  id            String            @id @default(uuid())
+  code          String            @unique
+  restrictionId String
+  restriction   StaffRestriction  @relation(fields: [restrictionId], references: [id])
+  accountId     String
+  text          String
+  submittedAt   DateTime          @default(now())
+  dueAt         DateTime
+  status        StaffAppealStatus @default(OPEN)
+  decidedBy     String?
+  decidedAt     DateTime?
+  internalNote  String?
+
+  @@index([accountId, submittedAt])
+  @@index([status, dueAt])
+  @@map("staff_appeals")
+}
+
+/// Founder 4 Nov: banning the only Owner of a company promotes its longest-serving Admin after a
+/// 7-day notice; with no Admin, staff chose a transfer through support.
+model StaffOwnerHandover {
+  id                    String    @id @default(uuid())
+  restrictionId         String
+  tenantId              String
+  candidateMembershipId String?
+  dueAt                 DateTime
+  doneAt                DateTime?
+  /// promoted | transfer_needed | cancelled
+  outcome               String?
+
+  @@index([doneAt, dueAt])
+  @@map("staff_owner_handovers")
+}
+
+model StaffNote {
+  id         String    @id @default(uuid())
+  targetType String
+  targetId   String
+  body       String
+  authorId   String
+  createdAt  DateTime  @default(now())
+  deletedAt  DateTime?
+
+  @@index([targetType, targetId, createdAt])
+  @@map("staff_notes")
+}
+
+model StaffTag {
+  targetType String
+  targetId   String
+  tag        String
+  addedBy    String
+  addedAt    DateTime @default(now())
+
+  @@id([targetType, targetId, tag])
+  @@index([tag])
+  @@map("staff_tags")
+}
+
+/// Every 5xx, and every 4xx on an authenticated request, by its `MNR-` reference; 30 days.
+model StaffErrorReference {
+  reference     String   @id
+  at            DateTime @default(now())
+  correlationId String?
+  issuer        String?
+  subject       String?
+  tenantId      String?
+  route         String
+  status        Int
+  code          String?
+
+  @@index([at])
+  @@map("staff_error_references")
 }

@@ -6,7 +6,9 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   ClientWriteRequestOnDuplicateWrites,
+  ClientWriteRequestOnMissingDeletes,
   OpenFgaClient,
+  type Condition,
   type TypeDefinition,
 } from '@openfga/sdk';
 import { transformer } from '@openfga/syntax-transformer';
@@ -16,6 +18,8 @@ export interface TupleKey {
   user: string;
   relation: string;
   object: string;
+  /** A conditional tuple (staff elevations and timed grants: `within_window`). Writes only. */
+  condition?: { name: string; context?: Record<string, unknown> };
 }
 
 /**
@@ -116,6 +120,8 @@ export class OpenFgaClientService implements OnModuleInit {
   async write(input: {
     writes?: TupleKey[];
     deletes?: TupleKey[];
+    /** Staff RBAC: deleting a tuple that is already gone is the desired state, not an error. */
+    ignoreMissingDeletes?: boolean;
   }): Promise<void> {
     if (!input.writes?.length && !input.deletes?.length) return;
     // A revoked tuple must not be served from this process's cache.
@@ -126,6 +132,9 @@ export class OpenFgaClientService implements OnModuleInit {
         authorizationModelId: this.requireModelId(),
         conflict: {
           onDuplicateWrites: ClientWriteRequestOnDuplicateWrites.Ignore,
+          ...(input.ignoreMissingDeletes
+            ? { onMissingDeletes: ClientWriteRequestOnMissingDeletes.Ignore }
+            : {}),
         },
       },
     );
@@ -133,15 +142,54 @@ export class OpenFgaClientService implements OnModuleInit {
     if (input.deletes?.length) this.allowed.clear();
   }
 
+  /** Every tuple on one object (staff RBAC reconciler). Throws on any failure. */
+  readObject(object: string): Promise<TupleKey[]> {
+    return this.readTuples({ object });
+  }
+
+  /** Tuples matching `filter` (object, optionally narrowed to one user). Throws on any failure. */
+  async readTuples(filter: {
+    object: string;
+    user?: string;
+  }): Promise<TupleKey[]> {
+    const out: TupleKey[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const page = await this.requireClient().read(filter, {
+        pageSize: 100,
+        continuationToken,
+      });
+      for (const t of page.tuples)
+        out.push({
+          user: t.key.user,
+          relation: t.key.relation,
+          object: t.key.object,
+          ...(t.key.condition
+            ? {
+                condition: {
+                  name: t.key.condition.name,
+                  context: t.key.condition.context as Record<string, unknown>,
+                },
+              }
+            : {}),
+        });
+      continuationToken = page.continuation_token || undefined;
+    } while (continuationToken);
+    return out;
+  }
+
   /** A single relationship check — throws on any transport/server failure, deliberately not swallowed here (see class doc comment). */
   async check(
     tuple: TupleKey,
-    options?: { consistency?: 'high' },
+    options?: { consistency?: 'high'; context?: Record<string, unknown> },
   ): Promise<boolean> {
     // Spec 7.2: only ALLOW is reused, for at most OPENFGA_CACHE_TTL_MS; `high` always asks OpenFGA.
+    // A conditional check (staff RBAC passes `current_time`) is never cached: its answer depends
+    // on the context, and an elevation must end at its expiry (DESK AC-30).
     const ttlMs =
       this.configService.get('OPENFGA_CACHE_TTL_MS', { infer: true }) ?? 3000;
-    const useCache = ttlMs > 0 && options?.consistency !== 'high';
+    const useCache =
+      ttlMs > 0 && options?.consistency !== 'high' && !options?.context;
     const key = `${tuple.user}|${tuple.relation}|${tuple.object}`;
     if (useCache) {
       const expiresAt = this.allowed.get(key);
@@ -149,7 +197,7 @@ export class OpenFgaClientService implements OnModuleInit {
         return true;
       this.allowed.delete(key);
     }
-    const allowed = await this.checkRemote(tuple);
+    const allowed = await this.checkRemote(tuple, options?.context);
     if (allowed && useCache) {
       this.allowed.set(key, performance.now() + ttlMs);
       if (this.allowed.size > OpenFgaClientService.CACHE_MAX_ENTRIES) {
@@ -160,18 +208,24 @@ export class OpenFgaClientService implements OnModuleInit {
     return allowed;
   }
 
-  private async checkRemote(tuple: TupleKey): Promise<boolean> {
+  private async checkRemote(
+    tuple: TupleKey,
+    context?: Record<string, unknown>,
+  ): Promise<boolean> {
     const timeoutMs = this.configService.get('OPENFGA_CHECK_TIMEOUT_MS', {
       infer: true,
     });
     let timer: NodeJS.Timeout | undefined;
     try {
       const result = await Promise.race([
-        this.requireCheckClient().check(tuple, {
-          authorizationModelId: this.requireModelId(),
-          // One quick retry for a blip; the race below bounds the total.
-          retryParams: { maxRetry: 1, minWaitInMs: 50 },
-        }),
+        this.requireCheckClient().check(
+          context ? { ...tuple, context } : tuple,
+          {
+            authorizationModelId: this.requireModelId(),
+            // One quick retry for a blip; the race below bounds the total.
+            retryParams: { maxRetry: 1, minWaitInMs: 50 },
+          },
+        ),
         new Promise<never>((_, reject) => {
           timer = setTimeout(
             () =>
@@ -261,6 +315,7 @@ export class OpenFgaClientService implements OnModuleInit {
     const desired = transformer.transformDSLToJSONObject(dsl) as {
       schema_version: string;
       type_definitions: TypeDefinition[];
+      conditions?: Record<string, Condition>;
     };
 
     const latest = await client
@@ -272,7 +327,8 @@ export class OpenFgaClientService implements OnModuleInit {
       sameModel(
         latest.authorization_model.type_definitions,
         desired.type_definitions,
-      )
+      ) &&
+      sameConditions(latest.authorization_model.conditions, desired.conditions)
     ) {
       return latest.authorization_model.id;
     }
@@ -288,6 +344,13 @@ function sameModel(a: TypeDefinition[], b: TypeDefinition[]): boolean {
   const normalize = (defs: TypeDefinition[]) =>
     JSON.stringify([...defs].sort((x, y) => x.type.localeCompare(y.type)));
   return normalize(a) === normalize(b);
+}
+
+/** A model whose conditions changed is a new model, even with the same types. */
+export function sameConditions(a: unknown, b: unknown): boolean {
+  const keys = (v: unknown) =>
+    JSON.stringify(Object.keys((v as object | undefined) ?? {}).sort());
+  return keys(a) === keys(b);
 }
 
 /**

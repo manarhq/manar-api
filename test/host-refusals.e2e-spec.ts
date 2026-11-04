@@ -6,6 +6,7 @@ import * as x509 from '@peculiar/x509';
 import { Client as PgClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { normalizeSerialNumber } from '../src/agents/serial-number.util';
+import { RestrictionEnforcement } from '../src/staff/restrictions/restriction-enforcement';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
@@ -37,7 +38,11 @@ describe('host refusals (e2e)', () => {
       fakeConfigService(),
       new EnvSecretProvider(),
     );
-    guard = new HostAuthGuard(control, manager);
+    guard = new HostAuthGuard(
+      control,
+      manager,
+      new RestrictionEnforcement(control),
+    );
   }, 60_000);
 
   afterAll(async () => {

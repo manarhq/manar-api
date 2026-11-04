@@ -14,6 +14,8 @@ import type {
 import { CertificateAuthorityService } from '../agents/certificate-authority.service';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
+import { DeviceIndexService } from '../staff/index/device-index.service';
+import { ResignupService } from '../staff/restrictions/resignup.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { matchApprovalRule, type VerifiedFacts } from './host-approval';
@@ -258,6 +260,19 @@ export class HostsService {
     const adcs = ctx.method === 'ADCS';
     // Stored as SOFTWARE unless TPM attestation passed; the installer's claim is not kept.
     const keyType = ctx.verified.tpm ? 'TPM' : 'SOFTWARE';
+    // DESK spec §9.5 (AC-26): a device of a restricted account is refused in every workspace,
+    // blocked only on attested identifiers (the enrolled key, a verified TPM EK); the
+    // self-reported machine id only queues a review,
+    // before anything is written or signed. Registration runs only in the HTTP app, which always
+    // provides the check (StaffEnforcementModule).
+    await this.moduleRef?.get(ResignupService, { strict: false }).checkDevice(
+      {
+        keyFingerprint,
+        tpmEk: ctx.verified.tpm ? ctx.tpmEkFingerprint : null,
+        machineId: input.machineId, // weak: flagged for review, never a block
+      },
+      tenant.id,
+    );
 
     const { host, publish, rekeyPending, reenrolled } =
       await client.$transaction(async (tx) => {
@@ -633,6 +648,21 @@ export class HostsService {
     ) {
       await this.ca.revokeHostCertificateSerial(client, issued.serialNumber);
       throw new HostRefusedError(`host ${host.id} changed during registration`);
+    }
+    // DESK staff search (spec §7.4): find this device by hostname. Never blocks registration.
+    try {
+      void this.moduleRef
+        ?.get(DeviceIndexService, { strict: false })
+        .upsert(tenant.id, {
+          hostId: host.id,
+          machineId: input.machineId,
+          hostname: input.hostname,
+          os: input.os,
+          status: host.status,
+          ownerSubject: host.ownerSubject,
+        });
+    } catch {
+      // No index in this process (it is optional).
     }
     return {
       hostId: host.id,

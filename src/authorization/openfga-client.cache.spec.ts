@@ -120,4 +120,18 @@ describe('OpenFgaClientService allow cache (spec 7.2)', () => {
     await service.check(TUPLE);
     expect(calls.check).toBe(2);
   });
+
+  it('a check with a condition context is never cached and passes the context through', async () => {
+    const { service, calls } = setup();
+    const context = { current_time: '2026-10-28T10:00:00Z' };
+    expect(await service.check(TUPLE, { context })).toBe(true);
+    expect(await service.check(TUPLE, { context })).toBe(true);
+    expect(calls.check).toBe(2);
+    const client = (
+      service as unknown as {
+        client: { check: { mock: { calls: unknown[][] } } };
+      }
+    ).client;
+    expect(client.check.mock.calls[0]![0]).toMatchObject({ context });
+  });
 });

@@ -50,6 +50,7 @@ import {
   dataCollectionConfigIssues,
 } from '../data-collection/data-collection.config';
 import { EdgeConfigSchema, edgeConfigIssues } from '../edge/edge.config';
+import { StaffConfigSchema, staffConfigIssues } from '../staff/staff.config';
 
 /**
  * Application-level environment schema.
@@ -107,6 +108,7 @@ export const AppConfigSchema = z
   .extend(TelegramConfigSchema.shape)
   .extend(GrowthConfigSchema.shape)
   .extend(DataCollectionConfigSchema.shape)
+  .extend(StaffConfigSchema.shape)
   // Backing-service connections: a half-configured or plaintext-credential setting stops
   // startup here, rather than in a best-effort consumer that would keep the pod ready.
   .superRefine((c, ctx) => {
@@ -121,6 +123,7 @@ export const AppConfigSchema = z
       ...pushConfigIssues(c),
       ...telegramConfigIssues(c),
       ...dataCollectionConfigIssues(c),
+      ...staffConfigIssues(c),
     ])
       ctx.addIssue({ code: 'custom', message });
   });

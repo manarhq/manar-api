@@ -69,6 +69,86 @@ export class KeycloakAdminClient {
     this.baseUrl = configService.get('KEYCLOAK_BASE_URL', { infer: true });
   }
 
+  // ---- DESK (staff console) reads and the one staff action (spec §8.1). Realm `manar` only. ----
+
+  /** Sign-in methods brokered into this user (Microsoft, GitHub): provider and its user id. */
+  async federatedIdentities(
+    realm: string,
+    userId: string,
+  ): Promise<{ identityProvider: string; userId: string }[]> {
+    const { body } = await this.adminRequest(
+      'GET',
+      `/admin/realms/${encodeURIComponent(realm)}/users/${encodeURIComponent(userId)}/federated-identity`,
+    );
+    return (body as { identityProvider: string; userId: string }[]) ?? [];
+  }
+
+  /** Credentials: type and creation time only (never the secret data). */
+  async credentials(
+    realm: string,
+    userId: string,
+  ): Promise<{ type: string; createdDate?: number }[]> {
+    const { body } = await this.adminRequest(
+      'GET',
+      `/admin/realms/${encodeURIComponent(realm)}/users/${encodeURIComponent(userId)}/credentials`,
+    );
+    return ((body as { type: string; createdDate?: number }[]) ?? []).map(
+      (c) => ({
+        type: c.type,
+        createdDate: c.createdDate,
+      }),
+    );
+  }
+
+  async userSessions(
+    realm: string,
+    userId: string,
+  ): Promise<
+    {
+      id: string;
+      ipAddress?: string;
+      start?: number;
+      lastAccess?: number;
+      clients?: Record<string, string>;
+    }[]
+  > {
+    const { body } = await this.adminRequest(
+      'GET',
+      `/admin/realms/${encodeURIComponent(realm)}/users/${encodeURIComponent(userId)}/sessions`,
+    );
+    return (body as never[]) ?? [];
+  }
+
+  /** Failed sign-ins in the last `days` (needs realm events on, `LOGIN_ERROR`). */
+  async loginErrors(
+    realm: string,
+    userId: string,
+    days: number,
+  ): Promise<{ time: number; ipAddress?: string; error?: string }[]> {
+    const from = new Date(Date.now() - days * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const { body } = await this.adminRequest(
+      'GET',
+      `/admin/realms/${encodeURIComponent(realm)}/events?user=${encodeURIComponent(userId)}&type=LOGIN_ERROR&dateFrom=${from}&max=100`,
+    );
+    return (
+      (body as { time: number; ipAddress?: string; error?: string }[]) ?? []
+    ).map((e) => ({
+      time: e.time,
+      ipAddress: e.ipAddress,
+      error: e.error,
+    }));
+  }
+
+  /** "Sign out everywhere": ends every Keycloak session of the user. */
+  async logoutUser(realm: string, userId: string): Promise<void> {
+    await this.adminRequest(
+      'POST',
+      `/admin/realms/${encodeURIComponent(realm)}/users/${encodeURIComponent(userId)}/logout`,
+    );
+  }
+
   /** Full issuer URL Keycloak stamps into a realm's tokens' `iss` claim. */
   issuerUrlForRealm(realmName: string): string {
     return `${this.baseUrl}/realms/${realmName}`;

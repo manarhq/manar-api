@@ -263,6 +263,15 @@ export const AUDIT_EVENT_TYPES = {
   JAIL_SITE_RULE_CREATED: 'jail.site_rule.created',
   /** A person removed a site rule. */
   JAIL_SITE_RULE_REMOVED: 'jail.site_rule.removed',
+
+  /** DESK trust log (spec §11.5): a Manar staff member opened this account or workspace. */
+  STAFF_RECORD_VIEWED: 'staff.record_viewed',
+  /** A staff member revealed masked details (email, ids) of this account or workspace for 1 hour. */
+  STAFF_PII_VIEWED: 'staff.pii_viewed',
+  /** A staff member acted on this account or workspace (data: action, reason category, fields). */
+  STAFF_ACTION: 'staff.action',
+  /** A Manar restriction (warning, suspension, ban, lift) on this account, a member, or the workspace. */
+  STAFF_RESTRICTION: 'staff.restriction',
 } as const;
 
 export type AuditEventType =
@@ -277,6 +286,11 @@ export type AuditEventType =
  * retrofit call sites).
  */
 export interface AuditActor {
-  type: 'human' | 'agent' | 'system';
+  type: 'human' | 'agent' | 'system' | 'staff';
   id: string;
+  /**
+   * Staff only: the badge at the time of the event ("Ali · Manar Sales"), copied so a later title
+   * change never rewrites history; covered by the event hash like every other field.
+   */
+  display?: string;
 }

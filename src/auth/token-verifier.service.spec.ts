@@ -1,7 +1,7 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { generateKeyPair, SignJWT, type JWTVerifyGetKey } from 'jose';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config/env.validation';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import type { JwksCacheService } from './jwks-cache.service';
@@ -84,8 +84,11 @@ function make(jwks?: JWTVerifyGetKey) {
     new KnownIssuerRegistry(control, cfg),
     cache,
     cfg,
+    { refuseIfRestricted: restricted } as never,
   );
 }
+
+const restricted = vi.fn(() => Promise.resolve());
 
 describe('TokenVerifierService', () => {
   it('accepts a shared-realm access token and exposes claims but never roles', async () => {
@@ -220,5 +223,32 @@ describe('Microsoft session claims', () => {
       }),
     );
     expect(id.wids).toEqual([]);
+  });
+
+  describe('DESK restrictions (spec §9.2)', () => {
+    it('checks a person from a legacy (tenant-bound) realm too', async () => {
+      restricted.mockClear();
+      const verifier = make();
+      await verifier
+        .verify(await sign(claims(), { iss: LEGACY }))
+        .catch(() => undefined);
+      expect(restricted).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a restricted person on every verification unless the route allows it', async () => {
+      const verifier = make();
+      const token = await sign(claims());
+      restricted.mockRejectedValueOnce(
+        new ForbiddenException({ code: 'account_suspended' }),
+      );
+      await expect(verifier.verify(token)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      restricted.mockClear();
+      await expect(
+        verifier.verify(token, { allowRestricted: true }),
+      ).resolves.toMatchObject({ subject: 'sub-1' });
+      expect(restricted).not.toHaveBeenCalled();
+    });
   });
 });

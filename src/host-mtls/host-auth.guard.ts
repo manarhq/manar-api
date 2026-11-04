@@ -22,6 +22,7 @@ const removed = () =>
     code: 'device_removed',
     message: 'This device was removed from the workspace',
   });
+import { RestrictionEnforcement } from '../staff/restrictions/restriction-enforcement';
 
 /**
  * Authenticates `/host/v1/*` by the host certificate presented on the mTLS listener (:3443).
@@ -43,6 +44,7 @@ export class HostAuthGuard implements CanActivate {
   constructor(
     private readonly control: ControlPrismaService,
     private readonly tenants: TenantDatabaseManager,
+    private readonly restrictions: RestrictionEnforcement,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -91,6 +93,21 @@ export class HostAuthGuard implements CanActivate {
       this.logger.warn(`host request for an inactive tenant`);
       throw hostRefused('workspace_deleted', 'This workspace is not active');
     }
+    if (
+      tenant.kind === 'PERSONAL' &&
+      tenant.ownerIssuer &&
+      tenant.ownerSubject &&
+      (await this.restrictions.activeFor(
+        tenant.ownerIssuer,
+        tenant.ownerSubject,
+      ))
+    )
+      // DESK spec §9.2: the owner is suspended or banned. 423 like every refusal of a genuine
+      // device: it stops syncing and keeps protecting (main's live-risk fix, 4 Nov).
+      throw hostRefused(
+        'account_suspended',
+        'The account that owns this device is suspended',
+      );
     let client;
     try {
       client = await this.tenants.getClient(tenant.id);

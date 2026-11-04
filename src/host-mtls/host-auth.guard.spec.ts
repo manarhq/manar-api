@@ -3,6 +3,7 @@ import type { ExecutionContext } from '@nestjs/common';
 import {
   GoneException,
   HttpException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import * as x509 from '@peculiar/x509';
@@ -49,18 +50,20 @@ function ctx(der: Buffer | null, authorized = true) {
 }
 
 /** Two tenants, each with its own database; a host machineId lives in one of them only. */
-function world() {
+function world(
+  opts: {
+    tenantA?: Record<string, unknown>;
+    restricted?: boolean | 'error';
+  } = {},
+) {
   const hostA = {
     id: 'host-a',
     machineId: 'm-1',
     status: 'APPROVED',
     ownerSubject: 'sub-a',
   };
-  const tenantsBySlug: Record<
-    string,
-    { id: string; slug: string; status: string }
-  > = {
-    a: { id: 'tid-a', slug: 'a', status: 'ACTIVE' },
+  const tenantsBySlug: Record<string, Record<string, unknown>> = {
+    a: { id: 'tid-a', slug: 'a', status: 'ACTIVE', ...opts.tenantA },
     b: { id: 'tid-b', slug: 'b', status: 'ACTIVE' },
   };
   const dbs: Record<string, unknown> = {
@@ -106,7 +109,19 @@ function world() {
     getClient: vi.fn((id: string) => Promise.resolve(dbs[id])),
   };
   return {
-    guard: new HostAuthGuard(control as never, manager as never),
+    guard: new HostAuthGuard(
+      control as never,
+      manager as never,
+      {
+        activeFor: vi.fn(() =>
+          opts.restricted === 'error'
+            ? Promise.reject(new ServiceUnavailableException())
+            : Promise.resolve(
+                opts.restricted ? { id: 'r', kind: 'BAN' } : null,
+              ),
+        ),
+      } as never,
+    ),
     hostA,
     dbs,
     tenantsBySlug,
@@ -286,6 +301,55 @@ describe('HostAuthGuard', () => {
     // A certificate the removed host never had is not told it was removed.
     const { context } = ctx(await hostCert('host://a/m-1', 'FFFF'));
     expect(await refusal(guard, context)).toMatchObject({ status: 423 });
+  });
+
+  describe('DESK restrictions (spec §9.2, AC-21)', () => {
+    it('a workspace Manar suspended answers 423 account_suspended', async () => {
+      const { guard } = world({ tenantA: { status: 'SUSPENDED' } });
+      const { context } = ctx(await hostCert('host://a/m-1', '0A0A'));
+      await expect(guard.canActivate(context)).rejects.toMatchObject({
+        response: { code: 'account_suspended' },
+      });
+      // 423 like every refusal of a genuine device: it keeps protecting (live-risk fix).
+      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+        HttpException,
+      );
+      await expect(guard.canActivate(context)).rejects.toMatchObject({
+        status: 423,
+      });
+    });
+
+    it('a personal workspace whose owner is restricted answers 423 account_suspended', async () => {
+      const personal = {
+        kind: 'PERSONAL',
+        ownerIssuer: 'iss',
+        ownerSubject: 'sub-a',
+      };
+      const { guard } = world({ tenantA: personal, restricted: true });
+      const { context } = ctx(await hostCert('host://a/m-1', '0A0A'));
+      await expect(guard.canActivate(context)).rejects.toMatchObject({
+        response: { code: 'account_suspended' },
+      });
+      const free = world({ tenantA: personal, restricted: false });
+      await expect(
+        free.guard.canActivate(
+          ctx(await hostCert('host://a/m-1', '0A0A')).context,
+        ),
+      ).resolves.toBe(true);
+    });
+
+    it('an unreadable restriction store fails closed', async () => {
+      const personal = {
+        kind: 'PERSONAL',
+        ownerIssuer: 'iss',
+        ownerSubject: 'sub-a',
+      };
+      const { guard } = world({ tenantA: personal, restricted: 'error' });
+      const { context } = ctx(await hostCert('host://a/m-1', '0A0A'));
+      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+    });
   });
 
   it('a random serial is unknown', async () => {

@@ -27,7 +27,11 @@ import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { CurrentAuth, type AuthContext } from '../auth/auth-context';
-import { CurrentIdentity, IdentityGuard } from '../auth/identity.guard';
+import {
+  AllowRestricted,
+  CurrentIdentity,
+  IdentityGuard,
+} from '../auth/identity.guard';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { canGrantRole } from '../auth/role-privilege';
 import { RequireRole } from '../auth/require-role.decorator';
@@ -347,6 +351,7 @@ export class GrowthIdentityController {
   }
 
   @Get('account/export')
+  @AllowRestricted() // data portability stays available to a restricted person (DESK spec §9.2)
   @Throttle({ human: { limit: 5, ttl: 3_600_000 } })
   @Header('Content-Type', 'application/zip')
   @Header('Content-Disposition', 'attachment; filename="manar-export.zip"')
