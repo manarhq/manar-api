@@ -143,14 +143,22 @@ export class OpenFgaClientService implements OnModuleInit {
   }
 
   /** Every tuple on one object (staff RBAC reconciler). Throws on any failure. */
-  async readObject(object: string): Promise<TupleKey[]> {
+  readObject(object: string): Promise<TupleKey[]> {
+    return this.readTuples({ object });
+  }
+
+  /** Tuples matching `filter` (object, optionally narrowed to one user). Throws on any failure. */
+  async readTuples(filter: {
+    object: string;
+    user?: string;
+  }): Promise<TupleKey[]> {
     const out: TupleKey[] = [];
     let continuationToken: string | undefined;
     do {
-      const page = await this.requireClient().read(
-        { object },
-        { pageSize: 100, continuationToken },
-      );
+      const page = await this.requireClient().read(filter, {
+        pageSize: 100,
+        continuationToken,
+      });
       for (const t of page.tuples)
         out.push({
           user: t.key.user,

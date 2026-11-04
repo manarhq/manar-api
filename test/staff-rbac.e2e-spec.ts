@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { vi } from 'vitest';
+import { onTestFinished, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
 import { OpenFgaClientService } from '../src/authorization/openfga-client.service';
@@ -355,13 +355,14 @@ describe('staff RBAC (e2e)', () => {
         permissions: ['people.view'],
         by: owner,
       });
-      await rbac.grant({
+      const held = await rbac.grant({
         roleId: role.id,
         principalType: 'STAFF',
         principalId: support,
         kind: 'ACTIVE',
         grantedBy: owner,
       });
+      onTestFinished(() => rbac.revoke(held.id, owner));
       const sets: string[][] = [
         ['people.view', 'notes.write'],
         ['people.view', 'tags.write'],
@@ -396,5 +397,219 @@ describe('staff RBAC (e2e)', () => {
       ] as const)
         expect(await rbac.can(support, p)).toBe(newest.includes(p));
     });
+  });
+
+  describe('expiry boundaries (security review, 4 Nov)', () => {
+    it('refuses an elevation on an expired eligibility and an end time already past', async () => {
+      const ownerRole = await roleId('owner');
+      const eligible = await rbac.grant({
+        roleId: ownerRole,
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ELIGIBLE',
+        expiresAt: new Date(Date.now() + 800),
+        grantedBy: owner,
+      });
+      await expect(
+        rbac.startElevation({
+          staffId: support,
+          assignmentId: eligible.id,
+          reason: 'urgent abuse case',
+          expiresAt: new Date(Date.now() - 1),
+        }),
+      ).rejects.toMatchObject({ response: { code: 'already_expired' } });
+      await new Promise((r) => setTimeout(r, 900));
+      await expect(
+        rbac.startElevation({
+          staffId: support,
+          assignmentId: eligible.id,
+          reason: 'urgent abuse case',
+          expiresAt: new Date(Date.now() + 60_000),
+        }),
+      ).rejects.toMatchObject({ response: { code: 'not_eligible' } });
+      await rbac.revoke(eligible.id, owner);
+    });
+
+    it('clamps an elevation to the eligibility expiry and to one hour', async () => {
+      const ownerRole = await roleId('owner');
+      const soon = new Date(Date.now() + 1500);
+      const eligible = await rbac.grant({
+        roleId: ownerRole,
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ELIGIBLE',
+        expiresAt: soon,
+        grantedBy: owner,
+      });
+      const e = await rbac.startElevation({
+        staffId: support,
+        assignmentId: eligible.id,
+        reason: 'urgent abuse case',
+        expiresAt: new Date(Date.now() + 10 * 3_600_000),
+      });
+      expect(e.expiresAt.getTime()).toBe(soon.getTime());
+      expect(await rbac.can(support, 'restrict.ban')).toBe(true);
+      await new Promise((r) => setTimeout(r, 1700));
+      expect(await rbac.can(support, 'restrict.ban')).toBe(false);
+      await rbac.reconcile({ dryRun: false });
+      expect(await rbac.can(support, 'restrict.ban')).toBe(false);
+      await rbac.revoke(eligible.id, owner);
+
+      const forever = await rbac.grant({
+        roleId: ownerRole,
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ELIGIBLE',
+        grantedBy: owner,
+      });
+      const long = await rbac.startElevation({
+        staffId: support,
+        assignmentId: forever.id,
+        reason: 'urgent abuse case',
+        expiresAt: new Date(Date.now() + 10 * 3_600_000),
+      });
+      expect(
+        long.expiresAt.getTime() - long.startedAt.getTime(),
+      ).toBeLessThanOrEqual(3_600_000 + 1000);
+      await rbac.revoke(forever.id, owner);
+      expect(await rbac.can(support, 'restrict.ban')).toBe(false);
+    });
+
+    it('reconcile does not project an elevation that runs past its eligibility', async () => {
+      const ownerRole = await roleId('owner');
+      const eligible = await rbac.grant({
+        roleId: ownerRole,
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ELIGIBLE',
+        grantedBy: owner,
+      });
+      const e = await rbac.startElevation({
+        staffId: support,
+        assignmentId: eligible.id,
+        reason: 'urgent abuse case',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      });
+      // The eligibility is shortened behind the elevation's back (a direct database edit).
+      await control.staffRoleAssignment.update({
+        where: { id: eligible.id },
+        data: { expiresAt: new Date(Date.now() + 60_000) },
+      });
+      await rbac.reconcile({ dryRun: false });
+      expect(await rbac.can(support, 'restrict.ban')).toBe(false);
+      await control.staffElevation.update({
+        where: { id: e.id },
+        data: { endedAt: new Date() },
+      });
+      await rbac.revoke(eligible.id, owner);
+    });
+  });
+
+  describe('concurrency, 50 rounds each (security review, 4 Nov)', () => {
+    it('grant racing revoke never leaves power behind a revoked row', async () => {
+      const devRole = await roleId('dev');
+      for (let i = 0; i < 50; i++) {
+        const grant = rbac.grant({
+          roleId: devRole,
+          principalType: 'STAFF',
+          principalId: support,
+          kind: 'ACTIVE',
+          grantedBy: owner,
+        });
+        // Revoke as soon as the row is committed, racing the grant's projection.
+        const revoke = (async () => {
+          for (let tries = 0; tries < 200; tries++) {
+            const row = await control.staffRoleAssignment.findFirst({
+              where: { roleId: devRole, principalId: support, revokedAt: null },
+            });
+            if (row) return rbac.revoke(row.id, owner);
+          }
+          return rbac.revoke((await grant).id, owner);
+        })();
+        await Promise.allSettled([grant, revoke]);
+        const live = await control.staffRoleAssignment.count({
+          where: { roleId: devRole, principalId: support, revokedAt: null },
+        });
+        expect(live).toBe(0);
+        expect(await rbac.can(support, 'errors.view')).toBe(false);
+      }
+    }, 120_000);
+
+    it('elevation racing an eligibility revoke never leaves power behind', async () => {
+      const ownerRole = await roleId('owner');
+      for (let i = 0; i < 50; i++) {
+        const eligible = await rbac.grant({
+          roleId: ownerRole,
+          principalType: 'STAFF',
+          principalId: support,
+          kind: 'ELIGIBLE',
+          grantedBy: owner,
+        });
+        await Promise.allSettled([
+          rbac.startElevation({
+            staffId: support,
+            assignmentId: eligible.id,
+            reason: 'urgent abuse case',
+            expiresAt: new Date(Date.now() + 60_000),
+          }),
+          rbac.revoke(eligible.id, owner),
+        ]);
+        expect(await rbac.can(support, 'restrict.ban')).toBe(false);
+        const open = await control.staffElevation.count({
+          where: { staffId: support, endedAt: null },
+        });
+        expect(open).toBe(0);
+      }
+    }, 120_000);
+
+    it('two edits of one role always leave OpenFGA on the committed version', async () => {
+      const role = await rbac.saveCustomRole({
+        key: `edit-${suffix}`,
+        name: 'Edit',
+        permissions: ['people.view'],
+        by: owner,
+      });
+      const held = await rbac.grant({
+        roleId: role.id,
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ACTIVE',
+        grantedBy: owner,
+      });
+      onTestFinished(() => rbac.revoke(held.id, owner));
+      const all = [
+        'people.view',
+        'notes.write',
+        'tags.write',
+        'orgs.view',
+      ] as const;
+      for (let i = 0; i < 50; i++) {
+        await Promise.all([
+          rbac.saveCustomRole({
+            roleId: role.id,
+            key: role.key,
+            name: 'Edit',
+            permissions: ['people.view', all[(i % 3) + 1]!],
+            by: owner,
+          }),
+          rbac.saveCustomRole({
+            roleId: role.id,
+            key: role.key,
+            name: 'Edit',
+            permissions: [all[((i + 1) % 3) + 1]!],
+            by: owner,
+          }),
+        ]);
+        const saved = await control.staffRole.findUniqueOrThrow({
+          where: { id: role.id },
+          include: { versions: true },
+        });
+        const newest = saved.versions.find(
+          (v) => v.version === saved.currentVersion,
+        )!.permissions;
+        for (const p of all)
+          expect(await rbac.can(support, p)).toBe(newest.includes(p));
+      }
+    }, 180_000);
   });
 });
