@@ -46,12 +46,24 @@ describe('staff audit chain (e2e)', () => {
     await control.staffAuditCheckpoint.createMany({ data: cpsBackup });
   };
 
+  let before: { rows: Row[]; cps: Cp[] };
   beforeAll(async () => {
-    // A clean chain for this file: any rows left by earlier files belong to an older anchor.
+    // A clean chain for this file; the database's own chain is put back afterwards.
+    before = {
+      rows: await control.staffAuditEvent.findMany({ orderBy: { seq: 'asc' } }),
+      cps: await control.staffAuditCheckpoint.findMany({
+        orderBy: { seq: 'asc' },
+      }),
+    };
     await control.staffAuditCheckpoint.deleteMany({});
     await control.staffAuditEvent.deleteMany({});
   });
-  afterAll(() => control.$disconnect());
+  afterAll(async () => {
+    rowsBackup = before.rows;
+    cpsBackup = before.cps;
+    await restore();
+    await control.$disconnect();
+  });
 
   it('links each row to the previous one and verifies', async () => {
     const a = await audit.append({ staffId: 's1', action: 'test.one' });

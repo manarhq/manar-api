@@ -6,7 +6,9 @@ import {
   STAFF_AUDIT_CHAIN_ID,
   StaffAuditService,
 } from './audit/staff-audit.service';
-import { StaffRbacService } from './rbac/staff-rbac.service';
+import { STAFF_ALERTS, StaffRbacService } from './rbac/staff-rbac.service';
+import { MailerService } from '../growth/mailer.service';
+import { StaffAlertsService } from './staff-alerts.service';
 
 /**
  * Staff RBAC and the staff audit chain, without HTTP: shared by the staff listener and the CLI.
@@ -23,7 +25,15 @@ import { StaffRbacService } from './rbac/staff-rbac.service';
     },
     StaffAuditService,
     StaffRbacService,
+    MailerService,
+    StaffAlertsService,
+    { provide: STAFF_ALERTS, useExisting: StaffAlertsService },
   ],
-  exports: [StaffAuditService, StaffRbacService, AuthorizationModule],
+  exports: [
+    StaffAuditService,
+    StaffRbacService,
+    StaffAlertsService,
+    AuthorizationModule,
+  ],
 })
 export class StaffCoreModule {}

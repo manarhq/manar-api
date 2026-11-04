@@ -34,6 +34,7 @@ import { StaffRestrictionsController } from './http/staff-restrictions.controlle
 import { ChangeRequestsService } from './approvals/change-requests.service';
 import { RestrictionsService } from './restrictions/restrictions.service';
 import { PlatformSuspension } from '../platform/platform-suspension';
+import { StaffAdminController } from './http/staff-admin.controller';
 import { StaffJobsService } from './staff-jobs.service';
 
 /**
@@ -53,6 +54,7 @@ import { StaffJobsService } from './staff-jobs.service';
     StaffInvitesController,
     StaffIndexController,
     StaffRestrictionsController,
+    StaffAdminController,
   ],
   providers: [
     JwksCacheService,
