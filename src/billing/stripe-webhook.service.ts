@@ -22,7 +22,17 @@ const HANDLED = new Set([
   'invoice.paid',
   'invoice.payment_failed',
   'charge.dispute.created',
+  'charge.dispute.updated',
   'charge.dispute.closed',
+  'charge.refunded',
+]);
+/** Dispute states in which the money is contested or gone: paid features stay frozen. */
+const FREEZING = new Set([
+  'warning_needs_response',
+  'warning_under_review',
+  'needs_response',
+  'under_review',
+  'lost',
 ]);
 const ENDED = new Set(['canceled', 'incomplete_expired', 'unpaid']);
 
@@ -145,9 +155,21 @@ export class StripeWebhookService {
         subscriptionId = storedSubscription;
         break;
       case 'charge.dispute.created':
+      case 'charge.dispute.updated':
       case 'charge.dispute.closed':
         await this.dispute(tenantId, event.data.object);
         return;
+      case 'charge.refunded': {
+        const c = event.data.object;
+        const pi = id(c.payment_intent);
+        if (pi && c.amount > 0)
+          await this.wallet.revokeForPayment(
+            tenantId,
+            pi,
+            c.amount_refunded / c.amount,
+          );
+        return;
+      }
       default: // invoice.payment_failed: re-derive from the subscription we track
         subscriptionId = storedSubscription;
     }
@@ -176,6 +198,8 @@ export class StripeWebhookService {
         lookupKey: i.price?.id === pack ? PRICE.CREDITS_1000 : null,
         quantity: i.quantity,
       })),
+      new Date(),
+      id(session.payment_intent),
     );
   }
 
@@ -193,14 +217,36 @@ export class StripeWebhookService {
           l.pricing?.price_details?.price === pack ? PRICE.CREDITS_1000 : null,
         quantity: l.quantity,
       })),
+      new Date(),
+      id(live.payments?.data[0]?.payment.payment_intent ?? null),
     );
   }
 
-  /** A dispute freezes paid features (safety stays) until it is won; staff review it. */
+  /**
+   * A dispute freezes paid features (safety stays) while ANY of the customer's disputes is open
+   * or lost; staff review it. The state is re-read from Stripe on every dispute event, never taken
+   * from the one event, so out-of-order deliveries converge. A lost dispute also takes back the
+   * credits its charge bought.
+   */
   private async dispute(tenantId: string, d: Stripe.Dispute) {
-    const status =
-      d.status === 'won' || d.status === 'warning_closed' ? 'active' : 'frozen';
-    await this.entitlements.change(tenantId, { status }, ACTOR, 'dispute');
+    const stripe = this.stripe.client();
+    const customer = id(
+      (await stripe.charges.retrieve(id(d.charge)!)).customer,
+    );
+    const all: { status: string; paymentIntent: string | null }[] = [];
+    for await (const c of stripe.charges.list({ customer: customer! }))
+      if (c.disputed)
+        for (const x of (await stripe.disputes.list({ charge: c.id })).data)
+          all.push({ status: x.status, paymentIntent: id(c.payment_intent) });
+    const frozen = all.some((x) => FREEZING.has(x.status));
+    const status = frozen ? 'frozen' : 'active';
+    const current = await this.entitlements.get(tenantId);
+    // Thawing never overrides a separate payment state: only frozen <-> active moves here.
+    if (frozen || current.status === 'frozen')
+      await this.entitlements.change(tenantId, { status }, ACTOR, 'dispute');
+    for (const lost of all.filter((x) => x.status === 'lost'))
+      if (lost.paymentIntent)
+        await this.wallet.revokeForPayment(tenantId, lost.paymentIntent, 1);
     try {
       const client = await this.tenants.getClient(tenantId);
       await this.audit.recordSafely(client, tenantId, {
@@ -318,11 +364,15 @@ export class StripeWebhookService {
     const tenant = await this.control.tenant.findUnique({
       where: { id: tenantId },
     });
-    const pmId = id(sub.default_payment_method);
-    const fingerprint = pmId
-      ? ((await this.stripe.client().paymentMethods.retrieve(pmId)).card
-          ?.fingerprint ?? null)
-      : null;
+    const fingerprint = await this.trialFingerprint(sub);
+    // No fingerprint means the one-trial-per-card rule cannot be checked: refuse, never skip it.
+    if (!fingerprint) {
+      this.logger.warn(
+        `company trial refused for ${tenantId}: no payment fingerprint`,
+      );
+      await this.refuseTrial(tenantId, sub.id);
+      return false;
+    }
     try {
       await this.control.trialClaim.create({
         data: {
@@ -337,20 +387,54 @@ export class StripeWebhookService {
     } catch (error) {
       if ((error as { code?: string }).code !== 'P2002') throw error;
       this.logger.warn(`company trial refused for ${tenantId}: already used`);
-      await this.stripe.client().subscriptions.cancel(sub.id);
-      await this.entitlements.change(
-        tenantId,
-        {
-          plan: 'free',
-          status: 'active',
-          stripeSubscriptionId: null,
-          // Marks the trial as used, so the console offers "talk to us".
-          trialEndsAt: new Date(),
-        },
-        ACTOR,
-        'trial_refused',
-      );
+      await this.refuseTrial(tenantId, sub.id);
       return false;
     }
+  }
+
+  /** Cancels a refused trial at once; the workspace sees "talk to us". */
+  private async refuseTrial(tenantId: string, subscriptionId: string) {
+    await this.stripe.client().subscriptions.cancel(subscriptionId);
+    await this.entitlements.change(
+      tenantId,
+      {
+        plan: 'free',
+        status: 'active',
+        stripeSubscriptionId: null,
+        // Marks the trial as used, so the console offers "talk to us".
+        trialEndsAt: new Date(),
+      },
+      ACTOR,
+      'trial_refused',
+    );
+  }
+
+  /**
+   * The trial's payment method, in order: the subscription's default, the customer's invoice
+   * default, the method its setup intent saved. Any type with a Stripe fingerprint counts (card,
+   * bank account, SEPA...), prefixed with the type so two kinds never collide. Null when none.
+   */
+  private async trialFingerprint(
+    sub: Stripe.Subscription,
+  ): Promise<string | null> {
+    const stripe = this.stripe.client();
+    let pmId = id(sub.default_payment_method);
+    if (!pmId) {
+      const c = await stripe.customers.retrieve(id(sub.customer)!);
+      if (!c.deleted)
+        pmId = id(c.invoice_settings?.default_payment_method ?? null);
+    }
+    if (!pmId && sub.pending_setup_intent)
+      pmId = id(
+        (await stripe.setupIntents.retrieve(id(sub.pending_setup_intent)!))
+          .payment_method,
+      );
+    if (!pmId) return null;
+    const pm = await stripe.paymentMethods.retrieve(pmId);
+    const fp = (
+      pm as unknown as Record<string, { fingerprint?: string } | undefined>
+    )[pm.type]?.fingerprint;
+    if (!fp) return null;
+    return pm.type === 'card' ? fp : `${pm.type}:${fp}`;
   }
 }

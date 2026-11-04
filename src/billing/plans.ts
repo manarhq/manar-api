@@ -44,8 +44,8 @@ const COMPANY_FEATURES = [
   'sso',
 ];
 
-/** Company trial (card required, not charged during it). */
-export const TRIAL_DAYS = 30;
+/** Company trial (card required, not charged during it; then it converts to paid). */
+export const TRIAL_DAYS = 14;
 /** Personal trial: no card, unlocks only "up to 3 devices". */
 export const PERSONAL_TRIAL_DAYS = 14;
 
@@ -112,13 +112,6 @@ export const PLAN_TABLE: Record<
 export const SEAT_PLANS: ReadonlySet<PlanName> = new Set([
   'company_trial',
   'company',
-]);
-/** Plans that may hold credits and spend above the allowance. */
-export const WALLET_PLANS: ReadonlySet<PlanName> = new Set([
-  'pro',
-  'company_trial',
-  'company',
-  'enterprise',
 ]);
 
 /** `2026-11` (UTC). */

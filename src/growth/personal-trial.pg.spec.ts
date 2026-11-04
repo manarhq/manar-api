@@ -183,4 +183,44 @@ describe.skipIf(!url)('personal 14-day trial (postgres)', () => {
     await trial.sendDue(new Date(start.getTime() + 10.2 * DAY));
     expect(sent.filter((s) => s.to.startsWith('f-'))).toHaveLength(0);
   });
+
+  it('company trial: reminders on days 7, 12 and 14 with a one-click cancel link', async () => {
+    const email = `g-${randomUUID()}@co-${randomUUID().slice(0, 8)}.io`;
+    const t = await person(email, 'COMPANY');
+    const tenant = await control.tenant.findUniqueOrThrow({ where: { id: t } });
+    const start = new Date(Date.now() - 6.5 * DAY);
+    await control.trialClaim.create({
+      data: {
+        tenantId: t,
+        kind: 'company',
+        issuer: 'trial-test',
+        subject: tenant.ownerSubject!,
+        cardFingerprint: `fp-${randomUUID()}`,
+        claimedAt: start,
+      },
+    });
+    await control.tenantEntitlement.create({
+      data: {
+        tenantId: t,
+        plan: 'company_trial',
+        trialEndsAt: new Date(start.getTime() + 14 * DAY),
+      },
+    });
+    const mine = () =>
+      sent.filter((s) => s.to === email) as {
+        subject: string;
+        text?: string;
+      }[];
+    await trial.sendDue(new Date(start.getTime() + 5 * DAY));
+    expect(mine()).toHaveLength(0);
+    await trial.sendDue(new Date(start.getTime() + 6.2 * DAY)); // day 7
+    expect(mine()).toHaveLength(1);
+    await trial.sendDue(new Date(start.getTime() + 11.2 * DAY)); // day 12
+    await trial.sendDue(new Date(start.getTime() + 13.2 * DAY)); // day 14
+    expect(mine()).toHaveLength(3);
+    // In Arabic (the person's language), naming the price after the trial and the cancel link.
+    expect(mine()[0]!.subject).toContain('تجربة');
+    expect(mine()[0]!.text).toContain('/ar/settings/billing?trial=cancel');
+    expect(mine()[0]!.text).toContain('15');
+  });
 });

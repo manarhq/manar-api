@@ -330,6 +330,42 @@ describe.skipIf(!url)(
         expect(PLAN_TABLE.pro.allowance.ai).toBe(300);
       });
 
+      it('a refund takes back unspent credits in proportion, never below zero, and only once', async () => {
+        const t = await tenant('pro');
+        await wallet.addPaidLot(
+          t,
+          `cs_rf_${t}`,
+          'purchase',
+          [{ lookupKey: 'manar_credits_1000_v2', quantity: 2 }],
+          new Date(),
+          `pi_rf_${t}`,
+        );
+        // 2,000 bought, 1,700 already spent.
+        await control.creditLot.updateMany({
+          where: { tenantId: t },
+          data: { remaining: 300 },
+        });
+        await wallet.revokeForPayment(t, `pi_rf_${t}`, 0.1); // 200 credits taken back
+        let lot = await control.creditLot.findFirstOrThrow({
+          where: { tenantId: t },
+        });
+        expect(lot).toMatchObject({ remaining: 100, revoked: 200 });
+        // The same refund event again changes nothing.
+        await wallet.revokeForPayment(t, `pi_rf_${t}`, 0.1);
+        lot = await control.creditLot.findFirstOrThrow({
+          where: { tenantId: t },
+        });
+        expect(lot.remaining).toBe(100);
+        // A full refund (or a lost dispute) leaves 0, not a negative balance.
+        await wallet.revokeForPayment(t, `pi_rf_${t}`, 1);
+        lot = await control.creditLot.findFirstOrThrow({
+          where: { tenantId: t },
+        });
+        expect(lot).toMatchObject({ remaining: 0, revoked: 2000 });
+        // Another tenant's payment id never touches this wallet.
+        await wallet.revokeForPayment('someone-else', `pi_rf_${t}`, 1);
+      });
+
       it('cap settings: USD to credits, null for no cap', async () => {
         const t = await tenant('pro');
         await wallet.updateSettings(t, { capUsd: 50 });

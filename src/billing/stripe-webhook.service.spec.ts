@@ -94,15 +94,60 @@ function make(rows: Record<string, Record<string, unknown>>) {
   let next: unknown = null;
   let live: unknown = null;
   const sub = vi.fn(() => Promise.resolve(live));
+  /** What Stripe holds now: every dispute of every charge, whatever event arrives. */
+  const disputes: { id: string; charge: string; status: string }[] = [];
+  const pms: Record<string, Record<string, unknown>> = {};
+  const customerDefaultPm: { id: string | null } = { id: null };
   const stripe = {
     subscriptions: { retrieve: sub, cancel: vi.fn(() => Promise.resolve()) },
     subscriptionItems: { create: vi.fn(() => Promise.resolve()) },
     charges: {
-      retrieve: vi.fn(() => Promise.resolve({ customer: 'cus_1' })),
+      retrieve: vi.fn((id: string) =>
+        Promise.resolve({
+          id,
+          customer: 'cus_1',
+          payment_intent: `pi_${id}`,
+          amount: 1000,
+          amount_refunded: 0,
+        }),
+      ),
+      list: vi.fn(() => ({
+        // eslint-disable-next-line @typescript-eslint/require-await
+        async *[Symbol.asyncIterator]() {
+          for (const c of new Set(disputes.map((d) => d.charge)))
+            yield {
+              id: c,
+              customer: 'cus_1',
+              disputed: true,
+              payment_intent: `pi_${c}`,
+            };
+        },
+      })),
+    },
+    disputes: {
+      list: vi.fn(({ charge }: { charge: string }) =>
+        Promise.resolve({ data: disputes.filter((d) => d.charge === charge) }),
+      ),
+    },
+    customers: {
+      retrieve: vi.fn(() =>
+        Promise.resolve({
+          invoice_settings: { default_payment_method: customerDefaultPm.id },
+        }),
+      ),
+    },
+    setupIntents: {
+      retrieve: vi.fn((id: string) =>
+        Promise.resolve({
+          payment_method: id === 'seti_ok' ? 'pm_from_seti' : null,
+        }),
+      ),
     },
     paymentMethods: {
       retrieve: vi.fn((id: string) =>
-        Promise.resolve({ card: { fingerprint: `fp_${id}` } }),
+        Promise.resolve(
+          pms[id] ?? { type: 'card', card: { fingerprint: `fp_${id}` } },
+        ),
       ),
     },
     checkout: {
@@ -119,6 +164,7 @@ function make(rows: Record<string, Record<string, unknown>>) {
         Promise.resolve({
           id: 'in_top',
           status: 'paid',
+          payments: { data: [{ payment: { payment_intent: 'pi_top' } }] },
           lines: {
             data: [
               {
@@ -139,7 +185,10 @@ function make(rows: Record<string, Record<string, unknown>>) {
     price: (k: string) => Promise.resolve(PRICE_IDS[k] ?? `price_${k}`),
     client: () => stripe,
   };
-  const wallet = { addPaidLot: vi.fn(() => Promise.resolve(1000)) };
+  const wallet = {
+    addPaidLot: vi.fn(() => Promise.resolve(1000)),
+    revokeForPayment: vi.fn(() => Promise.resolve()),
+  };
   const svc = new StripeWebhookService(
     control as never,
     entitlements,
@@ -169,6 +218,9 @@ function make(rows: Record<string, Record<string, unknown>>) {
     wallet,
     sub,
     claims,
+    disputes,
+    pms,
+    customerDefaultPm,
     setLive: (v: unknown) => (live = v),
   };
 }
@@ -406,14 +458,20 @@ describe('StripeWebhookService', () => {
           id: 'cs_1',
           mode: 'payment',
           payment_status: 'paid',
+          payment_intent: 'pi_cs_1',
           customer: 'cus_1',
           metadata: { tenantId: 't1', credits: '999999' },
         },
       },
     });
-    expect(wallet.addPaidLot).toHaveBeenCalledWith('t1', 'cs_1', 'purchase', [
-      { lookupKey: PRICE.CREDITS_1000, quantity: 3 },
-    ]);
+    expect(wallet.addPaidLot).toHaveBeenCalledWith(
+      't1',
+      'cs_1',
+      'purchase',
+      [{ lookupKey: PRICE.CREDITS_1000, quantity: 3 }],
+      expect.any(Date),
+      'pi_cs_1',
+    );
   });
 
   it('an unpaid credit Checkout adds nothing', async () => {
@@ -446,22 +504,28 @@ describe('StripeWebhookService', () => {
         },
       },
     });
-    expect(wallet.addPaidLot).toHaveBeenCalledWith('t1', 'in_top', 'top_up', [
-      { lookupKey: PRICE.CREDITS_1000, quantity: 2 },
-    ]);
+    expect(wallet.addPaidLot).toHaveBeenCalledWith(
+      't1',
+      'in_top',
+      'top_up',
+      [{ lookupKey: PRICE.CREDITS_1000, quantity: 2 }],
+      expect.any(Date),
+      'pi_top',
+    );
     expect(sub).not.toHaveBeenCalled();
   });
 
+  const disputeEvent = (
+    id: string,
+    type: string,
+    d: { id: string; charge: string; status: string },
+  ) => ({ id, type, data: { object: d } });
+
   it('a dispute freezes paid features; winning it restores them', async () => {
-    const { send, rows, audit } = make(row());
+    const { send, rows, audit, disputes } = make(row());
     await send(subEvent('evt_p'));
-    await send({
-      id: 'evt_d1',
-      type: 'charge.dispute.created',
-      data: {
-        object: { id: 'dp_1', charge: 'ch_1', status: 'needs_response' },
-      },
-    });
+    disputes.push({ id: 'dp_1', charge: 'ch_1', status: 'needs_response' });
+    await send(disputeEvent('evt_d1', 'charge.dispute.created', disputes[0]!));
     expect(rows.t1).toMatchObject({ plan: 'pro', status: 'frozen' });
     expect(audit.recordSafely).toHaveBeenCalledWith(
       expect.anything(),
@@ -471,11 +535,103 @@ describe('StripeWebhookService', () => {
     // A subscription update while frozen keeps it frozen.
     await send(subEvent('evt_p2'));
     expect(rows.t1!.status).toBe('frozen');
-    await send({
-      id: 'evt_d2',
-      type: 'charge.dispute.closed',
-      data: { object: { id: 'dp_1', charge: 'ch_1', status: 'won' } },
-    });
+    disputes[0]!.status = 'won';
+    await send(disputeEvent('evt_d2', 'charge.dispute.closed', disputes[0]!));
     expect(rows.t1!.status).toBe('active');
+  });
+
+  it('state comes from all disputes in Stripe, not the event: a late "won" for one cannot unfreeze another open one', async () => {
+    const { send, rows, disputes } = make(row());
+    await send(subEvent('evt_s'));
+    disputes.push(
+      { id: 'dp_a', charge: 'ch_a', status: 'won' },
+      { id: 'dp_b', charge: 'ch_b', status: 'under_review' },
+    );
+    await send(disputeEvent('evt_x', 'charge.dispute.closed', disputes[0]!));
+    expect(rows.t1!.status).toBe('frozen');
+    // Out of order: an old "created" event arrives after everything was won.
+    disputes[1]!.status = 'won';
+    await send(
+      disputeEvent('evt_y', 'charge.dispute.created', {
+        id: 'dp_b',
+        charge: 'ch_b',
+        status: 'needs_response',
+      }),
+    );
+    expect(rows.t1!.status).toBe('active');
+  });
+
+  it('a lost dispute keeps paid features frozen and takes back the credits that charge bought', async () => {
+    const { send, rows, disputes, wallet } = make(row());
+    await send(subEvent('evt_l'));
+    disputes.push({ id: 'dp_l', charge: 'ch_l', status: 'lost' });
+    await send(disputeEvent('evt_l1', 'charge.dispute.closed', disputes[0]!));
+    expect(rows.t1!.status).toBe('frozen');
+    expect(wallet.revokeForPayment).toHaveBeenCalledWith('t1', 'pi_ch_l', 1);
+  });
+
+  it('a refund takes back the unspent credits in proportion (partial refunds too)', async () => {
+    const { send, wallet } = make(row());
+    await send({
+      id: 'evt_r',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_r',
+          customer: 'cus_1',
+          payment_intent: 'pi_r',
+          amount: 1000,
+          amount_refunded: 250,
+        },
+      },
+    });
+    expect(wallet.revokeForPayment).toHaveBeenCalledWith('t1', 'pi_r', 0.25);
+  });
+
+  const trialSub = (o: Record<string, unknown>) =>
+    subEvent('evt_t', {
+      status: 'trialing',
+      items: { data: [item(PRICE.COMPANY_SEAT_MONTHLY)] },
+      ...o,
+    });
+
+  it("trial fingerprint falls back to the customer's default, then the setup intent", async () => {
+    const a = make(row());
+    a.customerDefaultPm.id = 'pm_cust';
+    await a.send(trialSub({ default_payment_method: null }));
+    expect(a.claims[0]).toMatchObject({ cardFingerprint: 'fp_pm_cust' });
+
+    const b = make(row());
+    await b.send(
+      trialSub({
+        default_payment_method: null,
+        pending_setup_intent: 'seti_ok',
+      }),
+    );
+    expect(b.claims[0]).toMatchObject({ cardFingerprint: 'fp_pm_from_seti' });
+  });
+
+  it('non-card methods are fingerprinted too', async () => {
+    const f = make(row());
+    f.pms.pm_bank = {
+      type: 'us_bank_account',
+      us_bank_account: { fingerprint: 'bank_fp' },
+    };
+    await f.send(trialSub({ default_payment_method: 'pm_bank' }));
+    expect(f.claims[0]).toMatchObject({
+      cardFingerprint: 'us_bank_account:bank_fp',
+    });
+  });
+
+  it('a trial with no payment-method fingerprint at all is refused', async () => {
+    const f = make(row());
+    f.pms.pm_link = { type: 'link', link: {} };
+    await f.send(trialSub({ default_payment_method: 'pm_link' }));
+    expect(f.stripe.subscriptions.cancel).toHaveBeenCalledWith('sub_1');
+    expect(f.rows.t1).toMatchObject({
+      plan: 'free',
+      stripeSubscriptionId: null,
+    });
+    expect(f.claims).toHaveLength(0);
   });
 });

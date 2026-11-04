@@ -16,7 +16,6 @@ import {
   PRO_DEFAULT_CAP_CREDITS,
   SEAT_PLANS,
   TOP_UP_BELOW_CREDITS,
-  WALLET_PLANS,
   monthOf,
 } from './plans';
 
@@ -165,8 +164,6 @@ export class UsageMeterService {
       return { source: 'allowance' };
     }
 
-    if (!WALLET_PLANS.has(e.plan))
-      throw new UsagePausedError('allowance_used', upgradeUrl);
     const wallet = await tx.creditWallet.findUnique({ where: { tenantId } });
     const cap = wallet ? wallet.capCredits : defaultCap(e.plan);
     if (cap !== null && m.creditsSpent + 1 > cap)

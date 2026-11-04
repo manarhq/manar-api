@@ -10,7 +10,7 @@ import { ControlPrismaService } from '../database/control-prisma.service';
 import { isConsumerDomain, isDisposableDomain } from '../growth/disposable';
 import { BillableUsageService } from './billable-usage.service';
 import { EntitlementsService } from './entitlements.service';
-import { COMPANY_MIN_SEATS, TRIAL_DAYS, WALLET_PLANS } from './plans';
+import { COMPANY_MIN_SEATS, TRIAL_DAYS } from './plans';
 import { PRICE, StripeGateway, type PriceKey } from './stripe.gateway';
 
 export const CHECKOUT_PLANS = [
@@ -157,27 +157,20 @@ export class BillingService {
     return { url: session.url };
   }
 
-  /** Credit packs ($5 = 1,000 credits), one-time Checkout with a tax invoice. Paid plans only. */
-  async buyCredits(tenantId: string, packs: number) {
+  /** Credit packs ($5 = 1,000 credits), one-time Checkout with a tax invoice. Any plan, Free too. */
+  async buyCredits(tenantId: string, email: string, packs: number) {
     const e = await this.entitlements.get(tenantId);
-    const row = await this.control.tenantEntitlement.findUnique({
-      where: { tenantId },
-    });
-    if (!WALLET_PLANS.has(e.plan) || !row?.stripeCustomerId)
-      throw new ForbiddenException({
-        statusCode: 403,
-        code: 'paid_plan_required',
-      });
-    if (e.status === 'frozen')
+    if (e.status === 'frozen' || e.status === 'read_only')
       throw new ForbiddenException({
         statusCode: 403,
         code: 'paid_features_paused',
       });
-    await this.expireOpenSessions(row.stripeCustomerId);
+    const customer = await this.ensureCustomer(tenantId, email);
+    await this.expireOpenSessions(customer);
     const base = this.entitlements.upgradeUrl();
     const session = await this.stripe.client().checkout.sessions.create({
       mode: 'payment',
-      customer: row.stripeCustomerId,
+      customer,
       line_items: [
         {
           price: await this.stripe.price(PRICE.CREDITS_1000),
@@ -234,6 +227,24 @@ export class BillingService {
         code: 'already_subscribed',
         message: 'Use the billing portal to change an existing plan.',
       });
+  }
+
+  /**
+   * One-click cancel of a Company trial: the trialing subscription is cancelled at once, so the
+   * card is never charged. The webhook then moves the workspace to Free. 404 when not trialing.
+   */
+  async cancelTrial(tenantId: string) {
+    const row = await this.control.tenantEntitlement.findUnique({
+      where: { tenantId },
+    });
+    if (row?.plan !== 'company_trial' || !row.stripeSubscriptionId)
+      throw new NotFoundException({ statusCode: 404, code: 'no_trial' });
+    const stripe = this.stripe.client();
+    const sub = await stripe.subscriptions.retrieve(row.stripeSubscriptionId);
+    if (sub.status !== 'trialing')
+      throw new ConflictException({ statusCode: 409, code: 'trial_over' });
+    await stripe.subscriptions.cancel(sub.id);
+    return { cancelled: true };
   }
 
   async portal(tenantId: string) {

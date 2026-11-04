@@ -11,7 +11,6 @@ import {
   TOP_UP_BELOW_CREDITS,
   TOP_UP_MAX_PER_MONTH,
   TOP_UP_PACKS,
-  WALLET_PLANS,
   monthOf,
 } from './plans';
 import { PRICE, StripeGateway } from './stripe.gateway';
@@ -120,7 +119,8 @@ export class WalletService implements OnModuleInit {
         },
       },
       wallet: {
-        available: WALLET_PLANS.has(e.plan),
+        // Every plan may buy credits, Free included (founder, 4 Nov).
+        available: true,
         balance,
         expiringSoon: expiring.map((l) => ({
           credits: l.remaining,
@@ -184,7 +184,6 @@ export class WalletService implements OnModuleInit {
       cap,
       balance,
       autoTopUp,
-      wallet: WALLET_PLANS.has(plan as never),
     });
   }
 
@@ -228,6 +227,7 @@ export class WalletService implements OnModuleInit {
     source: 'purchase' | 'top_up',
     lines: { lookupKey: string | null; quantity: number | null }[],
     paidAt = new Date(),
+    paymentIntentId: string | null = null,
   ): Promise<number> {
     const packs = lines
       .filter((l) => l.lookupKey === PRICE.CREDITS_1000)
@@ -243,6 +243,7 @@ export class WalletService implements OnModuleInit {
           remaining: credits,
           expiresAt: addMonths(paidAt, CREDIT_VALID_MONTHS),
           stripeRef,
+          paymentIntentId,
         },
       ],
       skipDuplicates: true,
@@ -255,11 +256,35 @@ export class WalletService implements OnModuleInit {
     return r.count ? credits : 0;
   }
 
-  /** A refunded pack: its unspent part goes. Spent credits are not clawed back. */
-  async removeRefunded(stripeRef: string): Promise<void> {
-    await this.control.creditLot.updateMany({
-      where: { stripeRef },
-      data: { remaining: 0 },
+  /**
+   * A refund (or a lost dispute, `fraction` 1) takes back that share of the credits the payment
+   * bought, from what is left: credits already spent are not clawed back, and a lot never goes
+   * below zero. `revoked` is cumulative, so a replayed event takes nothing more. Credits only
+   * gate paid extras; nothing here can reach protection.
+   */
+  async revokeForPayment(
+    tenantId: string,
+    paymentIntentId: string,
+    fraction: number,
+  ): Promise<void> {
+    const share = Math.min(1, Math.max(0, fraction));
+    await this.control.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`wallet:${tenantId}`}))`;
+      const lots = await tx.creditLot.findMany({
+        where: { tenantId, paymentIntentId },
+      });
+      for (const lot of lots) {
+        const target = Math.ceil(lot.credits * share);
+        const more = target - lot.revoked;
+        if (more <= 0) continue;
+        await tx.creditLot.update({
+          where: { id: lot.id },
+          data: {
+            revoked: target,
+            remaining: Math.max(0, lot.remaining - more),
+          },
+        });
+      }
     });
   }
 
@@ -383,7 +408,6 @@ export function thresholdKeys(n: {
   cap: number | null;
   balance: number;
   autoTopUp: boolean;
-  wallet: boolean;
 }): string[] {
   const keys: string[] = [];
   const steps = (name: string, used: number, of: number) => {
@@ -393,16 +417,16 @@ export function thresholdKeys(n: {
   };
   steps('ai', n.aiUsed, n.aiIncluded);
   steps('minutes', n.minutesUsed, n.minutesIncluded);
-  if (n.wallet && n.cap !== null) steps('cap', n.creditsSpent, n.cap);
-  // Low credits matter only once the allowance is nearly used or credits are being spent.
+  if (n.cap !== null) steps('cap', n.creditsSpent, n.cap);
+  // Low credits matter only to someone who has credits (or is spending them) and whose
+  // allowance is nearly used; someone with none gets the 100% allowance alert instead.
   const nearlyUsed =
     n.aiUsed * 100 >= n.aiIncluded * 80 ||
     (n.minutesIncluded > 0 && n.minutesUsed * 100 >= n.minutesIncluded * 80);
   if (
-    n.wallet &&
     !n.autoTopUp &&
     n.balance < TOP_UP_BELOW_CREDITS &&
-    (nearlyUsed || n.creditsSpent > 0)
+    (n.creditsSpent > 0 || (n.balance > 0 && nearlyUsed))
   )
     keys.push('credits:low');
   return keys;

@@ -63,6 +63,29 @@ const TRIAL = {
   },
 } as const;
 
+const COMPANY_TRIAL = {
+  en: {
+    subject: (left: number) =>
+      left > 0
+        ? `Your Manar Company trial ends in ${left} ${left === 1 ? 'day' : 'days'}`
+        : 'Your Manar Company trial ends today',
+    body: 'When the trial ends, your card is charged $15 per active seat a month, at least 3 seats ($45), plus VAT for UAE buyers. A seat is active when the person is online on 3 or more days in the month.',
+    cancel:
+      'Not ready? Cancel in one click before the trial ends and nothing is charged. Protection on your devices keeps working on the Free plan.',
+    cta: 'Keep or cancel the trial',
+  },
+  ar: {
+    subject: (left: number) =>
+      left > 0
+        ? `تنتهي تجربة منار للشركات خلال ${left} ${left === 1 ? 'يوم' : 'أيام'}`
+        : 'تنتهي تجربة منار للشركات اليوم',
+    body: 'عند انتهاء التجربة تُحصَّل من بطاقتك 15 دولاراً لكل مقعد نشط شهرياً، بحد أدنى 3 مقاعد (45 دولاراً)، مع ضريبة القيمة المضافة للمشترين في الإمارات. يكون المقعد نشطاً عندما يكون صاحبه متصلاً في 3 أيام أو أكثر خلال الشهر.',
+    cancel:
+      'لست مستعداً؟ ألغِ بنقرة واحدة قبل انتهاء التجربة ولن يُحصَّل أي مبلغ. تبقى الحماية على أجهزتك تعمل في الخطة المجانية.',
+    cta: 'احتفظ بالتجربة أو ألغها',
+  },
+} as const;
+
 function page(
   locale: Locale,
   title: string,
@@ -116,6 +139,22 @@ export function renderTrialReminder(args: {
   const c = TRIAL[args.locale];
   const title = c.subject(args.daysLeft);
   const paras = [c.value(args.blocked), c.body];
+  return {
+    subject: title,
+    html: page(args.locale, title, paras, c.cta, args.link),
+    text: `${title}\n\n${paras.join('\n\n')}\n\n${c.cta}: ${args.link}\n`,
+  };
+}
+
+/** The Company trial reminder for day 7, 12 or 14, with the one-click cancel link. */
+export function renderCompanyTrialReminder(args: {
+  locale: Locale;
+  daysLeft: number;
+  link: string;
+}) {
+  const c = COMPANY_TRIAL[args.locale];
+  const title = c.subject(args.daysLeft);
+  const paras = [c.body, c.cancel];
   return {
     subject: title,
     html: page(args.locale, title, paras, c.cta, args.link),

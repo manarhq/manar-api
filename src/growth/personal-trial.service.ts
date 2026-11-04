@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { renderTrialReminder } from '../billing/billing-mail';
+import {
+  renderCompanyTrialReminder,
+  renderTrialReminder,
+} from '../billing/billing-mail';
 import { EntitlementsService } from '../billing/entitlements.service';
-import { PERSONAL_TRIAL_DAYS } from '../billing/plans';
+import { PERSONAL_TRIAL_DAYS, TRIAL_DAYS } from '../billing/plans';
 import type { AppConfig } from '../config/env.validation';
 import {
   ContactEmailService,
@@ -20,8 +23,15 @@ const DAY_MS = 86_400_000;
 /** Claims per day from one (non-consumer) email domain, and from one IP address. */
 const DOMAIN_DAILY_CAP = 3;
 const IP_DAILY_CAP = 5;
-/** Reminder days, counted from the start (day 14 is the last day). */
-export const REMINDER_DAYS = [10, 13, 14] as const;
+/** Reminder days, counted from the start (day 14 is the last day of both trials). */
+export const REMINDER_DAYS = {
+  personal: [10, 13, 14],
+  company: [7, 12, 14],
+} as const;
+const TRIAL_LENGTH = {
+  personal: PERSONAL_TRIAL_DAYS,
+  company: TRIAL_DAYS,
+} as const;
 
 // Same inputs as the retired launch offer, so its claims (copied into trial_claims) still match.
 const sha = (prefix: string, v: string) =>
@@ -170,25 +180,31 @@ export class PersonalTrialService {
   }
 
   /**
-   * Hourly: the day 10, 13 and 14 reminders, in the person's language, with what Manar blocked
-   * in the trial. Claim-then-send: a failed send gives the day back for the next tick.
+   * Hourly: the personal trial's day 10, 13 and 14 reminders (with what Manar blocked in the
+   * trial) and the Company trial's day 7, 12 and 14 reminders (with the price after it and the
+   * one-click cancel link), in the person's language. Claim-then-send: a failed send gives the
+   * day back for the next tick.
    */
   async sendDue(now = new Date()): Promise<{ sent: number; failed: number }> {
     const out = { sent: 0, failed: 0 };
     if (!this.mailer.configured) return out;
     const claims = await this.control.trialClaim.findMany({
       where: {
-        kind: 'personal',
+        kind: { in: ['personal', 'company'] },
         claimedAt: {
-          gt: new Date(now.getTime() - PERSONAL_TRIAL_DAYS * DAY_MS),
+          gt: new Date(
+            now.getTime() - Math.max(PERSONAL_TRIAL_DAYS, TRIAL_DAYS) * DAY_MS,
+          ),
         },
       },
       take: 1000,
     });
     for (const c of claims) {
+      const kind = c.kind === 'company' ? 'company' : 'personal';
       const day =
         Math.floor((now.getTime() - c.claimedAt.getTime()) / DAY_MS) + 1;
-      const due = REMINDER_DAYS.filter(
+      if (day > TRIAL_LENGTH[kind]) continue;
+      const due = REMINDER_DAYS[kind].filter(
         (d) => d <= day && !c.remindersSent.includes(d),
       );
       if (!due.length) continue;
@@ -199,7 +215,7 @@ export class PersonalTrialService {
         WHERE "id" = ${c.id} AND NOT (${d} = ANY("remindersSent"))`;
       if (won !== 1) continue;
       try {
-        if (await this.remind(c, d, now)) out.sent++;
+        if (await this.remind(c, kind, d, now)) out.sent++;
       } catch (error) {
         out.failed++;
         await this.control.trialClaim.update({
@@ -214,12 +230,14 @@ export class PersonalTrialService {
 
   private async remind(
     c: { tenantId: string; issuer: string; subject: string },
+    kind: 'personal' | 'company',
     day: number,
     now: Date,
   ): Promise<boolean> {
-    // Still on the trial (not upgraded, not ended early)?
+    // Still on the trial (not upgraded, cancelled or ended early)?
     const e = await this.entitlements.get(c.tenantId);
-    if (e.plan !== 'trial') return false;
+    if (e.plan !== (kind === 'company' ? 'company_trial' : 'trial'))
+      return false;
     const m = await this.control.membership.findUnique({
       where: {
         issuer_subject_tenantId: {
@@ -232,15 +250,25 @@ export class PersonalTrialService {
     const to = await this.contact.verified(c.issuer, c.subject);
     if (!to || !m || m.status !== 'ACTIVE') return false;
     const locale = m.locale === 'ar' ? 'ar' : 'en';
+    const web = (
+      this.config.get('BILLING_CONSOLE_URL', { infer: true }) ??
+      DEVICES_DEFAULTS.MANAR_CONSOLE_URL
+    ).replace(/\/+$/, '');
+    if (kind === 'company') {
+      const mail = renderCompanyTrialReminder({
+        locale,
+        daysLeft: TRIAL_DAYS - day,
+        link: `${web}/${locale}/settings/billing?trial=cancel`,
+      });
+      if (!(await this.mailer.send({ to, ...mail })))
+        throw new Error('mail not accepted');
+      return true;
+    }
     const client = await this.tenants.getClient(c.tenantId);
     const [a, b] = await Promise.all([
       this.cards.compute(client, now),
       this.cards.compute(client, new Date(now.getTime() - 7 * DAY_MS)),
     ]);
-    const web = (
-      this.config.get('BILLING_CONSOLE_URL', { infer: true }) ??
-      DEVICES_DEFAULTS.MANAR_CONSOLE_URL
-    ).replace(/\/+$/, '');
     const mail = renderTrialReminder({
       locale,
       daysLeft: PERSONAL_TRIAL_DAYS - day,

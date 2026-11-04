@@ -34,6 +34,8 @@ CREATE TABLE "credit_lots" (
     "remaining" INTEGER NOT NULL,
     "expiresAt" TIMESTAMP(3) NOT NULL,
     "stripeRef" TEXT,
+    "paymentIntentId" TEXT,
+    "revoked" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "credit_lots_pkey" PRIMARY KEY ("id")
@@ -112,6 +114,9 @@ CREATE UNIQUE INDEX "credit_lots_stripeRef_key" ON "credit_lots"("stripeRef");
 
 -- CreateIndex
 CREATE INDEX "credit_lots_tenantId_expiresAt_idx" ON "credit_lots"("tenantId", "expiresAt");
+
+-- CreateIndex
+CREATE INDEX "credit_lots_paymentIntentId_idx" ON "credit_lots"("paymentIntentId");
 
 -- CreateIndex
 CREATE INDEX "usage_events_createdAt_idx" ON "usage_events"("createdAt");

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { renderTrialReminder, renderUsageAlert } from './billing-mail';
+import {
+  renderCompanyTrialReminder,
+  renderTrialReminder,
+  renderUsageAlert,
+} from './billing-mail';
 import { dayOf, meterTarget } from './meter-targets';
 import { highestPerKind } from './usage-alerts.service';
 import { thresholdKeys } from './wallet.service';
@@ -70,20 +74,27 @@ describe('alert thresholds', () => {
 
   it('low credits only once credits matter and auto top-up is off', () => {
     expect(thresholdKeys({ ...base, balance: 0 })).toEqual([]);
-    expect(thresholdKeys({ ...base, balance: 0, aiUsed: 250 })).toContain(
+    expect(thresholdKeys({ ...base, balance: 100, aiUsed: 250 })).toContain(
+      'credits:low',
+    );
+    expect(thresholdKeys({ ...base, balance: 0, creditsSpent: 9 })).toContain(
+      'credits:low',
+    );
+    // Never bought any: the allowance alerts say it, not "low credits".
+    expect(thresholdKeys({ ...base, balance: 0, aiUsed: 250 })).not.toContain(
       'credits:low',
     );
     expect(
-      thresholdKeys({ ...base, balance: 0, aiUsed: 250, autoTopUp: true }),
+      thresholdKeys({ ...base, balance: 100, aiUsed: 250, autoTopUp: true }),
     ).not.toContain('credits:low');
-    // Free has no wallet: no cap or credit alerts.
+    // No cap (Free): no cap alerts.
     expect(
       thresholdKeys({
         ...base,
-        wallet: false,
+        cap: null,
         aiIncluded: 20,
         aiUsed: 20,
-        balance: 0,
+        balance: 5000,
       }),
     ).toEqual(['ai:50', 'ai:80', 'ai:100']);
   });
@@ -133,6 +144,9 @@ describe('billing emails', () => {
       expect(
         renderTrialReminder({ locale, daysLeft: 1, blocked: 1, link: 'x' })
           .text,
+      ).not.toMatch(banned);
+      expect(
+        renderCompanyTrialReminder({ locale, daysLeft: 2, link: 'x' }).text,
       ).not.toMatch(banned);
     }
   });

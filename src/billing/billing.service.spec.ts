@@ -10,6 +10,8 @@ function make(
     row?: Record<string, unknown>;
     claimed?: boolean;
     plan?: string;
+    status?: string;
+    live?: Record<string, unknown>;
   } = {},
 ) {
   const expire = vi.fn(() => Promise.resolve());
@@ -17,8 +19,13 @@ function make(
     void params;
     return Promise.resolve({ url: 'https://stripe.example/c' });
   });
+  const cancel = vi.fn(() => Promise.resolve({}));
   const client = {
-    subscriptions: { list: () => Promise.resolve({ data: subs }) },
+    subscriptions: {
+      list: () => Promise.resolve({ data: subs }),
+      retrieve: () => Promise.resolve(opts.live),
+      cancel,
+    },
     checkout: {
       sessions: {
         list: () => ({
@@ -53,7 +60,10 @@ function make(
     {
       upgradeUrl: () => 'https://c.example/settings/billing',
       get: () =>
-        Promise.resolve({ plan: opts.plan ?? 'pro', status: 'active' }),
+        Promise.resolve({
+          plan: opts.plan ?? 'pro',
+          status: opts.status ?? 'active',
+        }),
     } as never,
     {} as never,
     {
@@ -69,7 +79,7 @@ function make(
       automatic_tax: { enabled: boolean };
       payment_method_collection?: string;
     };
-  return { svc, expire, create, params };
+  return { svc, expire, create, params, cancel };
 }
 
 describe('BillingService.checkout', () => {
@@ -130,12 +140,12 @@ describe('BillingService.checkout', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('company trial: card collected, 30 days, and only for a work email', async () => {
+  it('company trial: card collected, 14 days, and only for a work email', async () => {
     const ok = make([], [], { kind: 'COMPANY' });
     await ok.svc.checkout('t1', 'it@acme.io', 'company_trial');
     expect(ok.params().payment_method_collection).toBe('always');
     expect(ok.params().subscription_data).toMatchObject({
-      trial_period_days: 30,
+      trial_period_days: 14,
       trial_settings: { end_behavior: { missing_payment_method: 'cancel' } },
     });
     for (const email of ['me@gmail.com', 'x@mailinator.com'])
@@ -168,7 +178,7 @@ describe('BillingService.checkout', () => {
 describe('BillingService.buyCredits', () => {
   it('one-time Checkout with a tax invoice and an adjustable pack count', async () => {
     const { svc, params } = make([]);
-    await svc.buyCredits('t1', 2);
+    await svc.buyCredits('t1', 'a@b.c', 2);
     const p = params() as unknown as {
       mode: string;
       line_items: Record<string, unknown>[];
@@ -183,10 +193,38 @@ describe('BillingService.buyCredits', () => {
     });
   });
 
-  it('Free and trial workspaces upgrade first; a frozen one cannot buy', async () => {
+  it('Free and trial workspaces may buy packs; a frozen or read-only one cannot', async () => {
     for (const plan of ['free', 'trial'])
       await expect(
-        make([], [], { plan }).svc.buyCredits('t1', 1),
+        make([], [], { plan }).svc.buyCredits('t1', 'a@b.c', 1),
+      ).resolves.toEqual({ url: 'https://stripe.example/c' });
+    for (const status of ['frozen', 'read_only'])
+      await expect(
+        make([], [], { status }).svc.buyCredits('t1', 'a@b.c', 1),
       ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('BillingService.cancelTrial', () => {
+  it('cancels a trialing Company subscription at once (one click, nothing charged)', async () => {
+    const { svc, cancel } = make([], [], {
+      kind: 'COMPANY',
+      row: { plan: 'company_trial', stripeSubscriptionId: 'sub_t' },
+      live: { id: 'sub_t', status: 'trialing' },
+    });
+    expect(await svc.cancelTrial('t1')).toEqual({ cancelled: true });
+    expect(cancel).toHaveBeenCalledWith('sub_t');
+  });
+
+  it('refuses when there is no trial, or it already converted', async () => {
+    await expect(make([]).svc.cancelTrial('t1')).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(
+      make([], [], {
+        row: { plan: 'company_trial', stripeSubscriptionId: 'sub_t' },
+        live: { id: 'sub_t', status: 'active' },
+      }).svc.cancelTrial('t1'),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 });

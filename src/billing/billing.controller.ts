@@ -73,7 +73,12 @@ export class BillingController {
   })
   async checkout(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const { plan, seats } = parseBodyOrThrow(CheckoutSchema, body);
-    // The token's email can be the realm's `.invalid` placeholder: Stripe gets the verified one.
+    const email = await this.verifiedEmail(auth);
+    return this.billing.checkout(auth.tenant.id, email, plan, seats);
+  }
+
+  /** The token's email can be the realm's `.invalid` placeholder: Stripe gets the verified one. */
+  private async verifiedEmail(auth: AuthContext): Promise<string> {
     const email = await this.contact.verified(
       auth.issuer,
       auth.user.keycloakSubject,
@@ -84,7 +89,7 @@ export class BillingController {
         code: 'contact_email_required',
         message: 'Confirm a contact email before checkout.',
       });
-    return this.billing.checkout(auth.tenant.id, email, plan, seats);
+    return email;
   }
 
   @Get('usage')
@@ -117,9 +122,24 @@ export class BillingController {
     summary:
       'Stripe Checkout session URL for credit packs ($5 = 1,000 credits)',
   })
-  credits(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
+  async credits(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
     const { packs } = parseBodyOrThrow(CreditsSchema, body);
-    return this.billing.buyCredits(auth.tenant.id, packs);
+    return this.billing.buyCredits(
+      auth.tenant.id,
+      await this.verifiedEmail(auth),
+      packs,
+    );
+  }
+
+  @Post('trial/cancel')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequireRole('TENANT_OWNER')
+  @ApiOperation({
+    summary: 'Cancel the Company trial now (one click); nothing is charged',
+  })
+  cancelTrial(@CurrentAuth() auth: AuthContext) {
+    return this.billing.cancelTrial(auth.tenant.id);
   }
 
   @Post('portal')

@@ -7,7 +7,7 @@ import { DEVICES_DEFAULTS } from '../devices/devices.config';
 import { MailerService } from '../growth/mailer.service';
 import { renderUsageAlert } from './billing-mail';
 import { EntitlementsService } from './entitlements.service';
-import { WALLET_PLANS, monthOf } from './plans';
+import { monthOf } from './plans';
 import { allowanceFor, balanceOf, defaultCap } from './usage-meter.service';
 import { thresholdKeys } from './wallet.service';
 
@@ -52,7 +52,6 @@ export class UsageAlertsService {
           cap: wallet ? wallet.capCredits : defaultCap(e.plan),
           balance: await balanceOf(this.control, m.tenantId, now),
           autoTopUp: wallet?.autoTopUp ?? false,
-          wallet: WALLET_PLANS.has(e.plan),
         }).filter((k) => !m.alertsSent.includes(k));
         // Only the highest new step per kind: crossing 50 and 80 in one hour sends one email.
         for (const key of highestPerKind(keys)) {

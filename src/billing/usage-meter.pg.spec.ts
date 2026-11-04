@@ -62,17 +62,22 @@ describe.skipIf(!url)('UsageMeterService (postgres)', () => {
     await control.$disconnect();
   });
 
-  it('Free: 20 AI actions a month, then paused with "allowance_used"', async () => {
+  it('Free: 20 AI actions a month, then credits (Free may buy packs), then paused', async () => {
     current = ent('free');
     const t = tenant();
     await setMonth(t, 19);
     expect(await meter.consume(t, 'ai', 'k1')).toEqual({ source: 'allowance' });
-    expect(await reason(meter.consume(t, 'ai', 'k2'))).toBe('allowance_used');
-    // Credits do not help a Free workspace: it must upgrade.
-    await lot(t, 1000, 30);
-    expect(await reason(meter.consume(t, 'ai', 'k3'))).toBe('allowance_used');
+    expect(await reason(meter.consume(t, 'ai', 'k2'))).toBe(
+      'credits_exhausted',
+    );
     // A refusal leaves no trace.
     expect(await control.usageEvent.count({ where: { tenantId: t } })).toBe(1);
+    // Free has no cap (credits are prepaid): a $5 pack is spent.
+    await lot(t, 1, 30);
+    expect((await meter.consume(t, 'ai', 'k3')).source).toBe('credits');
+    expect(await reason(meter.consume(t, 'ai', 'k4'))).toBe(
+      'credits_exhausted',
+    );
   });
 
   it('the same key is counted once (a retry or the same cloud minute)', async () => {
