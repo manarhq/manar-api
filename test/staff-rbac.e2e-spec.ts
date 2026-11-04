@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { CheckpointSigner } from '../src/audit/checkpoint/checkpoint-signer';
 import { OpenFgaClientService } from '../src/authorization/openfga-client.service';
@@ -127,7 +128,7 @@ describe('staff RBAC (e2e)', () => {
     await rbac.revoke(a.id, owner);
   });
 
-  it('an OpenFGA failure on grant leaves no Postgres row (fail closed)', async () => {
+  it('an OpenFGA failure on grant leaves no active Postgres row (fail closed)', async () => {
     const broken = new OpenFgaClientService(config);
     const brokenRbac = new StaffRbacService(control, broken, audit); // never initialised: every call throws
     const before = await control.staffRoleAssignment.count({
@@ -212,5 +213,188 @@ describe('staff RBAC (e2e)', () => {
     expect(await rbac.can(owner, 'restrict.ban')).toBe(true);
     expect(await rbac.can(support, 'restrict.ban')).toBe(false);
     expect(await rbac.reconcile({ dryRun: false })).toEqual({ fixed: 0 });
+  });
+
+  describe('security review fixes (4 Nov)', () => {
+    /** An OpenFGA client whose next write fails, then works again. */
+    const failNextWrite = () => {
+      const original = fga.write.bind(fga);
+      const spy = vi
+        .spyOn(fga, 'write')
+        .mockImplementationOnce(() => Promise.reject(new Error('fga down')));
+      return () => {
+        spy.mockRestore();
+        void original;
+      };
+    };
+
+    it('revoking Owner eligibility ends an open elevation at once, and reconcile keeps it ended', async () => {
+      const ownerRole = await roleId('owner');
+      const eligible = await rbac.grant({
+        roleId: ownerRole,
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ELIGIBLE',
+        grantedBy: owner,
+      });
+      const elevation = await rbac.startElevation({
+        staffId: support,
+        assignmentId: eligible.id,
+        reason: 'urgent abuse case',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      });
+      expect(await rbac.can(support, 'restrict.ban')).toBe(true);
+      await rbac.revoke(eligible.id, owner);
+      expect(await rbac.can(support, 'restrict.ban')).toBe(false);
+      const row = await control.staffElevation.findUniqueOrThrow({
+        where: { id: elevation.id },
+      });
+      expect(row.endedAt).not.toBeNull();
+      expect(row.endedBy).toBe(owner);
+      await rbac.reconcile({ dryRun: false });
+      expect(await rbac.can(support, 'restrict.ban')).toBe(false);
+    });
+
+    it('reconcile ignores an open elevation whose eligibility was revoked behind its back', async () => {
+      const ownerRole = await roleId('owner');
+      const eligible = await rbac.grant({
+        roleId: ownerRole,
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ELIGIBLE',
+        grantedBy: owner,
+      });
+      await rbac.startElevation({
+        staffId: support,
+        assignmentId: eligible.id,
+        reason: 'urgent abuse case',
+        expiresAt: new Date(Date.now() + 3_600_000),
+      });
+      // Someone revokes the row directly in the database (or an older binary did).
+      await control.staffRoleAssignment.update({
+        where: { id: eligible.id },
+        data: { revokedAt: new Date(), revokedBy: 'db' },
+      });
+      await rbac.reconcile({ dryRun: false });
+      expect(await rbac.can(support, 'restrict.ban')).toBe(false);
+      await control.staffElevation.updateMany({
+        where: { staffId: support, endedAt: null },
+        data: { endedAt: new Date() },
+      });
+    });
+
+    it('a failed OpenFGA write on grant leaves the assignment revoked in Postgres and no tuple', async () => {
+      const restore = failNextWrite();
+      try {
+        await expect(
+          rbac.grant({
+            roleId: await roleId('billing'),
+            principalType: 'STAFF',
+            principalId: support,
+            kind: 'ACTIVE',
+            grantedBy: owner,
+          }),
+        ).rejects.toThrow('fga down');
+      } finally {
+        restore();
+      }
+      const rows = await control.staffRoleAssignment.findMany({
+        where: { principalId: support, roleId: await roleId('billing') },
+      });
+      expect(rows.every((r) => r.revokedAt !== null)).toBe(true);
+      expect(await rbac.can(support, 'tags.write')).toBe(false);
+      expect(await rbac.reconcile({ dryRun: true })).toEqual({ fixed: 0 });
+    });
+
+    it('a failed OpenFGA write on group add leaves no member row', async () => {
+      const group = await control.staffGroup.create({
+        data: { name: `g-fail-${suffix}`, createdBy: owner },
+      });
+      const restore = failNextWrite();
+      try {
+        await expect(
+          rbac.addGroupMember(group.id, support, owner),
+        ).rejects.toThrow('fga down');
+      } finally {
+        restore();
+      }
+      expect(
+        await control.staffGroupMember.count({ where: { groupId: group.id } }),
+      ).toBe(0);
+    });
+
+    it('a failed OpenFGA delete on revoke keeps the assignment active (nothing half done)', async () => {
+      const a = await rbac.grant({
+        roleId: await roleId('dev'),
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ACTIVE',
+        grantedBy: owner,
+      });
+      const restore = failNextWrite();
+      try {
+        await expect(rbac.revoke(a.id, owner)).rejects.toThrow('fga down');
+      } finally {
+        restore();
+      }
+      expect(
+        (
+          await control.staffRoleAssignment.findUniqueOrThrow({
+            where: { id: a.id },
+          })
+        ).revokedAt,
+      ).toBeNull();
+      await rbac.revoke(a.id, owner);
+      expect(await rbac.can(support, 'errors.view')).toBe(false);
+    });
+
+    it('concurrent edits of one custom role leave OpenFGA on the newest version', async () => {
+      const role = await rbac.saveCustomRole({
+        key: `race-${suffix}`,
+        name: 'Race',
+        permissions: ['people.view'],
+        by: owner,
+      });
+      await rbac.grant({
+        roleId: role.id,
+        principalType: 'STAFF',
+        principalId: support,
+        kind: 'ACTIVE',
+        grantedBy: owner,
+      });
+      const sets: string[][] = [
+        ['people.view', 'notes.write'],
+        ['people.view', 'tags.write'],
+        ['orgs.view'],
+        ['people.search', 'errors.view'],
+      ];
+      await Promise.all(
+        sets.map((permissions) =>
+          rbac.saveCustomRole({
+            roleId: role.id,
+            key: role.key,
+            name: 'Race',
+            permissions,
+            by: owner,
+          }),
+        ),
+      );
+      const saved = await control.staffRole.findUniqueOrThrow({
+        where: { id: role.id },
+        include: { versions: true },
+      });
+      const newest = saved.versions.find(
+        (v) => v.version === saved.currentVersion,
+      )!.permissions;
+      for (const p of [
+        'people.view',
+        'notes.write',
+        'tags.write',
+        'orgs.view',
+        'people.search',
+        'errors.view',
+      ] as const)
+        expect(await rbac.can(support, p)).toBe(newest.includes(p));
+    });
   });
 });

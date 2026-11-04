@@ -30,6 +30,8 @@ import {
 } from './permissions';
 
 export const WITHIN_WINDOW = 'within_window';
+/** `revokedBy` / `endedBy` when the OpenFGA projection of a grant failed and it was rolled back. */
+export const PROJECTION_FAILED = 'system:projection_failed';
 
 const reconcileFixed = new Counter({
   name: 'rbac_reconcile_fixed_total',
@@ -125,55 +127,66 @@ export class StaffRbacService {
   async ensureBuiltInRoles(): Promise<void> {
     for (const key of BUILT_IN_ROLE_KEYS) {
       const wanted = [...BUILT_IN_ROLES[key]].sort();
-      let role = await this.control.staffRole.findUnique({
-        where: { key },
-        include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
-      });
-      if (!role) {
-        await this.control.staffRole.create({
-          data: {
-            key,
-            name: BUILT_IN_ROLE_NAMES[key],
-            builtIn: true,
-            versions: {
-              create: { version: 1, permissions: wanted, createdBy: 'system' },
-            },
-          },
-        });
-        role = await this.control.staffRole.findUniqueOrThrow({
+      await this.withRoleLock(async () => {
+        const role = await this.control.staffRole.findUnique({
           where: { key },
           include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
         });
-      } else if (
-        JSON.stringify([...(role.versions[0]?.permissions ?? [])].sort()) !==
-        JSON.stringify(wanted)
-      ) {
-        const version = role.currentVersion + 1;
-        await this.control.$transaction([
-          this.control.staffRoleVersion.create({
+        if (!role) {
+          await this.control.staffRole.create({
             data: {
-              roleId: role.id,
-              version,
-              permissions: wanted,
-              createdBy: 'system',
+              key,
+              name: BUILT_IN_ROLE_NAMES[key],
+              builtIn: true,
+              versions: {
+                create: {
+                  version: 1,
+                  permissions: wanted,
+                  createdBy: 'system',
+                },
+              },
             },
-          }),
-          this.control.staffRole.update({
-            where: { id: role.id },
-            data: { currentVersion: version },
-          }),
-        ]);
-      }
-      await this.syncRolePermissions(role.id, wanted);
+          });
+        } else if (
+          JSON.stringify([...(role.versions[0]?.permissions ?? [])].sort()) !==
+          JSON.stringify(wanted)
+        ) {
+          const version = role.currentVersion + 1;
+          await this.control.$transaction([
+            this.control.staffRoleVersion.create({
+              data: {
+                roleId: role.id,
+                version,
+                permissions: wanted,
+                createdBy: 'system',
+              },
+            }),
+            this.control.staffRole.update({
+              where: { id: role.id },
+              data: { currentVersion: version },
+            }),
+          ]);
+        }
+        const saved = await this.control.staffRole.findUniqueOrThrow({
+          where: { key },
+        });
+        await this.syncRolePermissions(saved.id);
+      });
     }
   }
 
+  /**
+   * AC-29: the Postgres row and its audit row commit first, then the tuple is written. If the
+   * tuple write fails, the row is revoked as a compensation (history kept) and the error is
+   * rethrown, so Postgres never says "granted" for a grant the caller saw fail. A crash between
+   * the two leaves Postgres granted and audited; the reconciler projects it.
+   */
   async grant(input: GrantInput): Promise<StaffRoleAssignment> {
     const role = await this.control.staffRole.findUnique({
       where: { id: input.roleId },
     });
     if (!role || role.archivedAt) throw new NotFoundException('Unknown role');
-    return this.control.$transaction(async (tx) => {
+    const row = await this.control.$transaction(async (tx) => {
       const existing = await tx.staffRoleAssignment.findFirst({
         where: {
           roleId: input.roleId,
@@ -188,7 +201,7 @@ export class StaffRbacService {
           code: 'already_assigned',
           message: 'This role is already assigned.',
         });
-      const row = await tx.staffRoleAssignment.create({
+      const created = await tx.staffRoleAssignment.create({
         data: {
           roleId: input.roleId,
           principalType: input.principalType,
@@ -206,6 +219,7 @@ export class StaffRbacService {
           targetType: input.principalType === 'STAFF' ? 'STAFF' : 'GROUP',
           targetId: input.principalId,
           data: {
+            assignmentId: created.id,
             roleKey: role.key,
             kind: input.kind,
             expiresAt: input.expiresAt?.toISOString() ?? null,
@@ -214,8 +228,11 @@ export class StaffRbacService {
         },
         tx,
       );
-      // ELIGIBLE grants no power until an elevation; only ACTIVE projects to a tuple.
-      if (input.kind === 'ACTIVE')
+      return created;
+    });
+    // ELIGIBLE grants no power until an elevation; only ACTIVE projects to a tuple.
+    if (input.kind === 'ACTIVE') {
+      try {
         await this.fga.write({
           writes: [
             assigneeTuple(
@@ -226,34 +243,25 @@ export class StaffRbacService {
             ),
           ],
         });
-      return row;
-    });
+      } catch (error) {
+        await this.compensateGrant(row.id);
+        throw error;
+      }
+    }
+    return row;
   }
 
-  async revoke(assignmentId: string, by: string): Promise<void> {
-    const a = await this.control.staffRoleAssignment.findUnique({
-      where: { id: assignmentId },
-    });
-    if (!a || a.revokedAt) throw new NotFoundException('Unknown assignment');
-    if (a.kind === 'ACTIVE')
-      await this.fga.write({
-        deletes: [
-          assigneeTuple(a.roleId, a.principalType, a.principalId, a.expiresAt),
-        ],
-        ignoreMissingDeletes: true,
-      });
+  private async compensateGrant(assignmentId: string): Promise<void> {
     await this.control.$transaction(async (tx) => {
       await tx.staffRoleAssignment.update({
-        where: { id: a.id },
-        data: { revokedAt: new Date(), revokedBy: by },
+        where: { id: assignmentId },
+        data: { revokedAt: new Date(), revokedBy: PROJECTION_FAILED },
       });
       await this.audit.append(
         {
-          staffId: by,
-          action: 'staff.role_revoked',
-          targetType: a.principalType === 'STAFF' ? 'STAFF' : 'GROUP',
-          targetId: a.principalId,
-          data: { assignmentId: a.id, roleId: a.roleId },
+          staffId: null,
+          action: 'staff.role_grant_rolled_back',
+          data: { assignmentId, reason: 'openfga_write_failed' },
         },
         tx,
       );
@@ -261,8 +269,192 @@ export class StaffRbacService {
   }
 
   /**
+   * AC-29: tuples are deleted first, then Postgres is updated, so a failure part-way never leaves
+   * power behind. Revoking an ELIGIBLE assignment also ends every open elevation that rests on it.
+   */
+  async revoke(assignmentId: string, by: string): Promise<void> {
+    const a = await this.control.staffRoleAssignment.findUnique({
+      where: { id: assignmentId },
+    });
+    if (!a || a.revokedAt) throw new NotFoundException('Unknown assignment');
+    const elevations =
+      a.kind === 'ELIGIBLE'
+        ? await this.control.staffElevation.findMany({
+            where: { assignmentId: a.id, endedAt: null },
+          })
+        : [];
+    const deletes = [
+      ...(a.kind === 'ACTIVE'
+        ? [assigneeTuple(a.roleId, a.principalType, a.principalId, a.expiresAt)]
+        : []),
+      ...elevations.map((e) =>
+        assigneeTuple(e.roleId, 'STAFF', e.staffId, e.expiresAt),
+      ),
+    ];
+    if (deletes.length)
+      await this.fga.write({ deletes, ignoreMissingDeletes: true });
+    await this.control.$transaction(async (tx) => {
+      const now = new Date();
+      await tx.staffElevation.updateMany({
+        where: { assignmentId: a.id, endedAt: null },
+        data: { endedAt: now, endedBy: by },
+      });
+      await tx.staffRoleAssignment.update({
+        where: { id: a.id },
+        data: { revokedAt: now, revokedBy: by },
+      });
+      await this.audit.append(
+        {
+          staffId: by,
+          action: 'staff.role_revoked',
+          targetType: a.principalType === 'STAFF' ? 'STAFF' : 'GROUP',
+          targetId: a.principalId,
+          data: {
+            assignmentId: a.id,
+            roleId: a.roleId,
+            elevationsEnded: elevations.map((e) => e.id),
+          },
+        },
+        tx,
+      );
+    });
+  }
+
+  /**
+   * Turns an ELIGIBLE assignment on for the caller until `expiresAt` (spec §11.1). The row commits
+   * first, then the conditional tuple; a failed write ends the row again. Expired rows still open
+   * are closed (and their tuples removed) first, so the one-open-elevation index admits the new one.
+   */
+  async startElevation(input: {
+    staffId: string;
+    assignmentId: string;
+    reason: string;
+    expiresAt: Date;
+  }) {
+    const a = await this.control.staffRoleAssignment.findUnique({
+      where: { id: input.assignmentId },
+      include: { role: true },
+    });
+    if (
+      !a ||
+      a.revokedAt ||
+      a.kind !== 'ELIGIBLE' ||
+      a.principalType !== 'STAFF' ||
+      a.principalId !== input.staffId ||
+      a.role.archivedAt
+    )
+      throw new ForbiddenException({
+        code: 'not_eligible',
+        message: 'You are not eligible for this role.',
+      });
+    await this.closeExpiredElevations(input.staffId);
+    const row = await this.control.$transaction(async (tx) => {
+      const created = await tx.staffElevation
+        .create({
+          data: {
+            staffId: input.staffId,
+            assignmentId: a.id,
+            roleId: a.roleId,
+            reason: input.reason,
+            expiresAt: input.expiresAt,
+          },
+        })
+        .catch((e: { code?: string }) => {
+          if (e.code === 'P2002')
+            throw new ConflictException({
+              code: 'elevation_active',
+              message: 'You already have an active elevation.',
+            });
+          throw e;
+        });
+      await this.audit.append(
+        {
+          staffId: input.staffId,
+          action: 'staff.elevation_started',
+          targetType: 'ROLE',
+          targetId: a.roleId,
+          data: {
+            elevationId: created.id,
+            roleKey: a.role.key,
+            reason: input.reason,
+            expiresAt: input.expiresAt.toISOString(),
+          },
+        },
+        tx,
+      );
+      return created;
+    });
+    try {
+      await this.fga.write({
+        writes: [
+          assigneeTuple(a.roleId, 'STAFF', input.staffId, input.expiresAt),
+        ],
+      });
+    } catch (error) {
+      await this.control.staffElevation.update({
+        where: { id: row.id },
+        data: { endedAt: new Date(), endedBy: PROJECTION_FAILED },
+      });
+      throw error;
+    }
+    return row;
+  }
+
+  async endElevation(elevationId: string, by: string): Promise<void> {
+    const e = await this.control.staffElevation.findUnique({
+      where: { id: elevationId },
+    });
+    if (!e || e.endedAt) throw new NotFoundException('No active elevation');
+    await this.fga.write({
+      deletes: [assigneeTuple(e.roleId, 'STAFF', e.staffId, e.expiresAt)],
+      ignoreMissingDeletes: true,
+    });
+    await this.control.$transaction(async (tx) => {
+      await tx.staffElevation.update({
+        where: { id: e.id },
+        data: { endedAt: new Date(), endedBy: by },
+      });
+      await this.audit.append(
+        {
+          staffId: by,
+          action: 'staff.elevation_ended',
+          targetType: 'STAFF',
+          targetId: e.staffId,
+          data: { elevationId: e.id },
+        },
+        tx,
+      );
+    });
+  }
+
+  /** Tidiness only: an expired elevation already has no power (the tuple condition). */
+  async closeExpiredElevations(staffId?: string): Promise<number> {
+    const expired = await this.control.staffElevation.findMany({
+      where: {
+        endedAt: null,
+        expiresAt: { lte: new Date() },
+        ...(staffId ? { staffId } : {}),
+      },
+    });
+    if (!expired.length) return 0;
+    await this.fga.write({
+      deletes: expired.map((e) =>
+        assigneeTuple(e.roleId, 'STAFF', e.staffId, e.expiresAt),
+      ),
+      ignoreMissingDeletes: true,
+    });
+    for (const e of expired)
+      await this.control.staffElevation.update({
+        where: { id: e.id },
+        data: { endedAt: e.expiresAt, endedBy: 'system:expired' },
+      });
+    return expired.length;
+  }
+
+  /**
    * Creates a custom role or a new version of one. AC-31: no Owner-only permission, and the editor
-   * cannot hand out a permission they do not hold themselves.
+   * cannot hand out a permission they do not hold themselves. The version write and the OpenFGA
+   * sync run under one role lock, so concurrent edits project in the order they committed.
    */
   async saveCustomRole(input: {
     roleId?: string;
@@ -294,75 +486,77 @@ export class StaffRbacService {
         permissions: unheld,
       });
 
-    const role = await this.control.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('staff_roles'))`;
-      let saved: StaffRole;
-      if (input.roleId) {
-        const current = await tx.staffRole.findUnique({
-          where: { id: input.roleId },
-        });
-        if (!current || current.builtIn || current.archivedAt)
-          throw new ForbiddenException({
-            code: 'role_not_editable',
-            message: 'Built-in roles cannot be edited.',
+    return this.withRoleLock(async () => {
+      const role = await this.control.$transaction(async (tx) => {
+        let saved: StaffRole;
+        if (input.roleId) {
+          const current = await tx.staffRole.findUnique({
+            where: { id: input.roleId },
           });
-        const version = current.currentVersion + 1;
-        await tx.staffRoleVersion.create({
-          data: {
-            roleId: current.id,
-            version,
-            permissions: perms,
-            createdBy: input.by,
-          },
-        });
-        saved = await tx.staffRole.update({
-          where: { id: current.id },
-          data: {
-            currentVersion: version,
-            name: input.name,
-            description: input.description ?? current.description,
-          },
-        });
-      } else {
-        if (
-          (BUILT_IN_ROLE_KEYS as readonly string[]).includes(input.key) ||
-          !/^[a-z][a-z0-9_-]{1,40}$/.test(input.key)
-        )
-          throw new ForbiddenException({
-            code: 'bad_role_key',
-            message: 'Choose another role key.',
+          if (!current || current.builtIn || current.archivedAt)
+            throw new ForbiddenException({
+              code: 'role_not_editable',
+              message: 'Built-in roles cannot be edited.',
+            });
+          const version = current.currentVersion + 1;
+          await tx.staffRoleVersion.create({
+            data: {
+              roleId: current.id,
+              version,
+              permissions: perms,
+              createdBy: input.by,
+            },
           });
-        saved = await tx.staffRole.create({
-          data: {
-            key: input.key,
-            name: input.name,
-            description: input.description ?? '',
-            versions: {
-              create: { version: 1, permissions: perms, createdBy: input.by },
+          saved = await tx.staffRole.update({
+            where: { id: current.id },
+            data: {
+              currentVersion: version,
+              name: input.name,
+              description: input.description ?? current.description,
+            },
+          });
+        } else {
+          if (
+            (BUILT_IN_ROLE_KEYS as readonly string[]).includes(input.key) ||
+            !/^[a-z][a-z0-9_-]{1,40}$/.test(input.key)
+          )
+            throw new ForbiddenException({
+              code: 'bad_role_key',
+              message: 'Choose another role key.',
+            });
+          saved = await tx.staffRole.create({
+            data: {
+              key: input.key,
+              name: input.name,
+              description: input.description ?? '',
+              versions: {
+                create: { version: 1, permissions: perms, createdBy: input.by },
+              },
+            },
+          });
+        }
+        await this.audit.append(
+          {
+            staffId: input.by,
+            action: 'staff.role_saved',
+            targetType: 'ROLE',
+            targetId: saved.id,
+            data: {
+              key: saved.key,
+              version: saved.currentVersion,
+              permissions: perms,
             },
           },
-        });
-      }
-      await this.audit.append(
-        {
-          staffId: input.by,
-          action: 'staff.role_saved',
-          targetType: 'ROLE',
-          targetId: saved.id,
-          data: {
-            key: saved.key,
-            version: saved.currentVersion,
-            permissions: perms,
-          },
-        },
-        tx,
-      );
-      return saved;
+          tx,
+        );
+        return saved;
+      });
+      await this.syncRolePermissions(role.id);
+      return role;
     });
-    await this.syncRolePermissions(role.id, perms as StaffPermission[]);
-    return role;
   }
 
+  /** AC-29 order for groups: the member row commits first; a failed tuple write removes it again. */
   async addGroupMember(groupId: string, staffId: string, by: string) {
     await this.control.$transaction(async (tx) => {
       await tx.staffGroupMember.create({
@@ -378,6 +572,8 @@ export class StaffRbacService {
         },
         tx,
       );
+    });
+    try {
       await this.fga.write({
         writes: [
           {
@@ -387,7 +583,24 @@ export class StaffRbacService {
           },
         ],
       });
-    });
+    } catch (error) {
+      await this.control.$transaction(async (tx) => {
+        await tx.staffGroupMember.delete({
+          where: { groupId_staffId: { groupId, staffId } },
+        });
+        await this.audit.append(
+          {
+            staffId: null,
+            action: 'staff.group_member_add_rolled_back',
+            targetType: 'GROUP',
+            targetId: groupId,
+            data: { staffId, reason: 'openfga_write_failed' },
+          },
+          tx,
+        );
+      });
+      throw error;
+    }
   }
 
   async removeGroupMember(groupId: string, staffId: string, by: string) {
@@ -418,11 +631,33 @@ export class StaffRbacService {
     });
   }
 
-  /** Makes the role's permission tuples exactly `perms`: adds the new, removes the dropped. */
-  private async syncRolePermissions(
-    roleId: string,
-    perms: StaffPermission[],
-  ): Promise<void> {
+  /**
+   * Holds the role lock for the whole of `fn`: an outer transaction keeps the advisory lock while
+   * `fn` commits its own transactions and syncs OpenFGA, so role edits and their projection are
+   * serialised (security review 4 Nov).
+   */
+  private withRoleLock<T>(fn: () => Promise<T>): Promise<T> {
+    return this.control.$transaction(
+      async (outer) => {
+        await outer.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('staff_roles'))`;
+        return fn();
+      },
+      { timeout: 30_000 },
+    );
+  }
+
+  /** Makes the role's permission tuples exactly its CURRENT version (read under the role lock). */
+  private async syncRolePermissions(roleId: string): Promise<void> {
+    const role = await this.control.staffRole.findUniqueOrThrow({
+      where: { id: roleId },
+      include: { versions: true },
+    });
+    const current = role.versions.find(
+      (v) => v.version === role.currentVersion,
+    );
+    const perms = role.archivedAt
+      ? []
+      : (current?.permissions ?? []).filter(isStaffPermission);
     const actual = (await this.fga.readObject(PLATFORM_OBJECT)).filter(
       (t) => t.user === `${roleObject(roleId)}#assignee`,
     );
@@ -470,8 +705,24 @@ export class StaffRbacService {
       desired.push(
         assigneeTuple(a.roleId, a.principalType, a.principalId, a.expiresAt),
       );
-    for (const e of elevations)
-      desired.push(assigneeTuple(e.roleId, 'STAFF', e.staffId, e.expiresAt));
+    const liveEligible = new Map(
+      (
+        await this.control.staffRoleAssignment.findMany({
+          where: {
+            id: { in: elevations.map((e) => e.assignmentId) },
+            kind: 'ELIGIBLE',
+            revokedAt: null,
+            role: { archivedAt: null },
+          },
+          select: { id: true, roleId: true, principalId: true },
+        })
+      ).map((a) => [a.id, a]),
+    );
+    for (const e of elevations) {
+      const a = liveEligible.get(e.assignmentId);
+      if (a && a.roleId === e.roleId && a.principalId === e.staffId)
+        desired.push(assigneeTuple(e.roleId, 'STAFF', e.staffId, e.expiresAt));
+    }
     for (const m of members)
       desired.push({
         user: `staff:${m.staffId}`,
