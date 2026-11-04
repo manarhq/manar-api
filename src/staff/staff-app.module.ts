@@ -24,6 +24,12 @@ import {
   StaffInvitesService,
 } from './auth/staff-invites';
 import { StaffCoreModule } from './staff-core.module';
+import { StaffIndexController } from './http/staff-index.controller';
+import { StaffIndexService } from './index/staff-index.service';
+import { StaffRecordsService } from './index/staff-records.service';
+import { TrustLogService } from './trust-log.service';
+import { StripeGateway } from '../billing/stripe.gateway';
+import { KeycloakAdminClient } from '../keycloak/keycloak-admin.client';
 import { StaffJobsService } from './staff-jobs.service';
 
 /**
@@ -38,13 +44,22 @@ import { StaffJobsService } from './staff-jobs.service';
     AuditModule,
     StaffCoreModule,
   ],
-  controllers: [StaffMeController, StaffInvitesController],
+  controllers: [
+    StaffMeController,
+    StaffInvitesController,
+    StaffIndexController,
+  ],
   providers: [
     JwksCacheService,
     StaffAuthGuard,
     StaffPermissionGuard,
     StaffJobsService,
     StaffInvitesService,
+    StaffIndexService,
+    StaffRecordsService,
+    TrustLogService,
+    StripeGateway,
+    KeycloakAdminClient,
     ErrorReferenceRecorder,
     { provide: ERROR_REFERENCE_SINK, useExisting: ErrorReferenceRecorder },
     { provide: APP_FILTER, useClass: ErrorEnvelopeFilter },

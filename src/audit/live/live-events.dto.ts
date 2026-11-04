@@ -25,11 +25,19 @@ export class LiveAuditEventEnvelopeDto {
   @ApiProperty({
     type: 'object',
     properties: {
-      type: { type: 'string', enum: ['human', 'agent', 'system'] },
+      type: { type: 'string', enum: ['human', 'agent', 'system', 'staff'] },
       id: { type: 'string' },
+      display: {
+        type: 'string',
+        description: 'Staff only: "Ali · Manar Sales"',
+      },
     },
   })
-  actor!: { type: 'human' | 'agent' | 'system'; id: string };
+  actor!: {
+    type: 'human' | 'agent' | 'system' | 'staff';
+    id: string;
+    display?: string;
+  };
 
   @ApiProperty({
     type: 'object',

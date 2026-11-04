@@ -8,7 +8,12 @@ import { randomUUID } from 'node:crypto';
 export const STAFF_E2E_SUFFIX = randomUUID().slice(0, 8);
 export const STAFF_E2E_REALM = `staff-e2e-${STAFF_E2E_SUFFIX}`;
 export const STAFF_E2E_TID = randomUUID();
+export const CUSTOMER_E2E_REALM = `cust-e2e-${STAFF_E2E_SUFFIX}`;
 const base = process.env.KEYCLOAK_BASE_URL ?? 'http://localhost:8081';
+export const CUSTOMER_E2E_ISSUER = `${base}/realms/${CUSTOMER_E2E_REALM}`;
+// The customer realm stands in for the shared hosted realm `manar` (AUTH_ISSUERS), so staff pages
+// read real Keycloak data and restricted customers get real tokens.
+process.env.AUTH_ISSUERS = CUSTOMER_E2E_ISSUER;
 
 process.env.STAFF_ENABLED = 'true';
 process.env.STAFF_OIDC_ISSUER = `${base}/realms/${STAFF_E2E_REALM}`;
