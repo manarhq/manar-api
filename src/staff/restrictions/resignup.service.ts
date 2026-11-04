@@ -10,10 +10,6 @@ import { StaffAuditService } from '../audit/staff-audit.service';
 import { fingerprint, normalizeEmail } from './fingerprints';
 import { AccountSuspendedException } from './restriction-enforcement';
 
-/** The device signal: the machine id, trimmed and lower-cased (same value the hosts table keys on). */
-export const deviceFingerprintValue = (machineId: string) =>
-  machineId.trim().toLowerCase();
-
 const yymm = () => new Date().toISOString().slice(2, 7).replace('-', '');
 
 /**
@@ -37,10 +33,14 @@ export class ResignupService {
     );
   }
 
-  /** The restriction in force holding one of these fingerprints, if any (not the caller's own). */
+  /**
+   * The restriction in force holding one of these fingerprints, if any (not the subject's own).
+   * A false-positive clearance applies only to the exact (subject, fingerprint, restriction) it
+   * was recorded for (security review, 4 Nov): a later account with the same signal is checked again.
+   */
   private async match(
     signals: { kind: StaffFingerprintKind; valueHash: string }[],
-    exceptAccountId?: string,
+    subject: { accountId?: string; tenantId?: string },
   ) {
     if (!signals.length) return null;
     try {
@@ -53,24 +53,31 @@ export class ResignupService {
               kind: { in: ['SUSPEND', 'BAN'] },
               liftedAt: null,
               OR: [{ kind: 'BAN' }, { until: { gt: new Date() } }],
-              ...(exceptAccountId
-                ? { NOT: { accountId: exceptAccountId } }
+              ...(subject.accountId
+                ? { NOT: { accountId: subject.accountId } }
                 : {}),
             },
           },
           include: { restriction: true },
         });
-        // A pair marked false positive never matches again.
-        if (hit) {
-          const cleared = await this.control.staffRestrictionMatch.findFirst({
-            where: {
-              kind: s.kind,
-              matchedRestrictionId: hit.restrictionId,
-              resolution: 'false_positive',
-            },
-          });
-          if (!cleared) return { kind: s.kind, restriction: hit.restriction };
-        }
+        if (!hit) continue;
+        const cleared = await this.control.staffRestrictionMatch.findFirst({
+          where: {
+            kind: s.kind,
+            valueHash: s.valueHash,
+            matchedRestrictionId: hit.restrictionId,
+            resolution: 'false_positive',
+            ...(subject.accountId
+              ? { newAccountId: subject.accountId }
+              : { newTenantId: subject.tenantId ?? '' }),
+          },
+        });
+        if (!cleared)
+          return {
+            kind: s.kind,
+            valueHash: s.valueHash,
+            restriction: hit.restriction,
+          };
       }
       return null;
     } catch (error) {
@@ -113,7 +120,7 @@ export class ResignupService {
       },
       update: {},
     });
-    const hit = await this.match(signals, account.id);
+    const hit = await this.match(signals, { accountId: account.id });
     if (!hit) return;
     const ban = await this.control.$transaction(async (tx) => {
       const r = await tx.staffRestriction.create({
@@ -131,8 +138,10 @@ export class ResignupService {
       await tx.staffRestrictionMatch.create({
         data: {
           kind: hit.kind,
+          valueHash: hit.valueHash,
           matchedRestrictionId: hit.restriction.id,
           newAccountId: account.id,
+          createdRestrictionId: r.id,
           action: 'blocked',
         },
       });
@@ -155,24 +164,38 @@ export class ResignupService {
   }
 
   /** Before a device certificate is issued, in every workspace (AC-26). */
-  async checkDevice(machineId: string, tenantId: string): Promise<void> {
+  /**
+   * Before a device certificate is issued, in every workspace (AC-26). Only attested identifiers
+   * count (security review, 4 Nov): the key the device enrols with and, when TPM attestation
+   * passed, its endorsement key. The machine id is self-reported and is never a signal.
+   */
+  async checkDevice(
+    device: { keyFingerprint: string; tpmEk?: string | null },
+    tenantId: string,
+  ): Promise<void> {
     const key = this.key();
     if (!key) return;
-    const hit = await this.match([
+    const signals: { kind: StaffFingerprintKind; valueHash: string }[] = [
       {
         kind: 'DEVICE',
-        valueHash: fingerprint(
-          'DEVICE',
-          deviceFingerprintValue(machineId),
-          key,
-        ),
+        valueHash: fingerprint('DEVICE', device.keyFingerprint, key),
       },
-    ]);
+      ...(device.tpmEk
+        ? [
+            {
+              kind: 'TPM_EK' as const,
+              valueHash: fingerprint('TPM_EK', device.tpmEk, key),
+            },
+          ]
+        : []),
+    ];
+    const hit = await this.match(signals, { tenantId });
     if (!hit) return;
     // The device's own restricted owner re-installing in the same personal workspace is still blocked.
     await this.control.staffRestrictionMatch.create({
       data: {
-        kind: 'DEVICE',
+        kind: hit.kind,
+        valueHash: hit.valueHash,
         matchedRestrictionId: hit.restriction.id,
         newTenantId: tenantId,
         action: 'blocked',
@@ -202,9 +225,10 @@ export class ResignupService {
   ): Promise<string | null> {
     const key = this.key();
     if (!key) return null;
-    const hit = await this.match([
-      { kind: 'CARD', valueHash: fingerprint('CARD', cardFingerprint, key) },
-    ]);
+    const hit = await this.match(
+      [{ kind: 'CARD', valueHash: fingerprint('CARD', cardFingerprint, key) }],
+      { tenantId },
+    );
     if (!hit) return null;
     const owner = await this.control.membership.findFirst({
       where: { tenantId, role: 'TENANT_OWNER', status: 'ACTIVE' },
@@ -225,29 +249,33 @@ export class ResignupService {
         })
       : null;
     await this.control.$transaction(async (tx) => {
-      if (account && account.id !== hit.restriction.accountId)
-        await tx.staffRestriction.create({
-          data: {
-            code: `RS-${yymm()}-${String(randomInt(100_000)).padStart(5, '0')}`,
-            targetType: 'ACCOUNT',
-            accountId: account.id,
-            kind: 'BAN',
-            category: 'ban_evasion',
-            internalNote: `Card matched restriction ${hit.restriction.code}.`,
-            createdBy: 'system:resignup',
-            fingerprints: {
-              create: [
-                {
-                  kind: 'CARD',
-                  valueHash: fingerprint('CARD', cardFingerprint, key),
+      const created =
+        account && account.id !== hit.restriction.accountId
+          ? await tx.staffRestriction.create({
+              data: {
+                code: `RS-${yymm()}-${String(randomInt(100_000)).padStart(5, '0')}`,
+                targetType: 'ACCOUNT',
+                accountId: account.id,
+                kind: 'BAN',
+                category: 'ban_evasion',
+                internalNote: `Card matched restriction ${hit.restriction.code}.`,
+                createdBy: 'system:resignup',
+                fingerprints: {
+                  create: [
+                    {
+                      kind: 'CARD',
+                      valueHash: fingerprint('CARD', cardFingerprint, key),
+                    },
+                  ],
                 },
-              ],
-            },
-          },
-        });
+              },
+            })
+          : null;
       await tx.staffRestrictionMatch.create({
         data: {
           kind: 'CARD',
+          valueHash: hit.valueHash,
+          createdRestrictionId: created?.id ?? null,
           matchedRestrictionId: hit.restriction.id,
           newAccountId: account?.id,
           newTenantId: tenantId,

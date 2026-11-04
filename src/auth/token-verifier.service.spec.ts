@@ -226,6 +226,15 @@ describe('Microsoft session claims', () => {
   });
 
   describe('DESK restrictions (spec §9.2)', () => {
+    it('checks a person from a legacy (tenant-bound) realm too', async () => {
+      restricted.mockClear();
+      const verifier = make();
+      await verifier
+        .verify(await sign(claims(), { iss: LEGACY }))
+        .catch(() => undefined);
+      expect(restricted).toHaveBeenCalledTimes(1);
+    });
+
     it('refuses a restricted person on every verification unless the route allows it', async () => {
       const verifier = make();
       const token = await sign(claims());

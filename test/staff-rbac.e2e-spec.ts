@@ -171,21 +171,17 @@ describe('staff RBAC (e2e)', () => {
     ).rejects.toMatchObject({ response: { code: 'cannot_grant_unheld' } });
   });
 
-  it('a new version of a custom role removes a dropped permission from every holder', async () => {
+  it('a new version of a custom role removes a dropped permission from every holder, and groups pass a built-in role on', async () => {
     const role = await rbac.saveCustomRole({
       key: `lead2-${suffix}`,
       name: 'Lead',
       permissions: ['people.view', 'notes.write'],
       by: owner,
     });
-    const group = await control.staffGroup.create({
-      data: { name: `night-${suffix}`, createdBy: owner },
-    });
-    await rbac.addGroupMember(group.id, support, owner);
-    await rbac.grant({
+    const held = await rbac.grant({
       roleId: role.id,
-      principalType: 'GROUP',
-      principalId: group.id,
+      principalType: 'STAFF',
+      principalId: support,
       kind: 'ACTIVE',
       grantedBy: owner,
     });
@@ -199,8 +195,23 @@ describe('staff RBAC (e2e)', () => {
     });
     expect(await rbac.can(support, 'notes.write')).toBe(false);
     expect(await rbac.can(support, 'people.view')).toBe(true);
+    await rbac.revoke(held.id, owner);
+    // Group membership carries a built-in role, and stops carrying it when removed.
+    const group = await control.staffGroup.create({
+      data: { name: `night-${suffix}`, createdBy: owner },
+    });
+    const viaGroup = await rbac.grant({
+      roleId: await roleId('billing'),
+      principalType: 'GROUP',
+      principalId: group.id,
+      kind: 'ACTIVE',
+      grantedBy: owner,
+    });
+    await rbac.addGroupMember(group.id, support, owner);
+    expect(await rbac.can(support, 'tags.write')).toBe(true);
     await rbac.removeGroupMember(group.id, support, owner);
-    expect(await rbac.can(support, 'people.view')).toBe(false);
+    expect(await rbac.can(support, 'tags.write')).toBe(false);
+    await rbac.revoke(viaGroup.id, owner);
   });
 
   it('the reconciler restores a deleted tuple and removes a stray one', async () => {
@@ -707,5 +718,43 @@ describe('staff RBAC (e2e)', () => {
       expect(done.blocked).toBeFalsy();
       expect(await rbac.can(rogues[0]!, 'restrict.ban')).toBe(false);
     });
+  });
+
+  it('groups cannot hold Owner or a custom role (security review, 4 Nov)', async () => {
+    const group = await control.staffGroup.create({
+      data: { name: `priv-${suffix}`, createdBy: owner },
+    });
+    await expect(
+      rbac.grant({
+        roleId: await roleId('owner'),
+        principalType: 'GROUP',
+        principalId: group.id,
+        kind: 'ACTIVE',
+        grantedBy: owner,
+      }),
+    ).rejects.toMatchObject({ response: { code: 'group_cannot_hold_role' } });
+    const custom = await rbac.saveCustomRole({
+      key: `gc-${suffix}`,
+      name: 'GC',
+      permissions: ['people.view'],
+      by: owner,
+    });
+    await expect(
+      rbac.grant({
+        roleId: custom.id,
+        principalType: 'GROUP',
+        principalId: group.id,
+        kind: 'ACTIVE',
+        grantedBy: owner,
+      }),
+    ).rejects.toMatchObject({ response: { code: 'group_cannot_hold_role' } });
+    const ok = await rbac.grant({
+      roleId: await roleId('support'),
+      principalType: 'GROUP',
+      principalId: group.id,
+      kind: 'ACTIVE',
+      grantedBy: owner,
+    });
+    await rbac.revoke(ok.id, owner);
   });
 });

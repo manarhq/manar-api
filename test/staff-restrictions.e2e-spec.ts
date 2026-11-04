@@ -11,6 +11,7 @@ import { AppModule } from '../src/app.module';
 import { AuditService } from '../src/audit/audit.service';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { ResignupService } from '../src/staff/restrictions/resignup.service';
+import { RestrictionsService } from '../src/staff/restrictions/restrictions.service';
 import { fingerprint } from '../src/staff/restrictions/fingerprints';
 import { bootStaffApp, type SeededStaff } from './support/staff-app';
 import { createStaffRealm, deleteStaffRealm } from './support/staff-realm';
@@ -201,7 +202,7 @@ describe('staff restrictions (e2e)', () => {
         machineId: `M-${STAFF_E2E_SUFFIX}-DEV`,
         hostname: 'LAYLA-XPS15',
         os: 'windows',
-        keyFingerprint: 'k',
+        keyFingerprint: `key-${STAFF_E2E_SUFFIX}`,
         keyType: 'SOFTWARE',
         registeredFromIp: '203.0.113.5',
         hostGroupId: hostGroup.id,
@@ -297,12 +298,74 @@ describe('staff restrictions (e2e)', () => {
       ).status,
     ).toBe(403);
 
+    // The clearance is bound to that one account: a NEW account with the same address is still blocked.
+    const username2 = `evader2-${STAFF_E2E_SUFFIX}`;
+    await adminFetch(
+      `/admin/realms/${CUSTOMER_E2E_ISSUER.split('/realms/')[1]}/users`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          username: username2,
+          email: c.email.replace('@', '+third@'),
+          firstName: 'E',
+          lastName: 'V',
+          enabled: true,
+          emailVerified: true,
+          credentials: [
+            {
+              type: 'password',
+              value: 'Customer-e2e-password-1',
+              temporary: false,
+            },
+          ],
+        }),
+      },
+    );
+    expect(
+      (
+        await api()
+          .post('/workspaces/bootstrap')
+          .set({ Authorization: `Bearer ${await customerToken(username2)}` })
+      ).status,
+    ).toBe(403);
+    // Proposing an un-ban needs the permission (or the review that overturned it), for every caller.
+    const adminPrincipal = {
+      staffId: admin.id,
+      email: admin.email,
+      displayName: 'Admin',
+      firstName: 'Admin',
+      team: 'SALES',
+      title: '',
+      requestId: 't',
+    } as never;
+    await expect(
+      staff.app
+        .get(RestrictionsService)
+        .proposeUnban(
+          adminPrincipal,
+          r.body.restriction.id,
+          'no permission for this',
+        ),
+    ).rejects.toMatchObject({ response: { code: 'permission_required' } });
+
     // The same machine enrolling anywhere: refused before a certificate exists (AC-26).
     await expect(
       human
         .get(ResignupService)
-        .checkDevice(`m-${STAFF_E2E_SUFFIX}-dev`, randomUUID()),
+        .checkDevice(
+          { keyFingerprint: `key-${STAFF_E2E_SUFFIX}` },
+          randomUUID(),
+        ),
     ).rejects.toMatchObject({ response: { code: 'device_blocked' } });
+    // The self-reported machine id is not a signal: a new key on that machine is not matched.
+    await expect(
+      human
+        .get(ResignupService)
+        .checkDevice(
+          { keyFingerprint: `other-key-${STAFF_E2E_SUFFIX}` },
+          randomUUID(),
+        ),
+    ).resolves.toBeUndefined();
 
     // A card of the banned account on a new paying workspace bans its owner.
     const key = process.env.RESTRICTION_FINGERPRINT_KEY!;
@@ -310,12 +373,14 @@ describe('staff restrictions (e2e)', () => {
       data: {
         restrictionId: r.body.restriction.id,
         kind: 'CARD',
-        valueHash: fingerprint('CARD', 'card_fp_e2e', key),
+        valueHash: fingerprint('CARD', `card_fp_${STAFF_E2E_SUFFIX}`, key),
       },
     });
     const payer = await customer('payer');
     expect(
-      await human.get(ResignupService).checkCard('card_fp_e2e', payer.tenantId),
+      await human
+        .get(ResignupService)
+        .checkCard(`card_fp_${STAFF_E2E_SUFFIX}`, payer.tenantId),
     ).toBe(r.body.restriction.code);
     expect(
       (

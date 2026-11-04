@@ -9,7 +9,7 @@ import { KnownIssuerRegistry } from './known-issuer-registry.service';
 import { RolesGuard } from './roles.guard';
 import { AccountsService } from '../staff/index/accounts.service';
 import { DeviceIndexService } from '../staff/index/device-index.service';
-import { RestrictionEnforcement } from '../staff/restrictions/restriction-enforcement';
+import { RestrictionEnforcementModule } from '../staff/restrictions/restriction-enforcement.module';
 
 /**
  * Wires up dynamic per-issuer JWT validation (`JwtAuthGuard`) and coarse
@@ -20,12 +20,11 @@ import { RestrictionEnforcement } from '../staff/restrictions/restriction-enforc
  */
 @Global()
 @Module({
-  imports: [DatabaseModule],
+  imports: [DatabaseModule, RestrictionEnforcementModule],
   providers: [
     // DESK indexes, written from token verification and device registration (global for both).
     AccountsService,
     DeviceIndexService,
-    RestrictionEnforcement,
     KnownIssuerRegistry,
     JwksCacheService,
     TokenVerifierService,
@@ -37,7 +36,6 @@ import { RestrictionEnforcement } from '../staff/restrictions/restriction-enforc
   exports: [
     AccountsService,
     DeviceIndexService,
-    RestrictionEnforcement,
     KnownIssuerRegistry,
     JwksCacheService,
     TokenVerifierService,

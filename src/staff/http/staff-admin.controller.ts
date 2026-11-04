@@ -329,15 +329,39 @@ export class StaffAdminController implements OnModuleInit {
     return { ok: true, sessionsEnded };
   }
 
+  /** Owner directly, or through a group (groups cannot be granted Owner; counted anyway). */
   private async isOwner(staffId: string) {
+    const role = await this.control.staffRole.findUnique({
+      where: { key: 'owner' },
+    });
+    const groups = await this.control.staffGroupMember.findMany({
+      where: { staffId },
+      select: { groupId: true },
+    });
+    return !!(await this.control.staffRoleAssignment.findFirst({
+      where: {
+        roleId: role?.id,
+        revokedAt: null,
+        OR: [
+          { principalType: 'STAFF', principalId: staffId },
+          {
+            principalType: 'GROUP',
+            principalId: { in: groups.map((g) => g.groupId) },
+          },
+        ],
+      },
+    }));
+  }
+
+  private async groupHoldsOwner(groupId: string) {
     const role = await this.control.staffRole.findUnique({
       where: { key: 'owner' },
     });
     return !!(await this.control.staffRoleAssignment.findFirst({
       where: {
         roleId: role?.id,
-        principalType: 'STAFF',
-        principalId: staffId,
+        principalType: 'GROUP',
+        principalId: groupId,
         revokedAt: null,
       },
     }));
@@ -444,6 +468,15 @@ export class StaffAdminController implements OnModuleInit {
     @Param('id', ParseUUIDPipe) id: string,
     @Param('staffId', ParseUUIDPipe) staffId: string,
   ) {
+    // Same rule as removing Owner access directly (defensive: groups cannot hold Owner).
+    if (
+      (await this.groupHoldsOwner(id)) &&
+      !(await this.rbac.can(s.staffId, 'staff.owner.grant.approve'))
+    )
+      throw new ForbiddenException({
+        code: 'owner_only',
+        message: 'Only an Owner can change Owner access.',
+      });
     await this.rbac.removeGroupMember(id, staffId, s.staffId);
     return { ok: true };
   }

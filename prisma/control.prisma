@@ -1038,6 +1038,10 @@ model StaffRestrictionMatch {
   newTenantId          String?
   /// blocked | flagged
   action               String
+  /// The exact fingerprint that matched, and the ban this match created: a false-positive
+  /// clearance applies to this (subject, value) pair only, never to future accounts.
+  valueHash            String?
+  createdRestrictionId String?
   at                   DateTime             @default(now())
   resolvedBy           String?
   resolvedAt           DateTime?

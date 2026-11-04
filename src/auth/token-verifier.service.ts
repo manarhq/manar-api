@@ -134,7 +134,7 @@ export class TokenVerifierService {
     };
     // DESK account index (spec §17.1): at most once per 10 minutes, never fails the request.
     void this.accounts?.touch(identity);
-    if (!opts.allowRestricted && !identity.boundTenant)
+    if (!opts.allowRestricted)
       await this.restrictions.refuseIfRestricted(
         identity.issuer,
         identity.subject,

@@ -143,25 +143,21 @@ export class StaffRestrictionsController {
       where: { id },
       data: { resolution, resolvedBy: s.staffId, resolvedAt: new Date() },
     });
-    // A wrong block is undone by un-banning the ban it created (spec §9.5). A ban is never lifted
-    // by one person (founder: un-ban needs a different Owner), so this opens the un-ban request.
+    // A wrong block is undone by un-banning the one ban THIS match created (spec §9.5), through
+    // a second person; the clearance applies to this exact (subject, fingerprint) pair only.
     const unbans: string[] = [];
-    if (resolution === 'false_positive' && m.newAccountId) {
-      const system = await this.control.staffRestriction.findMany({
-        where: {
-          accountId: m.newAccountId,
-          createdBy: 'system:resignup',
-          liftedAt: null,
-          kind: 'BAN',
-        },
+    if (resolution === 'false_positive' && m.createdRestrictionId) {
+      const r = await this.control.staffRestriction.findUnique({
+        where: { id: m.createdRestrictionId },
       });
-      for (const r of system)
+      if (r && !r.liftedAt && r.kind === 'BAN')
         unbans.push(
           (
             await this.restrictions.proposeUnban(
               s,
               r.id,
               'Re-signup match marked false positive',
+              { fromMatch: m.id },
             )
           ).id,
         );

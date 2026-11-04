@@ -36,7 +36,6 @@ import {
   planRestriction,
   type Category,
 } from './restriction-rules';
-import { deviceFingerprintValue } from './resignup.service';
 
 export const RestrictionBody = z.object({
   target: z.object({ type: z.enum(['ACCOUNT', 'TENANT']), id: z.uuid() }),
@@ -434,12 +433,14 @@ export class RestrictionsService implements OnModuleInit {
     const out = new Map<
       string,
       {
-        kind: 'EMAIL' | 'IDP_IDENTITY' | 'CARD' | 'DEVICE' | 'ENTRA_TID';
+        kind:
+          'EMAIL' | 'IDP_IDENTITY' | 'CARD' | 'DEVICE' | 'TPM_EK' | 'ENTRA_TID';
         valueHash: string;
       }
     >();
     const add = (
-      kind: 'EMAIL' | 'IDP_IDENTITY' | 'CARD' | 'DEVICE' | 'ENTRA_TID',
+      kind:
+        'EMAIL' | 'IDP_IDENTITY' | 'CARD' | 'DEVICE' | 'TPM_EK' | 'ENTRA_TID',
       value: string | null | undefined,
       prehashed = false,
     ) => {
@@ -465,10 +466,17 @@ export class RestrictionsService implements OnModuleInit {
       for (const m of personal) {
         try {
           const db = await this.tenants.getClient(m.tenantId);
+          // Attested identifiers only: the enrolled key, and the TPM EK when attestation passed.
           for (const h of await db.host.findMany({
-            select: { machineId: true },
-          }))
-            add('DEVICE', deviceFingerprintValue(h.machineId));
+            select: {
+              keyFingerprint: true,
+              tpmVerified: true,
+              tpmEkFingerprint: true,
+            },
+          })) {
+            add('DEVICE', h.keyFingerprint);
+            if (h.tpmVerified) add('TPM_EK', h.tpmEkFingerprint);
+          }
         } catch (error) {
           this.logger.warn(
             `device fingerprints of ${m.tenantId}: ${String(error)}`,
@@ -703,13 +711,35 @@ export class RestrictionsService implements OnModuleInit {
     return true;
   }
 
-  /** Spec §9.1: un-ban is proposed (Owner, or an appeal reviewer) and approved by another Owner. */
+  /**
+   * Spec §9.1: un-ban is proposed by an Owner (`restrict.unban.propose`), by the reviewer of an
+   * appeal that overturned it (`appeals.review`) or by the reviewer of a false-positive re-signup
+   * match (`matches.review`), and approved by another Owner. Checked here, for every caller,
+   * failing closed (security review, 4 Nov).
+   */
   async proposeUnban(
     s: StaffPrincipal,
     id: string,
     reason: string,
-    opts: { fromAppeal?: string } = {},
+    opts: { fromAppeal?: string; fromMatch?: string } = {},
   ) {
+    const needed = opts.fromAppeal
+      ? 'appeals.review'
+      : opts.fromMatch
+        ? 'matches.review'
+        : 'restrict.unban.propose';
+    let allowed: boolean;
+    try {
+      allowed = await this.rbac.can(s.staffId, needed);
+    } catch (error) {
+      throwFailClosed('openfga', error);
+    }
+    if (!allowed)
+      throw new ForbiddenException({
+        code: 'permission_required',
+        permission: needed,
+        message: "Your role doesn't allow proposing an un-ban.",
+      });
     const r = await this.control.staffRestriction.findUnique({ where: { id } });
     if (!r || r.liftedAt || r.kind !== 'BAN')
       throw new NotFoundException({
@@ -719,7 +749,11 @@ export class RestrictionsService implements OnModuleInit {
     return this.changes.propose(s, {
       kind: 'unban',
       targetId: r.id,
-      payload: { restrictionId: r.id, appealId: opts.fromAppeal ?? null },
+      payload: {
+        restrictionId: r.id,
+        appealId: opts.fromAppeal ?? null,
+        matchId: opts.fromMatch ?? null,
+      },
       reason,
     });
   }

@@ -318,6 +318,17 @@ export class StaffRbacService {
         where: { id: input.roleId },
       });
       if (!role || role.archivedAt) throw new NotFoundException('Unknown role');
+      // Groups never hold Owner or a custom role (security review, 4 Nov): a membership change would
+      // grant them without the two-person rule those grants need.
+      if (
+        input.principalType === 'GROUP' &&
+        (role.key === 'owner' || !role.builtIn)
+      )
+        throw new ForbiddenException({
+          code: 'group_cannot_hold_role',
+          message:
+            'Groups cannot hold the Owner role or a custom role. Grant it to the person.',
+        });
       if (input.expiresAt && input.expiresAt <= new Date())
         throw new ConflictException({
           code: 'already_expired',
