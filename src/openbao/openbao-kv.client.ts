@@ -85,6 +85,35 @@ export class OpenBaoKvClient {
     return response.data;
   }
 
+  /** The current version and data at `path`, or null when nothing was ever written there. */
+  async readSecretVersioned(
+    path: string,
+  ): Promise<{ data: Record<string, unknown>; version: number } | null> {
+    const response = await this.request<{
+      data: Record<string, unknown>;
+      metadata: { version: number; deletion_time?: string };
+    } | null>('GET', `${this.mountPath}/data/${path}`, undefined, true);
+    if (response === null) return null;
+    if (response.metadata?.deletion_time)
+      throw new Error(`OpenBao KV secret at "${path}" has been deleted`);
+    return { data: response.data, version: response.metadata.version };
+  }
+
+  /**
+   * KV v2 check-and-set: writes only if the current version is still `cas` (0 = nothing yet);
+   * OpenBao refuses the write otherwise, so two writers cannot both win.
+   */
+  async writeSecretCas(
+    path: string,
+    data: Record<string, unknown>,
+    cas: number,
+  ): Promise<void> {
+    await this.request('POST', `${this.mountPath}/data/${path}`, {
+      data,
+      options: { cas },
+    });
+  }
+
   /**
    * Writes `data` only if nothing exists at `path` yet (KV v2 check-and-set
    * with `cas: 0`); throws if something does. For values that must never be

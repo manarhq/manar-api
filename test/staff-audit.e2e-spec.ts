@@ -197,4 +197,111 @@ describe('staff audit chain (e2e)', () => {
     }
     expect(await audit.verify()).toMatchObject({ valid: true });
   });
+
+  describe('the OpenBao head anchor', () => {
+    const anchorPath = `audit/staff-audit-head/${chainId}`;
+    const readAnchor = async () => (await kv.readSecretVersioned(anchorPath))!;
+
+    it('two concurrent checkpoint writers leave the anchor on the newest checkpoint', async () => {
+      for (let round = 0; round < 5; round++) {
+        await audit.append({ staffId: 's8', action: `test.race${round}` });
+        const other = new StaffAuditService(control, signer, kv, chainId);
+        await Promise.all([
+          audit.checkpoint(),
+          other.checkpoint(),
+          audit.checkpoint(),
+        ]);
+      }
+      const newest = await control.staffAuditCheckpoint.findFirstOrThrow({
+        orderBy: { seq: 'desc' },
+      });
+      const anchor = await readAnchor();
+      expect(anchor.data.checkpointSeq).toBe(newest.seq.toString());
+      expect(anchor.data.checkpointHash).toBe(newest.checkpointHash);
+      expect(await audit.verify()).toMatchObject({ valid: true });
+    });
+
+    it('never moves the anchor backwards', async () => {
+      await audit.append({ staffId: 's9', action: 'test.monotonic' });
+      await audit.checkpoint();
+      const before = await readAnchor();
+      // A writer replaying an older checkpoint must not overwrite the newer anchor.
+      const older = await control.staffAuditCheckpoint.findFirstOrThrow({
+        where: { seq: { lt: BigInt(String(before.data.checkpointSeq)) } },
+        orderBy: { seq: 'desc' },
+      });
+      await expect(audit.anchor(older)).resolves.toBe(false);
+      expect((await readAnchor()).data.checkpointSeq).toBe(
+        before.data.checkpointSeq,
+      );
+    });
+
+    it('a stale anchor (more than one checkpoint behind, or old) fails verification', async () => {
+      await audit.append({ staffId: 's10', action: 'test.stale-a' });
+      await audit.checkpoint();
+      const stale = await readAnchor();
+      await audit.append({ staffId: 's10', action: 'test.stale-b' });
+      await audit.checkpoint();
+      await audit.append({ staffId: 's10', action: 'test.stale-c' });
+      await audit.checkpoint();
+      const current = await readAnchor();
+      // Roll the anchor back by two checkpoints (an operator restoring an old OpenBao backup).
+      await kv.writeSecretCas(anchorPath, stale.data, current.version);
+      try {
+        expect(await audit.verify()).toMatchObject({
+          valid: false,
+          reason: 'anchor_stale',
+        });
+      } finally {
+        await kv.writeSecretCas(anchorPath, current.data, current.version + 1);
+      }
+      expect(await audit.verify()).toMatchObject({ valid: true });
+    });
+
+    it('one checkpoint behind is allowed only inside the lag window', async () => {
+      await audit.append({ staffId: 's11', action: 'test.lag-a' });
+      await audit.checkpoint();
+      const behind = await readAnchor();
+      await audit.append({ staffId: 's11', action: 'test.lag-b' });
+      await audit.checkpoint();
+      const current = await readAnchor();
+      await kv.writeSecretCas(anchorPath, behind.data, current.version);
+      try {
+        expect(await audit.verify()).toMatchObject({ valid: true });
+        const newest = await control.staffAuditCheckpoint.findFirstOrThrow({
+          orderBy: { seq: 'desc' },
+        });
+        expect(
+          await audit.verify(
+            new Date(
+              newest.createdAt.getTime() + StaffAuditService.ANCHOR_LAG_MS + 1,
+            ),
+          ),
+        ).toMatchObject({
+          valid: false,
+          reason: 'anchor_stale',
+        });
+      } finally {
+        await kv.writeSecretCas(anchorPath, current.data, current.version + 1);
+      }
+    });
+
+    it('an anchor naming a deleted checkpoint fails verification', async () => {
+      await audit.append({ staffId: 's12', action: 'test.deleted-cp' });
+      await audit.checkpoint();
+      await backup();
+      await control.staffAuditCheckpoint.delete({
+        where: { seq: cpsBackup.at(-1)!.seq },
+      });
+      try {
+        expect(await audit.verify()).toMatchObject({
+          valid: false,
+          reason: 'anchored_checkpoint_missing',
+        });
+      } finally {
+        await restore();
+      }
+      expect(await audit.verify()).toMatchObject({ valid: true });
+    });
+  });
 });
