@@ -1,11 +1,15 @@
+import type { BlockList } from 'node:net';
 import {
   type CanActivate,
   type ExecutionContext,
   ForbiddenException,
   Injectable,
   Logger,
+  Optional,
+  SetMetadata,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import {
   errors as joseErrors,
@@ -23,6 +27,7 @@ import type { AppConfig } from '../../config/env.validation';
 import { ControlPrismaService } from '../../database/control-prisma.service';
 import type { StaffMember } from '../../generated/control-client/client';
 import { StaffAuditService } from '../audit/staff-audit.service';
+import { clientIpOf, trustedPeers } from './client-ip';
 import type { RequestWithStaff, StaffPrincipal } from './staff-principal';
 
 export interface StaffTokenConfig {
@@ -87,20 +92,33 @@ export async function verifyStaffClaims(
   return payload as StaffClaims;
 }
 
+/** Lets the invite-claim route run for a verified staff token with no bound staff row yet. */
+export const ALLOW_UNBOUND_KEY = 'staff:allow-unbound';
+export const AllowUnboundStaff = () => SetMetadata(ALLOW_UNBOUND_KEY, true);
+
 /**
  * Staff listener guard (spec §16): verifies the staff token, then requires an ACTIVE staff row
- * whose pinned Entra object id matches. The first sign-in of an INVITED row binds it by verified
- * email, once (AC-43); after that a different oid with the same email is refused and recorded.
- * Any database failure is 503. Permissions and the passkey re-check: StaffPermissionGuard.
+ * whose Entra object id is the token's `entra_oid`. Rows are bound only by an immutable id: an
+ * object id recorded at invite time, or a one-time invite token claimed out of band
+ * (`POST /staff/v1/invites/claim`); an email claim alone never binds anything (security review,
+ * 4 Nov). The staff member's address comes from DESK only when DESK is the TCP peer. Any database
+ * failure is 503. Permissions and the passkey re-check: StaffPermissionGuard.
  */
 @Injectable()
 export class StaffAuthGuard implements CanActivate {
+  private readonly desk: BlockList;
+
   constructor(
     private readonly config: ConfigService<AppConfig, true>,
     private readonly control: ControlPrismaService,
     private readonly audit: StaffAuditService,
     private readonly jwks: JwksCacheService,
-  ) {}
+    @Optional() private readonly reflector?: Reflector,
+  ) {
+    this.desk = trustedPeers(
+      config.get?.('STAFF_TRUSTED_PROXY_CIDRS', { infer: true }),
+    );
+  }
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const request = ctx.switchToHttp().getRequest<RequestWithStaff>();
@@ -119,73 +137,82 @@ export class StaffAuthGuard implements CanActivate {
       },
       this.jwks.getJwks(issuer),
     );
-    const principal = await this.resolveStaff(claims);
-    const ipHeader = request.headers['x-manar-client-ip'];
+    const { clientIp, peerIp } = clientIpOf(
+      request.raw?.socket?.remoteAddress ?? request.ip,
+      request.headers['x-manar-client-ip'],
+      this.desk,
+    );
+    const allowUnbound = this.reflector?.getAllAndOverride<boolean>(
+      ALLOW_UNBOUND_KEY,
+      [ctx.getHandler(), ctx.getClass()],
+    );
+    const principal = await this.resolveStaff(claims, {
+      allowUnbound: !!allowUnbound,
+    });
+    if (!principal) {
+      request.unboundStaff = claims;
+      return true;
+    }
     request.staff = {
       ...principal,
-      ip: (Array.isArray(ipHeader) ? ipHeader[0] : ipHeader) ?? request.ip,
+      ip: clientIp,
+      peerIp,
       requestId: String(request.id),
     };
     return true;
   }
 
+  /** The ACTIVE staff member this token belongs to; null only for an allowed unbound caller. */
   async resolveStaff(
     claims: Pick<
       StaffClaims,
       'sub' | 'email' | 'entra_oid' | 'acr' | 'auth_time' | 'iss'
     >,
-  ): Promise<Omit<StaffPrincipal, 'requestId' | 'ip'>> {
+    opts: { allowUnbound?: boolean } = {},
+  ): Promise<Omit<StaffPrincipal, 'requestId' | 'ip' | 'peerIp'> | null> {
     let row: StaffMember | null;
     try {
       row = await this.control.staffMember.findUnique({
         where: { entraOid: claims.entra_oid },
       });
-      if (!row) {
-        const byEmail = await this.control.staffMember.findUnique({
-          where: { email: claims.email.trim().toLowerCase() },
+      // A row pre-bound by object id learns its Keycloak subject at first sign-in, once.
+      if (row && row.status === 'ACTIVE' && !row.subject) {
+        const bound = await this.control.staffMember.updateMany({
+          where: { id: row.id, subject: null },
+          data: {
+            subject: claims.sub,
+            issuer: claims.iss ?? null,
+            boundAt: new Date(),
+          },
         });
-        if (byEmail?.entraOid && byEmail.entraOid !== claims.entra_oid) {
+        if (bound.count)
           await this.audit.append({
-            staffId: byEmail.id,
-            action: 'staff.identity_mismatch',
+            staffId: row.id,
+            action: 'staff.bound',
             targetType: 'STAFF',
-            targetId: byEmail.id,
-            data: { presentedOid: claims.entra_oid },
+            targetId: row.id,
+            data: { by: 'entra_oid' },
           });
-          throw new ForbiddenException({
-            code: 'staff_identity_mismatch',
-            message:
-              'This sign-in does not match your staff account. The Owners were told.',
-          });
-        }
-        if (byEmail?.status === 'INVITED' && !byEmail.entraOid)
-          row = await this.control.$transaction(async (tx) => {
-            const bound = await tx.staffMember.update({
-              where: { id: byEmail.id },
-              data: {
-                issuer: claims.iss ?? null,
-                subject: claims.sub,
-                entraOid: claims.entra_oid,
-                status: 'ACTIVE',
-                boundAt: new Date(),
-              },
-            });
-            await this.audit.append(
-              {
-                staffId: bound.id,
-                action: 'staff.bound',
-                targetType: 'STAFF',
-                targetId: bound.id,
-              },
-              tx,
-            );
-            return bound;
-          });
+      }
+      if (row && row.subject && row.subject !== claims.sub) {
+        await this.audit.append({
+          staffId: row.id,
+          action: 'staff.identity_mismatch',
+          targetType: 'STAFF',
+          targetId: row.id,
+          data: { reason: 'subject_changed' },
+        });
+        throw new ForbiddenException({
+          code: 'staff_identity_mismatch',
+          message:
+            'This sign-in does not match your staff account. The Owners were told.',
+        });
       }
     } catch (error) {
       if (error instanceof ForbiddenException) throw error;
       throwFailClosed('control-db', error);
     }
+    if (!row && opts.allowUnbound) return null;
     if (!row || row.status !== 'ACTIVE')
       throw new ForbiddenException({
         code: 'not_staff',

@@ -13,11 +13,23 @@ export interface StaffPrincipal {
   /** `acr` and `auth_time` of the token, for the passkey step-up. */
   acr?: string;
   authTime?: number;
+  /** The staff member's address: DESK's forwarded value when DESK is the peer, else the peer. */
   ip?: string;
+  /** The TCP peer that called the staff listener. */
+  peerIp?: string;
   requestId: string;
 }
 
-export type RequestWithStaff = FastifyRequest & { staff?: StaffPrincipal };
+export type RequestWithStaff = FastifyRequest & {
+  staff?: StaffPrincipal;
+  /** A verified staff token with no bound row (only on @AllowUnboundStaff routes). */
+  unboundStaff?: {
+    sub: string;
+    email: string;
+    entra_oid: string;
+    iss?: string;
+  };
+};
 
 export const TEAM_LABEL: Record<StaffTeam, string> = {
   DEV: 'Dev',

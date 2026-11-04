@@ -50,6 +50,7 @@ export class StaffAuditInterceptor implements NestInterceptor {
               params.reference,
             data: {
               params,
+              peerIp: request.staff.peerIp ?? null,
               ...(typeof query.q === 'string'
                 ? { q: query.q.slice(0, 200) }
                 : {}),

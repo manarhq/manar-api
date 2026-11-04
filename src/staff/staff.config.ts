@@ -24,6 +24,8 @@ export const StaffConfigSchema = z.object({
   RESTRICTION_FINGERPRINT_KEY: optional,
   /** Turnstile secret for customer appeals (Key Vault `turnstile-secret-key`). */
   TURNSTILE_SECRET_KEY: optional,
+  /** DESK pod ranges; only these may forward the staff member's address (x-manar-client-ip). */
+  STAFF_TRUSTED_PROXY_CIDRS: optional,
   /** Chain id of the staff audit log's signing key and OpenBao anchor. */
   STAFF_AUDIT_CHAIN_ID: z.string().min(1).default('staff-audit'),
 });

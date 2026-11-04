@@ -11,6 +11,7 @@ import type { StaffPermission } from '../rbac/permissions';
 import { StaffRbacService } from '../rbac/staff-rbac.service';
 import type { RequestWithStaff } from './staff-principal';
 import { STEP_UP_KEY, checkStepUp } from './step-up';
+import { ALLOW_UNBOUND_KEY } from './staff-auth.guard';
 
 export const STAFF_PERMISSION_KEY = 'staff:permission';
 export const STAFF_SIGNED_IN_KEY = 'staff:signed-in';
@@ -36,7 +37,15 @@ export class StaffPermissionGuard implements CanActivate {
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const targets = [ctx.getHandler(), ctx.getClass()];
-    const staff = ctx.switchToHttp().getRequest<RequestWithStaff>().staff;
+    const request = ctx.switchToHttp().getRequest<RequestWithStaff>();
+    const staff = request.staff;
+    // Only the invite-claim route admits a verified but unbound staff token; it checks the token.
+    if (
+      !staff &&
+      request.unboundStaff &&
+      this.reflector.getAllAndOverride<boolean>(ALLOW_UNBOUND_KEY, targets)
+    )
+      return true;
     if (!staff) throw new ForbiddenException();
     const permission = this.reflector.getAllAndOverride<
       StaffPermission | undefined

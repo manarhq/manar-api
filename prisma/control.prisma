@@ -781,6 +781,10 @@ model StaffMember {
   status      StaffStatus @default(INVITED)
   createdAt   DateTime    @default(now())
   boundAt     DateTime?
+  /// sha256 of a one-time invite token, handed to the person out of band. Binding needs it (or an
+  /// Entra object id recorded at invite time); an email claim alone never binds a row.
+  inviteTokenHash String?   @unique
+  inviteExpiresAt DateTime?
 
   @@map("staff_members")
 }

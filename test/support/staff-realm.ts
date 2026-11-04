@@ -27,7 +27,13 @@ const attrMapper = (attr: string, claim: string) => ({
 export async function createStaffRealm(): Promise<void> {
   await adminFetch('/admin/realms', {
     method: 'POST',
-    body: JSON.stringify({ realm: STAFF_E2E_REALM, enabled: true }),
+    // Duplicate emails allowed: a test signs in two different people carrying one email claim.
+    body: JSON.stringify({
+      realm: STAFF_E2E_REALM,
+      enabled: true,
+      duplicateEmailsAllowed: true,
+      loginWithEmailAllowed: false,
+    }),
   });
   const profile = (await (
     await adminFetch(`/admin/realms/${STAFF_E2E_REALM}/users/profile`)
@@ -66,6 +72,7 @@ export async function createStaffRealm(): Promise<void> {
 
 export async function createStaffUser(input: {
   email: string;
+  username?: string;
   oid: string;
   tid: string;
   idp?: string;
@@ -80,7 +87,7 @@ export async function createStaffUser(input: {
   const res = await adminFetch(`/admin/realms/${STAFF_E2E_REALM}/users`, {
     method: 'POST',
     body: JSON.stringify({
-      username: input.email,
+      username: input.username ?? input.email,
       email: input.email,
       firstName: input.email.split('@')[0],
       lastName: 'Staff',
@@ -93,7 +100,7 @@ export async function createStaffUser(input: {
   if (!res.headers.get('location')) throw new Error('no user created');
 }
 
-export async function staffToken(email: string): Promise<string> {
+export async function staffToken(username: string): Promise<string> {
   const res = await fetch(
     `${base}/realms/${STAFF_E2E_REALM}/protocol/openid-connect/token`,
     {
@@ -103,13 +110,14 @@ export async function staffToken(email: string): Promise<string> {
         grant_type: 'password',
         client_id: 'manar-admin',
         client_secret: STAFF_E2E_CLIENT_SECRET,
-        username: email,
+        username,
         password: PASSWORD,
         scope: 'openid',
       }),
     },
   );
-  if (!res.ok) throw new Error(`staff token for ${email}: HTTP ${res.status}`);
+  if (!res.ok)
+    throw new Error(`staff token for ${username}: HTTP ${res.status}`);
   return ((await res.json()) as { access_token: string }).access_token;
 }
 

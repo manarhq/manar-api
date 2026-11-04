@@ -1,8 +1,12 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
 import { Command, CommandRunner, Option } from 'nest-commander';
 import { ControlPrismaService } from '../../database/control-prisma.service';
 import type { StaffTeam } from '../../generated/control-client/client';
 import { StaffAuditService } from '../../staff/audit/staff-audit.service';
+import { newInviteToken } from '../../staff/auth/staff-invites';
 import { StaffRbacService } from '../../staff/rbac/staff-rbac.service';
 import {
   isBuiltInRole,
@@ -11,7 +15,7 @@ import {
 } from './staff-seed.options';
 
 /**
- * `pnpm manar staff:seed --email <e> --name <n> --role owner|admin|... [--eligible owner] --team <t> [--title <t>]`
+ * `pnpm manar staff:seed --email <e> --name <n> --role owner|admin|... [--eligible owner] --team <t> [--title <t>] [--entra-oid <oid>]`
  *
  * Idempotent by email: creates an INVITED staff row (bound to an Entra identity at first sign-in,
  * AC-43) and its role assignments, and makes sure the built-in roles exist. Re-running it adds a
@@ -47,14 +51,34 @@ export class StaffSeedCommand extends CommandRunner {
       where: { email },
     });
     if (!member) {
+      // Bound by an immutable id only (security review, 4 Nov): the Entra object id when the
+      // operator has it (Entra admin centre, Users, Object ID), else a one-time invite token.
+      const invite = o.entraOid ? null : newInviteToken();
       member = await this.control.staffMember.create({
         data: {
           email,
           displayName: o.name,
           title: o.title ?? '',
           team: o.team as StaffTeam,
+          ...(invite
+            ? {
+                inviteTokenHash: invite.hash,
+                inviteExpiresAt: invite.expiresAt,
+              }
+            : { entraOid: o.entraOid, status: 'ACTIVE' as const }),
         },
       });
+      if (invite) {
+        // Never printed: written for the operator to hand over out of band (the person opens
+        // Desk at /invite#<token>), mode 600 like the Keycloak setup credentials.
+        const dir = join(homedir(), '.manar-staff', 'invites');
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const file = join(dir, `${email}.txt`);
+        writeFileSync(file, `${invite.token}\n`, { mode: 0o600 });
+        this.logger.log(
+          `invite token for ${email} written to ${file} (valid 7 days)`,
+        );
+      }
       await this.audit.append({
         staffId: null,
         action: 'staff.seeded',
@@ -104,6 +128,11 @@ export class StaffSeedCommand extends CommandRunner {
   }
   @Option({ flags: '--team <team>' }) parseTeam(v: string) {
     return v.toUpperCase();
+  }
+  @Option({ flags: '--entra-oid <oid>' }) parseEntraOid(v: string) {
+    if (!/^[0-9a-f-]{36}$/i.test(v))
+      throw new Error('--entra-oid takes an Entra object id (a GUID)');
+    return v.toLowerCase();
   }
   @Option({ flags: '--title <title>' }) parseTitle(v: string) {
     return v;

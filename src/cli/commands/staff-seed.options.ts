@@ -10,6 +10,7 @@ export interface SeedOptions {
   eligible?: string;
   team?: string;
   title?: string;
+  entraOid?: string;
 }
 
 const TEAMS = [

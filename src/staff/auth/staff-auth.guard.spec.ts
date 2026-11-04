@@ -78,26 +78,24 @@ describe('StaffAuthGuard staff resolution', () => {
     team: 'SALES',
     status: 'ACTIVE',
     entraOid: 'oid-ali',
+    subject: 'kc-sub-1',
     ...over,
   });
-  const make = (byOid: unknown, byEmail: unknown, fail = false) => {
+  const make = (byOid: unknown, fail = false) => {
     const updates: unknown[] = [];
     const audit: unknown[] = [];
     const control = {
       staffMember: {
-        findUnique: ({ where }: { where: Record<string, string> }) =>
-          fail
-            ? Promise.reject(new Error('db down'))
-            : Promise.resolve(where.entraOid ? byOid : byEmail),
-        update: (u: { data: Record<string, unknown> }) => {
+        findUnique: () =>
+          fail ? Promise.reject(new Error('db down')) : Promise.resolve(byOid),
+        updateMany: (u: unknown) => {
           updates.push(u);
-          return Promise.resolve(row(u.data));
+          return Promise.resolve({ count: 1 });
         },
       },
-      $transaction: (fn: (tx: unknown) => unknown) => fn(control),
     };
     const guard = new StaffAuthGuard(
-      {} as never,
+      { get: () => undefined } as never,
       control as never,
       { append: (a: unknown) => (audit.push(a), Promise.resolve()) } as never,
       {} as never,
@@ -105,8 +103,8 @@ describe('StaffAuthGuard staff resolution', () => {
     return { guard, updates, audit };
   };
 
-  it('finds an ACTIVE staff member by their pinned Entra object id', async () => {
-    const { guard } = make(row(), null);
+  it('finds an ACTIVE staff member by their Entra object id', async () => {
+    const { guard } = make(row());
     await expect(guard.resolveStaff(claims)).resolves.toMatchObject({
       staffId: 'staff-ali',
       firstName: 'Ali',
@@ -114,26 +112,23 @@ describe('StaffAuthGuard staff resolution', () => {
   });
 
   it('refuses a DISABLED staff member', async () => {
-    const { guard } = make(row({ status: 'DISABLED' }), null);
+    const { guard } = make(row({ status: 'DISABLED' }));
     await expect(guard.resolveStaff(claims)).rejects.toMatchObject({
       status: 403,
     });
   });
 
-  it('binds an INVITED row once, by verified email (AC-43)', async () => {
-    const { guard, updates, audit } = make(
-      null,
-      row({ status: 'INVITED', entraOid: null }),
-    );
-    await expect(guard.resolveStaff(claims)).resolves.toMatchObject({
-      staffId: 'staff-ali',
+  it('records the Keycloak subject of a row pre-bound by object id, once', async () => {
+    const { guard, updates, audit } = make(row({ subject: null }));
+    await guard.resolveStaff(claims);
+    expect(updates[0]).toMatchObject({
+      where: { id: 'staff-ali', subject: null },
     });
-    expect(updates).toHaveLength(1);
     expect(audit[0]).toMatchObject({ action: 'staff.bound' });
   });
 
-  it('refuses and records a bound email signing in with a different Entra object id', async () => {
-    const { guard, audit } = make(null, row({ entraOid: 'oid-someone-else' }));
+  it('refuses and records a bound row signing in with another Keycloak subject', async () => {
+    const { guard, audit } = make(row({ subject: 'kc-someone-else' }));
     await expect(guard.resolveStaff(claims)).rejects.toMatchObject({
       status: 403,
       response: { code: 'staff_identity_mismatch' },
@@ -141,15 +136,23 @@ describe('StaffAuthGuard staff resolution', () => {
     expect(audit[0]).toMatchObject({ action: 'staff.identity_mismatch' });
   });
 
-  it('refuses someone who is not staff', async () => {
-    const { guard } = make(null, null);
+  it('never binds by email: an unknown object id is not staff', async () => {
+    const { guard, updates } = make(null);
     await expect(guard.resolveStaff(claims)).rejects.toMatchObject({
       status: 403,
     });
+    expect(updates).toHaveLength(0);
+  });
+
+  it('lets an unbound caller through only where the route allows it (invite claim)', async () => {
+    const { guard } = make(null);
+    await expect(
+      guard.resolveStaff(claims, { allowUnbound: true }),
+    ).resolves.toBeNull();
   });
 
   it('answers 503 when the control database is down (fail closed)', async () => {
-    const { guard } = make(null, null, true);
+    const { guard } = make(null, true);
     await expect(guard.resolveStaff(claims)).rejects.toMatchObject({
       status: 503,
     });

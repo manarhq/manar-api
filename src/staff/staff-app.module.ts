@@ -19,6 +19,10 @@ import {
 } from './errors/error-reference.recorder';
 import { StaffAuditInterceptor } from './http/staff-audit.interceptor';
 import { StaffMeController } from './http/staff-me.controller';
+import {
+  StaffInvitesController,
+  StaffInvitesService,
+} from './auth/staff-invites';
 import { StaffCoreModule } from './staff-core.module';
 import { StaffJobsService } from './staff-jobs.service';
 
@@ -34,12 +38,13 @@ import { StaffJobsService } from './staff-jobs.service';
     AuditModule,
     StaffCoreModule,
   ],
-  controllers: [StaffMeController],
+  controllers: [StaffMeController, StaffInvitesController],
   providers: [
     JwksCacheService,
     StaffAuthGuard,
     StaffPermissionGuard,
     StaffJobsService,
+    StaffInvitesService,
     ErrorReferenceRecorder,
     { provide: ERROR_REFERENCE_SINK, useExisting: ErrorReferenceRecorder },
     { provide: APP_FILTER, useClass: ErrorEnvelopeFilter },

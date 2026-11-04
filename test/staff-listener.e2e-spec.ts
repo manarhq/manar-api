@@ -7,6 +7,7 @@ import {
   deleteStaffRealm,
   staffToken,
 } from './support/staff-realm';
+import { newInviteToken } from '../src/staff/auth/staff-invites';
 import { OpenFgaClientService } from '../src/authorization/openfga-client.service';
 
 interface Body {
@@ -111,35 +112,113 @@ describe('staff listener (e2e)', () => {
     await ctx.http().get('/staff/v1/me').expect(401);
   });
 
-  it('binds an invited row at first sign-in, then refuses another Entra identity with that email', async () => {
-    const email = `invited-${STAFF_E2E_SUFFIX}@fixio.test`;
-    const row = await ctx.control.staffMember.create({
-      data: { email, displayName: 'Invited Staff', team: 'SUPPORT' },
+  describe('invites bind by an immutable id, never by email (security review, 4 Nov)', () => {
+    const invite = async (name: string) => {
+      const email = `${name}-${STAFF_E2E_SUFFIX}@fixio.test`;
+      const { token, hash, expiresAt } = newInviteToken();
+      const row = await ctx.control.staffMember.create({
+        data: {
+          email,
+          displayName: 'Invited Staff',
+          team: 'SUPPORT',
+          inviteTokenHash: hash,
+          inviteExpiresAt: expiresAt,
+        },
+      });
+      return { email, token, row };
+    };
+
+    it('an email claim alone does not bind: the person must present the invite token', async () => {
+      const { email, token, row } = await invite('invited');
+      const oid = randomUUID();
+      await createStaffUser({ email, oid, tid: STAFF_E2E_TID });
+      const t = await staffToken(email);
+      await ctx
+        .http()
+        .get('/staff/v1/me')
+        .set(await bearer(t))
+        .expect(403);
+      expect(
+        (
+          await ctx.control.staffMember.findUniqueOrThrow({
+            where: { id: row.id },
+          })
+        ).status,
+      ).toBe('INVITED');
+      await ctx
+        .http()
+        .post('/staff/v1/invites/claim')
+        .set(await bearer(t))
+        .send({ token })
+        .expect(200);
+      expect(
+        await ctx.control.staffMember.findUniqueOrThrow({
+          where: { id: row.id },
+        }),
+      ).toMatchObject({ status: 'ACTIVE', entraOid: oid });
+      await ctx
+        .http()
+        .get('/staff/v1/me')
+        .set(await bearer(t))
+        .expect(200);
     });
-    const oid = randomUUID();
-    await createStaffUser({ email, oid, tid: STAFF_E2E_TID });
-    await ctx
-      .http()
-      .get('/staff/v1/me')
-      .set(await bearer(await staffToken(email)))
-      .expect(200);
-    expect(
-      await ctx.control.staffMember.findUniqueOrThrow({
-        where: { id: row.id },
-      }),
-    ).toMatchObject({ status: 'ACTIVE', entraOid: oid });
-    // Someone else's Entra account presenting the same email address.
-    const realm = `${email}`;
-    await ctx.control.staffMember.update({
-      where: { id: row.id },
-      data: { entraOid: randomUUID() },
+
+    it('a second person with the same email claim gets nothing, with or without the token', async () => {
+      const { email, token } = await invite('twin');
+      await createStaffUser({ email, oid: randomUUID(), tid: STAFF_E2E_TID });
+      const first = await staffToken(email);
+      await ctx
+        .http()
+        .post('/staff/v1/invites/claim')
+        .set(await bearer(first))
+        .send({ token })
+        .expect(200);
+      // Another Entra account carrying the same email address (a second Keycloak user here).
+      const twinUser = `twin-account-${STAFF_E2E_SUFFIX}`;
+      await createStaffUser({
+        email,
+        username: twinUser,
+        oid: randomUUID(),
+        tid: STAFF_E2E_TID,
+      });
+      const twin = await staffToken(twinUser);
+      await ctx
+        .http()
+        .get('/staff/v1/me')
+        .set(await bearer(twin))
+        .expect(403);
+      const res = await ctx
+        .http()
+        .post('/staff/v1/invites/claim')
+        .set(await bearer(twin))
+        .send({ token })
+        .expect(403);
+      expect(body(res).code).toBe('invite_invalid');
     });
-    const res = await ctx
-      .http()
-      .get('/staff/v1/me')
-      .set(await bearer(await staffToken(realm)))
-      .expect(403);
-    expect(body(res).code).toBe('staff_identity_mismatch');
+
+    it('two concurrent claims of one invite: exactly one wins', async () => {
+      const { email, token, row } = await invite('race');
+      await createStaffUser({ email, oid: randomUUID(), tid: STAFF_E2E_TID });
+      const t = await staffToken(email);
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          ctx
+            .http()
+            .post('/staff/v1/invites/claim')
+            .set({ Authorization: `Bearer ${t}` })
+            .send({ token }),
+        ),
+      );
+      expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+      expect(results.filter((r) => r.status === 403)).toHaveLength(4);
+      expect(
+        (
+          await ctx.control.staffMember.findUniqueOrThrow({
+            where: { id: row.id },
+          })
+        ).inviteTokenHash,
+      ).toBeNull();
+    });
   });
 
   it('refuses a disabled staff member at once', async () => {
