@@ -641,6 +641,7 @@ describe('legacy MCP hosts (domain move)', () => {
       {
         increment: () => Promise.resolve({ isBlocked: false }),
       } as unknown as ThrottlerStorage,
+      {} as never,
     );
     const resourceOn = async (hostname: string) =>
       (
@@ -681,6 +682,7 @@ describe('CloudMcpController protected resource metadata', () => {
       control,
       {} as never,
       limits(),
+      {} as never,
     );
     const expected = {
       resource: MCP_URL,
@@ -702,6 +704,7 @@ describe('CloudMcpController protected resource metadata', () => {
       { tenant: { findUnique: () => Promise.resolve(null) } } as never,
       {} as never,
       limits(),
+      {} as never,
     );
     await expect(
       gone.protectedResourceMetadata('nope', 'x', request),
@@ -716,6 +719,7 @@ describe('CloudMcpController protected resource metadata', () => {
       { tenant: { findUnique } } as never,
       {} as never,
       limits(true),
+      {} as never,
     );
     const error = await controller
       .protectedResourceMetadata('acme', 'copilot-1', request)

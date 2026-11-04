@@ -40,7 +40,6 @@ import { ContactFlowService } from './contact-flow.service';
 import { AccountService } from './account.service';
 import { renderBadge } from './badge.svg';
 import { DigestService } from './digest.service';
-import { LaunchOfferService } from './launch-offer.service';
 import { MembersService } from './members.service';
 import { ProfileService } from './profile.service';
 import { verifyToken } from './signed-token';
@@ -70,28 +69,16 @@ const PrefsBody = z.object({
 
 /**
  * Unauthenticated by design; each route is rate limited per address and reads the control DB
- * only (the badge and counter are cached snapshots), so they cannot be used to load a workspace.
+ * only (the badge is a cached snapshot), so they cannot be used to load a workspace.
  */
 @ApiTags('public')
 @Controller('public')
 export class GrowthPublicController {
   constructor(
-    private readonly offer: LaunchOfferService,
     private readonly profiles: ProfileService,
     private readonly digest: DigestService,
     private readonly config: ConfigService<AppConfig, true>,
   ) {}
-
-  @Get('launch-offer')
-  @Throttle({ human: { limit: 60, ttl: 60_000 } })
-  @Header('Cache-Control', 'public, max-age=30, s-maxage=30')
-  @ApiOperation({
-    summary: 'Launch offer counter',
-    description: 'How many of the free Pro slots are left. Numbers only.',
-  })
-  counter() {
-    return this.offer.counter();
-  }
 
   @Get('badge/:file')
   @Throttle({ human: { limit: 120, ttl: 60_000 } })

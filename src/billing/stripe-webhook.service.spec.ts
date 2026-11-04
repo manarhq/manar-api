@@ -1,21 +1,22 @@
 import { BadRequestException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
-import { CompanyQuantityService } from './company-quantity.service';
 import { EntitlementsService } from './entitlements.service';
+import { PRICE } from './stripe.gateway';
 import { StripeWebhookService } from './stripe-webhook.service';
 
-const PRICES: Record<string, string> = {
-  PRO_MONTHLY: 'price_pm',
-  PRO_YEARLY: 'price_py',
-  COMPANY_USER: 'price_cu',
-  EXTRA_DEVICE: 'price_ed',
+const PRICE_IDS: Record<string, string> = {
+  [PRICE.CREDITS_1000]: 'price_credits',
+  [PRICE.PRO_EXTRA_DEVICE]: 'price_extra',
+  [PRICE.COMPANY_SEAT_MONTHLY]: 'price_seat_m',
 };
+const item = (lookup_key: string, quantity = 1) => ({
+  quantity,
+  price: { id: `price_${lookup_key}`, lookup_key },
+});
 
-function make(
-  rows: Record<string, Record<string, unknown>>,
-  keepPro?: { complete: (...a: unknown[]) => Promise<void> },
-) {
+function make(rows: Record<string, Record<string, unknown>>) {
   const events = new Set<string>();
+  const claims: Record<string, unknown>[] = [];
   const find = (where: { tenantId?: string; stripeCustomerId?: string }) =>
     Object.values(rows).find(
       (r) =>
@@ -46,6 +47,9 @@ function make(
       ),
     },
     stripeEvent: {
+      findUnique: vi.fn(({ where }: { where: { id: string } }) =>
+        Promise.resolve(events.has(where.id) ? { id: where.id } : null),
+      ),
       create: vi.fn(({ data }: { data: { id: string } }) => {
         if (events.has(data.id))
           return Promise.reject(
@@ -54,10 +58,29 @@ function make(
         events.add(data.id);
         return Promise.resolve();
       }),
-      delete: vi.fn(({ where }: { where: { id: string } }) => {
-        events.delete(where.id);
-        return Promise.resolve();
+    },
+    trialClaim: {
+      findFirst: vi.fn(({ where }: { where: { tenantId: string } }) =>
+        Promise.resolve(
+          claims.find((c) => c.tenantId === where.tenantId) ?? null,
+        ),
+      ),
+      create: vi.fn(({ data }: { data: Record<string, unknown> }) => {
+        if (
+          data.cardFingerprint &&
+          claims.some((c) => c.cardFingerprint === data.cardFingerprint)
+        )
+          return Promise.reject(
+            Object.assign(new Error('dup'), { code: 'P2002' }),
+          );
+        claims.push(data);
+        return Promise.resolve(data);
       }),
+    },
+    tenant: {
+      findUnique: vi.fn(() =>
+        Promise.resolve({ ownerIssuer: 'iss', ownerSubject: 'owner' }),
+      ),
     },
   };
   const audit = { recordSafely: vi.fn(() => Promise.resolve()) };
@@ -71,19 +94,59 @@ function make(
   let next: unknown = null;
   let live: unknown = null;
   const sub = vi.fn(() => Promise.resolve(live));
+  const stripe = {
+    subscriptions: { retrieve: sub, cancel: vi.fn(() => Promise.resolve()) },
+    subscriptionItems: { create: vi.fn(() => Promise.resolve()) },
+    charges: {
+      retrieve: vi.fn(() => Promise.resolve({ customer: 'cus_1' })),
+    },
+    paymentMethods: {
+      retrieve: vi.fn((id: string) =>
+        Promise.resolve({ card: { fingerprint: `fp_${id}` } }),
+      ),
+    },
+    checkout: {
+      sessions: {
+        listLineItems: vi.fn(() =>
+          Promise.resolve({
+            data: [{ price: { id: 'price_credits' }, quantity: 3 }],
+          }),
+        ),
+      },
+    },
+    invoices: {
+      retrieve: vi.fn(() =>
+        Promise.resolve({
+          id: 'in_top',
+          status: 'paid',
+          lines: {
+            data: [
+              {
+                pricing: { price_details: { price: 'price_credits' } },
+                quantity: 2,
+              },
+            ],
+          },
+        }),
+      ),
+    },
+  };
   const gateway = {
     constructEvent: vi.fn(() => {
       if (next === 'bad') throw new Error('bad signature');
       return next;
     }),
-    price: (n: string) => PRICES[n],
-    client: () => ({ subscriptions: { retrieve: sub } }),
+    price: (k: string) => Promise.resolve(PRICE_IDS[k] ?? `price_${k}`),
+    client: () => stripe,
   };
+  const wallet = { addPaidLot: vi.fn(() => Promise.resolve(1000)) };
   const svc = new StripeWebhookService(
     control as never,
     entitlements,
     gateway as never,
-    keepPro as never,
+    wallet as never,
+    audit as never,
+    { getClient: () => Promise.resolve({}) } as never,
   );
   const send = (event: unknown) => {
     next = event;
@@ -102,7 +165,10 @@ function make(
     control,
     audit,
     gateway,
+    stripe,
+    wallet,
     sub,
+    claims,
     setLive: (v: unknown) => (live = v),
   };
 }
@@ -110,14 +176,13 @@ function make(
 const subEvent = (id: string, o: Record<string, unknown> = {}) => ({
   id,
   type: 'customer.subscription.updated',
-  created: 1_800_000_000,
   data: {
     object: {
       id: 'sub_1',
       customer: 'cus_1',
       status: 'active',
       metadata: { tenantId: 't1' },
-      items: { data: [{ price: { id: 'price_pm' } }] },
+      items: { data: [item(PRICE.PRO_MONTHLY), item(PRICE.PRO_EXTRA_DEVICE)] },
       ...o,
     },
   },
@@ -154,7 +219,7 @@ describe('StripeWebhookService', () => {
     expect(control.stripeEvent.create).not.toHaveBeenCalled();
   });
 
-  it('applies a subscription once; a duplicate delivery is ignored', async () => {
+  it('maps Pro by lookup key, once; a duplicate delivery is ignored', async () => {
     const { send, rows, audit } = make(row());
     expect(await send(subEvent('evt_1'))).toEqual({ received: true });
     expect(rows.t1).toMatchObject({
@@ -169,6 +234,15 @@ describe('StripeWebhookService', () => {
     });
     expect(rows.t1!.plan).toBe('free');
     expect(audit.recordSafely).toHaveBeenCalledTimes(1);
+  });
+
+  it("an event whose apply failed is applied on Stripe's retry", async () => {
+    const { send, rows, sub } = make(row());
+    sub.mockRejectedValueOnce(new Error('process stopped'));
+    await expect(send(subEvent('evt_9'))).rejects.toThrow();
+    expect(rows.t1!.plan).toBe('free');
+    expect(await send(subEvent('evt_9'))).toEqual({ received: true });
+    expect(rows.t1!.plan).toBe('pro');
   });
 
   it('rejects a cross-tenant spoof: metadata names another tenant than the customer', async () => {
@@ -193,7 +267,7 @@ describe('StripeWebhookService', () => {
     expect(rows.t1!.plan).toBe('free');
   });
 
-  it('cancellation downgrades to free and keeps nothing else', async () => {
+  it('cancellation downgrades to free', async () => {
     const { send, rows } = make(row());
     await send(subEvent('evt_4'));
     await send({ ...subEvent('evt_5'), type: 'customer.subscription.deleted' });
@@ -213,193 +287,195 @@ describe('StripeWebhookService', () => {
     });
   });
 
-  const inv = (id: string, type: string) => ({
-    id,
-    type,
-    created: 1_800_000_100,
-    data: { object: { id: 'in_1', customer: 'cus_1' } },
-  });
-  const liveSub = (o: Record<string, unknown> = {}) => ({
-    id: 'sub_1',
-    customer: 'cus_1',
-    status: 'active',
-    items: { data: [{ price: { id: 'price_pm' } }] },
-    ...o,
+  it('a subscription with an unknown price (the retired $9 one) changes nothing', async () => {
+    const { send, rows } = make(row());
+    await send(
+      subEvent('evt_old', { items: { data: [item('price_old_pro_9')] } }),
+    );
+    expect(rows.t1!.plan).toBe('free');
   });
 
   it('invoice events derive status from the live subscription', async () => {
     const { send, rows, setLive } = make(row());
     await send(subEvent('evt_8'));
-    setLive(liveSub({ status: 'past_due' }));
-    await send(inv('evt_9', 'invoice.payment_failed'));
-    expect(rows.t1!.status).toBe('past_due');
-    setLive(liveSub());
-    await send(inv('evt_10', 'invoice.paid'));
-    expect(rows.t1!.status).toBe('active');
-  });
-
-  it('a late payment_failed cannot overwrite a newer paid state', async () => {
-    const { send, rows, setLive } = make(row());
-    await send(subEvent('evt_8'));
-    setLive(liveSub()); // Stripe already says paid and active
-    await send(inv('evt_11', 'invoice.payment_failed'));
-    expect(rows.t1!.status).toBe('active');
-  });
-
-  it('an invoice event does not drop a later-delivered plan change', async () => {
-    const { send, rows } = make(row());
-    await send(subEvent('evt_8'));
-    await send(inv('evt_12', 'invoice.paid')); // newer timestamp than the update below
+    const live = subEvent('x').data.object;
+    setLive({ ...live, status: 'past_due' });
     await send({
-      ...subEvent('evt_13', {
-        items: { data: [{ price: { id: 'price_py' } }] },
-      }),
-      created: 1_700_000_000,
+      id: 'evt_10',
+      type: 'invoice.payment_failed',
+      data: { object: { id: 'in_1', customer: 'cus_1' } },
     });
-    expect(rows.t1).toMatchObject({ plan: 'pro', billingInterval: 'year' });
+    expect(rows.t1!.status).toBe('past_due');
+    setLive(live);
+    await send({
+      id: 'evt_11',
+      type: 'invoice.paid',
+      data: { object: { id: 'in_1', customer: 'cus_1' } },
+    });
+    expect(rows.t1!.status).toBe('active');
   });
 
-  it('the Company price makes a company plan', async () => {
-    const { send, rows } = make(row());
+  it('Pro yearly gets its monthly extra-device item added once', async () => {
+    const { send, rows, stripe } = make(row());
     await send(
-      subEvent('evt_11', { items: { data: [{ price: { id: 'price_cu' } }] } }),
+      subEvent('evt_y', { items: { data: [item(PRICE.PRO_YEARLY)] } }),
     );
-    expect(rows.t1!.plan).toBe('company');
-  });
-});
-
-describe('CompanyQuantityService', () => {
-  const PERIOD = 1_790_000_000;
-  function quantity(
-    items: { id: string; price: string; quantity: number }[],
-    billed: { users: number; extraDevices: number },
-  ) {
-    const update = vi.fn(() => Promise.resolve());
-    const create = vi.fn(() => Promise.resolve());
-    const billable = vi.fn(() => Promise.resolve(billed));
-    const svc = new CompanyQuantityService(
-      {} as never,
-      { billable } as never,
+    expect(rows.t1).toMatchObject({ plan: 'pro', billingInterval: 'year' });
+    expect(stripe.subscriptionItems.create).toHaveBeenCalledWith(
       {
-        price: (n: string) => PRICES[n],
-        client: () => ({
-          subscriptions: {
-            retrieve: () =>
-              Promise.resolve({
-                items: {
-                  data: items.map((i) => ({
-                    id: i.id,
-                    price: { id: i.price },
-                    quantity: i.quantity,
-                    current_period_start: PERIOD,
-                  })),
-                },
-              }),
-          },
-          subscriptionItems: { update, create },
-        }),
-      } as never,
+        subscription: 'sub_1',
+        price: 'price_extra',
+        proration_behavior: 'none',
+      },
+      { idempotencyKey: 'manar-usage-item-sub_1' },
     );
-    return { svc, update, create, billable };
-  }
-
-  it('raises with prorations, creates the device item, and counts from the period start', async () => {
-    const { svc, update, create, billable } = quantity(
-      [{ id: 'si_u', price: 'price_cu', quantity: 1 }],
-      { users: 4, extraDevices: 2 },
-    );
-    await svc.syncTenant('t1', 'sub_1');
-    expect(billable).toHaveBeenCalledWith('t1', new Date(PERIOD * 1000));
-    expect(update).toHaveBeenCalledWith('si_u', {
-      quantity: 4,
-      proration_behavior: 'create_prorations',
-    });
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ price: 'price_ed', quantity: 2 }),
-    );
-  });
-
-  it('applies decreases unprorated, at renewal', async () => {
-    const { svc, update } = quantity(
-      [
-        { id: 'si_u', price: 'price_cu', quantity: 5 },
-        { id: 'si_d', price: 'price_ed', quantity: 4 },
-      ],
-      { users: 3, extraDevices: 1 },
-    );
-    await svc.syncTenant('t1', 'sub_1');
-    expect(update).toHaveBeenCalledWith('si_u', {
-      quantity: 3,
-      proration_behavior: 'none',
-    });
-    expect(update).toHaveBeenCalledWith('si_d', {
-      quantity: 1,
-      proration_behavior: 'none',
-    });
-  });
-
-  it('a failing round is logged and does not crash the worker', async () => {
-    vi.useFakeTimers();
-    const findMany = vi.fn(() => Promise.reject(new Error('db down')));
-    const svc = new CompanyQuantityService(
-      { tenantEntitlement: { findMany } } as never,
-      {} as never,
-      { configured: true } as never,
-    );
-    const unhandled = vi.fn();
-    process.on('unhandledRejection', unhandled);
-    svc.onModuleInit();
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(findMany).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(24 * 3600 * 1000); // and it still runs the next day
-    expect(findMany).toHaveBeenCalledTimes(2);
-    expect(unhandled).not.toHaveBeenCalled();
-    process.off('unhandledRejection', unhandled);
-    svc.onModuleDestroy();
-    vi.useRealTimers();
-  });
-});
-
-describe('setup-mode checkout (launch offer, Keep Pro)', () => {
-  it('hands the session to KeepProService for the tenant of the customer', async () => {
-    const keepPro = { complete: vi.fn(() => Promise.resolve()) };
-    const f = make(
-      { t1: { tenantId: 't1', stripeCustomerId: 'cus_1', plan: 'pro' } },
-      keepPro,
-    );
-    const session = {
-      id: 'cs_1',
-      mode: 'setup',
-      customer: 'cus_1',
-      metadata: { tenantId: 't1' },
-    };
-    await f.send({
-      id: 'evt_keep',
-      type: 'checkout.session.completed',
-      data: { object: session },
-    });
-    expect(keepPro.complete).toHaveBeenCalledWith('t1', session);
-  });
-
-  it('refuses a session whose metadata names another tenant', async () => {
-    const keepPro = { complete: vi.fn(() => Promise.resolve()) };
-    const f = make(
-      { t1: { tenantId: 't1', stripeCustomerId: 'cus_1', plan: 'pro' } },
-      keepPro,
-    );
-    const session = {
-      id: 'cs_2',
-      mode: 'setup',
-      customer: 'cus_1',
-      metadata: { tenantId: 'other' },
-    };
-    await expect(
-      f.send({
-        id: 'evt_spoof',
-        type: 'checkout.session.completed',
-        data: { object: session },
+    await send(
+      subEvent('evt_y2', {
+        items: {
+          data: [item(PRICE.PRO_YEARLY), item(PRICE.PRO_EXTRA_DEVICE)],
+        },
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    expect(keepPro.complete).not.toHaveBeenCalled();
+    );
+    expect(stripe.subscriptionItems.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('Company yearly records committed seats (at least 3) and adds the monthly seat item', async () => {
+    const { send, rows, stripe } = make(row());
+    await send(
+      subEvent('evt_cy', {
+        items: { data: [item(PRICE.COMPANY_SEAT_YEARLY, 2)] },
+      }),
+    );
+    expect(rows.t1).toMatchObject({ plan: 'company', committedSeats: 3 });
+    expect(stripe.subscriptionItems.create).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 'price_seat_m' }),
+      expect.anything(),
+    );
+  });
+
+  it('a trialing Company subscription is a company trial, claimed with its card', async () => {
+    const { send, rows, claims } = make(row());
+    await send(
+      subEvent('evt_tr', {
+        status: 'trialing',
+        trial_end: 1_900_000_000,
+        default_payment_method: 'pm_a',
+        items: { data: [item(PRICE.COMPANY_SEAT_MONTHLY)] },
+      }),
+    );
+    expect(rows.t1).toMatchObject({
+      plan: 'company_trial',
+      trialEndsAt: new Date(1_900_000_000_000),
+    });
+    expect(claims[0]).toMatchObject({
+      kind: 'company',
+      cardFingerprint: 'fp_pm_a',
+    });
+  });
+
+  it('a card that already had a company trial cancels the second trial at once', async () => {
+    const { send, rows, stripe } = make(row());
+    await send(
+      subEvent('evt_a', {
+        customer: 'cus_2',
+        metadata: { tenantId: 't2' },
+        status: 'trialing',
+        default_payment_method: 'pm_same',
+        items: { data: [item(PRICE.COMPANY_SEAT_MONTHLY)] },
+      }),
+    );
+    await send(
+      subEvent('evt_b', {
+        status: 'trialing',
+        default_payment_method: 'pm_same',
+        items: { data: [item(PRICE.COMPANY_SEAT_MONTHLY)] },
+      }),
+    );
+    expect(stripe.subscriptions.cancel).toHaveBeenCalledWith('sub_1');
+    expect(rows.t1).toMatchObject({ plan: 'free', stripeSubscriptionId: null });
+    expect(rows.t1!.trialEndsAt).toBeInstanceOf(Date);
+  });
+
+  it('a paid credit-pack Checkout adds credits from the paid line items, not metadata', async () => {
+    const { send, wallet } = make(row());
+    await send({
+      id: 'evt_c',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: 'cs_1',
+          mode: 'payment',
+          payment_status: 'paid',
+          customer: 'cus_1',
+          metadata: { tenantId: 't1', credits: '999999' },
+        },
+      },
+    });
+    expect(wallet.addPaidLot).toHaveBeenCalledWith('t1', 'cs_1', 'purchase', [
+      { lookupKey: PRICE.CREDITS_1000, quantity: 3 },
+    ]);
+  });
+
+  it('an unpaid credit Checkout adds nothing', async () => {
+    const { send, wallet } = make(row());
+    await send({
+      id: 'evt_u',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: 'cs_2',
+          mode: 'payment',
+          payment_status: 'unpaid',
+          customer: 'cus_1',
+        },
+      },
+    });
+    expect(wallet.addPaidLot).not.toHaveBeenCalled();
+  });
+
+  it('a paid auto top-up invoice adds a top_up lot from the live invoice lines', async () => {
+    const { send, wallet, sub } = make(row());
+    await send({
+      id: 'evt_t',
+      type: 'invoice.paid',
+      data: {
+        object: {
+          id: 'in_top',
+          customer: 'cus_1',
+          metadata: { purpose: 'credit_top_up', tenantId: 't1' },
+        },
+      },
+    });
+    expect(wallet.addPaidLot).toHaveBeenCalledWith('t1', 'in_top', 'top_up', [
+      { lookupKey: PRICE.CREDITS_1000, quantity: 2 },
+    ]);
+    expect(sub).not.toHaveBeenCalled();
+  });
+
+  it('a dispute freezes paid features; winning it restores them', async () => {
+    const { send, rows, audit } = make(row());
+    await send(subEvent('evt_p'));
+    await send({
+      id: 'evt_d1',
+      type: 'charge.dispute.created',
+      data: {
+        object: { id: 'dp_1', charge: 'ch_1', status: 'needs_response' },
+      },
+    });
+    expect(rows.t1).toMatchObject({ plan: 'pro', status: 'frozen' });
+    expect(audit.recordSafely).toHaveBeenCalledWith(
+      expect.anything(),
+      't1',
+      expect.objectContaining({ eventType: 'billing.dispute.changed' }),
+    );
+    // A subscription update while frozen keeps it frozen.
+    await send(subEvent('evt_p2'));
+    expect(rows.t1!.status).toBe('frozen');
+    await send({
+      id: 'evt_d2',
+      type: 'charge.dispute.closed',
+      data: { object: { id: 'dp_1', charge: 'ch_1', status: 'won' } },
+    });
+    expect(rows.t1!.status).toBe('active');
   });
 });

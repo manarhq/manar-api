@@ -48,7 +48,6 @@ describe('unsubscribe', () => {
     const unsubscribe = vi.fn(() => Promise.resolve(true));
     const c = new GrowthPublicController(
       {} as never,
-      {} as never,
       { unsubscribe } as never,
       { get: () => 's'.repeat(32) } as never,
     );

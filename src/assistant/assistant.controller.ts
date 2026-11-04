@@ -1,3 +1,4 @@
+import { UsageMeterService } from '../billing/usage-meter.service';
 import {
   Body,
   Controller,
@@ -37,7 +38,10 @@ delete chatBodySchema.$schema;
 @Controller('assistant')
 @UseGuards(JwtAuthGuard)
 export class AssistantController {
-  constructor(private readonly assistant: AssistantService) {}
+  constructor(
+    private readonly assistant: AssistantService,
+    private readonly meter: UsageMeterService,
+  ) {}
 
   @Post('chat')
   @HttpCode(200)
@@ -55,6 +59,12 @@ export class AssistantController {
   @ApiResponse({ status: 400, type: ErrorResponseDto })
   @ApiResponse({ status: 401, type: ErrorResponseDto })
   @ApiResponse({ status: 429, type: ErrorResponseDto })
+  @ApiResponse({
+    status: 402,
+    type: ErrorResponseDto,
+    description:
+      'Paused: the monthly AI allowance is used and no credits or cap are left. Protection is not affected.',
+  })
   async chat(
     @CurrentAuth() auth: AuthContext,
     @Headers('authorization') authorization: string | undefined,
@@ -62,6 +72,9 @@ export class AssistantController {
   ): Promise<AssistantChatResponse> {
     // JwtAuthGuard already verified this exact header.
     if (!authorization) throw new UnauthorizedException();
-    return this.assistant.chat(auth, authorization, body);
+    // One AI action (paid extra), given back when no model answered or the request failed.
+    return this.meter.ai(auth.tenant.id, () =>
+      this.assistant.chat(auth, authorization, body),
+    );
   }
 }

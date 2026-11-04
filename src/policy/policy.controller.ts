@@ -1,3 +1,4 @@
+import { UsageMeterService } from '../billing/usage-meter.service';
 import {
   BadRequestException,
   Body,
@@ -123,6 +124,7 @@ export class PolicyController {
   constructor(
     private readonly policyService: PolicyService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly meter: UsageMeterService,
   ) {}
 
   @Post()
@@ -247,11 +249,14 @@ export class PolicyController {
       auth.tenant.id,
     );
 
-    const result = await mapPolicyErrors(() =>
-      this.policyService.suggestPolicy(tenantClient, auth.tenant.id, {
-        ...input,
-        authorId: auth.user.id,
-      }),
+    // One AI action (paid extra), given back when no model answered.
+    const result = await this.meter.ai(auth.tenant.id, () =>
+      mapPolicyErrors(() =>
+        this.policyService.suggestPolicy(tenantClient, auth.tenant.id, {
+          ...input,
+          authorId: auth.user.id,
+        }),
+      ),
     );
 
     return {

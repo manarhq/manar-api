@@ -261,3 +261,44 @@ describe('ADR-004 — synchronous decision path dependencies', () => {
     );
   });
 });
+
+/**
+ * Pay-as-you-go pricing (workspace spec 2026-11-04-payg, section 10): safety is never metered.
+ * Blocks, approvals, the device APIs, the vault, kill switches and the audit write path must not
+ * be able to reach the usage meter or the wallet, so running out of credits can never touch them.
+ */
+describe('safety is never metered', () => {
+  const METERED = [
+    resolve(SRC, 'billing/usage-meter.service.ts'),
+    resolve(SRC, 'billing/wallet.service.ts'),
+  ];
+  const SAFETY = [
+    'authorization/authorization.service.ts',
+    'approvals/approval-request.service.ts',
+    'approvals/grant.service.ts',
+    'approvals/host-approvals.service.ts',
+    'host-mtls/host-auth.guard.ts',
+    'host-mtls/host-config.controller.ts',
+    'hosts/hosts.service.ts',
+    'secrets/secrets.service.ts',
+    'kill-switches/kill-switch.service.ts',
+    'audit/audit.service.ts',
+  ];
+
+  it.each(SAFETY)('%s cannot reach the usage meter or the wallet', (entry) => {
+    const file = resolve(SRC, entry);
+    expect(existsSync(file), entry).toBe(true);
+    const graph = reachableModules(file);
+    const hit = METERED.find((m) => graph.has(m));
+    const trail = hit
+      ? (graph.get(hit) ?? [])
+          .map((f) => f.replace(`${SRC}/`, ''))
+          .join('\n  -> ')
+      : '';
+    expect(hit, trail).toBeUndefined();
+  });
+
+  it('the meter is where this test looks for it', () => {
+    for (const m of METERED) expect(existsSync(m), m).toBe(true);
+  });
+});

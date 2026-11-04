@@ -12,20 +12,13 @@ const int = (min: number, max: number) =>
   );
 
 /**
- * Growth track (launch offer, badge, weekly digest, invites, account deletion). Secrets
+ * Growth track (badge, weekly digest, invites, account deletion). Secrets
  * (MANAR_LINK_SECRET, ACS_EMAIL_CONNECTION_STRING) come from ExternalSecrets. Without the link
  * secret nothing signed (invites, unsubscribe, cancel links) is issued or accepted; without the
  * ACS string nothing is emailed. Every key is optional (like the auth settings) so existing
  * fixtures keep validating; `growthSetting` supplies the defaults.
  */
 export const GrowthConfigSchema = z.object({
-  /** Off switch for the launch offer. On by default; it also needs Stripe and a Pro monthly price. */
-  LAUNCH_OFFER_ENABLED: flag,
-  LAUNCH_OFFER_SLOTS: int(1, 100_000),
-  LAUNCH_OFFER_MONTHS: int(1, 12),
-  /** Claims per day from one (non-consumer) email domain, and from one IP address. */
-  LAUNCH_OFFER_DOMAIN_DAILY_CAP: int(1, 1000),
-  LAUNCH_OFFER_IP_DAILY_CAP: int(1, 1000),
   /** HMAC key for signed links, at least 32 characters. */
   MANAR_LINK_SECRET: optional.pipe(z.string().min(32).optional()),
   /** `endpoint=https://<name>.communication.azure.com/;accesskey=<base64>` */
@@ -40,11 +33,6 @@ export const GrowthConfigSchema = z.object({
 });
 
 const DEFAULTS = {
-  LAUNCH_OFFER_ENABLED: 'true',
-  LAUNCH_OFFER_SLOTS: 100,
-  LAUNCH_OFFER_MONTHS: 3,
-  LAUNCH_OFFER_DOMAIN_DAILY_CAP: 3,
-  LAUNCH_OFFER_IP_DAILY_CAP: 5,
   MAIL_FROM: 'noreply@fixio.ae',
   MAIL_REPLY_TO: 'support@fixio.ae',
   WEEKLY_DIGEST_ENABLED: 'true',

@@ -1,7 +1,9 @@
 import { EntitlementsService } from '../../src/billing/entitlements.service';
 import type { ControlPrismaService } from '../../src/database/control-prisma.service';
 
-function entitlements(row: { plan: string; status: string } | null) {
+function entitlements(
+  row: { plan: string; status: string; trialEndsAt?: Date } | null,
+) {
   return new EntitlementsService(
     { tenantEntitlement: { findUnique: () => Promise.resolve(row) } } as never,
     { get: () => 'http://localhost:3001' } as never,
@@ -11,9 +13,17 @@ function entitlements(row: { plan: string; status: string } | null) {
   );
 }
 
-/** The real service with no billing row for any tenant, so every tenant is on the free plan. */
+/**
+ * The real service with every tenant on a non-paying plan with a 3-device cap: the personal trial
+ * (Free itself has 1 device since pay-as-you-go pricing). The device specs were written against a
+ * cap of 3, which is what they exercise.
+ */
 export function freeEntitlements(): EntitlementsService {
-  return entitlements(null);
+  return entitlements({
+    plan: 'trial',
+    status: 'active',
+    trialEndsAt: new Date(Date.now() + 14 * 86_400_000),
+  });
 }
 
 /** The real service with an active Company row for every tenant (no device cap). */

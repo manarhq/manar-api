@@ -421,6 +421,8 @@ model ReportShare {
 
 enum EntitlementPlan {
   free
+  /// The personal 14-day trial (up to 3 devices); reads as free after trialEndsAt.
+  trial
   pro
   company_trial
   company
@@ -433,6 +435,8 @@ enum EntitlementStatus {
   /// Lapsed company trial or unpaid: reads and export only (EntitlementsService.get derives this
   /// for an expired trial; Stripe events set it for non-payment).
   read_only
+  /// A card dispute is open: paid features stop (Free limits), safety stays, staff review.
+  frozen
 }
 
 /// Plan, limits source and Stripe ids per tenant (docs/billing.md). No row means the free plan.
@@ -452,6 +456,8 @@ model TenantEntitlement {
   lastStripeEventAt    DateTime?
   /// Granted by hand (pilot and demo tenants that pre-date plans), not by Stripe or a trial.
   manual               Boolean           @default(false)
+  /// Company yearly: seats paid for the year (at least 3). Seats above it are billed monthly.
+  committedSeats       Int?
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
 
@@ -697,4 +703,131 @@ model ProductSample {
   @@index([tenantId])
   @@index([createdAt])
   @@map("product_samples")
+}
+
+/// Pay-as-you-go wallet settings per tenant (docs/billing.md). The balance is the sum of its lots.
+model CreditWallet {
+  tenantId       String    @id
+  /// Credits that may be spent above the allowance per month; null = no cap.
+  capCredits     Int?
+  autoTopUp      Boolean   @default(false)
+  /// An auto top-up is being charged (claim; stale after 15 minutes).
+  topUpPendingAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@map("credit_wallets")
+}
+
+enum CreditSource {
+  purchase
+  top_up
+  referral
+  promo
+  contract
+}
+
+/// Prepaid credits, spent oldest expiry first. 1 credit = 1 AI action or 1 cloud-agent minute.
+model CreditLot {
+  id        String       @id @default(uuid())
+  tenantId  String
+  source    CreditSource
+  credits   Int
+  remaining Int
+  expiresAt DateTime
+  /// Checkout session or invoice id that paid for it: a webhook replay adds nothing.
+  stripeRef String?      @unique
+  createdAt DateTime     @default(now())
+
+  @@index([tenantId, expiresAt])
+  @@map("credit_lots")
+}
+
+/// Per tenant per calendar month (UTC, `2026-11`): allowance use, credits spent, alerts sent.
+model UsageMonth {
+  tenantId     String
+  month        String
+  aiUsed       Int      @default(0)
+  minutesUsed  Int      @default(0)
+  creditsSpent Int      @default(0)
+  topUps       Int      @default(0)
+  /// Alert keys already sent this month, e.g. `ai:80`, `cap:100`, `credits:low`.
+  alertsSent   String[] @default([])
+  updatedAt    DateTime @updatedAt
+
+  @@id([tenantId, month])
+  @@map("usage_months")
+}
+
+enum UsageKind {
+  ai
+  cloud_minute
+}
+
+/// One metered use. The key is unique per tenant, so a retry or a second call in the same
+/// cloud-agent minute costs nothing. Kept 13 months.
+model UsageEvent {
+  tenantId  String
+  key       String
+  kind      UsageKind
+  /// `allowance` or `credits`.
+  source    String
+  /// The lot a credit came from, so a use whose answer never came can be given back.
+  lotId     String?
+  createdAt DateTime  @default(now())
+
+  @@id([tenantId, key])
+  @@index([createdAt])
+  @@map("usage_events")
+}
+
+/// A UTC day on which a device was online or a person was active (seat). Billing counts only.
+model ActiveDay {
+  tenantId  String
+  /// `device` (host id) or `seat` (Keycloak subject).
+  kind      String
+  subjectId String
+  day       DateTime @db.Date
+
+  @@id([tenantId, kind, subjectId, day])
+  @@index([tenantId, day])
+  @@map("active_days")
+}
+
+/// Meter events for Stripe, queued until sent (`reportedAt`). The identifier makes a resend a no-op.
+model MeterReport {
+  identifier String    @id
+  tenantId   String
+  meter      String
+  month      String
+  value      Int
+  reportedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([tenantId, meter, month])
+  @@index([reportedAt])
+  @@map("meter_reports")
+}
+
+/// One 14-day personal trial or company trial per person, email, device, TPM key and card.
+model TrialClaim {
+  id              String   @id @default(uuid())
+  tenantId        String   @unique
+  /// `personal` or `company`.
+  kind            String
+  issuer          String
+  subject         String
+  emailHash       String?  @unique
+  emailDomain     String?
+  deviceHash      String?  @unique
+  ekHash          String?  @unique
+  ipHash          String?
+  cardFingerprint String?  @unique
+  /// Reminder days already sent (10, 13, 14).
+  remindersSent   Int[]    @default([])
+  claimedAt       DateTime @default(now())
+
+  @@unique([issuer, subject, kind])
+  @@index([claimedAt])
+  @@map("trial_claims")
 }

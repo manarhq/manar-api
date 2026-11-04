@@ -6,6 +6,7 @@ import {
   Headers,
   HttpCode,
   Post,
+  Put,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -23,14 +24,24 @@ import type { AuthContext } from '../auth/auth-context';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RequireRole } from '../auth/require-role.decorator';
 import { RolesGuard } from '../auth/roles.guard';
-import { BillingService } from './billing.service';
+import { BillingService, CHECKOUT_PLANS } from './billing.service';
 import { ContactEmailService } from '../contact/contact-email.service';
-import { KeepProService } from './keep-pro.service';
 import { StripeWebhookService } from './stripe-webhook.service';
+import { WalletService } from './wallet.service';
 
 const CheckoutSchema = z.object({
-  plan: z.enum(['pro_monthly', 'pro_yearly', 'company']),
+  plan: z.enum(CHECKOUT_PLANS),
+  /** Company yearly: seats to commit for the year (at least 3). */
+  seats: z.number().int().min(3).max(10_000).optional(),
 });
+const CreditsSchema = z.object({ packs: z.number().int().min(1).max(20) });
+const WalletSchema = z
+  .object({
+    /** Monthly cap in USD above the allowance; null = no cap. */
+    capUsd: z.number().int().min(0).max(100_000).nullable().optional(),
+    autoTopUp: z.boolean().optional(),
+  })
+  .strict();
 
 @ApiTags('billing')
 @ApiBearerAuth('jwt')
@@ -38,7 +49,7 @@ const CheckoutSchema = z.object({
 export class BillingController {
   constructor(
     private readonly billing: BillingService,
-    private readonly keepPro: KeepProService,
+    private readonly wallet: WalletService,
     private readonly contact: ContactEmailService,
   ) {}
 
@@ -58,10 +69,10 @@ export class BillingController {
   @RequireRole('TENANT_OWNER')
   @ApiOperation({
     summary:
-      'Stripe Checkout session URL for Pro (monthly or yearly) or Company',
+      'Stripe Checkout session URL for Pro (monthly or yearly), Company (monthly, yearly) or the Company trial',
   })
   async checkout(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
-    const { plan } = parseBodyOrThrow(CheckoutSchema, body);
+    const { plan, seats } = parseBodyOrThrow(CheckoutSchema, body);
     // The token's email can be the realm's `.invalid` placeholder: Stripe gets the verified one.
     const email = await this.contact.verified(
       auth.issuer,
@@ -73,20 +84,42 @@ export class BillingController {
         code: 'contact_email_required',
         message: 'Confirm a contact email before checkout.',
       });
-    return this.billing.checkout(auth.tenant.id, email, plan);
+    return this.billing.checkout(auth.tenant.id, email, plan, seats);
   }
 
-  @Post('keep-pro')
+  @Get('usage')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequireRole('TENANT_OWNER', 'SECURITY_ADMIN')
+  @ApiOperation({
+    summary:
+      'Usage and bill so far this month: allowance, credits, active devices or seats, forecast',
+  })
+  usage(@CurrentAuth() auth: AuthContext) {
+    return this.wallet.usage(auth.tenant.id);
+  }
+
+  @Put('wallet')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequireRole('TENANT_OWNER')
+  @ApiOperation({ summary: 'Set the monthly spend cap and auto top-up' })
+  updateWallet(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
+    return this.wallet.updateSettings(
+      auth.tenant.id,
+      parseBodyOrThrow(WalletSchema, body),
+    );
+  }
+
+  @Post('credits')
   @HttpCode(200)
   @UseGuards(JwtAuthGuard, RolesGuard)
   @RequireRole('TENANT_OWNER')
   @ApiOperation({
-    summary: 'Keep Pro after the launch-offer free months',
-    description:
-      'Stripe Checkout (setup mode) URL collecting a card, billing address and tax id. On completion automatic tax is turned on for the subscription.',
+    summary:
+      'Stripe Checkout session URL for credit packs ($5 = 1,000 credits)',
   })
-  keepProSession(@CurrentAuth() auth: AuthContext) {
-    return this.keepPro.createSession(auth.tenant.id);
+  credits(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
+    const { packs } = parseBodyOrThrow(CreditsSchema, body);
+    return this.billing.buyCredits(auth.tenant.id, packs);
   }
 
   @Post('portal')

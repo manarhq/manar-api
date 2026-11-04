@@ -1,3 +1,4 @@
+import { UsageMeterService } from '../billing/usage-meter.service';
 import {
   Body,
   Controller,
@@ -76,6 +77,7 @@ export class IncidentsController {
   constructor(
     private readonly incidentsService: IncidentsService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly meter: UsageMeterService,
   ) {}
 
   @Post()
@@ -195,11 +197,14 @@ export class IncidentsController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    return mapIncidentErrors(() =>
-      this.incidentsService.summarizeIncident(tenantClient, {
-        ...input,
-        tenantId: auth.tenant.id,
-      }),
+    // One AI action (paid extra), given back when no model answered.
+    return this.meter.ai(auth.tenant.id, () =>
+      mapIncidentErrors(() =>
+        this.incidentsService.summarizeIncident(tenantClient, {
+          ...input,
+          tenantId: auth.tenant.id,
+        }),
+      ),
     );
   }
 

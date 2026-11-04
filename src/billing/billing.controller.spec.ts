@@ -17,7 +17,12 @@ describe('POST /billing/checkout', () => {
       { verified: () => Promise.resolve('me@acme.io') } as never,
     );
     await c.checkout(auth, { plan: 'pro_monthly' });
-    expect(checkout).toHaveBeenCalledWith('t1', 'me@acme.io', 'pro_monthly');
+    expect(checkout).toHaveBeenCalledWith(
+      't1',
+      'me@acme.io',
+      'pro_monthly',
+      undefined,
+    );
   });
 
   it('answers 409 contact_email_required when there is none', async () => {
