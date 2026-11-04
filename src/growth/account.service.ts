@@ -16,6 +16,8 @@ import { DataCollectionService } from '../data-collection/data-collection.servic
 import { growthSetting } from './growth.config';
 import { ContactEmailService } from '../contact/contact-email.service';
 import { MailerService } from './mailer.service';
+import { GrowthAuditService } from './growth-audit.service';
+import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { zip } from './zip';
 
 const DAY_MS = 86_400_000;
@@ -36,9 +38,12 @@ const json = (v: unknown) =>
 /**
  * "Delete my account" (spec #34, launch brief: 7-day grace). Export first, then a graced request
  * the person can cancel. After the grace period the hourly job: cancels the Stripe subscriptions and
- * deletes the Stripe customer (invoices stay with Stripe for tax records), revokes the devices and
- * removes the personal workspace and its database, takes the person out of company workspaces
- * (their audit entries stay in those workspaces under that workspace's own retention), removes
+ * deletes the Stripe customer (invoices stay with Stripe for tax records), removes the personal
+ * devices (REMOVED, so each is told 410 device_removed and gives the person their tools back, also
+ * after the database is gone, through a `deleted_workspaces` tombstone) and the personal workspace
+ * and its database, leaves the person's company devices protected but unassigned and tells the
+ * company's owners and admins, takes the person out of company workspaces (their audit entries
+ * stay in those workspaces under that workspace's own retention), removes
  * the Keycloak user, and keeps a PII-free record (subject hashed). The launch-offer claim stays,
  * so a deleted account cannot take a slot twice.
  */
@@ -56,6 +61,7 @@ export class AccountService {
     private readonly contact: ContactEmailService,
     private readonly config: ConfigService<AppConfig, true>,
     private readonly data: DataCollectionService,
+    private readonly audit: GrowthAuditService,
   ) {}
 
   // ---- export ----
@@ -351,7 +357,8 @@ export class AccountService {
       personalWorkspaces: 0,
       companyMembershipsRemoved: 0,
       stripeCustomers: 0,
-      devicesRevoked: 0,
+      devicesRemoved: 0,
+      companyDevicesUnassigned: 0,
       keycloakUserRemoved: false,
     };
     for (const t of owned) {
@@ -371,20 +378,37 @@ export class AccountService {
           .catch(ignoreMissing);
         summary.stripeCustomers++;
       }
-      // 2. Devices revoked, then the workspace (DELETED stops every guard) and its database.
+      // 2. The tombstone first (it only counts once the workspace row is gone), then the devices
+      //    REMOVED, not REVOKED: a removed device is told 410 device_removed and gives the person
+      //    their tools back; a revoked one would keep blocking them. Then the workspace (DELETED
+      //    stops every guard) and its database.
+      await this.control.deletedWorkspace.upsert({
+        where: { slug: t.slug },
+        create: { slug: t.slug, reason: 'account_deleted' },
+        update: { reason: 'account_deleted' },
+      });
       if (t.status === 'ACTIVE') {
         const db = await this.tenants.getClient(t.id);
-        summary.devicesRevoked += (
+        summary.devicesRemoved += (
           await db.host.updateMany({
-            where: { status: { notIn: ['REVOKED', 'REMOVED'] } },
-            data: { status: 'REVOKED' },
+            where: { status: { not: 'REMOVED' } },
+            data: {
+              status: 'REMOVED',
+              removedAt: new Date(),
+              removedReason: 'account_deleted',
+            },
           })
         ).count;
       }
       await this.provisioning.deleteOwnedWorkspace(t.id);
       if (t.kind === 'PERSONAL') summary.personalWorkspaces++;
     }
-    // 3. Company workspaces keep existing: the person just leaves.
+    // 3. Company workspaces keep existing: the person just leaves. Their company devices belong to
+    //    the company: they stay protected, unassigned, and the owners and admins are told.
+    summary.companyDevicesUnassigned = await this.unassignCompanyDevices(
+      issuer,
+      subject,
+    );
     summary.companyMembershipsRemoved = (
       await this.control.membership.deleteMany({ where: { issuer, subject } })
     ).count;
@@ -405,7 +429,78 @@ export class AccountService {
     }
     return summary;
   }
+
+  /**
+   * Company devices assigned to the person (in a company, the host's `ownerSubject`) lose that
+   * person: no longer "their own" device, so approvals go to approvers, and protection is untouched.
+   * Audited in each company and mailed to its owners and admins. Idempotent for the hourly retry.
+   */
+  private async unassignCompanyDevices(
+    issuer: string,
+    subject: string,
+  ): Promise<number> {
+    const memberships = await this.control.membership.findMany({
+      where: { issuer, subject, tenant: { kind: 'COMPANY', status: 'ACTIVE' } },
+      include: { tenant: true },
+    });
+    let total = 0;
+    for (const m of memberships) {
+      const db = await this.tenants.getClient(m.tenantId);
+      const hosts = await db.host.findMany({
+        where: { ownerSubject: subject, status: { not: 'REMOVED' } },
+        select: { id: true },
+      });
+      const { count } = await db.host.updateMany({
+        where: { ownerSubject: subject, status: { not: 'REMOVED' } },
+        data: { ownerSubject: null, unassignedAt: new Date() },
+      });
+      total += count;
+      const actor = { type: 'system' as const, id: 'system:account-deletion' };
+      await this.audit.record(
+        m.tenantId,
+        AUDIT_EVENT_TYPES.MEMBER_ACCOUNT_DELETED,
+        actor,
+        { devicesUnassigned: count },
+      );
+      for (const h of hosts) {
+        await this.audit.record(
+          m.tenantId,
+          AUDIT_EVENT_TYPES.HOST_UNASSIGNED,
+          actor,
+          { hostId: h.id, reason: 'account_deleted' },
+        );
+      }
+      const admins = await this.control.membership.findMany({
+        where: {
+          tenantId: m.tenantId,
+          status: 'ACTIVE',
+          NOT: { issuer, subject },
+          OR: [
+            { role: { in: [...COMPANY_ADMIN_ROLES] } },
+            { extraRoles: { hasSome: [...COMPANY_ADMIN_ROLES] } },
+          ],
+        },
+      });
+      const text =
+        count > 0
+          ? `A member of your Manar workspace deleted their account. ${count} device(s) they used stay protected and are now unassigned: assign them to someone or release them in Devices.\n`
+          : 'A member of your Manar workspace deleted their account. They used no devices in it.\n';
+      for (const a of admins) {
+        const to = await this.contact.verified(a.issuer, a.subject);
+        if (to)
+          void this.mailer.send({
+            to,
+            subject: 'A member deleted their Manar account',
+            text,
+            html: `<p>${text.trim()}</p>`,
+          });
+      }
+    }
+    return total;
+  }
 }
+
+const COMPANY_ADMIN_ROLES = ['TENANT_OWNER', 'SECURITY_ADMIN'] as const;
 
 const ignoreMissing = (e: unknown) => {
   if ((e as { code?: string }).code === 'resource_missing') return;

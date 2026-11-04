@@ -85,7 +85,10 @@ export function sensitiveReason(input: {
  *   unless the company workspace is "admins only"; a sensitive one they can only deny;
  * - anyone else decides nothing.
  * A personal workspace has one person, so its owner approves their own sensitive requests, but
- * only after re-confirming their sign-in (`stepUp`), and the approval is recorded as such.
+ * only after re-confirming their sign-in (`stepUp`), and the approval is recorded as such. That
+ * owner never self-grants "always" (founder decision, 4 Nov 2026): once or 8 hours, and a rule made
+ * deliberately in the console for anything longer. Every request there is the owner's own, also
+ * for a device with no recorded owner. Passkeys replace the fresh sign-in in Phase A.
  */
 export function decisionRights(input: {
   admin: boolean;
@@ -96,7 +99,9 @@ export function decisionRights(input: {
   sensitive: SensitiveReason | null;
   actionId: string;
 }): DecisionRights {
-  const { admin, owner, sensitive } = input;
+  const { admin, sensitive } = input;
+  // A personal workspace has one person: whatever an approver decides there is their own.
+  const owner = input.owner || (admin && !input.company);
   if (admin) {
     if (sensitive && owner && input.company)
       return {
@@ -106,19 +111,20 @@ export function decisionRights(input: {
         canRevoke: true,
         stepUp: false,
       };
-    // Personal workspace, own sensitive request: once or deny, after a fresh sign-in. No standing
-    // permission (8 hours, always) is ever self-granted for something sensitive.
+    // Personal workspace, own sensitive request: once or 8 hours, after a fresh sign-in.
     if (sensitive && owner)
       return {
-        choices: ['approve_once', 'deny'],
+        choices: ['approve_once', 'approve_8h', 'deny'],
         needs: null,
         why: sensitive,
         canRevoke: true,
         stepUp: true,
       };
     return {
+      // "Always" is a standing permission an approver gives someone else's device; a personal
+      // owner makes a rule instead.
       choices:
-        input.actionId === SITE_CONNECT_ACTION
+        input.actionId === SITE_CONNECT_ACTION && !(owner && !input.company)
           ? ['approve_once', 'approve_8h', 'approve_always', 'deny']
           : ['approve_once', 'approve_8h', 'deny'],
       needs: null,

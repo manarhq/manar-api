@@ -10,6 +10,8 @@ import { JailSitesService } from '../jail/jail-sites.service';
 import { DataCollectionHostController } from '../data-collection/data-collection-host.controller';
 import { DataCollectionModule } from '../data-collection/data-collection.module';
 import { HostConfigController } from './host-config.controller';
+import { HostsModule } from '../hosts/hosts.module';
+import { BillingModule } from '../billing/billing.module';
 
 /** `/host/v1/*` on the mTLS listener. Other tracks add their controllers and `@UseGuards(HostAuthGuard)`. */
 @Module({
@@ -18,6 +20,10 @@ import { HostConfigController } from './host-config.controller';
     SecretsModule,
     FileChangesModule,
     DataCollectionModule,
+    // "This device moved to another workspace" (POST /host/v1/moved). HostsModule's services need
+    // EntitlementsService (BillingModule), which the mTLS app does not otherwise load.
+    BillingModule,
+    HostsModule,
   ],
   controllers: [
     HostConfigController,

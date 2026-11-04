@@ -375,7 +375,10 @@ describe('device config', () => {
       { isPaused: () => Promise.resolve(false) } as never,
       { doorConfig: () => Promise.reject(new Error('db down')) } as never,
       { getClient: () => Promise.resolve({}) } as never,
-      { features: () => Promise.resolve([]) } as never,
+      {
+        features: () => Promise.resolve([]),
+        vaultGrants: () => Promise.resolve([]),
+      } as never,
       { config: () => Promise.resolve({}) } as never,
       {
         forHost: () =>
@@ -383,6 +386,7 @@ describe('device config', () => {
             effective: { improveManar: true, aiTraining: true },
           }),
       } as never,
+      {} as never,
     );
     const cfg = await c.config(host('h1') as never);
     expect(cfg.door).toEqual({ unavailable: true });

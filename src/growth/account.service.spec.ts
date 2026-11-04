@@ -6,6 +6,9 @@ function setup(
   opts: { soleOwner?: boolean; deployment?: 'hosted' | 'customer' } = {},
 ) {
   const calls: string[] = [];
+  const hostUpdates: { where: unknown; data: Record<string, unknown> }[] = [];
+  const mails: string[] = [];
+  const audits: string[] = [];
   const row = {
     id: 'd1',
     issuer: 'https://kc/realms/manar',
@@ -14,16 +17,33 @@ function setup(
     executeAfter: new Date(0),
   };
   const control = {
+    deletedWorkspace: {
+      upsert: async (a: { where: { slug: string } }) =>
+        void calls.push(`tombstone:${a.where.slug}`),
+    },
     membership: {
-      findMany: async () =>
+      findMany: async (a: { where: Record<string, unknown> }) =>
         opts.soleOwner
           ? [{ tenantId: 'co', role: 'TENANT_OWNER', extraRoles: [] }]
-          : [],
+          : 'subject' in a.where
+            ? // the deleted person's company memberships
+              [
+                {
+                  tenantId: 'co',
+                  role: 'DEVELOPER',
+                  extraRoles: [],
+                  tenant: { id: 'co', kind: 'COMPANY', status: 'ACTIVE' },
+                },
+              ]
+            : // that company's owners and admins
+              [{ issuer: 'https://kc/realms/manar', subject: 'boss' }],
       count: async () => 0,
       deleteMany: async () => (calls.push('memberships'), { count: 1 }),
     },
     tenant: {
-      findMany: async () => [{ id: 'p1', kind: 'PERSONAL', status: 'ACTIVE' }],
+      findMany: async () => [
+        { id: 'p1', slug: 'p-1', kind: 'PERSONAL', status: 'ACTIVE' },
+      ],
     },
     tenantEntitlement: {
       findUnique: async () => ({
@@ -51,8 +71,18 @@ function setup(
   const svc = new AccountService(
     control as never,
     {
-      getClient: async () => ({
-        host: { updateMany: async () => (calls.push('revoke'), { count: 2 }) },
+      getClient: async (id: string) => ({
+        host: {
+          updateMany: async (a: {
+            where: unknown;
+            data: Record<string, unknown>;
+          }) => {
+            hostUpdates.push(a);
+            calls.push(id === 'co' ? 'unassign' : 'remove');
+            return { count: 2 };
+          },
+          findMany: async () => [{ id: 'h-co-1' }],
+        },
       }),
     } as never,
     { deleteOwnedWorkspace: async () => void calls.push('workspace') } as never,
@@ -67,15 +97,24 @@ function setup(
         customers: { del: async () => void calls.push('stripe:del') },
       }),
     } as never,
-    { send: async () => true } as never,
-    { verified: async () => 'me@acme.io' } as never,
+    {
+      send: async (m: { to: string }) => (mails.push(m.to), true),
+    } as never,
+    {
+      verified: async (_i: string, s: string) =>
+        s === 'boss' ? 'boss@acme.io' : 'me@acme.io',
+    } as never,
     {
       get: (k: string) =>
         k === 'MANAR_DEPLOYMENT' ? (opts.deployment ?? 'hosted') : undefined,
     } as never,
     { deleteUserData: async () => void calls.push('data') } as never,
+    {
+      record: async (tenantId: string, type: string) =>
+        void audits.push(`${tenantId}:${type}`),
+    } as never,
   );
-  return { svc, calls, row };
+  return { svc, calls, row, hostUpdates, mails, audits };
 }
 
 describe('account deletion', () => {
@@ -85,14 +124,36 @@ describe('account deletion', () => {
     expect(calls).toEqual([
       'stripe:cancel',
       'stripe:del',
-      'revoke',
+      'tombstone:p-1',
+      'remove',
       'workspace',
+      'unassign',
       'memberships',
       'data',
       'kc:manar:u1',
       'contact',
     ]);
     expect(row.status).toBe('DONE');
+  });
+  it('marks personal devices REMOVED (not REVOKED) and leaves a tombstone, so the devices are told to clean up', async () => {
+    const { svc, hostUpdates } = setup();
+    await svc.executeDue();
+    expect(hostUpdates[0]!.data).toMatchObject({
+      status: 'REMOVED',
+      removedReason: 'account_deleted',
+    });
+    expect(hostUpdates[0]!.data.removedAt).toBeInstanceOf(Date);
+  });
+  it('leaves the company devices protected but unassigned, and tells the company admins', async () => {
+    const { svc, hostUpdates, mails, audits } = setup();
+    await svc.executeDue();
+    const unassign = hostUpdates[1]!;
+    expect(unassign.where).toMatchObject({ ownerSubject: 'u1' });
+    expect(unassign.data).toMatchObject({ ownerSubject: null });
+    expect(unassign.data.unassignedAt).toBeInstanceOf(Date);
+    expect(unassign.data).not.toHaveProperty('status');
+    expect(audits).toEqual(['co:member.account_deleted', 'co:host.unassigned']);
+    expect(mails).toContain('boss@acme.io');
   });
   it('keeps the account when the person became the only owner of a company', async () => {
     const { svc, calls, row } = setup({ soleOwner: true });

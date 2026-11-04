@@ -287,8 +287,8 @@ describe('Hosts (e2e)', () => {
       ).toBe('VDI-POOL-17');
     }, 60_000);
 
-    it('a different key for a known machine changes nothing until an admin approves the rekey', async () => {
-      const t = await tenant('rekey');
+    it('a different key for a known machine never touches it: the key becomes its own PENDING host (possible clone)', async () => {
+      const t = await tenant('clone');
       const { raw } = await keys.create(t.client, t, admin, {
         hostGroupId: t.group.id,
         label: 'dev',
@@ -300,70 +300,75 @@ describe('Hosts (e2e)', () => {
       });
 
       // register() makes a fresh key pair each call: a different key.
-      const { csrPem: newCsr } = await generateAgentCsr(
-        `host://${t.slug}/laptop-7`,
-      );
-      const attempt = () =>
-        hosts.register({
-          installKey: raw,
-          csr: newCsr,
-          machineId: 'laptop-7',
-          hostname: 'DEV-LAPTOP-001',
-          os: 'Windows 11 24H2',
-          keyType: 'TPM',
-          ip: '10.0.0.7',
-        });
-      await expect(attempt()).rejects.toBeInstanceOf(HostRekeyPendingError);
+      const second = await register(t, raw, 'laptop-7');
+      expect(second.hostId).not.toBe(first.hostId);
+      expect(second.status).toBe('PENDING');
 
-      // Nothing changed for the machine already in place.
+      // Nothing changed for the machine already in place: same key, approved, its certificate valid.
       const host = await t.client.host.findUniqueOrThrow({
         where: { id: first.hostId },
       });
       expect(host.status).toBe('APPROVED');
-      expect(host.pendingKeyFingerprint).not.toBeNull();
+      expect(host.pendingKeyFingerprint).toBeNull();
       expect(
         await t.client.hostCertificate.count({
           where: { hostId: first.hostId, revokedAt: null },
         }),
       ).toBe(1);
-
-      // An admin approves the rekey: old certificates go, the new key may register.
-      // Approval names the exact key it binds.
-      await expect(
-        admins.decide(t.client, t.id, admin, first.hostId, 'approve'),
-      ).rejects.toBeInstanceOf(HostTransitionError);
-      await admins.decide(t.client, t.id, admin, first.hostId, 'approve', {
-        keyFingerprint: host.pendingKeyFingerprint!,
+      const clone = await t.client.host.findUniqueOrThrow({
+        where: { id: second.hostId },
       });
+      expect(clone.cloneOfHostId).toBe(first.hostId);
       expect(
-        await t.client.hostCertificate.count({
-          where: { hostId: first.hostId, revokedAt: null },
+        await t.client.auditEvent.count({
+          where: { eventType: 'host.possible_clone' },
         }),
-      ).toBe(0);
-      const again = await attempt();
-      expect(again).toMatchObject({ hostId: first.hostId, status: 'APPROVED' });
+      ).toBe(1);
+
+      // An admin approves the clone: two devices, each with its own valid certificate.
+      await admins.decide(t.client, t.id, admin, second.hostId, 'approve');
+      for (const id of [first.hostId, second.hostId]) {
+        expect(
+          await t.client.hostCertificate.count({
+            where: { hostId: id, revokedAt: null },
+          }),
+        ).toBe(1);
+      }
     }, 60_000);
 
-    it('a second rekey cannot replace a pending one; revoking clears it', async () => {
+    it('a second rekey (another group) cannot replace a pending one; revoking clears it', async () => {
       const t = await tenant('rekey2');
+      const ops = await t.client.hostGroup.create({ data: { name: 'Ops' } });
+      const qa = await t.client.hostGroup.create({ data: { name: 'QA' } });
       const { raw } = await keys.create(t.client, t, admin, {
         hostGroupId: t.group.id,
         label: 'dev',
       });
       const first = await register(t, raw, 'laptop-8');
-      await expect(register(t, raw, 'laptop-8')).rejects.toBeInstanceOf(
-        HostRekeyPendingError,
-      );
+      const again = (groupId: string) =>
+        keys
+          .create(t.client, t, admin, { hostGroupId: groupId, label: 'x' })
+          .then(({ raw: k }) =>
+            hosts.register({
+              installKey: k,
+              csr: first.csr,
+              machineId: 'laptop-8',
+              hostname: 'L8',
+              os: 'Linux',
+              keyType: 'SOFTWARE',
+              ip: '10.0.0.7',
+            }),
+          );
+      await expect(again(ops.id)).rejects.toBeInstanceOf(HostRekeyPendingError);
       const pending = (
         await t.client.host.findUniqueOrThrow({ where: { id: first.hostId } })
-      ).pendingKeyFingerprint;
-      await expect(register(t, raw, 'laptop-8')).rejects.toBeInstanceOf(
-        HostRekeyPendingError,
-      );
+      ).pendingHostGroupId;
+      expect(pending).toBe(ops.id);
+      await expect(again(qa.id)).rejects.toBeInstanceOf(HostRekeyPendingError);
       expect(
         (await t.client.host.findUniqueOrThrow({ where: { id: first.hostId } }))
-          .pendingKeyFingerprint,
-      ).toBe(pending);
+          .pendingHostGroupId,
+      ).toBe(ops.id);
       // Both attempts are on record, the second marked as conflicting.
       const requested = await t.client.auditEvent.findMany({
         where: { eventType: 'host.rekey_requested' },
@@ -376,18 +381,15 @@ describe('Hosts (e2e)', () => {
             (e.data as { conflictsWithPending: boolean }).conflictsWithPending,
         ),
       ).toEqual([false, true]);
-      expect(
-        (requested[0]!.data as { keyFingerprint: string }).keyFingerprint,
-      ).toBe(pending);
 
       await admins.decide(t.client, t.id, admin, first.hostId, 'revoke');
       const revoked = await t.client.host.findUniqueOrThrow({
         where: { id: first.hostId },
       });
-      expect(revoked.pendingKeyFingerprint).toBeNull();
+      expect(revoked.pendingHostGroupId).toBeNull();
       await expect(
         admins.decide(t.client, t.id, admin, first.hostId, 'approve', {
-          keyFingerprint: pending!,
+          keyFingerprint: revoked.keyFingerprint,
         }),
       ).rejects.toBeInstanceOf(HostTransitionError);
     }, 60_000);

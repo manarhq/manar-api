@@ -1,4 +1,17 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
+import {
+  decisionRights,
+  refusalMessage,
+  STEP_UP_MAX_AGE_SECONDS,
+  type Choice,
+  type DecisionRights,
+} from '../approvals/decision-rights';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import type { AuditActor } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
@@ -23,6 +36,60 @@ import {
 } from './secrets.validation';
 
 export class SecretsNotFoundError extends Error {}
+
+export type VaultDecision = 'ALLOW_ONCE' | 'ALLOW_8H' | 'ALLOW_ALWAYS' | 'DENY';
+
+/** Who answers a vault request in the console. */
+export interface VaultDecider {
+  /** Keycloak subject, compared with the device's owner. */
+  subject: string;
+  /** Holds an approver role. */
+  admin: boolean;
+  company: boolean;
+  /** Signed in within STEP_UP_MAX_AGE_SECONDS (the step-up until passkeys, Phase A). */
+  freshSignIn: boolean;
+}
+
+const CHOICE: Record<VaultDecision, Choice> = {
+  ALLOW_ONCE: 'approve_once',
+  ALLOW_8H: 'approve_8h',
+  ALLOW_ALWAYS: 'approve_always',
+  DENY: 'deny',
+};
+const EIGHT_HOURS_MS = 8 * 3_600_000;
+const STANDING = ['ALLOW_8H', 'ALLOW_ALWAYS'];
+
+/**
+ * What a person may answer to "may this program have this secret": the approval rights of a
+ * secret handover (decision-rights.ts). In a company an approver never releases a secret to their
+ * own device; another approver must. A personal owner allows once or 8 hours after a fresh
+ * sign-in, never always. "Always" is a company approver's answer for someone else's device.
+ */
+export function vaultRights(
+  who: VaultDecider,
+  ownerSubject: string | null,
+): DecisionRights & { decisions: VaultDecision[] } {
+  const rights = decisionRights({
+    admin: who.admin,
+    owner: !!ownerSubject && ownerSubject === who.subject,
+    adminsOnly: false,
+    company: who.company,
+    sensitive: 'handover',
+    actionId: 'secret.use',
+  });
+  const choices: Choice[] =
+    who.company && who.admin && rights.choices.includes('approve_8h')
+      ? [
+          ...rights.choices.filter((c) => c !== 'deny'),
+          'approve_always',
+          'deny',
+        ]
+      : rights.choices;
+  const decisions = (Object.keys(CHOICE) as VaultDecision[]).filter((d) =>
+    choices.includes(CHOICE[d]),
+  );
+  return { ...rights, choices, decisions };
+}
 export class SecretsConflictError extends Error {}
 
 const WATCH_TYPES = ['secret.watch.available', 'secret.watch.unavailable'];
@@ -518,9 +585,9 @@ export class SecretsService {
     return { blockMode };
   }
 
-  /** Console: open requests (newest first). */
-  listAccess(client: TenantPrismaClient) {
-    return client.secretVaultAccess.findMany({
+  /** Console: open requests (newest first), each with what this person may answer. */
+  async listAccess(client: TenantPrismaClient, who: VaultDecider) {
+    const rows = await client.secretVaultAccess.findMany({
       where: {
         status: 'PENDING',
         createdAt: { gte: new Date(Date.now() - ACCESS_TTL_MS) },
@@ -528,6 +595,102 @@ export class SecretsService {
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
+    const hosts = rows.length
+      ? await client.host.findMany({
+          where: { id: { in: [...new Set(rows.map((r) => r.hostId))] } },
+          select: { id: true, ownerSubject: true },
+        })
+      : [];
+    const owner = new Map(hosts.map((h) => [h.id, h.ownerSubject]));
+    return rows.map((r) => {
+      const rights = vaultRights(who, owner.get(r.hostId) ?? null);
+      return {
+        ...r,
+        allowedDecisions: rights.decisions,
+        needs: rights.needs,
+        stepUpNeeded: rights.stepUp && !who.freshSignIn,
+      };
+    });
+  }
+
+  /** "8 hours" and "Always" answers still in force (not withdrawn, not ended). */
+  private standingWhere(now: Date) {
+    return {
+      status: { in: STANDING },
+      withdrawnAt: null,
+      OR: [
+        { status: 'ALLOW_ALWAYS', expiresAt: null },
+        { expiresAt: { gt: now } },
+      ],
+    };
+  }
+
+  /**
+   * Device config (`vaultGrants`): the standing grants the device may keep. The device drops any
+   * local grant not in this list, so a withdrawal takes effect at its next config read.
+   */
+  async vaultGrants(client: TenantPrismaClient, hostId: string) {
+    const rows = await client.secretVaultAccess.findMany({
+      where: { hostId, ...this.standingWhere(new Date()) },
+      select: { id: true, status: true, expiresAt: true },
+      orderBy: { createdAt: 'asc' },
+      take: 500,
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      until: r.expiresAt?.toISOString() ?? null,
+    }));
+  }
+
+  /** Console: standing grants per device, to withdraw. */
+  async listGrants(client: TenantPrismaClient) {
+    const rows = await client.secretVaultAccess.findMany({
+      where: this.standingWhere(new Date()),
+      orderBy: { decidedAt: 'desc' },
+      take: 500,
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      hostId: r.hostId,
+      kind: r.kind,
+      ref: r.ref,
+      program: r.program,
+      programPath: r.programPath,
+      decision: r.status as 'ALLOW_8H' | 'ALLOW_ALWAYS',
+      decidedAt: r.decidedAt,
+      until: r.expiresAt,
+    }));
+  }
+
+  /** Console: withdraw a standing grant. Audited once; withdrawing again changes nothing. */
+  async withdrawGrant(
+    client: TenantPrismaClient,
+    tenantId: string,
+    actor: AuditActor,
+    id: string,
+  ) {
+    const now = new Date();
+    const done = await client.secretVaultAccess.updateMany({
+      where: { id, status: { in: STANDING }, withdrawnAt: null },
+      data: { withdrawnAt: now, withdrawnBy: actor.id },
+    });
+    const row = await client.secretVaultAccess.findUnique({ where: { id } });
+    if (!row || !STANDING.includes(row.status))
+      throw new SecretsNotFoundError('No such permission');
+    if (done.count === 1)
+      await this.audit.recordSafely(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.SECRET_VAULT_GRANT_WITHDRAWN,
+        actor,
+        data: {
+          grantId: id,
+          hostId: row.hostId,
+          kind: row.kind,
+          ref: row.ref,
+          program: row.program,
+          decision: row.status,
+        },
+      });
+    return { id, withdrawn: true as const };
   }
 
   /** Console: the person's decision. Audited as released or denied. */
@@ -536,17 +699,48 @@ export class SecretsService {
     tenantId: string,
     actor: AuditActor,
     id: string,
-    decision: 'ALLOW_ONCE' | 'ALLOW_8H' | 'ALLOW_ALWAYS' | 'DENY',
+    decision: VaultDecision,
+    who: VaultDecider,
   ) {
     const row = await client.secretVaultAccess.findUnique({ where: { id } });
     if (!row) throw new SecretsNotFoundError('No such request');
+    // The approval rights apply here, where every console decision arrives (fail closed: an
+    // unknown owner is nobody's own device in a company, and the owner's in a personal workspace).
+    const host = await client.host.findUnique({
+      where: { id: row.hostId },
+      select: { ownerSubject: true },
+    });
+    const rights = vaultRights(who, host?.ownerSubject ?? null);
+    if (!rights.decisions.includes(decision))
+      throw new ForbiddenException(
+        decision === 'ALLOW_ALWAYS' && rights.decisions.includes('ALLOW_8H')
+          ? 'Always is not offered here: allow once or for 8 hours, or make a rule. Nothing was changed.'
+          : refusalMessage(rights),
+      );
+    if (rights.stepUp && decision !== 'DENY' && !who.freshSignIn)
+      throw new UnauthorizedException({
+        statusCode: 401,
+        code: 'reauth_required',
+        maxAge: STEP_UP_MAX_AGE_SECONDS,
+        message:
+          'Confirm it is you (sign in again) to release a secret to your own device. Nothing was changed.',
+      });
+    const now = new Date();
     const done = await client.secretVaultAccess.updateMany({
       where: {
         id,
         status: 'PENDING',
         createdAt: { gte: new Date(Date.now() - ACCESS_TTL_MS) },
       },
-      data: { status: decision, decidedBy: actor.id, decidedAt: new Date() },
+      data: {
+        status: decision,
+        decidedBy: actor.id,
+        decidedAt: now,
+        expiresAt:
+          decision === 'ALLOW_8H'
+            ? new Date(now.getTime() + EIGHT_HOURS_MS)
+            : null,
+      },
     });
     if (done.count !== 1)
       throw new SecretsConflictError(

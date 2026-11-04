@@ -22,6 +22,23 @@ import { InvalidCidrError } from './install-keys.service';
 import { latestTamper, type TamperInfo } from './tamper';
 
 export class HostNotFoundError extends Error {}
+
+/** Standing secret-vault grants of a device end with it (revoked, removed or moved). */
+async function withdrawVaultGrants(
+  tx: Prisma.TransactionClient,
+  hostId: string,
+  by: string,
+  now: Date,
+): Promise<void> {
+  await tx.secretVaultAccess.updateMany({
+    where: {
+      hostId,
+      status: { in: ['ALLOW_8H', 'ALLOW_ALWAYS'] },
+      withdrawnAt: null,
+    },
+    data: { withdrawnAt: now, withdrawnBy: by },
+  });
+}
 /** The requested change isn't allowed from the host's current status. */
 export class HostTransitionError extends Error {}
 /** An auto-approval rule needs at least one verified condition (F2b, docs/hosts.md). */
@@ -176,6 +193,8 @@ export class HostsAdminService {
             }),
         );
       }
+      if (decision === 'revoke')
+        await withdrawVaultGrants(tx, hostId, actor.id, new Date());
       const updated = await this.writeIfUnchanged(tx, current, {
         status: rule.to,
         // Revoking or rejecting also drops any rekey waiting for approval.
@@ -220,10 +239,34 @@ export class HostsAdminService {
     const host = await client.host.findUnique({ where: { id: hostId } });
     if (!host) throw new HostNotFoundError(hostId);
     if (host.status !== 'REMOVED') {
-      await this.retire(client, tenantId, actor, host);
+      await this.retire(client, tenantId, actor, host, null);
     }
     // After the status change, so a certificate issued meanwhile is caught too (registration
     // re-reads the host after signing). Marked revoked locally first; OpenBao follows.
+    await this.ca.revokeHostCertificates(client, hostId);
+  }
+
+  /**
+   * The device moved itself to another workspace (`POST /host/v1/moved`, signed by its own
+   * certificate): removed here with reason `moved`, so this workspace shows "moved" instead of an
+   * approved device that went quiet. Same steps as Remove device.
+   */
+  async markMoved(
+    client: TenantPrismaClient,
+    tenantId: string,
+    hostId: string,
+  ): Promise<void> {
+    const host = await client.host.findUnique({ where: { id: hostId } });
+    if (!host) throw new HostNotFoundError(hostId);
+    if (host.status !== 'REMOVED') {
+      await this.retire(
+        client,
+        tenantId,
+        { type: 'system', id: 'system:device-moved' },
+        host,
+        'moved',
+      );
+    }
     await this.ca.revokeHostCertificates(client, hostId);
   }
 
@@ -232,6 +275,7 @@ export class HostsAdminService {
     tenantId: string,
     actor: AuditActor,
     host: Host,
+    reason: 'moved' | null,
   ): Promise<void> {
     const hostId = host.id;
     const now = new Date();
@@ -243,6 +287,7 @@ export class HostsAdminService {
         data: {
           status: 'REMOVED',
           removedAt: now,
+          removedReason: reason,
           adcsDnsName: null,
           pendingKeyFingerprint: null,
           pendingHostGroupId: null,
@@ -262,8 +307,12 @@ export class HostsAdminService {
         where: { hostId, revokedAt: null },
         data: { revokedAt: now },
       });
+      await withdrawVaultGrants(tx, hostId, actor.id, now);
       return this.audit.recordInTransaction(tx, tenantId, {
-        eventType: AUDIT_EVENT_TYPES.HOST_REMOVED,
+        eventType:
+          reason === 'moved'
+            ? AUDIT_EVENT_TYPES.HOST_MOVED
+            : AUDIT_EVENT_TYPES.HOST_REMOVED,
         actor,
         data: { hostId, machineId: host.machineId, from: host.status },
       });

@@ -124,9 +124,29 @@ describe('Hosts HTTP (e2e)', () => {
         .set('Authorization', as('owner'))
         .send({ hostGroupId: group.id, label: 'dev laptops', maxUses: 5 })
         .expect(201)
-    ).body as { id: string; installKey: string; keyHash?: string };
+    ).body as {
+      id: string;
+      installKey: string;
+      keyHash?: string;
+      expiresAt: string;
+      maxUses: number;
+    };
     expect(created.installKey).toMatch(/^mik_/);
     expect(created.keyHash).toBeUndefined();
+    // No "never expires": 24 hours unless the admin picks 1 hour to 30 days.
+    const left = new Date(created.expiresAt).getTime() - Date.now();
+    expect(left).toBeGreaterThan(23 * 3_600_000);
+    expect(left).toBeLessThanOrEqual(24 * 3_600_000);
+    expect(created.maxUses).toBe(5);
+    await request(server())
+      .post('/install-keys')
+      .set('Authorization', as('owner'))
+      .send({
+        hostGroupId: group.id,
+        label: 'forever',
+        expiresAt: new Date(Date.now() + 31 * 86_400_000).toISOString(),
+      })
+      .expect(400);
     const listed = await request(server())
       .get('/install-keys')
       .set('Authorization', as('auditor'))

@@ -71,7 +71,8 @@ describe('decision rights', () => {
       choices: ['deny'],
       needs: 'needs_another_admin',
     });
-    // A personal workspace has nobody else to ask: once or deny, after a fresh sign-in.
+    // A personal workspace has nobody else to ask: once or 8 hours, never always, after a fresh
+    // sign-in (founder decision, 4 Nov 2026; passkeys replace the fresh sign-in in Phase A).
     expect(
       decisionRights({
         ...base,
@@ -81,13 +82,38 @@ describe('decision rights', () => {
         company: false,
       }),
     ).toMatchObject({
-      choices: ['approve_once', 'deny'],
+      choices: ['approve_once', 'approve_8h', 'deny'],
       stepUp: true,
       why: 'high_risk',
     });
     expect(
       decisionRights({ ...base, admin: true, company: false }).stepUp,
     ).toBe(false);
+  });
+
+  it('a personal workspace owner never self-grants "always": make a rule instead', () => {
+    const site = { ...base, actionId: 'site.connect', company: false };
+    expect(
+      decisionRights({ ...site, admin: true, owner: true }).choices,
+    ).toEqual(['approve_once', 'approve_8h', 'deny']);
+    // A device with no recorded owner is still the only person's own device.
+    expect(
+      decisionRights({ ...site, admin: true, owner: false }).choices,
+    ).not.toContain('approve_always');
+    expect(
+      decisionRights({
+        ...base,
+        admin: true,
+        owner: false,
+        company: false,
+        sensitive: 'handover',
+      }),
+    ).toMatchObject({ stepUp: true });
+    // A company approver may still remember a site for someone else's device.
+    expect(
+      decisionRights({ ...base, actionId: 'site.connect', admin: true })
+        .choices,
+    ).toContain('approve_always');
   });
 
   it('anyone else decides nothing', () => {
