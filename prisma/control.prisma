@@ -950,6 +950,22 @@ model StaffAuditEvent {
   @@map("staff_audit_events")
 }
 
+/// Signed checkpoints of the staff audit chain head (Ed25519 via CheckpointSigner, key in
+/// OpenBao). The newest checkpoint is also named in OpenBao (`audit/staff-audit-head/<chain>`), so
+/// truncating the table, deleting the last rows or rewriting the chain is detected by verify().
+model StaffAuditCheckpoint {
+  seq                    BigInt   @id
+  createdAt              DateTime @default(now())
+  headSeq                BigInt
+  headHash               String
+  previousCheckpointHash String?
+  checkpointHash         String   @unique
+  signature              String
+  keyId                  String
+
+  @@map("staff_audit_checkpoints")
+}
+
 enum StaffRestrictionKind {
   WARNING
   SUSPEND
