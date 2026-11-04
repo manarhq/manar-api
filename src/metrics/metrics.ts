@@ -198,7 +198,7 @@ export function recordDecision(
 /** Adds the request-duration hook to a Fastify instance (both listeners). */
 export function instrumentHttp(
   fastify: FastifyInstance,
-  listener: 'human' | 'agent',
+  listener: 'human' | 'agent' | 'staff',
 ): void {
   fastify.addHook('onResponse', (request, reply, done) => {
     httpDuration.observe(

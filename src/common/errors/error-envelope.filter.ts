@@ -5,12 +5,17 @@ import {
   ExceptionFilter,
   HttpException,
   Inject,
+  Optional,
 } from '@nestjs/common';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Logger } from 'winston';
 import { getCorrelationId } from '../../logging/correlation-id.store';
 import { newErrorReference } from './error-reference';
+import {
+  ERROR_REFERENCE_SINK,
+  type ErrorReferenceSink,
+} from '../../staff/errors/error-reference.recorder';
 
 /**
  * The body of every error response, on both listeners. `statusCode`, `error` and `message` keep
@@ -148,6 +153,9 @@ function pathOf(url: string): string {
 export class ErrorEnvelopeFilter implements ExceptionFilter {
   constructor(
     @Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    @Optional()
+    @Inject(ERROR_REFERENCE_SINK)
+    private readonly references?: ErrorReferenceSink,
   ) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
@@ -193,6 +201,15 @@ export class ErrorEnvelopeFilter implements ExceptionFilter {
         userMessage: envelope.message,
       });
     }
+
+    if (request)
+      this.references?.record({
+        reference,
+        status,
+        code: typeof body.code === 'string' ? body.code : undefined,
+        correlationId,
+        request,
+      });
 
     // A stream (SSE) that already sent its headers can only be closed, not answered.
     if (reply.sent || reply.raw?.headersSent) {

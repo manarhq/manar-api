@@ -2,6 +2,10 @@ import { AiSpendHttpModule } from './ai-spend/ai-spend.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { JailHttpModule } from './jail/jail.module';
 import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import {
+  ERROR_REFERENCE_SINK,
+  ErrorReferenceRecorder,
+} from './staff/errors/error-reference.recorder';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AppConfigModule } from './config/config.module';
@@ -133,6 +137,8 @@ import { EdgeHttpModule } from './edge/edge-http.module';
   providers: [
     AppService,
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+    ErrorReferenceRecorder,
+    { provide: ERROR_REFERENCE_SINK, useExisting: ErrorReferenceRecorder },
     { provide: APP_FILTER, useClass: ErrorEnvelopeFilter },
   ],
 })

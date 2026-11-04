@@ -1,6 +1,11 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { AppConfig } from '../config/env.validation';
 import { AuthorizationModule } from '../authorization/authorization.module';
-import { StaffAuditService } from './audit/staff-audit.service';
+import {
+  STAFF_AUDIT_CHAIN_ID,
+  StaffAuditService,
+} from './audit/staff-audit.service';
 import { StaffRbacService } from './rbac/staff-rbac.service';
 
 /**
@@ -9,7 +14,16 @@ import { StaffRbacService } from './rbac/staff-rbac.service';
  */
 @Module({
   imports: [AuthorizationModule],
-  providers: [StaffAuditService, StaffRbacService],
+  providers: [
+    {
+      provide: STAFF_AUDIT_CHAIN_ID,
+      useFactory: (c: ConfigService<AppConfig, true>): string =>
+        c.get('STAFF_AUDIT_CHAIN_ID', { infer: true }),
+      inject: [ConfigService],
+    },
+    StaffAuditService,
+    StaffRbacService,
+  ],
   exports: [StaffAuditService, StaffRbacService, AuthorizationModule],
 })
 export class StaffCoreModule {}
