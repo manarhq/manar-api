@@ -261,14 +261,15 @@ export class HostsService {
     // Stored as SOFTWARE unless TPM attestation passed; the installer's claim is not kept.
     const keyType = ctx.verified.tpm ? 'TPM' : 'SOFTWARE';
     // DESK spec §9.5 (AC-26): a device of a restricted account is refused in every workspace,
-    // matched only on attested identifiers (the enrolled key, a verified TPM EK), never the
-    // self-reported machine id,
+    // blocked only on attested identifiers (the enrolled key, a verified TPM EK); the
+    // self-reported machine id only queues a review,
     // before anything is written or signed. Registration runs only in the HTTP app, which always
     // provides the check (StaffEnforcementModule).
     await this.moduleRef?.get(ResignupService, { strict: false }).checkDevice(
       {
         keyFingerprint,
         tpmEk: ctx.verified.tpm ? ctx.tpmEkFingerprint : null,
+        machineId: input.machineId, // weak: flagged for review, never a block
       },
       tenant.id,
     );

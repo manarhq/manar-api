@@ -1012,9 +1012,13 @@ enum StaffFingerprintKind {
   IDP_EMAIL
   IDP_IDENTITY
   CARD
+  /// Strong: the enrolled certificate key.
   DEVICE
+  /// Strong: a TPM endorsement key that passed attestation.
   TPM_EK
   ENTRA_TID
+  /// Weak: the self-reported machine id. A match never blocks; it queues "possible ban evasion".
+  MACHINE_ID
 }
 
 model StaffRestrictionFingerprint {

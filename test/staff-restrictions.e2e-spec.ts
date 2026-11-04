@@ -203,7 +203,9 @@ describe('staff restrictions (e2e)', () => {
         hostname: 'LAYLA-XPS15',
         os: 'windows',
         keyFingerprint: `key-${STAFF_E2E_SUFFIX}`,
-        keyType: 'SOFTWARE',
+        keyType: 'TPM',
+        tpmVerified: true,
+        tpmEkFingerprint: `ek-${STAFF_E2E_SUFFIX}`,
         registeredFromIp: '203.0.113.5',
         hostGroupId: hostGroup.id,
         ownerSubject: c.subject,
@@ -240,7 +242,12 @@ describe('staff restrictions (e2e)', () => {
     const fps = await staff.control.staffRestrictionFingerprint.findMany({
       where: { restrictionId: r.body.restriction.id },
     });
-    expect(fps.map((f) => f.kind).sort()).toEqual(['DEVICE', 'EMAIL']);
+    expect(fps.map((f) => f.kind).sort()).toEqual([
+      'DEVICE',
+      'EMAIL',
+      'MACHINE_ID',
+      'TPM_EK',
+    ]);
 
     // Re-signup with a +tag of the same address: blocked as ban evasion and recorded.
     const username = `evader-${STAFF_E2E_SUFFIX}`;
@@ -357,15 +364,55 @@ describe('staff restrictions (e2e)', () => {
           randomUUID(),
         ),
     ).rejects.toMatchObject({ response: { code: 'device_blocked' } });
-    // The self-reported machine id is not a signal: a new key on that machine is not matched.
+    // Strong: the same TPM, even with a brand-new key, is blocked.
     await expect(
-      human
-        .get(ResignupService)
-        .checkDevice(
-          { keyFingerprint: `other-key-${STAFF_E2E_SUFFIX}` },
-          randomUUID(),
-        ),
-    ).resolves.toBeUndefined();
+      human.get(ResignupService).checkDevice(
+        {
+          keyFingerprint: `new-key-${STAFF_E2E_SUFFIX}`,
+          tpmEk: `ek-${STAFF_E2E_SUFFIX}`,
+        },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ response: { code: 'device_blocked' } });
+    // Weak: the same self-reported machine id with a new key is queued for a person, not blocked;
+    // the workspace owner's risk score rises.
+    const company = await customer('cloneco');
+    await human.get(ResignupService).checkDevice(
+      {
+        keyFingerprint: `clone-key-1-${STAFF_E2E_SUFFIX}`,
+        machineId: `m-${STAFF_E2E_SUFFIX}-dev`,
+      },
+      company.tenantId,
+    );
+    const flagged = await staff.control.staffRestrictionMatch.findMany({
+      where: { kind: 'MACHINE_ID', newTenantId: company.tenantId },
+    });
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0]!.action).toBe('flagged');
+    expect(
+      (
+        await staff.control.account.findUniqueOrThrow({
+          where: { id: company.accountId },
+        })
+      ).riskScore,
+    ).toBe(40);
+    // Two golden-image clones sharing that machine id never block each other (nor the second time).
+    await human.get(ResignupService).checkDevice(
+      {
+        keyFingerprint: `clone-key-2-${STAFF_E2E_SUFFIX}`,
+        machineId: `M-${STAFF_E2E_SUFFIX}-DEV`,
+      },
+      company.tenantId,
+    );
+    expect(
+      await staff.control.staffRestrictionMatch.count({
+        where: { kind: 'MACHINE_ID', newTenantId: company.tenantId },
+      }),
+    ).toBe(1);
+    await api()
+      .get('/workspaces')
+      .set({ Authorization: `Bearer ${await company.token()}` })
+      .expect(200);
 
     // An install code from before the ban cannot enrol a new device into the banned owner's workspace.
     await expect(

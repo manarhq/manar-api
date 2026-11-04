@@ -28,7 +28,7 @@ import type { StaffPrincipal } from '../auth/staff-principal';
 import { checkStepUp } from '../auth/step-up';
 import { StaffRbacService } from '../rbac/staff-rbac.service';
 import { TrustLogService } from '../trust-log.service';
-import { fingerprint, normalizeEmail } from './fingerprints';
+import { fingerprint, machineIdValue, normalizeEmail } from './fingerprints';
 import {
   CATEGORIES,
   DURATIONS,
@@ -434,13 +434,25 @@ export class RestrictionsService implements OnModuleInit {
       string,
       {
         kind:
-          'EMAIL' | 'IDP_IDENTITY' | 'CARD' | 'DEVICE' | 'TPM_EK' | 'ENTRA_TID';
+          | 'EMAIL'
+          | 'IDP_IDENTITY'
+          | 'CARD'
+          | 'DEVICE'
+          | 'TPM_EK'
+          | 'ENTRA_TID'
+          | 'MACHINE_ID';
         valueHash: string;
       }
     >();
     const add = (
       kind:
-        'EMAIL' | 'IDP_IDENTITY' | 'CARD' | 'DEVICE' | 'TPM_EK' | 'ENTRA_TID',
+        | 'EMAIL'
+        | 'IDP_IDENTITY'
+        | 'CARD'
+        | 'DEVICE'
+        | 'TPM_EK'
+        | 'ENTRA_TID'
+        | 'MACHINE_ID',
       value: string | null | undefined,
       prehashed = false,
     ) => {
@@ -472,10 +484,14 @@ export class RestrictionsService implements OnModuleInit {
               keyFingerprint: true,
               tpmVerified: true,
               tpmEkFingerprint: true,
+              machineId: true,
             },
           })) {
+            // Strong: the enrolled key and a verified TPM EK (a match blocks). Weak: the
+            // self-reported machine id (a match only queues a review: golden images share it).
             add('DEVICE', h.keyFingerprint);
             if (h.tpmVerified) add('TPM_EK', h.tpmEkFingerprint);
+            add('MACHINE_ID', machineIdValue(h.machineId));
           }
         } catch (error) {
           this.logger.warn(

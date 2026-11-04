@@ -32,3 +32,7 @@ export function fingerprint(
     .update(`${kind}\u0000${value}`)
     .digest('hex');
 }
+
+/** The weak device signal's value: the self-reported machine id, trimmed and lower-cased. */
+export const machineIdValue = (machineId: string) =>
+  machineId.trim().toLowerCase();

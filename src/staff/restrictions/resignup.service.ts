@@ -7,7 +7,7 @@ import type { AppConfig } from '../../config/env.validation';
 import { ControlPrismaService } from '../../database/control-prisma.service';
 import type { StaffFingerprintKind } from '../../generated/control-client/client';
 import { StaffAuditService } from '../audit/staff-audit.service';
-import { fingerprint, normalizeEmail } from './fingerprints';
+import { fingerprint, machineIdValue, normalizeEmail } from './fingerprints';
 import {
   ACCOUNT_SUSPENDED,
   AccountSuspendedException,
@@ -182,7 +182,11 @@ export class ResignupService {
    * passed, its endorsement key. The machine id is self-reported and is never a signal.
    */
   async checkDevice(
-    device: { keyFingerprint: string; tpmEk?: string | null },
+    device: {
+      keyFingerprint: string;
+      tpmEk?: string | null;
+      machineId?: string;
+    },
     tenantId: string,
   ): Promise<void> {
     // An install code made before a restriction must not enrol a new device for that owner: the
@@ -218,7 +222,15 @@ export class ResignupService {
         : []),
     ];
     const hit = await this.match(signals, { tenantId });
-    if (!hit) return;
+    if (!hit) {
+      if (device.machineId)
+        await this.flagMachineId(
+          machineIdValue(device.machineId),
+          tenantId,
+          key,
+        );
+      return;
+    }
     // The device's own restricted owner re-installing in the same personal workspace is still blocked.
     await this.control.staffRestrictionMatch.create({
       data: {
@@ -240,6 +252,58 @@ export class ResignupService {
       statusCode: 403,
       code: 'device_blocked',
       message: "This device can't be added. Contact support@fixio.ae.",
+    });
+  }
+
+  /**
+   * The weak signal (security review, 4 Nov): a self-reported machine id matching a restricted
+   * account never blocks, because golden-image clones share machine ids. It queues a "possible ban
+   * evasion" match for Trust & Safety, once per (workspace, value, restriction), and raises the
+   * workspace owner's risk score (+40, display only; spec §23 risk rules).
+   */
+  private async flagMachineId(value: string, tenantId: string, key: string) {
+    const hit = await this.match(
+      [
+        {
+          kind: 'MACHINE_ID',
+          valueHash: fingerprint('MACHINE_ID', value, key),
+        },
+      ],
+      { tenantId },
+    );
+    if (!hit) return;
+    const already = await this.control.staffRestrictionMatch.findFirst({
+      where: {
+        kind: 'MACHINE_ID',
+        valueHash: hit.valueHash,
+        matchedRestrictionId: hit.restriction.id,
+        newTenantId: tenantId,
+      },
+    });
+    if (already) return;
+    await this.control.staffRestrictionMatch.create({
+      data: {
+        kind: 'MACHINE_ID',
+        valueHash: hit.valueHash,
+        matchedRestrictionId: hit.restriction.id,
+        newTenantId: tenantId,
+        action: 'flagged',
+      },
+    });
+    const owner = await this.control.membership.findFirst({
+      where: { tenantId, role: 'TENANT_OWNER', status: 'ACTIVE' },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (owner)
+      await this.control.$executeRaw`
+        UPDATE accounts SET "riskScore" = LEAST(100, "riskScore" + 40)
+        WHERE issuer = ${owner.issuer} AND subject = ${owner.subject}`;
+    await this.audit.append({
+      staffId: null,
+      action: 'resignup.device_flagged',
+      targetType: 'TENANT',
+      targetId: tenantId,
+      data: { matched: hit.restriction.code },
     });
   }
 
