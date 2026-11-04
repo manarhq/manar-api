@@ -75,3 +75,82 @@ tests:
         object: grant:tenant-1_task-1_forbidden-action
         assertions:
           can_use: false
+
+  # ---- Staff RBAC (DESK Phase 1) ------------------------------------------------------------
+  - name: staff-role-permissions
+    description: A role instance carries its permissions; holders get them, others do not.
+    tuples:
+      - user: role:owner~platform~manar#assignee
+        relation: restrict_ban
+        object: platform:manar
+      - user: role:admin~platform~manar#assignee
+        relation: restrict_suspend
+        object: platform:manar
+      - user: staff:nofal
+        relation: assignee
+        object: role:owner~platform~manar
+      - user: staff:ali
+        relation: assignee
+        object: role:admin~platform~manar
+    check:
+      - user: staff:nofal
+        object: platform:manar
+        assertions:
+          restrict_ban: true
+      - user: staff:ali
+        object: platform:manar
+        assertions:
+          restrict_ban: false
+          restrict_suspend: true
+
+  - name: staff-group-membership
+    description: A role held by a group reaches its members, including nested groups.
+    tuples:
+      - user: role:support~platform~manar#assignee
+        relation: people_view
+        object: platform:manar
+      - user: group:night-oncall#member
+        relation: assignee
+        object: role:support~platform~manar
+      - user: group:oncall-leads#member
+        relation: member
+        object: group:night-oncall
+      - user: staff:sara
+        relation: member
+        object: group:oncall-leads
+    check:
+      - user: staff:sara
+        object: platform:manar
+        assertions:
+          people_view: true
+      - user: staff:omar
+        object: platform:manar
+        assertions:
+          people_view: false
+
+  - name: staff-elevation-window
+    description: An elevation holds only while current_time is before expires_at; no job needed.
+    tuples:
+      - user: role:owner~platform~manar#assignee
+        relation: restrict_ban
+        object: platform:manar
+      - user: staff:ali
+        relation: assignee
+        object: role:owner~platform~manar
+        condition:
+          name: within_window
+          context:
+            expires_at: '2026-11-04T10:00:00Z'
+    check:
+      - user: staff:ali
+        object: platform:manar
+        context:
+          current_time: '2026-11-04T09:59:59Z'
+        assertions:
+          restrict_ban: true
+      - user: staff:ali
+        object: platform:manar
+        context:
+          current_time: '2026-11-04T10:00:00Z'
+        assertions:
+          restrict_ban: false

@@ -80,3 +80,54 @@ type grant
     define resource: [resource]
     define forbidden_agent: [agent]
     define can_use: (assigned_agent from of_task) but not forbidden_agent
+
+# ---------------------------------------------------------------------------------------------
+# Staff RBAC (DESK Phase 1, docs/authorization-model.md "Staff"). Postgres is the source of
+# truth (staff_roles, staff_role_assignments, staff_groups); these tuples are its projection.
+#   - A role instance is one `role` object per (role, scope): `role:<roleId>~platform~manar`.
+#     Its permissions are tuples `platform:manar#<permission>@role:<instance>#assignee`.
+#   - A staff member or a group holds the role through `assignee`. Elevations and timed grants
+#     carry the `within_window` condition, so their power ends at `expires_at` at check time,
+#     with no job involved; every staff check passes `current_time`.
+# ---------------------------------------------------------------------------------------------
+type staff
+
+type group
+  relations
+    define member: [staff, group#member]
+
+type role
+  relations
+    define assignee: [staff, staff with within_window, group#member]
+
+type platform
+  relations
+    define people_search: [role#assignee]
+    define orgs_search: [role#assignee]
+    define people_view: [role#assignee]
+    define orgs_view: [role#assignee]
+    define people_reveal_pii: [role#assignee]
+    define people_sessions_revoke: [role#assignee]
+    define notes_write: [role#assignee]
+    define tags_write: [role#assignee]
+    define restrict_warn: [role#assignee]
+    define restrict_suspend_propose: [role#assignee]
+    define restrict_suspend: [role#assignee]
+    define restrict_lift: [role#assignee]
+    define restrict_ban: [role#assignee]
+    define restrict_unban_propose: [role#assignee]
+    define restrict_unban_approve: [role#assignee]
+    define restrict_immediate_approve: [role#assignee]
+    define appeals_review: [role#assignee]
+    define matches_review: [role#assignee]
+    define staff_view: [role#assignee]
+    define staff_manage: [role#assignee]
+    define staff_owner_grant_propose: [role#assignee]
+    define staff_owner_grant_approve: [role#assignee]
+    define staff_roles_manage: [role#assignee]
+    define staff_audit_view: [role#assignee]
+    define errors_view: [role#assignee]
+
+condition within_window(current_time: timestamp, expires_at: timestamp) {
+  current_time < expires_at
+}
