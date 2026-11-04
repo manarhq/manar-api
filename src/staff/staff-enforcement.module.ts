@@ -6,6 +6,8 @@ import {
   StaffAuditService,
 } from './audit/staff-audit.service';
 import { ResignupService } from './restrictions/resignup.service';
+import { AppealsService } from './appeals/appeals.service';
+import { MeRestrictionController } from './appeals/me-restriction.controller';
 
 /**
  * The customer-side half of DESK restrictions, in the human app: the re-signup checks at
@@ -23,7 +25,9 @@ import { ResignupService } from './restrictions/resignup.service';
     },
     StaffAuditService,
     ResignupService,
+    AppealsService,
   ],
+  controllers: [MeRestrictionController],
   exports: [ResignupService],
 })
 export class StaffEnforcementModule {}

@@ -35,6 +35,9 @@ import { ChangeRequestsService } from './approvals/change-requests.service';
 import { RestrictionsService } from './restrictions/restrictions.service';
 import { PlatformSuspension } from '../platform/platform-suspension';
 import { StaffAdminController } from './http/staff-admin.controller';
+import { StaffAppealsController } from './http/staff-appeals.controller';
+import { AppealsService } from './appeals/appeals.service';
+import { RestrictionEnforcement } from './restrictions/restriction-enforcement';
 import { StaffJobsService } from './staff-jobs.service';
 
 /**
@@ -55,6 +58,7 @@ import { StaffJobsService } from './staff-jobs.service';
     StaffIndexController,
     StaffRestrictionsController,
     StaffAdminController,
+    StaffAppealsController,
   ],
   providers: [
     JwksCacheService,
@@ -70,6 +74,8 @@ import { StaffJobsService } from './staff-jobs.service';
     ChangeRequestsService,
     RestrictionsService,
     PlatformSuspension,
+    AppealsService,
+    RestrictionEnforcement,
     ErrorReferenceRecorder,
     { provide: ERROR_REFERENCE_SINK, useExisting: ErrorReferenceRecorder },
     { provide: APP_FILTER, useClass: ErrorEnvelopeFilter },
