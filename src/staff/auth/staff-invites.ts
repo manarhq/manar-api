@@ -43,16 +43,31 @@ export class StaffInvitesService {
     private readonly audit: StaffAuditService,
   ) {}
 
+  private async refuse(entraOid: string): Promise<never> {
+    await this.audit.append({
+      staffId: null,
+      action: 'staff.invite_claim_refused',
+      data: { entraOid },
+    });
+    throw new ForbiddenException({
+      code: 'invite_invalid',
+      message: 'This invite is not valid. Ask an Owner for a new one.',
+    });
+  }
+
   /**
    * Binds the INVITED row named by the token to this Entra identity: one conditional update (the
-   * row must still be INVITED, unbound, unexpired and addressed to this verified email), so two
-   * concurrent claims cannot both win and a used token never works again.
+   * row must still be INVITED, unbound, unexpired and addressed to this email), so two concurrent
+   * claims cannot both win and a used token never works again. The one-time token is the binding;
+   * the email (unverified, from Fixio's own tenant) only narrows it to the invited address.
    */
   async claim(
-    claims: { sub: string; email: string; entra_oid: string; iss?: string },
+    claims: { sub: string; email?: string; entra_oid: string; iss?: string },
     token: string,
   ): Promise<{ staffId: string }> {
     const hash = hashInviteToken(token);
+    const email = (claims.email ?? '').trim().toLowerCase();
+    if (!email) return this.refuse(claims.entra_oid);
     let bound: { count: number };
     try {
       bound = await this.control.staffMember.updateMany({
@@ -61,7 +76,7 @@ export class StaffInvitesService {
           status: 'INVITED',
           entraOid: null,
           inviteExpiresAt: { gt: new Date() },
-          email: claims.email.trim().toLowerCase(),
+          email,
         },
         data: {
           entraOid: claims.entra_oid,
@@ -78,17 +93,7 @@ export class StaffInvitesService {
       if ((error as { code?: string }).code === 'P2002') bound = { count: 0 };
       else throwFailClosed('control-db', error);
     }
-    if (bound.count !== 1) {
-      await this.audit.append({
-        staffId: null,
-        action: 'staff.invite_claim_refused',
-        data: { entraOid: claims.entra_oid },
-      });
-      throw new ForbiddenException({
-        code: 'invite_invalid',
-        message: 'This invite is not valid. Ask an Owner for a new one.',
-      });
-    }
+    if (bound.count !== 1) return this.refuse(claims.entra_oid);
     const row = await this.control.staffMember.findUniqueOrThrow({
       where: { entraOid: claims.entra_oid },
     });

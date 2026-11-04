@@ -25,7 +25,8 @@ export type RequestWithStaff = FastifyRequest & {
   /** A verified staff token with no bound row (only on @AllowUnboundStaff routes). */
   unboundStaff?: {
     sub: string;
-    email: string;
+    /** Display only, unverified. */
+    email?: string;
     entra_oid: string;
     iss?: string;
   };

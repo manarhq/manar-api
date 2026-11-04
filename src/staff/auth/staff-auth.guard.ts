@@ -39,7 +39,8 @@ export interface StaffTokenConfig {
 
 export interface StaffClaims extends JWTPayload {
   sub: string;
-  email: string;
+  /** Display only: Entra's email claim is not a verified identity (Keycloak trustEmail is off). */
+  email?: string;
   name?: string;
   entra_oid: string;
   entra_tid: string;
@@ -59,8 +60,11 @@ const refuse = (reason: string) => {
 
 /**
  * DESK spec §16 guard 1 and AC-44: a vax-staff access token for client manar-admin, audience
- * manar-api-staff, brokered from Entra (`idp=entra`) in Fixio's tenant (`entra_tid`), with a
- * verified email and an Entra object id. Local password users never pass.
+ * manar-api-staff, brokered from Entra (`idp=entra`) in Fixio's tenant (`entra_tid`), with an Entra
+ * object id. Local password users never pass. The binding is the immutable pair (oid, tid): the
+ * guard then requires the staff row seeded with this oid. Email is display only and never checked
+ * here (architect decision 4 Nov: the staff realm keeps trustEmail off, so `email_verified` is false
+ * for brokered staff, and an email match must never stand in for the oid).
  */
 export async function verifyStaffClaims(
   token: string,
@@ -82,13 +86,13 @@ export async function verifyStaffClaims(
   if (payload.azp !== cfg.clientId) throw refuse('issued to another client');
   if (!aud.includes(cfg.audience)) throw refuse('audience');
   if (payload.idp !== 'entra') throw refuse('not brokered from Entra');
+  if (typeof payload.entra_tid !== 'string' || !payload.entra_tid)
+    throw refuse('no Entra tenant');
   if (payload.entra_tid !== cfg.entraTenantId) throw refuse('Entra tenant');
   if (typeof payload.entra_oid !== 'string' || !payload.entra_oid)
     throw refuse('no Entra oid');
   if (typeof payload.sub !== 'string' || !payload.sub)
     throw refuse('no subject');
-  if (typeof payload.email !== 'string' || payload.email_verified !== true)
-    throw refuse('no verified email');
   return payload as StaffClaims;
 }
 

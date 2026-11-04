@@ -85,6 +85,8 @@ export async function createStaffUser(input: {
   tid: string;
   idp?: string;
   acr?: string;
+  /** Entra's email is not verified through Keycloak (trustEmail off): false is the production case. */
+  emailVerified?: boolean;
 }): Promise<void> {
   const attributes: Record<string, string[]> = {
     test_oid: [input.oid],
@@ -100,7 +102,7 @@ export async function createStaffUser(input: {
       firstName: input.email.split('@')[0],
       lastName: 'Staff',
       enabled: true,
-      emailVerified: true,
+      emailVerified: input.emailVerified ?? true,
       attributes,
       credentials: [{ type: 'password', value: PASSWORD, temporary: false }],
     }),

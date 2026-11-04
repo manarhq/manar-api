@@ -51,6 +51,23 @@ describe('verifyStaffClaims', () => {
     });
   });
 
+  it('accepts a matching oid and tid with an unverified email: email is display only', async () => {
+    await expect(
+      verifyStaffClaims(
+        await sign({ ...good(), email_verified: false }),
+        cfg,
+        jwks,
+      ),
+    ).resolves.toMatchObject({ entra_oid: 'oid-ali', entra_tid: TID });
+    await expect(
+      verifyStaffClaims(
+        await sign({ ...good(), email: undefined, email_verified: undefined }),
+        cfg,
+        jwks,
+      ),
+    ).resolves.toMatchObject({ entra_oid: 'oid-ali' });
+  });
+
   it.each([
     ['another issuer', {}, 'https://auth.test/realms/manar'],
     ['an id token', { typ: 'ID' }, ISS],
@@ -60,7 +77,17 @@ describe('verifyStaffClaims', () => {
     ['another IdP', { idp: 'github' }, ISS],
     ['another Entra tenant', { entra_tid: 'other' }, ISS],
     ['no Entra object id', { entra_oid: undefined }, ISS],
-    ['an unverified email', { email_verified: false }, ISS],
+    ['an empty Entra object id', { entra_oid: '' }, ISS],
+    ['an Entra object id that is not a string', { entra_oid: 42 }, ISS],
+    ['no Entra tenant id', { entra_tid: undefined }, ISS],
+    [
+      'a wrong Entra tenant id with a verified email',
+      {
+        entra_tid: 'aaaaaaaa-0000-4000-8000-000000000000',
+        email_verified: true,
+      },
+      ISS,
+    ],
   ])('refuses %s', async (_name, change, iss) => {
     await expect(
       verifyStaffClaims(await sign({ ...good(), ...change }, iss), cfg, jwks),
@@ -86,8 +113,16 @@ describe('StaffAuthGuard staff resolution', () => {
     const audit: unknown[] = [];
     const control = {
       staffMember: {
-        findUnique: () =>
-          fail ? Promise.reject(new Error('db down')) : Promise.resolve(byOid),
+        // Looks rows up the way Prisma would: only by the unique key asked for.
+        findUnique: ({ where }: { where: { entraOid?: string } }) =>
+          fail
+            ? Promise.reject(new Error('db down'))
+            : Promise.resolve(
+                byOid &&
+                  (byOid as { entraOid: string }).entraOid === where.entraOid
+                  ? byOid
+                  : null,
+              ),
         updateMany: (u: unknown) => {
           updates.push(u);
           return Promise.resolve({ count: 1 });
@@ -141,6 +176,15 @@ describe('StaffAuthGuard staff resolution', () => {
     await expect(guard.resolveStaff(claims)).rejects.toMatchObject({
       status: 403,
     });
+    expect(updates).toHaveLength(0);
+  });
+
+  it('refuses an email match whose object id is not the seeded one', async () => {
+    // Same address and name as the seeded row, another Entra identity (e.g. another tenant's user).
+    const { guard, updates } = make(row({ entraOid: 'oid-the-real-ali' }));
+    await expect(
+      guard.resolveStaff({ ...claims, entra_oid: 'oid-attacker' }),
+    ).rejects.toMatchObject({ status: 403, response: { code: 'not_staff' } });
     expect(updates).toHaveLength(0);
   });
 

@@ -112,6 +112,46 @@ describe('staff listener (e2e)', { timeout: 60_000 }, () => {
     await ctx.http().get('/staff/v1/me').expect(401);
   });
 
+  it('binds by oid and tid, not email: an unverified email is accepted, an email match with another oid is not', async () => {
+    const email = `unverified-${STAFF_E2E_SUFFIX}@fixio.test`;
+    const oid = randomUUID();
+    await ctx.control.staffMember.create({
+      data: {
+        email,
+        displayName: 'Unverified Staff',
+        team: 'SUPPORT',
+        status: 'ACTIVE',
+        entraOid: oid,
+        boundAt: new Date(),
+      },
+    });
+    await createStaffUser({
+      email,
+      oid,
+      tid: STAFF_E2E_TID,
+      emailVerified: false,
+    });
+    await ctx
+      .http()
+      .get('/staff/v1/me')
+      .set(await bearer(await staffToken(email)))
+      .expect(200);
+    // Same address, another Entra identity in the same tenant: not staff.
+    const twin = `twin-unverified-${STAFF_E2E_SUFFIX}`;
+    await createStaffUser({
+      email,
+      username: twin,
+      oid: randomUUID(),
+      tid: STAFF_E2E_TID,
+      emailVerified: true,
+    });
+    await ctx
+      .http()
+      .get('/staff/v1/me')
+      .set(await bearer(await staffToken(twin)))
+      .expect(403);
+  });
+
   describe('invites bind by a stable id, never by email (security review, 4 Nov)', () => {
     const invite = async (name: string) => {
       const email = `${name}-${STAFF_E2E_SUFFIX}@fixio.test`;
