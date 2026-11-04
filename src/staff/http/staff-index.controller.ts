@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -12,7 +11,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import type { z } from 'zod';
+import { parse } from './parse';
 import { throwFailClosed } from '../../common/fail-closed/fail-closed';
 import { StaffAuthGuard } from '../auth/staff-auth.guard';
 import {
@@ -32,17 +31,6 @@ import {
   TagsBody,
 } from '../index/staff-records.service';
 import { StaffRbacService } from '../rbac/staff-rbac.service';
-
-function parse<T extends z.ZodType>(schema: T, body: unknown): z.infer<T> {
-  const r = schema.safeParse(body ?? {});
-  if (!r.success)
-    throw new BadRequestException({
-      code: 'invalid_request',
-      message: 'Check the details and try again.',
-      fields: r.error.issues.map((i) => i.path.join('.')),
-    });
-  return r.data;
-}
 
 /** Index, search and record pages (DESK spec §16). Every route is recorded by the interceptor. */
 @Controller('staff/v1')

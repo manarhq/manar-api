@@ -7,6 +7,8 @@ import {
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { StaffAuditService } from './audit/staff-audit.service';
 import { StaffRbacService } from './rbac/staff-rbac.service';
+import { ChangeRequestsService } from './approvals/change-requests.service';
+import { RestrictionsService } from './restrictions/restrictions.service';
 
 const MINUTE = 60_000;
 
@@ -27,6 +29,8 @@ export class StaffJobsService
     private readonly control: ControlPrismaService,
     private readonly audit: StaffAuditService,
     private readonly rbac: StaffRbacService,
+    private readonly changes: ChangeRequestsService,
+    private readonly restrictions: RestrictionsService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -36,6 +40,15 @@ export class StaffJobsService
     this.every(MINUTE, 'audit checkpoint', () => this.audit.checkpoint());
     this.every(MINUTE, 'close elevations', () =>
       this.rbac.closeExpiredElevations(),
+    );
+    this.every(MINUTE, 'expire change requests', () =>
+      this.changes.expireOld(),
+    );
+    this.every(MINUTE, 'record ended suspensions', () =>
+      this.restrictions.recordExpired(),
+    );
+    this.every(10 * MINUTE, 'owner handovers', () =>
+      this.restrictions.completeHandovers(),
     );
     this.every(5 * MINUTE, 'rbac reconcile', () =>
       this.rbac.reconcile({ dryRun: false }),

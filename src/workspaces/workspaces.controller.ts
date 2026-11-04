@@ -40,6 +40,7 @@ import {
   WorkspaceListResponseDto,
   WorkspaceSummaryDto,
 } from './workspaces.dto';
+import { ResignupService } from '../staff/restrictions/resignup.service';
 import { WorkspacesService } from './workspaces.service';
 
 /**
@@ -55,6 +56,7 @@ export class WorkspacesController {
   constructor(
     private readonly workspaces: WorkspacesService,
     private readonly contact: ContactEmailService,
+    private readonly resignup: ResignupService,
   ) {}
 
   @Get()
@@ -75,6 +77,9 @@ export class WorkspacesController {
   })
   @ApiResponse({ status: 200, type: CreateWorkspaceResponseDto })
   async bootstrap(@CurrentIdentity() id: VerifiedIdentity) {
+    // DESK spec §9.5: someone matching a restriction in force (email, Microsoft identity) is
+    // banned as ban evasion and refused here, before anything is created for them.
+    await this.resignup.checkNewAccount(id);
     // Records how the person signed in (and pre-verifies an email-link address) for the growth track.
     await this.contact.noteSignIn(id).catch(() => undefined);
     return this.workspaces.ensurePersonal(id);

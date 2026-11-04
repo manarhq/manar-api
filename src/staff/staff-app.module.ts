@@ -30,6 +30,10 @@ import { StaffRecordsService } from './index/staff-records.service';
 import { TrustLogService } from './trust-log.service';
 import { StripeGateway } from '../billing/stripe.gateway';
 import { KeycloakAdminClient } from '../keycloak/keycloak-admin.client';
+import { StaffRestrictionsController } from './http/staff-restrictions.controller';
+import { ChangeRequestsService } from './approvals/change-requests.service';
+import { RestrictionsService } from './restrictions/restrictions.service';
+import { PlatformSuspension } from '../platform/platform-suspension';
 import { StaffJobsService } from './staff-jobs.service';
 
 /**
@@ -48,6 +52,7 @@ import { StaffJobsService } from './staff-jobs.service';
     StaffMeController,
     StaffInvitesController,
     StaffIndexController,
+    StaffRestrictionsController,
   ],
   providers: [
     JwksCacheService,
@@ -60,6 +65,9 @@ import { StaffJobsService } from './staff-jobs.service';
     TrustLogService,
     StripeGateway,
     KeycloakAdminClient,
+    ChangeRequestsService,
+    RestrictionsService,
+    PlatformSuspension,
     ErrorReferenceRecorder,
     { provide: ERROR_REFERENCE_SINK, useExisting: ErrorReferenceRecorder },
     { provide: APP_FILTER, useClass: ErrorEnvelopeFilter },

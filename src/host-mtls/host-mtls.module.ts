@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { HostAuthGuard } from './host-auth.guard';
+import { RestrictionEnforcement } from '../staff/restrictions/restriction-enforcement';
 import { HostToolsService } from '../host-coverage/host-tools.service';
 import { PauseModule } from '../pause/pause.module';
 import { AiSpendService } from '../ai-spend/ai-spend.service';
@@ -32,6 +33,8 @@ import { BillingModule } from '../billing/billing.module';
   ],
   providers: [
     HostAuthGuard,
+    // The guard's restriction check (DESK spec §9.2); only needs the control database.
+    RestrictionEnforcement,
     HostToolsService,
     AiSpendService,
     JailSitesService,

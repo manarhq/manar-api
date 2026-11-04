@@ -57,6 +57,14 @@ export async function createStaffRealm(): Promise<void> {
         attrMapper('test_tid', 'entra_tid'),
         attrMapper('test_acr', 'acr'),
         {
+          // Direct-grant tokens carry no auth_time: tests stamp it per token (staffToken).
+          ...attrMapper('test_auth_time', 'auth_time'),
+          config: {
+            ...attrMapper('test_auth_time', 'auth_time').config,
+            'jsonType.label': 'long',
+          },
+        },
+        {
           name: 'audience',
           protocol: 'openid-connect',
           protocolMapper: 'oidc-audience-mapper',
@@ -101,6 +109,23 @@ export async function createStaffUser(input: {
 }
 
 export async function staffToken(username: string): Promise<string> {
+  // A fresh sign-in time for this token (the passkey step-up checks auth_time <= 300 s).
+  const [user] = (await (
+    await adminFetch(
+      `/admin/realms/${STAFF_E2E_REALM}/users?exact=true&username=${encodeURIComponent(username)}`,
+    )
+  ).json()) as { id: string; attributes?: Record<string, string[]> }[];
+  if (user)
+    await adminFetch(`/admin/realms/${STAFF_E2E_REALM}/users/${user.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        ...user,
+        attributes: {
+          ...user.attributes,
+          test_auth_time: [String(Math.floor(Date.now() / 1000))],
+        },
+      }),
+    });
   const res = await fetch(
     `${base}/realms/${STAFF_E2E_REALM}/protocol/openid-connect/token`,
     {

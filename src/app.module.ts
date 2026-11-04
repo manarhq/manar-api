@@ -2,6 +2,7 @@ import { AiSpendHttpModule } from './ai-spend/ai-spend.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { JailHttpModule } from './jail/jail.module';
 import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { StaffEnforcementModule } from './staff/staff-enforcement.module';
 import {
   ERROR_REFERENCE_SINK,
   ErrorReferenceRecorder,
@@ -66,6 +67,7 @@ import { EdgeHttpModule } from './edge/edge-http.module';
 
 @Module({
   imports: [
+    StaffEnforcementModule,
     AppConfigModule,
     LoggingModule,
     HealthModule,
