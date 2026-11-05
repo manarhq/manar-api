@@ -86,6 +86,17 @@ const PRISMA_CLIENT_ERRORS: Record<
   P2025: { status: 404, message: NOT_FOUND },
 };
 
+/** pg pool wait expired, or Postgres cancelled a statement (SQLSTATE 57014, 55P03 lock timeout). */
+function isDatabaseSaturated(exception: unknown): boolean {
+  if (!(exception instanceof Error)) return false;
+  if (exception.message === 'timeout exceeded when trying to connect')
+    return true;
+  const meta = (exception as { meta?: unknown }).meta as
+    { driverAdapterError?: { cause?: { originalCode?: string } } } | undefined;
+  const code = meta?.driverAdapterError?.cause?.originalCode;
+  return code === '57014' || code === '55P03';
+}
+
 interface Classified {
   status: number;
   body: Record<string, unknown>;
@@ -114,6 +125,21 @@ function classify(exception: unknown, method: string): Classified {
   if (typeof code === 'string' && PRISMA_CLIENT_ERRORS[code]) {
     const { status, message } = PRISMA_CLIENT_ERRORS[code];
     return { status, body: { message }, unexpected: false };
+  }
+
+  // The database could not take the request in time: the pool had no free connection within
+  // DB_POOL_CONNECT_TIMEOUT_MS, or a statement hit its timeout. Answer 503 now (the caller may
+  // retry) instead of a 500, with the stable fail-closed reason.
+  if (isDatabaseSaturated(exception)) {
+    return {
+      status: 503,
+      body: {
+        message: HUMAN_DEFAULTS[503],
+        reason: 'enforcement_dependency_unavailable',
+        dependency: 'database',
+      },
+      unexpected: false,
+    };
   }
 
   // Fastify's own errors (body parser, media type, payload size) carry a 4xx statusCode.

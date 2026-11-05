@@ -68,6 +68,8 @@ export function openSearchConfigIssues(c: Partial<OpenSearchConfig>): string[] {
   return issues;
 }
 
+export const OPENSEARCH_REQUEST_TIMEOUT_MS = 15_000;
+
 /** Client options for `OPENSEARCH_NODE`; a misconfigured connection throws. */
 export function openSearchClientOptions(
   get: <K extends keyof OpenSearchConfig>(key: K) => OpenSearchConfig[K],
@@ -84,6 +86,10 @@ export function openSearchClientOptions(
   const caFile = c.OPENSEARCH_TLS_CA_FILE;
   return {
     node: c.OPENSEARCH_NODE as string,
+    // Bounded: a hung OpenSearch must not hold a request or the Kafka consumer. Bulk gets the
+    // same bound; the service's own retry covers the rest.
+    requestTimeout: OPENSEARCH_REQUEST_TIMEOUT_MS,
+    maxRetries: 1,
     ...(username && password ? { auth: { username, password } } : {}),
     ...(caFile ? { ssl: { ca: readFileSync(caFile) } } : {}),
   };

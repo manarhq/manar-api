@@ -164,6 +164,36 @@ every flag at its safe default (`false`). This avoids a destructive schema
 migration later, when a real policy engine starts reading these fields to
 gate behavior per tenant.
 
+## Pools and timeouts (5 Nov 2026)
+
+Every Prisma client (control and each cached tenant client) has an explicit `pg` pool
+(`src/database/pool-options.ts`):
+
+| Variable                     | Default | Meaning                                                                                    |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------ |
+| `DB_POOL_MAX_CONTROL`        | 10      | Connections of the control pool                                                            |
+| `DB_POOL_MAX_TENANT`         | 5       | Connections of each tenant client (up to `TENANT_DB_CLIENT_CACHE_MAX` of them)             |
+| `DB_POOL_CONNECT_TIMEOUT_MS` | 3000    | Wait for a free connection / TCP connect; then the request fails (503, see below)          |
+| `DB_QUERY_TIMEOUT_MS`        | 35000   | Client-side bound on one query, all pools (PgBouncer-safe)                                 |
+| `DB_STATEMENT_TIMEOUT_MS`    | 30000   | Server-side `statement_timeout` for tenant clients only (0 = off); worker chart uses 120 s |
+
+An exhausted pool or a cancelled statement answers **503** `enforcement_dependency_unavailable`
+(`getClient` via `failClosed`; any other handler via `ErrorEnvelopeFilter`), never a hang. Worst case
+per pod is 2 apps x (control + cache max x tenant max) connections; size against `max_connections`.
+`TENANT_DB_CLIENT_CACHE_MAX` stays 50 (no evidence yet that it is too high; lower it only with
+connection counts from production).
+
+### PgBouncer for tenant databases: not switched
+
+Checked every session-level feature. Tenant request paths use none (all advisory locks are
+`pg_advisory_xact_lock`, no `LISTEN`, `SET`, temp tables or cursors), so transaction pooling would
+work for them. We still keep tenant DBs on the direct port because: provisioning and migrations
+(`CREATE DATABASE`, `prisma migrate deploy` with its session advisory lock) need a direct
+connection, which would mean two URLs per tenant; PgBouncer can reject the `statement_timeout`
+startup parameter; and one pooler pool per tenant database multiplies server connections anyway.
+`CONTROL_DATABASE_URL` must also stay direct: `EdgePeerService` holds a `LISTEN` connection on it.
+If the control pool is ever pooled, give the listener its own direct URL first.
+
 ## Known limitations (this phase)
 
 - No automatic rollback if `provisionTenant` fails after the control-DB

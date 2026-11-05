@@ -1,3 +1,4 @@
+import { pgPoolOptions, poolSettings } from './pool-options';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as fs from 'node:fs';
@@ -10,7 +11,7 @@ import { Prisma as ControlPrisma } from '../generated/control-client/client';
 import { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AppConfig } from '../config/env.validation';
 import { authSetting } from '../auth/auth.config';
-import { failClosed } from '../common/fail-closed/fail-closed';
+import { failClosed, throwFailClosed } from '../common/fail-closed/fail-closed';
 import { ControlPrismaService } from './control-prisma.service';
 import {
   DEFAULT_TENANT_DB_SECRET_REFERENCE,
@@ -197,7 +198,14 @@ export class TenantDatabaseManager implements OnModuleDestroy {
 
     // The stale window starts when the status is read, not when the client is ready.
     const readAt = Date.now();
-    const tenant = await this.resolveTenant(tenantId);
+    // A control DB that cannot answer (down, or its pool exhausted past DB_POOL_CONNECT_TIMEOUT_MS)
+    // is a fail-closed 503, not a bare 500; an unknown tenant stays TenantNotFoundError.
+    const tenant = await this.resolveTenant(tenantId).catch(
+      (error: unknown) => {
+        if (error instanceof TenantNotFoundError) throw error;
+        return throwFailClosed('control-db', error);
+      },
+    );
 
     if (
       tenant.status !== 'ACTIVE' ||
@@ -212,7 +220,12 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     );
 
     const client = new TenantPrismaClient({
-      adapter: new PrismaPg({ connectionString }),
+      adapter: new PrismaPg(
+        pgPoolOptions(
+          connectionString,
+          poolSettings((k) => this.configService.get(k as never), 'tenant'),
+        ),
+      ),
     });
     await client.$connect();
 

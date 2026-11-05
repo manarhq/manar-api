@@ -125,6 +125,24 @@ describe('ErrorEnvelopeFilter', () => {
     );
   });
 
+  it('answers 503 enforcement_dependency_unavailable when the DB pool wait or a statement times out', () => {
+    for (const e of [
+      new Error('timeout exceeded when trying to connect'),
+      Object.assign(new Error('Raw query failed'), {
+        code: 'P2010',
+        meta: { driverAdapterError: { cause: { originalCode: '57014' } } },
+      }),
+    ]) {
+      const r = run(e, 'GET');
+      expect(r.status).toBe(503);
+      expect(r.body).toMatchObject({
+        reason: 'enforcement_dependency_unavailable',
+        dependency: 'database',
+      });
+      expect(JSON.stringify(r.body)).not.toContain('57014');
+    }
+  });
+
   it('maps a duplicate and a missing row to 409 and 404', () => {
     expect(run(Object.assign(new Error('x'), { code: 'P2002' })).status).toBe(
       409,

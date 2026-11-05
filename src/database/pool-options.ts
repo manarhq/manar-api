@@ -1,0 +1,59 @@
+import type { PrismaPg } from '@prisma/adapter-pg';
+
+/** The adapter's own pool config type (two `@types/pg` versions are installed). */
+type PoolConfig = Exclude<
+  ConstructorParameters<typeof PrismaPg>[0],
+  string | { connect: unknown }
+>;
+
+export interface PoolSettings {
+  max: number;
+  connectTimeoutMs: number;
+  queryTimeoutMs: number;
+  /** Server-side statement_timeout; 0 or undefined sends nothing. */
+  statementTimeoutMs?: number;
+}
+
+/**
+ * `pg` pool options for a Prisma `PrismaPg` adapter. Bounded size, a bounded wait for a free
+ * connection (`connectionTimeoutMillis` also bounds the TCP connect) and a bounded query.
+ */
+export function pgPoolOptions(
+  connectionString: string,
+  s: PoolSettings,
+): PoolConfig {
+  return {
+    connectionString,
+    max: s.max,
+    connectionTimeoutMillis: s.connectTimeoutMs,
+    query_timeout: s.queryTimeoutMs,
+    ...(s.statementTimeoutMs
+      ? { statement_timeout: s.statementTimeoutMs }
+      : {}),
+  };
+}
+
+type Get = (key: string) => unknown;
+
+const num = (v: unknown, fallback: number): number =>
+  typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+
+/**
+ * Pool settings from the validated config (defaults mirror `DatabaseConfigSchema`, for callers
+ * whose config object is a partial test double). The control pool never sends statement_timeout.
+ */
+export function poolSettings(
+  get: Get,
+  kind: 'control' | 'tenant',
+): PoolSettings {
+  return {
+    max:
+      kind === 'control'
+        ? num(get('DB_POOL_MAX_CONTROL'), 10)
+        : num(get('DB_POOL_MAX_TENANT'), 5),
+    connectTimeoutMs: num(get('DB_POOL_CONNECT_TIMEOUT_MS'), 3000),
+    queryTimeoutMs: num(get('DB_QUERY_TIMEOUT_MS'), 35_000),
+    statementTimeoutMs:
+      kind === 'tenant' ? num(get('DB_STATEMENT_TIMEOUT_MS'), 30_000) : 0,
+  };
+}
