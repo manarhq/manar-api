@@ -70,6 +70,29 @@ describe('folder scopes: only a project folder inside a recognised user home', (
     ['Startup in name', '/home/x/proj/my-startup-scripts/a.sh'],
     ['wsl AppData', '/mnt/c/Users/x/AppData/Roaming/a.ts'],
     ['wsl startup', '/mnt/c/Users/x/proj/Startup/a.cmd'],
+    // folders that run or configure things, at any depth (security review)
+    ['.git hooks', '/home/sara/proj/.git/hooks/pre-commit'],
+    ['.git config', '/home/sara/proj/.git/config'],
+    ['.vscode', '/home/sara/proj/.vscode/tasks.json'],
+    ['.claude', '/home/sara/proj/.claude/settings.json'],
+    ['dot folder deep', '/home/sara/proj/src/a/.hidden/x.ts'],
+    ['dot folder mac', '/Users/sara/proj/.github/workflows/ci.yml'],
+    ['bin', '/home/sara/proj/bin/run.sh'],
+    ['bin deep', '/home/sara/proj/tools/bin/x.sh'],
+    [
+      'PowerShell profile folder',
+      'C:\\Users\\sara\\Documents\\WindowsPowerShell\\profile.ps1',
+    ],
+    [
+      'PowerShell 7 profile folder',
+      'c:/Users/sara/Documents/PowerShell/profile.ps1',
+    ],
+    ['wsl PowerShell', '/mnt/c/Users/sara/Documents/PowerShell/profile.ps1'],
+    // Windows folds case by its own table: ASCII only
+    ['non-ASCII in a Windows scope', 'C:\\Users\\sara\\projé\\x.ts'],
+    ['Kelvin sign folds to k', 'C:\\Users\\sara\\pro\u212Aj\\x.ts'],
+    ['Turkish dotted I', 'C:\\Users\\sara\\\u0130proj\\x.ts'],
+    ['non-ASCII in a WSL Windows home', '/mnt/c/Users/sara/pro\u212Aj/x.ts'],
     // paths that cannot be trusted
     ['relative', 'src/a.ts'],
     ['top-level file', '/a.ts'],
@@ -117,6 +140,25 @@ describe('folder matching', () => {
       false,
     );
     expect(scopeMatches(P, T, 'shell', '/home/sara/proj/src/x')).toBe(false);
+  });
+  it('never covers a dot folder, bin or a PowerShell profile folder inside a granted project', () => {
+    const P = '/home/sara/proj/*';
+    for (const r of [
+      '/home/sara/proj/.git/hooks/pre-commit',
+      '/home/sara/proj/.git/config',
+      '/home/sara/proj/.vscode/tasks.json',
+      '/home/sara/proj/.claude/settings.json',
+      '/home/sara/proj/src/.cache/x.ts',
+      '/home/sara/proj/bin/run.sh',
+    ])
+      expect(inside(P, r), r).toBe(false);
+    expect(inside(P, '/home/sara/proj/src/a.ts')).toBe(true);
+    expect(inside(P, '/home/sara/proj/.gitignore')).toBe(true); // a dot FILE is not a folder
+    const W = 'c:/users/sara/proj/*';
+    expect(inside(W, 'C:\\Users\\sara\\proj\\PowerShell\\profile.ps1')).toBe(
+      false,
+    );
+    expect(inside(W, 'C:\\Users\\sara\\proj\\pro\u212Aj\\x.ts')).toBe(false);
   });
   it('windows: case, slashes and drive letters', () => {
     const W = 'c:/users/sara/app/*';

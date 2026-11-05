@@ -35,10 +35,18 @@ export function canonicalAbsolute(raw: string): string | null {
   if (raw.length === 0 || raw.length > 2048) return null;
   const win = DRIVE.test(raw);
   let p = raw;
-  if (win) p = p.replace(/\\/g, '/').toLowerCase();
+  // Windows names fold case by the file system's own table, which is not Unicode's: so a Windows
+  // scope is ASCII only (folded with ASCII rules), and anything else asks.
+  const asciiFold = (x: string) => x.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  if (win) {
+    if (/\P{ASCII}/u.test(p)) return null;
+    p = asciiFold(p.replace(/\\/g, '/'));
+  }
   // Windows drives mounted in WSL are Windows files: case-insensitive, same name rules.
-  else if (WSL_DRIVE.test(raw)) p = p.toLowerCase();
-  else if (!p.startsWith('/') || p.startsWith('//') || p.includes('\\'))
+  else if (WSL_DRIVE.test(raw)) {
+    if (/\P{ASCII}/u.test(p)) return null;
+    p = asciiFold(p);
+  } else if (!p.startsWith('/') || p.startsWith('//') || p.includes('\\'))
     return null; // relative, UNC (`//server`, `\\server`), or an ambiguous backslash
   if (BAD_CHARS.test(p) || p.includes('%') || p.includes('\u0000')) return null;
   p = p.normalize('NFC');
@@ -78,6 +86,13 @@ const CONFIG_FIRST =
   /^(\.|appdata$|library$|application data$|start menu$|local settings$)/i;
 /** Autostart locations, wherever they sit in the path. */
 const PERSISTENCE = /startup|launchagents|launchdaemons|autostart|start menu/i;
+/**
+ * Folders that run or configure things, at any depth: dot-folders (`.git/hooks`, `.vscode`,
+ * `.claude`, `.config`), the PowerShell profile folders and `bin`. A grant never covers them.
+ */
+const RISKY_FOLDER = /^(\..*|bin|windowspowershell|powershell)$/i;
+const riskyFolder = (dir: string) =>
+  dir.split('/').some((s) => s !== '' && RISKY_FOLDER.test(s));
 
 function folderScope(resource: string): string | null {
   const path = canonicalAbsolute(resource);
@@ -88,7 +103,7 @@ function folderScope(resource: string): string | null {
   if (!m || NOT_A_PERSON.test(m[2]!)) return null;
   const below = m[3]!.split('/').filter(Boolean);
   if (below.length === 0 || CONFIG_FIRST.test(below[0]!)) return null;
-  if (PERSISTENCE.test(dir)) return null;
+  if (PERSISTENCE.test(dir) || riskyFolder(dir)) return null;
   return `${dir}*`;
 }
 function pathMatches(pattern: string, resource: string): boolean {
@@ -96,7 +111,12 @@ function pathMatches(pattern: string, resource: string): boolean {
   if (!path || !pattern.endsWith('/*')) return false;
   if (resourceAliases(resource, 'path').some(blockedAlias)) return false;
   // A persistence folder inside a granted project is still not covered.
-  return path.startsWith(pattern.slice(0, -1)) && !PERSISTENCE.test(path);
+  const dir = path.slice(0, path.lastIndexOf('/') + 1);
+  return (
+    path.startsWith(pattern.slice(0, -1)) &&
+    !PERSISTENCE.test(path) &&
+    !riskyFolder(dir)
+  );
 }
 
 // ---------------------------------------------------------------- web

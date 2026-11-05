@@ -2507,6 +2507,9 @@ model ApprovalAllowGrant {
   origin     String    @default("approval")
   /// A narrow prefix scope (`src/rule-scope.ts`) instead of the exact `resource`. Null: exact.
   resourcePattern String?
+  /// Which ask this answers (`ceiling`, or a hash of the policy version and the rule that asked).
+  /// A scoped grant satisfies only that ask; null never satisfies a scoped lookup.
+  askKey          String?
 
   @@index([hostId, toolId, actionId, expiresAt])
   @@index([sourceId])
@@ -2570,6 +2573,8 @@ model HostApproval {
   endReason        String?
   /// Self-approved, high risk, re-confirmed (see `ApprovalRequest.selfConfirmedAt`).
   selfConfirmedAt  DateTime?
+  /// Which ask opened this (`ceiling`, or a hash of the policy version and rule); see `ApprovalAllowGrant.askKey`.
+  askKey           String?
 
   @@index([hostId, status, expiresAt])
   @@index([createdAt, id])

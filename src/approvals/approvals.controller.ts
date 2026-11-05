@@ -75,6 +75,7 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ApprovalRequestService } from './approval-request.service';
 import { createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
+import { decodeGrantCursor, encodeGrantCursor } from './grant-cursor';
 import { redactForStorage } from '../contract/redact';
 import {
   DecideApprovalRequestSchema,
@@ -588,20 +589,50 @@ export class ApprovalsController {
     description:
       'Every live 8-hour grant and every "always allow this here" rule (origin: approval, offer or learning), newest first. Withdraw one with POST /approvals/allow-grants/:grantId/revoke. Approvers only.',
   })
-  async listGrants(@CurrentAuth() auth: AuthContext) {
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    description: '1 to 200, default 50',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'nextCursor of the previous page',
+  })
+  async listGrants(
+    @CurrentAuth() auth: AuthContext,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
     const client = await this.tenantDatabaseManager.getClient(auth.tenant.id);
+    const take = Math.min(
+      200,
+      Math.max(1, Number.parseInt(limit ?? '', 10) || 50),
+    );
+    const at = decodeGrantCursor(cursor);
     const rows = await client.approvalAllowGrant.findMany({
       where: {
         effect: 'ALLOW',
         revokedAt: null,
         expiresAt: { gt: new Date() },
+        ...(at
+          ? {
+              OR: [
+                { createdAt: { lt: at.createdAt } },
+                { createdAt: at.createdAt, id: { lt: at.id } },
+              ],
+            }
+          : {}),
       },
       include: { host: { select: { hostname: true } } },
-      orderBy: { createdAt: 'desc' },
-      take: 200,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: take + 1,
     });
+    const page = rows.slice(0, take);
+    const last = page.at(-1);
     return {
-      items: rows.map((g) => ({
+      nextCursor: rows.length > take && last ? encodeGrantCursor(last) : null,
+      items: page.map((g) => ({
         id: g.id,
         origin: g.origin,
         hostId: g.hostId,

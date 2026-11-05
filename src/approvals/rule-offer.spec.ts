@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApproverDirectory } from './approver-directory';
-import { HostApprovalsService } from './host-approvals.service';
+import { HostApprovalsService, publicOffer } from './host-approvals.service';
 
 type Row = {
   id: string;
@@ -9,6 +9,7 @@ type Row = {
   actionId: string;
   resource: string;
   highRisk: boolean;
+  askKey: string | null;
   status: string;
   decision: string | null;
   decidedBy: string | null;
@@ -18,7 +19,12 @@ type Row = {
 const DAY = 86_400_000;
 
 function world(
-  over: { history?: number; resource?: string; highRisk?: boolean } = {},
+  over: {
+    history?: number;
+    resource?: string;
+    highRisk?: boolean;
+    askKey?: string | null;
+  } = {},
 ) {
   const rows: Row[] = [];
   for (let i = 0; i < (over.history ?? 3); i++)
@@ -29,6 +35,7 @@ function world(
       actionId: 'edit',
       resource: `/home/sara/proj/src/f${i}.ts`,
       highRisk: false,
+      askKey: 'ceiling',
       status: 'APPROVED',
       decision: 'approve_once',
       decidedBy: 'owner',
@@ -42,6 +49,7 @@ function world(
     actionId: 'edit',
     resource: over.resource ?? '/home/sara/proj/src/new.ts',
     highRisk: over.highRisk ?? false,
+    askKey: over.askKey === undefined ? 'ceiling' : over.askKey,
     status: 'PENDING',
     decision: null,
     decidedBy: null,
@@ -73,8 +81,14 @@ function world(
     hostApproval: {
       findUnique: ({ where }: { where: { id: string } }) =>
         Promise.resolve(rows.find((r) => r.id === where.id) ?? null),
-      findMany: ({ where }: { where: { status: string } }) =>
-        Promise.resolve(rows.filter((r) => r.status === where.status)),
+      findMany: ({ where }: { where: { status: string; askKey?: string } }) =>
+        Promise.resolve(
+          rows.filter(
+            (r) =>
+              r.status === where.status &&
+              (where.askKey === undefined || r.askKey === where.askKey),
+          ),
+        ),
       updateMany: ({
         where,
         data,
@@ -113,6 +127,14 @@ describe('rule offer after the 3rd identical approval (decision 37)', () => {
     expect(m.get('ap1')).toEqual({
       scope: '/home/sara/proj/src/*',
       approvals: 3,
+      lastsDays: 365,
+      askKey: 'ceiling',
+    });
+    // The client never sees the internal ask key.
+    expect(publicOffer(m.get('ap1'))).toEqual({
+      scope: '/home/sara/proj/src/*',
+      approvals: 3,
+      lastsDays: 365,
     });
     const few = world({ history: 2 });
     expect((await few.service.offersFor(few.client, [few.pending])).size).toBe(
@@ -213,5 +235,29 @@ describe('rule offer after the 3rd identical approval (decision 37)', () => {
       }),
     ).rejects.toThrow('eight_hours_in_console');
     expect(w.grants).toHaveLength(0);
+  });
+
+  it('an offer answers one ask: approvals of another ask, or an unkeyed request, earn nothing', async () => {
+    const other = world({ askKey: 'p:abc' }); // history is all 'ceiling'
+    expect(
+      (await other.service.offersFor(other.client, [other.pending])).size,
+    ).toBe(0);
+    const unkeyed = world({ askKey: null });
+    expect(
+      (await unkeyed.service.offersFor(unkeyed.client, [unkeyed.pending])).size,
+    ).toBe(0);
+  });
+
+  it('the grant it makes carries the ask it answers', async () => {
+    const w = world();
+    await w.service.decide(w.client, 't1', {
+      approvalId: 'ap1',
+      subject: 'owner',
+      decision: 'approve_once',
+      via: 'console',
+      ownerMayOperate: true,
+      alwaysAllowHere: true,
+    });
+    expect(w.grants[0]).toMatchObject({ askKey: 'ceiling' });
   });
 });

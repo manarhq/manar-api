@@ -42,8 +42,10 @@ export async function createAllowGrant(
     createdBy: string;
     sourceId: string;
     now?: Date;
+    /** The ask an 8-hour grant answers; absent for an agent grant. */
+    askKey?: string;
     /** A longer-lived, narrow-scope grant ("always allow this here"); default is exact, 8 hours. */
-    always?: { origin: 'offer' | 'learning'; pattern: string };
+    always?: { origin: 'offer' | 'learning'; pattern: string; askKey: string };
   },
 ) {
   const where = scopeWhere(input.scope);
@@ -61,8 +63,13 @@ export async function createAllowGrant(
         now.getTime() +
           (input.always ? ALWAYS_GRANT_TTL_MS : ALLOW_GRANT_TTL_MS),
       ),
+      ...(input.askKey ? { askKey: input.askKey } : {}),
       ...(input.always
-        ? { origin: input.always.origin, resourcePattern: input.always.pattern }
+        ? {
+            origin: input.always.origin,
+            resourcePattern: input.always.pattern,
+            askKey: input.always.askKey,
+          }
         : {}),
     },
   });
@@ -73,7 +80,7 @@ export async function findLiveAllowGrant(
   scope: AllowGrantScope,
   target: AllowGrantTarget,
   now: Date = new Date(),
-): Promise<{ id: string; expiresAt: Date } | null> {
+): Promise<{ id: string; expiresAt: Date; askKey: string | null } | null> {
   const where = scopeWhere(scope);
   if (!where) return null;
   return client.approvalAllowGrant.findFirst({
@@ -87,7 +94,7 @@ export async function findLiveAllowGrant(
       expiresAt: { gt: now },
     },
     orderBy: { expiresAt: 'desc' },
-    select: { id: true, expiresAt: true },
+    select: { id: true, expiresAt: true, askKey: true },
   });
 }
 
@@ -100,6 +107,8 @@ export async function findLivePatternGrant(
   client: Pick<TenantPrismaClient, 'approvalAllowGrant'>,
   hostId: string,
   target: AllowGrantTarget,
+  /** The ask being answered: a scoped grant satisfies only the ask it was made for. */
+  askKey: string,
   now: Date = new Date(),
 ): Promise<{ id: string; expiresAt: Date } | null> {
   const rows = await client.approvalAllowGrant.findMany({
@@ -111,6 +120,7 @@ export async function findLivePatternGrant(
       revokedAt: null,
       expiresAt: { gt: now },
       resourcePattern: { not: null },
+      askKey,
     },
     select: { id: true, expiresAt: true, resourcePattern: true },
     take: 50,

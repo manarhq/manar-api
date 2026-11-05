@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
@@ -34,6 +35,32 @@ export interface HostAuthorizeDecision {
   expiresAt?: Date;
   /** Set when a live "Approve for 8 hours" grant turned an approval requirement into ALLOW. */
   grantId?: string;
+  /**
+   * Always false when the answer exists only because of a grant or learning mode: the device's
+   * offline snapshot must never store it, or a withdrawn permission would keep working offline.
+   */
+  cacheable?: boolean;
+  /** Which ask this is (`ceiling` or a policy rule); the approval and any scoped grant carry it. */
+  askKey?: string;
+}
+
+/** The ask that comes from the risk ceiling: no rule matched. */
+export const CEILING_ASK = 'ceiling';
+
+/**
+ * A policy ask is identified by the policy version and the exact rule that asked, so a grant made
+ * for one rule never answers another, and republishing a policy ends the grants made for it.
+ */
+export function policyAskKey(policy: {
+  policyVersionId?: string;
+  matchedRule?: unknown;
+}): string {
+  return `p:${createHash('sha256')
+    .update(
+      `${policy.policyVersionId ?? ''}|${JSON.stringify(policy.matchedRule ?? null)}`,
+    )
+    .digest('hex')
+    .slice(0, 24)}`;
 }
 
 /** Same as the default task ceiling for Claude Code: reads and fetches run, edits and shell ask. */
@@ -45,7 +72,7 @@ export interface HostApprovalOpener {
   open(
     host: HostContext,
     request: HostAuthorizeRequest,
-    decision: { reason: string; riskScore: number },
+    decision: { reason: string; riskScore: number; askKey?: string },
   ): Promise<{ id: string; expiresAt: Date } | null>;
 }
 
@@ -94,6 +121,7 @@ export class HostAuthorizeService {
         const a = await this.approvals.open(host, request, {
           reason: result.reason ?? 'policy_requires_approval',
           riskScore: result.riskScore ?? 0,
+          askKey: result.askKey,
         });
         if (a) result = { ...result, approvalId: a.id, expiresAt: a.expiresAt };
       } catch (error) {
@@ -189,9 +217,13 @@ export class HostAuthorizeService {
       target,
     );
     // A narrow "always allow here" scope is looked up only if something asks (below).
-    let grant = exact;
-    const scoped = async () => {
-      grant ??= await findLivePatternGrant(client, host.hostId, target);
+    // A grant made for one ask never answers another (a grant without a key is an older one).
+    let grant: { id: string } | null = null;
+    const scoped = async (askKey: string) => {
+      grant =
+        exact && (!exact.askKey || exact.askKey === askKey)
+          ? exact
+          : await findLivePatternGrant(client, host.hostId, target, askKey);
       return grant;
     };
     const policy = await this.policy.evaluate(client, host.tenantId, {
@@ -208,21 +240,34 @@ export class HostAuthorizeService {
       };
     }
     if (policy.effect === 'APPROVAL_REQUIRED') {
-      if (await scoped())
-        return { decision: 'ALLOW', riskScore: base, grantId: grant!.id };
+      const askKey = policyAskKey(policy);
+      if (await scoped(askKey))
+        return {
+          decision: 'ALLOW',
+          riskScore: base,
+          grantId: grant!.id,
+          cacheable: false,
+        };
       return {
         decision: 'APPROVAL_REQUIRED',
         reason: 'policy_requires_approval',
         riskScore: base,
+        askKey,
       };
     }
     if (!policy.matchedRule && base > HOST_RISK_CEILING) {
-      if (await scoped())
-        return { decision: 'ALLOW', riskScore: base, grantId: grant!.id };
+      if (await scoped(CEILING_ASK))
+        return {
+          decision: 'ALLOW',
+          riskScore: base,
+          grantId: grant!.id,
+          cacheable: false,
+        };
       return {
         decision: 'APPROVAL_REQUIRED',
         reason: 'risk_ceiling_exceeded',
         riskScore: base,
+        askKey: CEILING_ASK,
       };
     }
     return { decision: 'ALLOW', riskScore: base };

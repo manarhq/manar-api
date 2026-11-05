@@ -22,7 +22,7 @@ import {
   RevokeApprovalSchema,
 } from './approvals.validation';
 import { explainRisk } from './risk-explain';
-import { HostApprovalsService } from './host-approvals.service';
+import { HostApprovalsService, publicOffer } from './host-approvals.service';
 import { ApprovalRevokeService } from './approval-revoke.service';
 import {
   ApproverDirectory,
@@ -130,7 +130,7 @@ export class HostApprovalsConsoleController {
         highRisk: r.highRisk,
         explanation: explainRisk(r.actionId, r.resource, r.highRisk),
         // "Always allow this here" after the 3rd identical approval; null when not offered.
-        ruleOffer: offers.get(r.id) ?? null,
+        ruleOffer: publicOffer(offers.get(r.id)),
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,
         allowedDecisions: rights[i]!.choices,

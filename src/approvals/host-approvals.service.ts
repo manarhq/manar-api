@@ -23,6 +23,7 @@ import {
 } from '../jail/jail-sites.service';
 import {
   ALLOW_GRANT_TTL_MS,
+  ALWAYS_GRANT_TTL_MS,
   createAllowGrant,
   findLivePatternGrant,
 } from './allow-grants';
@@ -73,6 +74,8 @@ export interface OpenHostApprovalInput {
   highRisk: boolean;
   /** Shown in the push, e.g. "Cursor". */
   toolName: string;
+  /** Which ask this is (`ceiling` or a policy rule): a grant made from it answers only that ask. */
+  askKey?: string;
 }
 
 export interface DecideHostApprovalInput {
@@ -120,6 +123,19 @@ export interface RuleOffer {
   /** Narrow prefix scope the rule would cover (a folder, a web origin, or one MCP tool). */
   scope: string;
   approvals: number;
+  /** How long accepting lasts, in days. */
+  lastsDays: number;
+  /** The ask it would answer; never sent to a client. */
+  askKey: string;
+}
+
+/** What a client may see of an offer: never the internal ask key. */
+export function publicOffer(
+  o: RuleOffer | undefined,
+): { scope: string; approvals: number; lastsDays: number } | null {
+  return o
+    ? { scope: o.scope, approvals: o.approvals, lastsDays: o.lastsDays }
+    : null;
 }
 
 @Injectable()
@@ -196,6 +212,7 @@ export class HostApprovalsService {
         resource: input.resource,
         summary: `${input.summary.slice(0, 280)} #${matchCode}`,
         highRisk: input.highRisk,
+        askKey: input.askKey ?? null,
         expiresAt: new Date(now.getTime() + HOST_APPROVAL_TTL_MS),
       },
     });
@@ -247,6 +264,7 @@ export class HostApprovalsService {
       actionId: string;
       resource: string;
       highRisk: boolean;
+      askKey?: string | null;
     }>,
     at?: Date,
   ): Promise<Map<string, RuleOffer>> {
@@ -267,10 +285,13 @@ export class HostApprovalsService {
       actionId: string;
       resource: string;
       highRisk: boolean;
+      askKey?: string | null;
     },
     now: Date,
   ): Promise<RuleOffer | null> {
     if (r.highRisk || r.actionId === SITE_CONNECT_ACTION) return null;
+    // An offer answers one ask; a request without one (older) is never offered.
+    if (!r.askKey) return null;
     if (sensitiveReason(r)) return null;
     const scope = scopeFor(r.toolId, r.actionId, r.resource);
     if (!scope) return null;
@@ -295,6 +316,7 @@ export class HostApprovalsService {
         decision: { in: ['approve_once', 'approve_8h'] },
         decidedBy: { not: null },
         highRisk: false,
+        askKey: r.askKey,
         decidedAt: { gte: new Date(now.getTime() - OFFER_WINDOW_MS) },
       },
       select: { resource: true },
@@ -306,8 +328,14 @@ export class HostApprovalsService {
     ).length;
     if (approvals < OFFER_AFTER_APPROVALS) return null;
     // Already covered by an always-allow scope: nothing to offer.
-    if (await findLivePatternGrant(client, r.hostId, r, now)) return null;
-    return { scope, approvals };
+    if (await findLivePatternGrant(client, r.hostId, r, r.askKey, now))
+      return null;
+    return {
+      scope,
+      approvals,
+      lastsDays: Math.round(ALWAYS_GRANT_TTL_MS / 86_400_000),
+      askKey: r.askKey,
+    };
   }
 
   /**
@@ -657,7 +685,11 @@ export class HostApprovalsService {
           createdBy: input.subject,
           sourceId: row.id,
           now,
-          always: { origin: 'offer', pattern: offer.scope },
+          always: {
+            origin: 'offer',
+            pattern: offer.scope,
+            askKey: offer.askKey,
+          },
         });
         return { grantId: g.id, origin: 'offer', scope: offer.scope };
       }
@@ -674,6 +706,7 @@ export class HostApprovalsService {
         createdBy: input.subject,
         sourceId: row.id,
         now,
+        ...(row.askKey ? { askKey: row.askKey } : {}),
       });
       return { grantId: grant.id, origin: 'approval', scope: null };
     });

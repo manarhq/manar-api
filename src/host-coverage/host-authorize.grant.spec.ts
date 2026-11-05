@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- expect matchers */
 import { describe, expect, it, vi } from 'vitest';
 import type { HostContext } from '../host-mtls/host-context';
-import { HostAuthorizeService } from './host-authorize.service';
+import { HostAuthorizeService, policyAskKey } from './host-authorize.service';
 
 const host: HostContext = {
   hostId: 'h1',
@@ -16,6 +16,10 @@ function make(opts: {
   block?: boolean;
   policy?: unknown;
   patterns?: string[];
+  /** The ask the scoped grants were made for. */
+  grantAsk?: string;
+  /** An 8-hour grant's own ask (a grant without one answers any ask). */
+  grantKey?: string | null;
 }) {
   const grants = {
     findFirst: vi.fn((args?: { where?: { effect?: string } }) =>
@@ -25,17 +29,20 @@ function make(opts: {
             ? { id: 'b1' }
             : null
           : opts.grant
-            ? { id: 'g1', expiresAt: new Date() }
+            ? { id: 'g1', expiresAt: new Date(), askKey: opts.grantKey ?? null }
             : null,
       ),
     ),
-    findMany: vi.fn(() =>
+    findMany: vi.fn((args?: { where?: { askKey?: string } }) =>
       Promise.resolve(
-        (opts.patterns ?? []).map((p) => ({
-          id: 'g2',
-          expiresAt: new Date(),
-          resourcePattern: p,
-        })),
+        (opts.patterns ?? [])
+          .filter((_, i) => i >= 0)
+          .filter(() => args?.where?.askKey === (opts.grantAsk ?? 'ceiling'))
+          .map((p) => ({
+            id: 'g2',
+            expiresAt: new Date(),
+            resourcePattern: p,
+          })),
       ),
     ),
     update: vi.fn(() => Promise.resolve({})),
@@ -112,12 +119,26 @@ describe('8-hour grants on /host/v1/authorize', () => {
     });
     const ask = { effect: 'APPROVAL_REQUIRED' };
     it('allows inside the folder and audits the use', async () => {
-      const w = make({ patterns: ['/home/sara/proj/src/*'], policy: ask });
+      const w = make({
+        patterns: ['/home/sara/proj/src/*'],
+        policy: ask,
+        grantAsk: policyAskKey({
+          policyVersionId: undefined,
+          matchedRule: undefined,
+        }),
+      });
       const r = await w.svc.authorize(host, edit('/home/sara/proj/src/a.ts'));
       expect(r).toMatchObject({ decision: 'ALLOW', grantId: 'g2' });
     });
     it('still asks outside the folder, for secrets and for ..', async () => {
-      const w = make({ patterns: ['/home/sara/proj/src/*'], policy: ask });
+      const w = make({
+        patterns: ['/home/sara/proj/src/*'],
+        policy: ask,
+        grantAsk: policyAskKey({
+          policyVersionId: undefined,
+          matchedRule: undefined,
+        }),
+      });
       for (const res of [
         '/home/sara/proj/other/a.ts',
         '/home/sara/proj/src/.env',
@@ -134,6 +155,84 @@ describe('8-hour grants on /host/v1/authorize', () => {
       });
       await w.svc.authorize(host, edit('/home/sara/proj/src/a.ts'));
       expect(w.grants.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a grant answers only the ask it was made for', () => {
+    const edit = {
+      toolId: 'host.cursor',
+      actionId: 'edit',
+      resource: '/home/sara/proj/src/a.ts',
+    };
+    const rule = {
+      effect: 'APPROVAL_REQUIRED',
+      policyVersionId: 'v1',
+      matchedRule: { toolId: '*', actionId: 'edit', resourcePattern: '*' },
+    };
+    it('a scope made for the risk ceiling does not answer a policy rule', async () => {
+      const w = make({ patterns: ['/home/sara/proj/src/*'], policy: rule });
+      const r = await w.svc.authorize(host, edit);
+      expect(r.decision).toBe('APPROVAL_REQUIRED');
+      expect(r.askKey).toMatch(/^p:[0-9a-f]{24}$/);
+    });
+    it('a scope made for this rule answers it, republishing the policy does not', async () => {
+      const first = await make({ policy: rule }).svc.authorize(host, edit);
+      const mine = make({
+        patterns: ['/home/sara/proj/src/*'],
+        grantAsk: first.askKey,
+        policy: rule,
+      });
+      expect((await mine.svc.authorize(host, edit)).decision).toBe('ALLOW');
+      const republished = make({
+        patterns: ['/home/sara/proj/src/*'],
+        grantAsk: first.askKey,
+        policy: { ...rule, policyVersionId: 'v2' },
+      });
+      expect((await republished.svc.authorize(host, edit)).decision).toBe(
+        'APPROVAL_REQUIRED',
+      );
+    });
+    it('an 8-hour grant made for one ask does not answer another; an older one still does', async () => {
+      const shell = {
+        toolId: 'host.cursor',
+        actionId: 'SHELL',
+        resource: 'make deploy',
+      };
+      expect(
+        (
+          await make({ grant: true, grantKey: 'p:other' }).svc.authorize(
+            host,
+            shell,
+          )
+        ).decision,
+      ).toBe('APPROVAL_REQUIRED');
+      expect(
+        (
+          await make({ grant: true, grantKey: 'ceiling' }).svc.authorize(
+            host,
+            shell,
+          )
+        ).decision,
+      ).toBe('ALLOW');
+      expect(
+        (await make({ grant: true, grantKey: null }).svc.authorize(host, shell))
+          .decision,
+      ).toBe('ALLOW');
+    });
+    it('what a grant lets through is never cacheable by the device', async () => {
+      const w = make({ patterns: ['/home/sara/proj/src/*'] });
+      expect(await w.svc.authorize(host, edit)).toMatchObject({
+        decision: 'ALLOW',
+        cacheable: false,
+      });
+      const exact = make({ grant: true });
+      expect(
+        await exact.svc.authorize(host, {
+          toolId: 'host.cursor',
+          actionId: 'SHELL',
+          resource: 'make deploy',
+        }),
+      ).toMatchObject({ decision: 'ALLOW', cacheable: false });
     });
   });
 });

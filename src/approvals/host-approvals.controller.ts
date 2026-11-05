@@ -22,7 +22,7 @@ import {
 import { dbNow } from '../common/db-clock';
 import { isWorkspacePaused } from '../pause/pause-state';
 import { explainRisk } from './risk-explain';
-import { HostApprovalsService } from './host-approvals.service';
+import { HostApprovalsService, publicOffer } from './host-approvals.service';
 
 /**
  * `/host/v1/approvals/*`: what WARDEN on a device reads and answers (spec 4.6). A decision from a
@@ -65,7 +65,7 @@ export class HostApprovalsController {
         highRisk: r.highRisk,
         explanation: explainRisk(r.actionId, r.resource, r.highRisk),
         // "Always allow this here" (answered in the console; WARDEN shows it as a hint).
-        ruleOffer: offers.get(r.id) ?? null,
+        ruleOffer: publicOffer(offers.get(r.id)),
         // The prompt shows buttons only when this is true; otherwise "Open in console".
         decidableHere:
           ownerMayApprove &&

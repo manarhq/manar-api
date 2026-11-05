@@ -32,7 +32,7 @@ export class HostApprovalOpenerService implements HostApprovalOpener {
   async open(
     host: HostContext,
     request: HostAuthorizeRequest,
-    decision: { reason: string; riskScore: number },
+    decision: { reason: string; riskScore: number; askKey?: string },
   ) {
     // Tenant and host come from the verified certificate, never from the request body.
     const client = await this.tenants.getClient(host.tenantId);
@@ -46,6 +46,7 @@ export class HostApprovalOpenerService implements HostApprovalOpener {
       summary: `${toolName}: ${request.actionId}`,
       highRisk: decision.riskScore >= HIGH_RISK_SCORE,
       toolName,
+      askKey: decision.askKey,
     });
     return { id: row.id, expiresAt: row.expiresAt };
   }
