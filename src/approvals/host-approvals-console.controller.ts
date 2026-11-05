@@ -98,6 +98,7 @@ export class HostApprovalsConsoleController {
     );
     const ws = await this.approvers.workspace(auth.tenant.id);
     const rights = await Promise.all(rows.map((r) => this.rights(auth, r, ws)));
+    const offers = await this.approvals.offersFor(client, rows);
     // "Cursor on Sara's laptop wants to ...": the owner's name, never their subject.
     const owners = [
       ...new Set(
@@ -128,6 +129,8 @@ export class HostApprovalsConsoleController {
         matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,
         explanation: explainRisk(r.actionId, r.resource, r.highRisk),
+        // "Always allow this here" after the 3rd identical approval; null when not offered.
+        ruleOffer: offers.get(r.id) ?? null,
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,
         allowedDecisions: rights[i]!.choices,
@@ -159,6 +162,7 @@ export class HostApprovalsConsoleController {
       via: 'console',
       // makeRule pre-fills a policy rule: an approver's call.
       makeRule: input.makeRule && isApproverRole(auth.roles),
+      alwaysAllowHere: input.alwaysAllowHere,
       ownerMayOperate: isOperatorRole(auth.roles),
       freshSignIn: freshSignIn(auth.authTime),
       // A permanent site rule needs the role that may write site rules in the console.

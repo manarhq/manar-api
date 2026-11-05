@@ -75,6 +75,7 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ApprovalRequestService } from './approval-request.service';
 import { createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
+import { redactForStorage } from '../contract/redact';
 import {
   DecideApprovalRequestSchema,
   RevokeApprovalSchema,
@@ -578,6 +579,44 @@ export class ApprovalsController {
       },
     });
     return { ...page, seesAll: admin };
+  }
+
+  @Get('allow-grants')
+  @RequireRole(...APPROVER_ROLES)
+  @ApiOperation({
+    summary: 'Live permissions that skip the prompt, with where they came from',
+    description:
+      'Every live 8-hour grant and every "always allow this here" rule (origin: approval, offer or learning), newest first. Withdraw one with POST /approvals/allow-grants/:grantId/revoke. Approvers only.',
+  })
+  async listGrants(@CurrentAuth() auth: AuthContext) {
+    const client = await this.tenantDatabaseManager.getClient(auth.tenant.id);
+    const rows = await client.approvalAllowGrant.findMany({
+      where: {
+        effect: 'ALLOW',
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      include: { host: { select: { hostname: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    return {
+      items: rows.map((g) => ({
+        id: g.id,
+        origin: g.origin,
+        hostId: g.hostId,
+        hostName: g.host?.hostname ?? null,
+        agentId: g.agentId,
+        toolId: g.toolId,
+        actionId: g.actionId,
+        // The scope an always-allow covers, or the one exact resource of an 8-hour grant.
+        scope: redactForStorage(g.resourcePattern ?? g.resource),
+        createdAt: g.createdAt,
+        expiresAt: g.expiresAt,
+        useCount: g.useCount,
+        lastUsedAt: g.lastUsedAt,
+      })),
+    };
   }
 
   @Post('allow-grants/:grantId/revoke')

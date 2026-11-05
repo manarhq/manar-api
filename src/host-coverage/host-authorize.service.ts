@@ -5,6 +5,7 @@ import { AuditService } from '../audit/audit.service';
 import {
   findLiveAllowGrant,
   findLiveBlock,
+  findLivePatternGrant,
   markAllowGrantUsed,
 } from '../approvals/allow-grants';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
@@ -177,11 +178,22 @@ export class HostAuthorizeService {
 
     // "Approve for 8 hours" (spec 4.6): looked up before the policy runs, used only to satisfy an
     // approval requirement below. A policy DENY and the kill switches above are never overridden.
-    const grant = await findLiveAllowGrant(
+    const target = {
+      toolId: request.toolId,
+      actionId,
+      resource: request.resource,
+    };
+    const exact = await findLiveAllowGrant(
       client,
       { hostId: host.hostId },
-      { toolId: request.toolId, actionId, resource: request.resource },
+      target,
     );
+    // A narrow "always allow here" scope is looked up only if something asks (below).
+    let grant = exact;
+    const scoped = async () => {
+      grant ??= await findLivePatternGrant(client, host.hostId, target);
+      return grant;
+    };
     const policy = await this.policy.evaluate(client, host.tenantId, {
       toolId: request.toolId,
       actionId,
@@ -196,8 +208,8 @@ export class HostAuthorizeService {
       };
     }
     if (policy.effect === 'APPROVAL_REQUIRED') {
-      if (grant)
-        return { decision: 'ALLOW', riskScore: base, grantId: grant.id };
+      if (await scoped())
+        return { decision: 'ALLOW', riskScore: base, grantId: grant!.id };
       return {
         decision: 'APPROVAL_REQUIRED',
         reason: 'policy_requires_approval',
@@ -205,8 +217,8 @@ export class HostAuthorizeService {
       };
     }
     if (!policy.matchedRule && base > HOST_RISK_CEILING) {
-      if (grant)
-        return { decision: 'ALLOW', riskScore: base, grantId: grant.id };
+      if (await scoped())
+        return { decision: 'ALLOW', riskScore: base, grantId: grant!.id };
       return {
         decision: 'APPROVAL_REQUIRED',
         reason: 'risk_ceiling_exceeded',

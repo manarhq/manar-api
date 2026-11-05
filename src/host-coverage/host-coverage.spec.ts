@@ -347,6 +347,7 @@ describe('HostAuthorizeService', () => {
           Promise.resolve({
             approvalAllowGrant: {
               findFirst: () => Promise.resolve(null),
+              findMany: () => Promise.resolve([]),
               update: () => Promise.resolve({}),
             },
           }),

@@ -1,7 +1,11 @@
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+import { scopeMatches } from './rule-scope';
 
 /** "Approve for 8 hours" (spec 4.6). */
 export const ALLOW_GRANT_TTL_MS = 8 * 60 * 60 * 1000;
+
+/** "Always allow this here" (offer) and accepted learning suggestions last a year, then ask again. */
+export const ALWAYS_GRANT_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
 /**
  * A grant belongs to exactly one device or exactly one agent. A scope with neither, or both, matches
@@ -38,6 +42,8 @@ export async function createAllowGrant(
     createdBy: string;
     sourceId: string;
     now?: Date;
+    /** A longer-lived, narrow-scope grant ("always allow this here"); default is exact, 8 hours. */
+    always?: { origin: 'offer' | 'learning'; pattern: string };
   },
 ) {
   const where = scopeWhere(input.scope);
@@ -51,7 +57,13 @@ export async function createAllowGrant(
       createdBy: input.createdBy,
       sourceId: input.sourceId,
       createdAt: now,
-      expiresAt: new Date(now.getTime() + ALLOW_GRANT_TTL_MS),
+      expiresAt: new Date(
+        now.getTime() +
+          (input.always ? ALWAYS_GRANT_TTL_MS : ALLOW_GRANT_TTL_MS),
+      ),
+      ...(input.always
+        ? { origin: input.always.origin, resourcePattern: input.always.pattern }
+        : {}),
     },
   });
 }
@@ -77,6 +89,42 @@ export async function findLiveAllowGrant(
     orderBy: { expiresAt: 'desc' },
     select: { id: true, expiresAt: true },
   });
+}
+
+/**
+ * A live device grant whose narrow scope (`resourcePattern`) covers this request. Looked up only
+ * when a policy asks for approval and no exact grant exists, so the common path pays nothing.
+ * A scope never covers a secret, a `..` climb or a command (`scopeMatches`).
+ */
+export async function findLivePatternGrant(
+  client: Pick<TenantPrismaClient, 'approvalAllowGrant'>,
+  hostId: string,
+  target: AllowGrantTarget,
+  now: Date = new Date(),
+): Promise<{ id: string; expiresAt: Date } | null> {
+  const rows = await client.approvalAllowGrant.findMany({
+    where: {
+      hostId,
+      toolId: target.toolId,
+      actionId: target.actionId,
+      effect: 'ALLOW',
+      revokedAt: null,
+      expiresAt: { gt: now },
+      resourcePattern: { not: null },
+    },
+    select: { id: true, expiresAt: true, resourcePattern: true },
+    take: 50,
+  });
+  return (
+    rows.find((r) =>
+      scopeMatches(
+        r.resourcePattern!,
+        target.toolId,
+        target.actionId,
+        target.resource,
+      ),
+    ) ?? null
+  );
 }
 
 /**

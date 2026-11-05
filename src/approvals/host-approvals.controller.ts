@@ -52,6 +52,7 @@ export class HostApprovalsController {
       this.approvers.canApprove(host.tenantId, client, host.ownerSubject),
       this.approvals.listPending(client, host.hostId),
     ]);
+    const offers = await this.approvals.offersFor(client, rows);
     return {
       ownerMayApprove,
       items: rows.map((r) => ({
@@ -63,6 +64,8 @@ export class HostApprovalsController {
         matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,
         explanation: explainRisk(r.actionId, r.resource, r.highRisk),
+        // "Always allow this here" (answered in the console; WARDEN shows it as a hint).
+        ruleOffer: offers.get(r.id) ?? null,
         // The prompt shows buttons only when this is true; otherwise "Open in console".
         decidableHere:
           ownerMayApprove &&

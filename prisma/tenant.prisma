@@ -2502,11 +2502,30 @@ model ApprovalAllowGrant {
   /// after it was used; the next matching request is denied (`revoked_after_use`) until a person
   /// lifts the block (sets `revokedAt`).
   effect     String    @default("ALLOW")
+  /// `approval` (8 hours), `offer` (accepted after 3 identical approvals) or `learning` (accepted
+  /// from "what Manar saw this week").
+  origin     String    @default("approval")
+  /// A narrow prefix scope (`src/rule-scope.ts`) instead of the exact `resource`. Null: exact.
+  resourcePattern String?
 
   @@index([hostId, toolId, actionId, expiresAt])
   @@index([sourceId])
   @@index([agentId, toolId, actionId, expiresAt])
   @@map("approval_allow_grants")
+}
+
+/// "Always allow this here" was offered once for this device, tool, action and scope (decision 37).
+/// Spent when the person answers the request that carried it; no content is stored.
+model HostRuleOffer {
+  id        String   @id @default(uuid())
+  hostId    String
+  toolId    String
+  actionId  String
+  scope     String
+  createdAt DateTime @default(now())
+
+  @@unique([hostId, toolId, actionId, scope])
+  @@map("host_rule_offers")
 }
 
 enum HostApprovalStatus {
@@ -2554,6 +2573,7 @@ model HostApproval {
 
   @@index([hostId, status, expiresAt])
   @@index([createdAt, id])
+  @@index([hostId, toolId, actionId, status, decidedAt])
   @@map("host_approvals")
 }
 

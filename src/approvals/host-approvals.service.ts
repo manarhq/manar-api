@@ -21,7 +21,12 @@ import {
   siteRuleBlocksRemember,
   upsertSiteRule,
 } from '../jail/jail-sites.service';
-import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
+import {
+  ALLOW_GRANT_TTL_MS,
+  createAllowGrant,
+  findLivePatternGrant,
+} from './allow-grants';
+import { scopeFor } from './rule-scope';
 import { buildRuleDraft } from './rule-draft';
 import { ApproverDirectory } from './approver-directory';
 import {
@@ -93,6 +98,8 @@ export interface DecideHostApprovalInput {
    * do not set the flag).
    */
   withdraw?: boolean;
+  /** Console only: take the offered "always allow this here" (decision 37). */
+  alwaysAllowHere?: boolean;
   /**
    * Console only: the signed-in person currently holds a role that may operate devices
    * (`OPERATOR_ROLES`). The owner path needs it, so a demoted owner cannot decide.
@@ -103,6 +110,16 @@ export interface DecideHostApprovalInput {
    * for a personal workspace's owner approving their own sensitive request.
    */
   freshSignIn?: boolean;
+}
+
+/** The 3rd identical approval in this window earns the offer (decision 37). */
+export const OFFER_AFTER_APPROVALS = 3;
+export const OFFER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface RuleOffer {
+  /** Narrow prefix scope the rule would cover (a folder, a web origin, or one MCP tool). */
+  scope: string;
+  approvals: number;
 }
 
 @Injectable()
@@ -214,6 +231,83 @@ export class HostApprovalsService {
       expiresAt: row.expiresAt,
     });
     return row;
+  }
+
+  /**
+   * "Always allow this here" for each pending request that has earned it: the same device, tool,
+   * action and normalised scope approved by a person 3 times in 30 days. Never for high-risk,
+   * secret or handover requests, a new site, or a scope that is too broad; offered once.
+   */
+  async offersFor(
+    client: TenantPrismaClient,
+    rows: Array<{
+      id: string;
+      hostId: string;
+      toolId: string;
+      actionId: string;
+      resource: string;
+      highRisk: boolean;
+    }>,
+    at?: Date,
+  ): Promise<Map<string, RuleOffer>> {
+    const out = new Map<string, RuleOffer>();
+    const now = at ?? new Date();
+    for (const r of rows) {
+      const o = await this.offerFor(client, r, now);
+      if (o) out.set(r.id, o);
+    }
+    return out;
+  }
+
+  private async offerFor(
+    client: TenantPrismaClient,
+    r: {
+      hostId: string;
+      toolId: string;
+      actionId: string;
+      resource: string;
+      highRisk: boolean;
+    },
+    now: Date,
+  ): Promise<RuleOffer | null> {
+    if (r.highRisk || r.actionId === SITE_CONNECT_ACTION) return null;
+    if (sensitiveReason(r)) return null;
+    const scope = scopeFor(r.toolId, r.actionId, r.resource);
+    if (!scope) return null;
+    const spent = await client.hostRuleOffer.findUnique({
+      where: {
+        hostId_toolId_actionId_scope: {
+          hostId: r.hostId,
+          toolId: r.toolId,
+          actionId: r.actionId,
+          scope,
+        },
+      },
+      select: { id: true },
+    });
+    if (spent) return null;
+    const prior = await client.hostApproval.findMany({
+      where: {
+        hostId: r.hostId,
+        toolId: r.toolId,
+        actionId: r.actionId,
+        status: 'APPROVED',
+        decision: { in: ['approve_once', 'approve_8h'] },
+        decidedBy: { not: null },
+        highRisk: false,
+        decidedAt: { gte: new Date(now.getTime() - OFFER_WINDOW_MS) },
+      },
+      select: { resource: true },
+      orderBy: { decidedAt: 'desc' },
+      take: 200,
+    });
+    const approvals = prior.filter(
+      (p) => scopeFor(r.toolId, r.actionId, p.resource) === scope,
+    ).length;
+    if (approvals < OFFER_AFTER_APPROVALS) return null;
+    // Already covered by an always-allow scope: nothing to offer.
+    if (await findLivePatternGrant(client, r.hostId, r, now)) return null;
+    return { scope, approvals };
   }
 
   /**
@@ -443,6 +537,18 @@ export class HostApprovalsService {
       decision = 'approve_once';
       note = 'needs_owner';
     }
+    const takesOffer =
+      input.alwaysAllowHere === true && input.decision !== 'deny';
+    // Standing permission: console only, and only for someone who may give 8 hours (the same
+    // rights, so a personal self-approval of something sensitive can never make a rule).
+    if (takesOffer && input.via !== 'console')
+      throw new ForbiddenException('eight_hours_in_console');
+    if (takesOffer && !rights.choices.includes('approve_8h'))
+      throw new ForbiddenException(refusalMessage(rights));
+    // Recomputed here, never trusted from the client.
+    const offer = await this.offerFor(client, row, at ?? new Date());
+    if (takesOffer && !offer)
+      throw new BadRequestException('no_rule_offer_for_this_request');
     const wantsRemember =
       isSite && (decision === 'approve_8h' || decision === 'approve_always');
     let remember = false;
@@ -521,6 +627,40 @@ export class HostApprovalsService {
         });
         remember = true;
       }
+      // The offer is made once: any answer spends it.
+      if (offer)
+        await tx.hostRuleOffer.upsert({
+          where: {
+            hostId_toolId_actionId_scope: {
+              hostId: row.hostId,
+              toolId: row.toolId,
+              actionId: row.actionId,
+              scope: offer.scope,
+            },
+          },
+          create: {
+            hostId: row.hostId,
+            toolId: row.toolId,
+            actionId: row.actionId,
+            scope: offer.scope,
+          },
+          update: {},
+        });
+      if (takesOffer && offer) {
+        const g = await createAllowGrant(tx, {
+          scope: { hostId: row.hostId },
+          target: {
+            toolId: row.toolId,
+            actionId: row.actionId,
+            resource: row.resource,
+          },
+          createdBy: input.subject,
+          sourceId: row.id,
+          now,
+          always: { origin: 'offer', pattern: offer.scope },
+        });
+        return { grantId: g.id, origin: 'offer', scope: offer.scope };
+      }
       // A site prompt is answered by the site rule, never by an 8-hour action grant.
       if (decision !== 'approve_8h' || isSite)
         return { grantId: null as string | null };
@@ -535,7 +675,7 @@ export class HostApprovalsService {
         sourceId: row.id,
         now,
       });
-      return { grantId: grant.id };
+      return { grantId: grant.id, origin: 'approval', scope: null };
     });
     await this.audit.recordSafely(client, tenantId, {
       eventType:
@@ -590,6 +730,8 @@ export class HostApprovalsService {
           toolId: row.toolId,
           actionId: row.actionId,
           via: input.via,
+          origin: result.origin ?? 'approval',
+          ...(result.scope ? { scope: result.scope } : {}),
         },
       });
     }

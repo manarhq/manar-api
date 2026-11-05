@@ -11,7 +11,12 @@ const host: HostContext = {
   status: 'APPROVED',
 };
 
-function make(opts: { grant?: boolean; block?: boolean; policy?: unknown }) {
+function make(opts: {
+  grant?: boolean;
+  block?: boolean;
+  policy?: unknown;
+  patterns?: string[];
+}) {
   const grants = {
     findFirst: vi.fn((args?: { where?: { effect?: string } }) =>
       Promise.resolve(
@@ -22,6 +27,15 @@ function make(opts: { grant?: boolean; block?: boolean; policy?: unknown }) {
           : opts.grant
             ? { id: 'g1', expiresAt: new Date() }
             : null,
+      ),
+    ),
+    findMany: vi.fn(() =>
+      Promise.resolve(
+        (opts.patterns ?? []).map((p) => ({
+          id: 'g2',
+          expiresAt: new Date(),
+          resourcePattern: p,
+        })),
       ),
     ),
     update: vi.fn(() => Promise.resolve({})),
@@ -88,5 +102,38 @@ describe('8-hour grants on /host/v1/authorize', () => {
     const w = make({});
     w.grants.findFirst.mockRejectedValueOnce(new Error('db'));
     expect((await w.svc.authorize(host, shell)).decision).toBe('DENY');
+  });
+
+  describe('"always allow this here" scopes', () => {
+    const edit = (resource: string) => ({
+      toolId: 'host.cursor',
+      actionId: 'edit',
+      resource,
+    });
+    const ask = { effect: 'APPROVAL_REQUIRED' };
+    it('allows inside the folder and audits the use', async () => {
+      const w = make({ patterns: ['~/proj/src/*'], policy: ask });
+      const r = await w.svc.authorize(host, edit('/home/sara/proj/src/a.ts'));
+      expect(r).toMatchObject({ decision: 'ALLOW', grantId: 'g2' });
+    });
+    it('still asks outside the folder, for secrets and for ..', async () => {
+      const w = make({ patterns: ['~/proj/src/*'], policy: ask });
+      for (const res of [
+        '/home/sara/proj/other/a.ts',
+        '/home/sara/proj/src/.env',
+        '/home/sara/proj/src/../../x/a.ts',
+      ])
+        expect((await w.svc.authorize(host, edit(res))).decision).toBe(
+          'APPROVAL_REQUIRED',
+        );
+    });
+    it('is not looked up when nothing asks', async () => {
+      const w = make({
+        patterns: ['~/proj/src/*'],
+        policy: { effect: 'ALLOW', matchedRule: {} },
+      });
+      await w.svc.authorize(host, edit('/home/sara/proj/src/a.ts'));
+      expect(w.grants.findMany).not.toHaveBeenCalled();
+    });
   });
 });
