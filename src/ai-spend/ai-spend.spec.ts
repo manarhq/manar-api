@@ -388,7 +388,9 @@ describe('device config', () => {
       } as never,
       {} as never,
     );
-    const cfg = await c.config(host('h1') as never);
+    const cfg = await c.config(host('h1') as never, { headers: {} } as never);
+    expect(cfg.offlineReadsAllowed).toBe(true);
+    expect(cfg.offlineReadDeny).toEqual([]);
     expect(cfg.door).toEqual({ unavailable: true });
     expect(cfg.tools).toEqual({ unprotect: [] });
   });

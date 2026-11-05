@@ -4,8 +4,12 @@ import {
   HttpCode,
   Logger,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
+import type { FastifyRequest } from 'fastify';
+import { recordHostVersionSeen } from '../metrics/metrics';
+import { agentVersionChanged, parseAgentUserAgent } from './agent-version';
 import { HostsAdminService } from '../hosts/hosts-admin.service';
 import { AiSpendService } from '../ai-spend/ai-spend.service';
 import { HostToolsService } from '../host-coverage/host-tools.service';
@@ -66,11 +70,42 @@ export class HostConfigController {
     }
   }
 
+  /**
+   * Remembers which WARDEN version, OS and architecture the device runs. Written only when it
+   * differs from the stored value (the config poll is every 15 s), and never fails the poll.
+   */
+  private async recordAgentVersion(
+    host: HostContext,
+    userAgent: string | undefined,
+  ): Promise<void> {
+    const seen = parseAgentUserAgent(userAgent);
+    if (!seen || !agentVersionChanged(seen, host)) return;
+    try {
+      const client = await this.tenants.getClient(host.tenantId);
+      await client.host.update({
+        where: { id: host.hostId },
+        data: {
+          agentVersion: seen.version,
+          agentOs: seen.os,
+          agentArch: seen.arch,
+          agentVersionSeenAt: new Date(),
+        },
+      });
+      recordHostVersionSeen(seen.version, seen.os);
+    } catch (e) {
+      this.logger.warn(`agent version not stored: ${(e as Error).message}`);
+    }
+  }
+
   @Get('config')
   @ApiOperation({
     summary: 'The effective preset and feature flags for this device',
   })
-  async config(@CurrentHost() host: HostContext) {
+  async config(
+    @CurrentHost() host: HostContext,
+    @Req() request: FastifyRequest,
+  ) {
+    await this.recordAgentVersion(host, request.headers['user-agent']);
     return {
       hostId: host.hostId,
       status: host.status,
@@ -85,6 +120,17 @@ export class HostConfigController {
       ],
       // "Pause all AI": while true the device denies every protected tool with reason `paused`.
       paused: await this.pause.isPaused(host.tenantId),
+      // While the device service restarts, reads of ordinary files (never secrets) keep working from
+      // the device's last saved policy. On by default; `HOST_OFFLINE_READS_ALLOWED=false` turns it off
+      // (a per-workspace admin setting for Company and Gov plans is the follow-up).
+      offlineReadsAllowed: process.env.HOST_OFFLINE_READS_ALLOWED !== 'false',
+      // Path patterns (globs, or folders ending in a slash) the device never reads from its saved
+      // policy while the service restarts; `HOST_OFFLINE_READ_DENY` is a comma-separated list.
+      offlineReadDeny: (process.env.HOST_OFFLINE_READ_DENY ?? '')
+        .split(',')
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0 && p.length <= 512)
+        .slice(0, 100),
       // Tools whose owner turned protection off; the device restores their backups.
       tools: await this.tools.instructions(host),
       // DOOR: secrets guard mode and tools paused by the monthly spend cap.
