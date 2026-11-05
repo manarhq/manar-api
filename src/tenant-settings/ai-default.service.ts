@@ -20,6 +20,8 @@ export interface AiDefaultCounts {
   skippedAirGapped: number;
   /** Not ACTIVE yet (queued, provisioning, suspended...): no audit log to read; run again later. */
   skippedNotActive: number;
+  /** The audit history cannot prove no choice was made (pruned, anchored, or not reaching back to creation): AI stays off and the owner is asked. */
+  historyIncomplete: number;
   /** ACTIVE but the workspace's audit log could not be read: left alone, run again. */
   failed: number;
 }
@@ -31,6 +33,19 @@ export interface AiDefaultCounts {
  * Only workspaces whose sector is recorded as COMMERCIAL, on a hosted deployment, are flipped.
  * Idempotent; the dry run reads only (read-only transactions) and returns counts, never identifiers.
  */
+/** ponytail: a first event up to a week after creation still counts as "reaches back"; an idle new workspace is the case this tolerates. */
+const FIRST_EVENT_TOLERANCE_MS = 7 * 24 * 3_600_000;
+
+export function historyCoversLife(
+  log: { oldest: Date | undefined; anchors: number },
+  createdAt: Date,
+): boolean {
+  if (log.anchors > 0) return false;
+  // No event at all: nothing was pruned and no choice was ever recorded.
+  if (!log.oldest) return true;
+  return log.oldest.getTime() <= createdAt.getTime() + FIRST_EVENT_TOLERANCE_MS;
+}
+
 @Injectable()
 export class AiDefaultService {
   private readonly logger = new Logger(AiDefaultService.name);
@@ -49,6 +64,7 @@ export class AiDefaultService {
       skippedGovernment: 0,
       skippedCustomerDeployment: 0,
       needsReview: 0,
+      historyIncomplete: 0,
       skippedAirGapped: 0,
       skippedNotActive: 0,
       failed: 0,
@@ -70,6 +86,7 @@ export class AiDefaultService {
           status: true,
           residency: true,
           sector: true,
+          createdAt: true,
           allowExternalAiChosen: true,
         },
         orderBy: { createdAt: 'asc' },
@@ -91,19 +108,20 @@ export class AiDefaultService {
       // Only a positively known commercial sector is flipped; unknown waits for a person.
       else if (t.sector !== 'COMMERCIAL') counts.needsReview++;
       else if (t.status !== 'ACTIVE') counts.skippedNotActive++;
-      else await this.one(t.id, options.dryRun, counts);
+      else await this.one(t.id, t.createdAt, options.dryRun, counts);
     }
     return counts;
   }
 
   private async one(
     tenantId: string,
+    createdAt: Date,
     dryRun: boolean,
     counts: AiDefaultCounts,
   ): Promise<void> {
     try {
       const client = await this.tenants.getClient(tenantId);
-      const explicit = await client.$transaction(async (tx) => {
+      const log = await client.$transaction(async (tx) => {
         await tx.$executeRaw`SET TRANSACTION READ ONLY`;
         const hit = await tx.auditEvent.findFirst({
           where: {
@@ -113,14 +131,34 @@ export class AiDefaultService {
           },
           select: { id: true },
         });
-        return hit !== null;
+        const oldest = await tx.auditEvent.findFirst({
+          orderBy: { timestamp: 'asc' },
+          select: { timestamp: true },
+        });
+        const anchors = await tx.auditChainAnchor.count();
+        return { explicit: hit !== null, oldest: oldest?.timestamp, anchors };
       });
+      const explicit = log.explicit;
       if (explicit) {
         counts.keptExplicit++;
         if (!dryRun) {
           await this.control.tenant.updateMany({
             where: { id: tenantId, allowExternalAiChosen: false },
             data: { allowExternalAiChosen: true },
+          });
+        }
+        return;
+      }
+      // A missing settings event proves nothing unless the history covers the workspace's whole
+      // life: a retention prune leaves an anchor, and the oldest surviving event must reach back to
+      // creation. Write failures leave no record before this release (see PR), so they cannot be
+      // excluded here; the settings change now fails if its audit write does.
+      if (!historyCoversLife(log, createdAt)) {
+        counts.historyIncomplete++;
+        if (!dryRun) {
+          await this.control.tenant.updateMany({
+            where: { id: tenantId, aiOptInNoticePending: false },
+            data: { aiOptInNoticePending: true },
           });
         }
         return;

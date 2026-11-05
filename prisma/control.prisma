@@ -140,6 +140,8 @@ model Tenant {
   allowExternalAiChosen  Boolean         @default(false)
   /// Set by `ai:default-on` when it switched AI on for an existing workspace; cleared when an owner or admin dismisses the console notice.
   aiDefaultNoticePending Boolean         @default(false)
+  /// Set by `ai:default-on` where the audit history cannot prove no choice was made: AI stays off and the console asks the owner ("Turn on AI features?").
+  aiOptInNoticePending   Boolean         @default(false)
   allowOutboundTelemetry Boolean         @default(false)
   allowCloudStorage      Boolean         @default(false)
   /// COMPANY: only approver roles decide approvals; a device owner can no longer decide their own.

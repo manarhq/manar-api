@@ -4,6 +4,7 @@
 -- every owner's own choice (it reads each workspace's audit log, which this migration cannot).
 ALTER TABLE "tenants" ADD COLUMN "allowExternalAiChosen" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "tenants" ADD COLUMN "aiDefaultNoticePending" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "tenants" ADD COLUMN "aiOptInNoticePending" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "tenants" ALTER COLUMN "allowExternalAi" SET DEFAULT true;
 
 -- The sector is recorded on the tenant at every provisioning path. Backfill from what is known;

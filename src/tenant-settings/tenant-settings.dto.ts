@@ -88,6 +88,12 @@ export class TenantSettingsResponseDto {
   })
   aiDefaultNoticePending!: boolean;
 
+  @ApiProperty({
+    description:
+      'True when AI is off and `ai:default-on` could not prove from the audit history that nobody chose that: the console asks "Turn on AI features?". Cleared by dismissing or by any change to allowExternalAi.',
+  })
+  aiOptInNoticePending!: boolean;
+
   @ApiProperty({ format: 'date-time' })
   updatedAt!: Date;
 

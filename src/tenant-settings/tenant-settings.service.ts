@@ -12,6 +12,7 @@ import {
   isExternalAiProvider,
   type AiAdvisoryProvider,
 } from '../ai-advisory/ai-advisory.config';
+import { failClosed } from '../common/fail-closed/fail-closed';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { UpdateTenantSettingsRequest } from './tenant-settings.validation';
@@ -27,6 +28,8 @@ export interface TenantSettings {
   approvalsAdminsOnly: boolean;
   /** `ai:default-on` switched AI on here and nobody has dismissed the notice yet. */
   aiDefaultNoticePending: boolean;
+  /** AI is off and `ai:default-on` could not prove no choice was made: the console asks the owner. */
+  aiOptInNoticePending: boolean;
   updatedAt: Date;
   sso: {
     realm: string;
@@ -122,6 +125,13 @@ export class TenantSettingsService {
           '"Admins only" approvals are for company workspaces. Nothing was changed.',
         );
     }
+    // The audit event lands first and the change is refused if it does not: the two live in
+    // different databases, so one transaction is not possible, and an unprovable choice is worse
+    // than a refused request. A later control-DB failure leaves an event for a change that did not
+    // happen, never a change without an event.
+    await failClosed('audit-store', () =>
+      this.recordAuditEvent(tenantId, updatedByUserId, input),
+    );
     const tenant = await this.control.tenant.update({
       where: { id: tenantId },
       data: {
@@ -146,12 +156,6 @@ export class TenantSettingsService {
       },
     });
 
-    // The audit chain itself lives in the tenant's own isolated database
-    // (Phase 9a), even though the row just written lives in the control
-    // DB -- same convention every other retrofit point in this codebase
-    // follows (see AUDIT_EVENT_TYPES's doc comment).
-    await this.recordAuditEvent(tenantId, updatedByUserId, input);
-
     return this.toSettings(tenant);
   }
 
@@ -159,7 +163,7 @@ export class TenantSettingsService {
   async dismissAiDefaultNotice(tenantId: string): Promise<void> {
     await this.control.tenant.update({
       where: { id: tenantId },
-      data: { aiDefaultNoticePending: false },
+      data: { aiDefaultNoticePending: false, aiOptInNoticePending: false },
     });
   }
 
@@ -169,7 +173,7 @@ export class TenantSettingsService {
     input: UpdateTenantSettingsRequest,
   ): Promise<void> {
     const tenantClient = await this.tenantDatabaseManager.getClient(tenantId);
-    await this.auditService.recordSafely(tenantClient, tenantId, {
+    await this.auditService.record(tenantClient, tenantId, {
       eventType: AUDIT_EVENT_TYPES.TENANT_SETTINGS_UPDATED,
       actor: { type: 'human', id: updatedByUserId },
       data: { ...input },
@@ -186,6 +190,7 @@ export class TenantSettingsService {
     allowCloudStorage: boolean;
     approvalsAdminsOnly: boolean;
     aiDefaultNoticePending: boolean;
+    aiOptInNoticePending: boolean;
     kind: string;
     updatedAt: Date;
     keycloakRealm: string | null;
@@ -227,6 +232,7 @@ export class TenantSettingsService {
       approvalsAdminsOnly:
         tenant.kind === 'COMPANY' && tenant.approvalsAdminsOnly,
       aiDefaultNoticePending: tenant.aiDefaultNoticePending,
+      aiOptInNoticePending: tenant.aiOptInNoticePending,
       updatedAt: tenant.updatedAt,
       sso,
       aiProvider: { provider, isExternal: isExternalAiProvider(provider) },
