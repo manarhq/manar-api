@@ -7,27 +7,72 @@ const web = (r: string) => scopeFor(T, 'webfetch', r);
 const inside = (p: string, r: string) => scopeMatches(p, T, 'edit', r);
 const fetchOk = (p: string, r: string) => scopeMatches(p, T, 'webfetch', r);
 
-describe('folder scopes are absolute, owner included', () => {
+describe('folder scopes: only a project folder inside a recognised user home', () => {
   it.each([
-    ['/home/sara/proj/src/a.ts', '/home/sara/proj/src/*'],
-    ['/Users/sara/proj/a.ts', '/Users/sara/proj/*'],
-    ['/work/app/x.ts', '/work/app/*'],
-    ['C:\\Work\\App\\x.ts', 'c:/work/app/*'],
-    ['c:/Users/Sara/proj/x.ts', 'c:/users/sara/proj/*'],
-    ['/home/سارة/مشروع/a.ts', '/home/سارة/مشروع/*'],
-  ])('%s -> %s', (r, want) => expect(file(r)).toBe(want));
+    ['linux', '/home/sara/proj/src/a.ts', '/home/sara/proj/src/*'],
+    ['macos', '/Users/sara/proj/a.ts', '/Users/sara/proj/*'],
+    ['windows', 'C:\\Users\\Sara\\Work\\App\\x.ts', 'c:/users/sara/work/app/*'],
+    ['windows, other drive', 'D:/Users/Sara/proj/x.ts', 'd:/users/sara/proj/*'],
+    [
+      'wsl windows home',
+      '/mnt/c/Users/Sara/proj/x.ts',
+      '/mnt/c/users/sara/proj/*',
+    ],
+    [
+      'wsl, upper case drive path',
+      '/mnt/D/USERS/Sara/Proj/x.ts',
+      '/mnt/d/users/sara/proj/*',
+    ],
+    ['arabic names', '/home/سارة/مشروع/a.ts', '/home/سارة/مشروع/*'],
+  ])('%s: %s', (_os, r, want) => expect(file(r)).toBe(want));
 
   it.each([
+    // not under a recognised home (allowlist: nothing else is offered)
+    ['system root', '/etc/nginx/nginx.conf'],
+    ['opt', '/opt/app/src/a.ts'],
+    ['var', '/var/www/site/a.ts'],
+    ['tmp', '/tmp/work/a.ts'],
+    ['root user', '/root/proj/a.ts'],
+    ['plain top-level project', '/work/app/x.ts'],
+    ['windows project outside Users', 'C:\\Work\\App\\x.ts'],
+    ['windows dir', 'c:/windows/system32/x.dll'],
+    ['other drive windows dir', 'E:/Windows/System32/x.dll'],
+    ['program files', 'C:\\Program Files\\App\\x.exe'],
+    ['wsl windows dir', '/mnt/c/Windows/System32/x.dll'],
+    ['wsl other mount', '/mnt/data/proj/a.ts'],
+    ['wsl drive root project', '/mnt/c/work/proj/a.ts'],
+    ['mac system', '/Library/Application Support/x/a.json'],
+    ['mac private', '/private/var/x/a.ts'],
+    ['volumes', '/Volumes/Disk/proj/a.ts'],
+    ['unix home itself', '/home/sara/notes.txt'],
+    ['home itself, windows', 'c:/Users/sara/notes.txt'],
+    ['users root', '/Users/notes.txt'],
+    ['shared profile', '/Users/Shared/proj/a.ts'],
+    ['public profile', 'c:/Users/Public/proj/a.ts'],
+    ['default profile', 'c:/Users/Default/proj/a.ts'],
+    // config and persistence folders under a home
+    ['dot folder', '/home/sara/.ssh/config'],
+    ['.config', '/home/sara/.config/x/y.json'],
+    ['autostart', '/home/x/.config/autostart/app.desktop'],
+    ['dot folder, mac', '/Users/x/.zshrc.d/a.sh'],
+    ['AppData', 'C:\\Users\\x\\AppData\\Local\\Temp\\a.ts'],
+    [
+      'AppData startup',
+      'D:/Users/x/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/a.cmd',
+    ],
+    ['Start Menu', 'c:/Users/x/Start Menu/Programs/a.lnk'],
+    ['Application Data', 'c:/Users/x/Application Data/a.ts'],
+    ['Library', '/Users/x/Library/Preferences/a.plist'],
+    ['LaunchAgents', '/Users/x/Library/LaunchAgents/a.plist'],
+    ['LaunchAgents deeper', '/Users/x/proj/LaunchAgents/a.plist'],
+    ['LaunchDaemons', '/Users/x/proj/launchdaemons/a.plist'],
+    ['Startup anywhere', '/home/x/proj/Startup/a.sh'],
+    ['Startup in name', '/home/x/proj/my-startup-scripts/a.sh'],
+    ['wsl AppData', '/mnt/c/Users/x/AppData/Roaming/a.ts'],
+    ['wsl startup', '/mnt/c/Users/x/proj/Startup/a.cmd'],
+    // paths that cannot be trusted
     ['relative', 'src/a.ts'],
     ['top-level file', '/a.ts'],
-    ['home folder itself', '/home/sara/notes.txt'],
-    ['dot folder under home', '/home/sara/.ssh/config'],
-    ['.config under home', '/home/sara/.config/x/y.json'],
-    ['root user', '/root/proj/a.ts'],
-    ['system folders', '/etc/nginx/nginx.conf'],
-    ['usr', '/usr/local/bin/x'],
-    ['windows dir', 'c:/windows/system32/x.dll'],
-    ['program files', 'C:\\Program Files\\App\\x.exe'],
     ['secret name', '/home/sara/proj/.env'],
     ['secret dir', '/home/sara/.aws/credentials'],
     ['climb', '/home/sara/proj/../omar/a.ts'],
@@ -35,18 +80,19 @@ describe('folder scopes are absolute, owner included', () => {
     ['dot segment climb', '/home/sara/proj/src/../../x/a.ts'],
     ['UNC slash', '//server/share/proj/a.ts'],
     ['UNC backslash', '\\\\server\\share\\proj\\a.ts'],
+    ['UNC to a home', '\\\\server\\c$\\Users\\x\\proj\\a.ts'],
     ['backslash in posix', '/home/sara/proj\\src/a.ts'],
-    ['ADS', 'c:/work/app/a.txt:hidden'],
-    ['ADS stream type', 'c:/work/app/a.txt::$DATA'],
-    ['8.3 short name', 'C:\\PROGRA~1\\app\\a.ts'],
-    ['8.3 in project', 'c:/work/PROJEC~1/a.ts'],
-    ['trailing dot', 'c:/work/app./a.ts'],
-    ['trailing space', 'c:/work/app /a.ts'],
-    ['device name', 'c:/work/con/a.ts'],
+    ['ADS', 'c:/Users/x/app/a.txt:hidden'],
+    ['ADS stream type', 'c:/Users/x/app/a.txt::$DATA'],
+    ['8.3 short name', 'C:\\Users\\x\\PROJEC~1\\a.ts'],
+    ['8.3 user name', 'C:\\Users\\SARAHS~1\\proj\\a.ts'],
+    ['trailing dot', 'c:/Users/x/app./a.ts'],
+    ['trailing space', 'c:/Users/x/app /a.ts'],
+    ['device name', 'c:/Users/x/con/a.ts'],
     ['percent', '/home/sara/pro%2ej/a.ts'],
     ['control char', '/home/sara/proj/a\u0000.ts'],
     ['bidi override', '/home/sara/proj\u202e/a.ts'],
-  ])('refuses %s', (_n, r) => expect(file(r)).toBeNull());
+  ])('refuses %s: %s', (_n, r) => expect(file(r)).toBeNull());
 });
 
 describe('folder matching', () => {
@@ -73,16 +119,29 @@ describe('folder matching', () => {
     expect(scopeMatches(P, T, 'shell', '/home/sara/proj/src/x')).toBe(false);
   });
   it('windows: case, slashes and drive letters', () => {
-    const W = 'c:/work/app/*';
-    expect(inside(W, 'C:\\Work\\App\\sub\\x.ts')).toBe(true);
-    expect(inside(W, 'c:/WORK/app/x.ts')).toBe(true);
-    expect(inside(W, 'D:\\work\\app\\x.ts')).toBe(false);
-    expect(inside(W, 'c:/work/app2/x.ts')).toBe(false);
-    expect(inside(W, '\\\\server\\c$\\work\\app\\x.ts')).toBe(false);
-    expect(inside(W, 'c:/work/app/x.ts:stream')).toBe(false);
-    expect(inside(W, 'c:/work/app./x.ts')).toBe(false);
-    expect(inside(W, 'c:/work/PROJEC~1/x.ts')).toBe(false);
-    expect(inside(W, 'c:/work/app/../other/x.ts')).toBe(false);
+    const W = 'c:/users/sara/app/*';
+    expect(inside(W, 'C:\\Users\\Sara\\App\\sub\\x.ts')).toBe(true);
+    expect(inside(W, 'c:/USERS/sara/app/x.ts')).toBe(true);
+    expect(inside(W, 'D:\\users\\sara\\app\\x.ts')).toBe(false);
+    expect(inside(W, 'c:/users/sara/app2/x.ts')).toBe(false);
+    expect(inside(W, '\\\\server\\c$\\users\\sara\\app\\x.ts')).toBe(false);
+    expect(inside(W, 'c:/users/sara/app/x.ts:stream')).toBe(false);
+    expect(inside(W, 'c:/users/sara/app./x.ts')).toBe(false);
+    expect(inside(W, 'c:/users/sara/PROJEC~1/x.ts')).toBe(false);
+    expect(inside(W, 'c:/users/sara/app/../other/x.ts')).toBe(false);
+  });
+  it('wsl windows homes are case-insensitive; persistence folders are never covered', () => {
+    expect(
+      inside('/mnt/c/users/sara/proj/*', '/mnt/C/Users/Sara/Proj/x.ts'),
+    ).toBe(true);
+    expect(
+      inside('/mnt/c/users/sara/proj/*', '/mnt/d/users/sara/proj/x.ts'),
+    ).toBe(false);
+    expect(
+      inside('/Users/x/proj/*', '/Users/x/proj/LaunchAgents/a.plist'),
+    ).toBe(false);
+    expect(inside('/home/x/proj/*', '/home/x/proj/Startup/a.sh')).toBe(false);
+    expect(inside('/Users/x/proj/*', '/Users/x/proj/src/a.ts')).toBe(true);
   });
   it('a posix pattern is case sensitive', () => {
     expect(inside(P, '/home/sara/PROJ/src/a.ts')).toBe(false);

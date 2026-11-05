@@ -20,36 +20,12 @@ const kindOf = (toolId: string, a: string) =>
 
 /** A drive path, either slash. Windows names are case-insensitive, so they are lower-cased. */
 const DRIVE = /^[a-zA-Z]:[\\/]/;
+const WSL_DRIVE = /^\/mnt\/[a-zA-Z]\//;
 /** Control, format (bidi overrides) and separator characters. */
 const BAD_CHARS = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
 /** Windows device names, which name a device whatever the extension. */
 const DEVICE = /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i;
 const WIN_BAD = /[<>"|?*]/;
-/** Places a task folder is never: system folders and the root user's home. */
-const SYSTEM = [
-  '/root',
-  '/etc',
-  '/proc',
-  '/sys',
-  '/dev',
-  '/boot',
-  '/var',
-  '/usr',
-  '/bin',
-  '/sbin',
-  '/lib',
-  '/lib64',
-  '/opt',
-  '/private',
-  '/run',
-  '/tmp',
-  '/snap',
-  'c:/windows',
-  'c:/program files',
-  'c:/program files (x86)',
-  'c:/programdata',
-];
-
 /**
  * The absolute canonical form of a path, or null. Null for: relative paths, UNC, `..` anywhere,
  * alternate data streams (`:`), 8.3 short names (`PROGRA~1`), trailing dots or spaces, device
@@ -60,19 +36,22 @@ export function canonicalAbsolute(raw: string): string | null {
   const win = DRIVE.test(raw);
   let p = raw;
   if (win) p = p.replace(/\\/g, '/').toLowerCase();
+  // Windows drives mounted in WSL are Windows files: case-insensitive, same name rules.
+  else if (WSL_DRIVE.test(raw)) p = p.toLowerCase();
   else if (!p.startsWith('/') || p.startsWith('//') || p.includes('\\'))
     return null; // relative, UNC (`//server`, `\\server`), or an ambiguous backslash
   if (BAD_CHARS.test(p) || p.includes('%') || p.includes('\u0000')) return null;
   p = p.normalize('NFC');
+  const winLike = win || WSL_DRIVE.test(p);
   const root = win ? p.slice(0, 3) : '/';
   const rest = p.slice(root.length);
   const segs: string[] = [];
   for (const s of rest.split('/')) {
     if (s === '' || s === '.') continue;
     if (s === '..') return null; // never resolve a climb: ask instead
-    if (win && (s.includes(':') || WIN_BAD.test(s) || DEVICE.test(s)))
+    if (winLike && (s.includes(':') || WIN_BAD.test(s) || DEVICE.test(s)))
       return null;
-    if (win && /~\d/.test(s)) return null; // 8.3 short name
+    if (winLike && /~\d/.test(s)) return null; // 8.3 short name
     if (/[. ]$/.test(s)) return null; // Windows ignores trailing dots and spaces
     segs.push(s);
   }
@@ -84,37 +63,40 @@ const blockedAlias = (a: string) =>
   a.startsWith('unsafe-path:') ||
   a.startsWith('unsafe-command:');
 
-/** Home-folder shapes: `/home/<user>`, `/Users/<user>`, `c:/users/<user>`. */
-function homeDepth(dir: string): number {
-  const m = /^(\/home\/|\/users\/|c:\/users\/)/i.exec(dir);
-  return m ? m[0].split('/').filter(Boolean).length + 1 : 0;
-}
+/**
+ * A folder scope is offered only for a folder inside a recognised user home, at least one level
+ * below it: `/home/<u>/`, `/Users/<u>/`, `<drive>:/Users/<u>/` and `/mnt/<drive>/Users/<u>/`
+ * (WSL). Everything else (system roots, /tmp, /opt, /var, other mounts, network shares) offers
+ * nothing and keeps asking. Structure is compared case-insensitively.
+ */
+const HOME =
+  /^(\/home\/|\/users\/|[a-z]:\/users\/|\/mnt\/[a-z]\/users\/)([^/]+)\/(.+)$/i;
+/** Shared and template profiles are not a person's project space. */
+const NOT_A_PERSON = /^(shared|public|default|default user|all users|guest)$/i;
+/** First folders under a home that hold configuration, app data or persistence. */
+const CONFIG_FIRST =
+  /^(\.|appdata$|library$|application data$|start menu$|local settings$)/i;
+/** Autostart locations, wherever they sit in the path. */
+const PERSISTENCE = /startup|launchagents|launchdaemons|autostart|start menu/i;
 
 function folderScope(resource: string): string | null {
   const path = canonicalAbsolute(resource);
   if (!path || resourceAliases(resource, 'path').some(blockedAlias))
     return null;
-  const cut = path.lastIndexOf('/');
-  const dir = path.slice(0, cut + 1);
-  const lower = dir.toLowerCase();
-  if (SYSTEM.some((s) => lower === `${s}/` || lower.startsWith(`${s}/`)))
-    return null;
-  const segs = dir.split('/').filter(Boolean);
-  const root = DRIVE.test(dir) ? 1 : 0; // the drive letter is not a folder
-  const depth = segs.length - root;
-  // A folder inside a project, not a home folder or a drive root: at least `/home/u/proj/`.
-  const home = homeDepth(dir);
-  if (depth < 2 || (home > 0 && segs.length < home + 1)) return null;
-  // A dot-folder directly under a home folder (`.ssh`, `.config`) is not a project.
-  if (home > 0 && segs[home]!.startsWith('.')) return null;
+  const dir = path.slice(0, path.lastIndexOf('/') + 1);
+  const m = HOME.exec(dir);
+  if (!m || NOT_A_PERSON.test(m[2]!)) return null;
+  const below = m[3]!.split('/').filter(Boolean);
+  if (below.length === 0 || CONFIG_FIRST.test(below[0]!)) return null;
+  if (PERSISTENCE.test(dir)) return null;
   return `${dir}*`;
 }
-
 function pathMatches(pattern: string, resource: string): boolean {
   const path = canonicalAbsolute(resource);
   if (!path || !pattern.endsWith('/*')) return false;
   if (resourceAliases(resource, 'path').some(blockedAlias)) return false;
-  return path.startsWith(pattern.slice(0, -1));
+  // A persistence folder inside a granted project is still not covered.
+  return path.startsWith(pattern.slice(0, -1)) && !PERSISTENCE.test(path);
 }
 
 // ---------------------------------------------------------------- web
