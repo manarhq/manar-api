@@ -105,6 +105,8 @@ export const AUDIT_EVENT_TYPES = {
   USER_ROLE_GRANTED: 'user.role_granted',
   /** `DELETE /users/:id/role-bindings/:role` revoked a role — see `UsersService.revokeRole`. */
   USER_ROLE_REVOKED: 'user.role_revoked',
+  /** `DELETE /users/:id/role-bindings/TENANT_OWNER` refused because the target is the last active owner (nothing changed). */
+  USER_ROLE_REVOKE_REFUSED: 'user.role_revoke_refused',
   /** `PATCH /tenant/settings` updated one or more residency/AI-governance flags — see `TenantSettingsService.updateSettings`. */
   TENANT_SETTINGS_UPDATED: 'tenant.settings_updated',
   /** Manar staff changed this tenant's feature flags, packs or LLM route through manar-fleet (src/platform/catalog.*). */

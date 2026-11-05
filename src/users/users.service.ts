@@ -12,6 +12,7 @@ import {
   cursorWhereClause,
   toCursorPage,
 } from '../common/pagination/cursor-pagination';
+import { withOwnerLock } from './last-owner';
 import {
   LastOwnerError,
   PrivilegeEscalationError,
@@ -267,31 +268,27 @@ export class UsersService {
         input.role === 'TENANT_OWNER' &&
         rolesOf(existing).includes(input.role)
       ) {
-        // The count and the write sit under one per-workspace lock, so two owners revoking each
-        // other at the same moment cannot both pass the check.
-        await this.control.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owners:${input.tenantId}`}))`;
-          const owners = await tx.membership.findMany({
-            where: {
-              tenantId: input.tenantId,
-              status: 'ACTIVE',
-              OR: [
-                { role: 'TENANT_OWNER' },
-                { extraRoles: { has: 'TENANT_OWNER' } },
-              ],
-            },
-            select: { issuer: true, subject: true },
-          });
-          const another = owners.some(
-            (o) =>
-              !(
-                o.issuer === input.issuer &&
-                o.subject === target.keycloakSubject
-              ),
+        try {
+          await withOwnerLock(
+            this.control,
+            input.tenantId,
+            { issuer: input.issuer, subject: target.keycloakSubject },
+            write,
           );
-          if (!another) throw new LastOwnerError();
-          await write(tx);
-        });
+        } catch (error) {
+          if (error instanceof LastOwnerError) {
+            await this.auditService.recordSafely(tenantClient, input.tenantId, {
+              eventType: AUDIT_EVENT_TYPES.USER_ROLE_REVOKE_REFUSED,
+              actor: { type: 'human', id: input.revokedByUserId },
+              data: {
+                targetUserId: input.targetUserId,
+                role: input.role,
+                reason: 'last_owner',
+              },
+            });
+          }
+          throw error;
+        }
       } else {
         await write(this.control);
       }

@@ -18,25 +18,9 @@ function make(
     $transaction: vi.fn((fn: (tx: object) => unknown) => fn(self.control)),
     $executeRaw: vi.fn(() => Promise.resolve(1)),
     membership: {
-      findMany: vi.fn((args?: { where?: { OR?: unknown } }) =>
-        Promise.resolve(
-          args?.where?.OR
-            ? [
-                ...(m && m.status === 'ACTIVE'
-                  ? [
-                      {
-                        issuer: 'https://kc.test/realms/manar',
-                        subject: 'sub-t',
-                      },
-                    ]
-                  : []),
-                ...otherOwners,
-              ]
-            : m
-              ? [m]
-              : [],
-        ),
-      ),
+      findMany: vi.fn(() => Promise.resolve(m ? [m] : [])),
+      // the other-owners count (the target itself is excluded by the query)
+      count: vi.fn(() => Promise.resolve(otherOwners.length)),
       upsert: vi.fn(({ create, update }: any) => {
         m = {
           ...(m ?? { createdAt: new Date() }),
@@ -70,6 +54,7 @@ function make(
     svc: new UsersService(audit as never, control as never),
     client: client as never,
     control,
+    audit,
   };
 }
 const base = {
@@ -124,7 +109,7 @@ describe('UsersService roles live in Membership', () => {
   });
 
   it('the only owner cannot lose TENANT_OWNER, themselves or by another admin: last_owner, nothing written', async () => {
-    const { svc, client, control } = make({
+    const { svc, client, control, audit } = make({
       role: 'TENANT_OWNER',
       extraRoles: [],
       status: 'ACTIVE',
@@ -137,6 +122,31 @@ describe('UsersService roles live in Membership', () => {
       }),
     ).rejects.toThrow(LastOwnerError);
     expect(control.membership.update).not.toHaveBeenCalled();
+    // the refusal is a security event of its own
+    expect(audit.recordSafely).toHaveBeenCalledWith(
+      client,
+      't1',
+      expect.objectContaining({
+        eventType: 'user.role_revoke_refused',
+        data: {
+          targetUserId: 'u1',
+          role: 'TENANT_OWNER',
+          reason: 'last_owner',
+        },
+      }),
+    );
+  });
+
+  it('a revoke above the caller is 403 before any owner check or lock', async () => {
+    const { svc, client, control } = make({
+      role: 'TENANT_OWNER',
+      extraRoles: [],
+      status: 'ACTIVE',
+    });
+    await expect(
+      svc.revokeRole(client, { ...base, role: 'TENANT_OWNER' }), // caller is only SECURITY_ADMIN
+    ).rejects.toThrow(PrivilegeEscalationError);
+    expect(control.$transaction).not.toHaveBeenCalled();
   });
 
   it('the same holds when TENANT_OWNER is an extra role of the only owner', async () => {

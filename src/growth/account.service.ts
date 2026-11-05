@@ -19,6 +19,8 @@ import { MailerService } from './mailer.service';
 import { GrowthAuditService } from './growth-audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { zip } from './zip';
+import { hasAnotherOwner, withOwnerLock } from '../users/last-owner';
+import { LastOwnerError } from '../users/users.errors';
 
 const DAY_MS = 86_400_000;
 const LEASE_MS = 60 * 60 * 1000;
@@ -238,18 +240,10 @@ export class AccountService {
     for (const m of mine) {
       if (m.role !== 'TENANT_OWNER' && !m.extraRoles.includes('TENANT_OWNER'))
         continue;
-      const others = await this.control.membership.count({
-        where: {
-          tenantId: m.tenantId,
-          status: 'ACTIVE',
-          NOT: { issuer, subject },
-          OR: [
-            { role: 'TENANT_OWNER' },
-            { extraRoles: { has: 'TENANT_OWNER' } },
-          ],
-        },
-      });
-      if (others === 0) throw new SoleOwnerError();
+      if (
+        !(await hasAnotherOwner(this.control, m.tenantId, { issuer, subject }))
+      )
+        throw new SoleOwnerError();
     }
   }
 
@@ -409,7 +403,31 @@ export class AccountService {
       issuer,
       subject,
     );
-    summary.companyMembershipsRemoved = (
+    // An owner's membership leaves under the same per-workspace lock as a role revoke
+    // (withOwnerLock), so two owners deleting their accounts at once cannot orphan a company.
+    for (const m of await this.control.membership.findMany({
+      where: { issuer, subject, status: 'ACTIVE', tenant: { kind: 'COMPANY' } },
+    })) {
+      if (m.role !== 'TENANT_OWNER' && !m.extraRoles.includes('TENANT_OWNER'))
+        continue;
+      try {
+        summary.companyMembershipsRemoved += (
+          await withOwnerLock(
+            this.control,
+            m.tenantId,
+            { issuer, subject },
+            (tx) =>
+              tx.membership.deleteMany({
+                where: { issuer, subject, tenantId: m.tenantId },
+              }),
+          )
+        ).count;
+      } catch (error) {
+        if (error instanceof LastOwnerError) throw new SoleOwnerError();
+        throw error;
+      }
+    }
+    summary.companyMembershipsRemoved += (
       await this.control.membership.deleteMany({ where: { issuer, subject } })
     ).count;
     // 4. Product improvement data: stored samples and the PostHog person.
