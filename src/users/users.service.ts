@@ -12,7 +12,11 @@ import {
   cursorWhereClause,
   toCursorPage,
 } from '../common/pagination/cursor-pagination';
-import { PrivilegeEscalationError, UserNotFoundError } from './users.errors';
+import {
+  LastOwnerError,
+  PrivilegeEscalationError,
+  UserNotFoundError,
+} from './users.errors';
 
 export interface ListUsersInput {
   limit: number;
@@ -242,22 +246,55 @@ export class UsersService {
       const split = splitRoles(
         rolesOf(existing).filter((r) => r !== input.role),
       );
-      await this.control.membership.update({
-        where: {
-          issuer_subject_tenantId: {
-            issuer: input.issuer,
-            subject: target.keycloakSubject,
-            tenantId: input.tenantId,
-          },
-        },
-        data: split
-          ? { ...split, grantedBy: input.revokedByUserId }
-          : {
-              status: 'REMOVED',
-              extraRoles: [],
-              grantedBy: input.revokedByUserId,
+      const write = (db: Pick<ControlPrismaService, 'membership'>) =>
+        db.membership.update({
+          where: {
+            issuer_subject_tenantId: {
+              issuer: input.issuer,
+              subject: target.keycloakSubject,
+              tenantId: input.tenantId,
             },
-      });
+          },
+          data: split
+            ? { ...split, grantedBy: input.revokedByUserId }
+            : {
+                status: 'REMOVED',
+                extraRoles: [],
+                grantedBy: input.revokedByUserId,
+              },
+        });
+      if (
+        input.role === 'TENANT_OWNER' &&
+        rolesOf(existing).includes(input.role)
+      ) {
+        // The count and the write sit under one per-workspace lock, so two owners revoking each
+        // other at the same moment cannot both pass the check.
+        await this.control.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owners:${input.tenantId}`}))`;
+          const owners = await tx.membership.findMany({
+            where: {
+              tenantId: input.tenantId,
+              status: 'ACTIVE',
+              OR: [
+                { role: 'TENANT_OWNER' },
+                { extraRoles: { has: 'TENANT_OWNER' } },
+              ],
+            },
+            select: { issuer: true, subject: true },
+          });
+          const another = owners.some(
+            (o) =>
+              !(
+                o.issuer === input.issuer &&
+                o.subject === target.keycloakSubject
+              ),
+          );
+          if (!another) throw new LastOwnerError();
+          await write(tx);
+        });
+      } else {
+        await write(this.control);
+      }
     }
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
