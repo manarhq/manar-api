@@ -5,6 +5,7 @@ interface Row {
   id: string;
   status: string;
   residency: string;
+  sector: 'COMMERCIAL' | 'GOVERNMENT' | null;
   allowExternalAi: boolean;
   allowExternalAiChosen: boolean;
   aiDefaultNoticePending: boolean;
@@ -13,6 +14,7 @@ const row = (id: string, extra: Partial<Row> = {}): Row => ({
   id,
   status: 'ACTIVE',
   residency: 'UAE',
+  sector: 'COMMERCIAL',
   allowExternalAi: false,
   allowExternalAiChosen: false,
   aiDefaultNoticePending: false,
@@ -22,7 +24,12 @@ const row = (id: string, extra: Partial<Row> = {}): Row => ({
 /** In-memory control DB and tenant logs; `explicit` ids have a settings update touching allowExternalAi on record. */
 function setup(
   rows: Row[],
-  opts: { explicit?: string[]; government?: string[]; broken?: string[] } = {},
+  opts: {
+    explicit?: string[];
+    government?: string[];
+    broken?: string[];
+    deployment?: string;
+  } = {},
 ) {
   const readOnly = vi.fn().mockResolvedValue(1);
   const control = {
@@ -81,10 +88,12 @@ function setup(
     },
   };
   const audit = { recordSafely: vi.fn().mockResolvedValue(undefined) };
+  const config = { get: () => opts.deployment ?? 'hosted' };
   const service = new AiDefaultService(
     control as never,
     tenants as never,
     audit as never,
+    config as never,
   );
   return { service, audit, control, readOnly };
 }
@@ -96,6 +105,10 @@ const fixture = () => [
   row('explicit-in-log'),
   row('air', { residency: 'AIR_GAPPED' }),
   row('gov'),
+  // Government by its own recorded sector, with no enterprise profile.
+  row('gov-no-profile', { sector: 'GOVERNMENT' }),
+  // Sector not known: needs review, never flipped.
+  row('unknown', { sector: null }),
   row('queued', { status: 'QUEUED' }),
   row('on', { allowExternalAi: true }),
 ];
@@ -112,7 +125,9 @@ describe('ai:default-on', () => {
     expect(counts).toEqual({
       flip: 2,
       keptExplicit: 2,
-      skippedGovernment: 1,
+      skippedGovernment: 2,
+      skippedCustomerDeployment: 0,
+      needsReview: 1,
       skippedAirGapped: 1,
       skippedNotActive: 1,
       failed: 0,
@@ -145,6 +160,8 @@ describe('ai:default-on', () => {
     });
     expect(by('air').allowExternalAi).toBe(false);
     expect(by('gov').allowExternalAi).toBe(false);
+    expect(by('gov-no-profile').allowExternalAi).toBe(false);
+    expect(by('unknown').allowExternalAi).toBe(false);
     expect(by('queued').allowExternalAi).toBe(false);
     expect(audit.recordSafely).toHaveBeenCalledTimes(2);
     expect(audit.recordSafely.mock.calls[0]![2]).toMatchObject({
@@ -172,5 +189,14 @@ describe('ai:default-on', () => {
     expect(counts).toMatchObject({ flip: 1, failed: 1 });
     expect(rows[0]!.allowExternalAi).toBe(false);
     expect(rows[1]!.allowExternalAi).toBe(true);
+  });
+
+  it('a customer-hosted deployment is never flipped', async () => {
+    const rows = [row('a'), row('b')];
+    const { service, audit } = setup(rows, { deployment: 'customer' });
+    const counts = await service.run({ dryRun: false });
+    expect(counts).toMatchObject({ flip: 0, skippedCustomerDeployment: 2 });
+    expect(rows.every((r) => !r.allowExternalAi)).toBe(true);
+    expect(audit.recordSafely).not.toHaveBeenCalled();
   });
 });

@@ -142,6 +142,8 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
         slug,
         name,
         kind: input.kind,
+        // A personal workspace is an individual's; a company's sector is not known at sign-up.
+        sector: input.kind === 'PERSONAL' ? 'COMMERCIAL' : undefined,
         ownerSubject: input.kind === 'COMPANY' ? undefined : input.ownerSubject,
         ownerIssuer: input.kind === 'COMPANY' ? undefined : issuer,
         entraTenantId:

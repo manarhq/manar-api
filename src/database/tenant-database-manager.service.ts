@@ -33,9 +33,9 @@ const execFileAsync = promisify(execFile);
  */
 export function defaultAllowExternalAi(input: {
   residency?: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
-  government?: boolean;
+  sector?: 'COMMERCIAL' | 'GOVERNMENT';
 }): boolean {
-  return input.residency !== 'AIR_GAPPED' && input.government !== true;
+  return input.residency !== 'AIR_GAPPED' && input.sector !== 'GOVERNMENT';
 }
 
 export interface ProvisionTenantInput {
@@ -44,8 +44,8 @@ export interface ProvisionTenantInput {
   residency?: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
   /** Absent: `defaultAllowExternalAi`. */
   allowExternalAi?: boolean;
-  /** A Government workspace: AI defaults off. */
-  government?: boolean;
+  /** Recorded on the tenant. Government: AI off, recorded as an explicit choice. Absent: unknown. */
+  sector?: 'COMMERCIAL' | 'GOVERNMENT';
   allowOutboundTelemetry?: boolean;
   allowCloudStorage?: boolean;
   /** Hosted workspaces (spec 4.1). Absent for the legacy `tenant:create` path (COMPANY). */
@@ -670,7 +670,10 @@ export class TenantDatabaseManager implements OnModuleDestroy {
           residency: input.residency ?? 'UAE',
           allowExternalAi:
             input.allowExternalAi ?? defaultAllowExternalAi(input),
-          allowExternalAiChosen: input.allowExternalAi !== undefined,
+          allowExternalAiChosen:
+            input.allowExternalAi !== undefined ||
+            input.sector === 'GOVERNMENT',
+          sector: input.sector ?? null,
           allowOutboundTelemetry: input.allowOutboundTelemetry ?? false,
           allowCloudStorage: input.allowCloudStorage ?? false,
         },

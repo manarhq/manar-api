@@ -450,7 +450,8 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
       }),
       company: await mk({ kind: 'COMPANY' }),
       legacyCli: await mk({}),
-      government: await mk({ kind: 'COMPANY', government: true }),
+      government: await mk({ kind: 'COMPANY', sector: 'GOVERNMENT' }),
+      commercial: await mk({ kind: 'COMPANY', sector: 'COMMERCIAL' }),
       airGapped: await mk({ residency: 'AIR_GAPPED' }),
       explicitOff: await mk({ allowExternalAi: false }),
     };
@@ -459,6 +460,12 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
       expect(made.company.allowExternalAi).toBe(true);
       expect(made.legacyCli.allowExternalAi).toBe(true);
       expect(made.government.allowExternalAi).toBe(false);
+      // Government is an explicit, recorded decision; the sector is stored.
+      expect(made.government.allowExternalAiChosen).toBe(true);
+      expect(made.government.sector).toBe('GOVERNMENT');
+      expect(made.commercial.sector).toBe('COMMERCIAL');
+      expect(made.commercial.allowExternalAi).toBe(true);
+      expect(made.company.sector).toBeNull();
       expect(made.airGapped.allowExternalAi).toBe(false);
       expect(made.explicitOff.allowExternalAi).toBe(false);
       expect(made.company.allowExternalAiChosen).toBe(false);

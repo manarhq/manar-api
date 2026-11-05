@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '../generated/tenant-client/client';
+import { ConfigService } from '@nestjs/config';
+import type { AppConfig } from '../config/env.validation';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
@@ -11,6 +13,10 @@ export interface AiDefaultCounts {
   /** Still at false with an owner's own choice on record: left alone. */
   keptExplicit: number;
   skippedGovernment: number;
+  /** Customer-hosted deployments are never flipped. */
+  skippedCustomerDeployment: number;
+  /** Sector not known (or not confirmed commercial): left alone, needs a person to decide. */
+  needsReview: number;
   skippedAirGapped: number;
   /** Not ACTIVE yet (queued, provisioning, suspended...): no audit log to read; run again later. */
   skippedNotActive: number;
@@ -22,6 +28,7 @@ export interface AiDefaultCounts {
  * The founder's default (5 Nov 2026): AI on for Free, Pro and Company workspaces, off for
  * Government and air-gapped ones. Existing workspaces are still at the old `false` default or hold
  * an owner's own choice, and only each workspace's audit log tells them apart, so this reads it.
+ * Only workspaces whose sector is recorded as COMMERCIAL, on a hosted deployment, are flipped.
  * Idempotent; the dry run reads only (read-only transactions) and returns counts, never identifiers.
  */
 @Injectable()
@@ -32,6 +39,7 @@ export class AiDefaultService {
     private readonly control: ControlPrismaService,
     private readonly tenants: TenantDatabaseManager,
     private readonly audit: AuditService,
+    private readonly config: ConfigService<AppConfig, true>,
   ) {}
 
   async run(options: { dryRun: boolean }): Promise<AiDefaultCounts> {
@@ -39,6 +47,8 @@ export class AiDefaultService {
       flip: 0,
       keptExplicit: 0,
       skippedGovernment: 0,
+      skippedCustomerDeployment: 0,
+      needsReview: 0,
       skippedAirGapped: 0,
       skippedNotActive: 0,
       failed: 0,
@@ -59,17 +69,27 @@ export class AiDefaultService {
           id: true,
           status: true,
           residency: true,
+          sector: true,
           allowExternalAiChosen: true,
         },
         orderBy: { createdAt: 'asc' },
       });
-      return found.map((t) => ({ ...t, government: government.has(t.id) }));
+      return found.map((t) => ({
+        ...t,
+        government: t.sector === 'GOVERNMENT' || government.has(t.id),
+      }));
     });
 
     for (const t of rows) {
       if (t.residency === 'AIR_GAPPED') counts.skippedAirGapped++;
       else if (t.government) counts.skippedGovernment++;
       else if (t.allowExternalAiChosen) counts.keptExplicit++;
+      else if (
+        this.config.get('MANAR_DEPLOYMENT', { infer: true }) !== 'hosted'
+      )
+        counts.skippedCustomerDeployment++;
+      // Only a positively known commercial sector is flipped; unknown waits for a person.
+      else if (t.sector !== 'COMMERCIAL') counts.needsReview++;
       else if (t.status !== 'ACTIVE') counts.skippedNotActive++;
       else await this.one(t.id, options.dryRun, counts);
     }

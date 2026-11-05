@@ -6,7 +6,7 @@ import {
   FastifyAdapter,
   NestFastifyApplication,
 } from '@nestjs/platform-fastify';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
@@ -340,6 +340,7 @@ describe('Tenant Settings (e2e)', () => {
     await control.tenant.update({
       where: { id: tenant.id },
       data: {
+        sector: 'COMMERCIAL',
         allowExternalAi: false,
         allowExternalAiChosen: false,
         aiDefaultNoticePending: false,
@@ -349,6 +350,7 @@ describe('Tenant Settings (e2e)', () => {
       control,
       tenantDatabaseManager,
       app.get(AuditService),
+      app.get(ConfigService),
     );
     const dry = await service.run({ dryRun: true });
     expect(dry.keptExplicit).toBeGreaterThanOrEqual(1);

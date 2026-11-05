@@ -5,8 +5,8 @@ export const CreatePlatformTenantSchema = z.object({
   slug: z.string().regex(/^[a-z][a-z0-9-]{1,38}[a-z0-9]$/),
   name: z.string().trim().min(1).max(200),
   residency: z.enum(['UAE', 'CUSTOM_REGION', 'AIR_GAPPED']).default('UAE'),
-  /** A Government workspace: AI defaults off. */
-  government: z.boolean().default(false),
+  /** Commercial or Government; unset is unknown. Government: AI off, recorded as an explicit choice. */
+  sector: z.enum(['COMMERCIAL', 'GOVERNMENT']).optional(),
 });
 
 export type CreatePlatformTenant = z.infer<typeof CreatePlatformTenantSchema>;

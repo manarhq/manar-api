@@ -11,7 +11,7 @@ interface TenantCreateOptions {
   name: string;
   residency: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
   allowExternalAi?: boolean;
-  government?: boolean;
+  sector?: 'COMMERCIAL' | 'GOVERNMENT';
   allowOutboundTelemetry: boolean;
   allowCloudStorage: boolean;
 }
@@ -51,7 +51,7 @@ export class TenantCreateCommand extends CommandRunner {
         name: options.name,
         residency: options.residency,
         allowExternalAi: options.allowExternalAi,
-        government: options.government,
+        sector: options.sector,
         allowOutboundTelemetry: options.allowOutboundTelemetry,
         allowCloudStorage: options.allowCloudStorage,
       });
@@ -113,18 +113,23 @@ export class TenantCreateCommand extends CommandRunner {
   @Option({
     flags: '--allow-external-ai [boolean]',
     description:
-      'Allow this tenant to use external AI providers (default: true, false for --government or AIR_GAPPED)',
+      'Allow this tenant to use external AI providers (default: true, false for --sector GOVERNMENT or AIR_GAPPED)',
   })
   parseAllowExternalAi(value: string): boolean {
     return parseBoolean(value);
   }
 
   @Option({
-    flags: '--government',
-    description: 'A Government workspace: AI defaults off',
+    flags: '--sector <sector>',
+    description: 'COMMERCIAL or GOVERNMENT (Government: AI off)',
   })
-  parseGovernment(): boolean {
-    return true;
+  parseSector(value: string): 'COMMERCIAL' | 'GOVERNMENT' {
+    const v = value.toUpperCase();
+    if (v !== 'COMMERCIAL' && v !== 'GOVERNMENT')
+      throw new Error(
+        `Invalid --sector "${value}". Expected COMMERCIAL or GOVERNMENT`,
+      );
+    return v;
   }
 
   @Option({
