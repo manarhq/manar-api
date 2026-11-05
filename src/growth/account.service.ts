@@ -19,7 +19,7 @@ import { MailerService } from './mailer.service';
 import { GrowthAuditService } from './growth-audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { zip } from './zip';
-import { hasAnotherOwner, withOwnerLock } from '../users/last-owner';
+import { hasAnotherOwner, withOwnerLocks } from '../users/last-owner';
 import { LastOwnerError } from '../users/users.errors';
 
 const DAY_MS = 86_400_000;
@@ -340,24 +340,37 @@ export class AccountService {
 
   private async executeOne(issuer: string, subject: string) {
     await this.assertNotSoleOwner(issuer, subject); // changed since the request: stop, keep the account
-    // 0. The one step that can still refuse, before anything is destroyed. An owner stops being an
-    //    owner under the same per-workspace lock as a role revoke (withOwnerLock), so two owners
-    //    deleting their accounts at once cannot orphan a company: the loser is refused here, with
-    //    the account untouched. The row is marked REMOVED, not deleted, so step 3 still finds the
-    //    company (also on the hourly retry) and the final delete takes it away.
-    for (const m of await this.control.membership.findMany({
-      where: { issuer, subject, status: 'ACTIVE', tenant: { kind: 'COMPANY' } },
-    })) {
-      if (m.role !== 'TENANT_OWNER' && !m.extraRoles.includes('TENANT_OWNER'))
-        continue;
+    // 0. The one step that can still refuse, before anything is destroyed. The person stops being
+    //    an owner of ALL their companies in one transaction under the per-workspace locks of a role
+    //    revoke (withOwnerLocks): every last-owner check first, then every write, so a company
+    //    that refuses leaves the person owner of the others too. Two owners deleting their accounts
+    //    at once cannot orphan a company: the loser is refused here, with the account untouched.
+    //    Rows are marked REMOVED, not deleted, so step 3 still finds the companies (also on the
+    //    hourly retry) and the final delete takes them away.
+    const ownedCompanies = (
+      await this.control.membership.findMany({
+        where: {
+          issuer,
+          subject,
+          status: 'ACTIVE',
+          tenant: { kind: 'COMPANY' },
+        },
+      })
+    )
+      .filter(
+        (m) =>
+          m.role === 'TENANT_OWNER' || m.extraRoles.includes('TENANT_OWNER'),
+      )
+      .map((m) => m.tenantId);
+    if (ownedCompanies.length > 0) {
       try {
-        await withOwnerLock(
+        await withOwnerLocks(
           this.control,
-          m.tenantId,
+          ownedCompanies,
           { issuer, subject },
           (tx) =>
             tx.membership.updateMany({
-              where: { issuer, subject, tenantId: m.tenantId },
+              where: { issuer, subject, tenantId: { in: ownedCompanies } },
               data: { status: 'REMOVED' },
             }),
         );
