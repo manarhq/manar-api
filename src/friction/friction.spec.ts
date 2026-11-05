@@ -78,14 +78,21 @@ describe('friction numbers', () => {
 });
 
 describe('over-budget alert', () => {
-  function svc(avgPrompts: number[]) {
+  function svc(avgPrompts: number[], finds?: { n: number }) {
     const tenants = avgPrompts.map((_, i) => ({
       id: `t${i}`,
       slug: `ws-${i}`,
       name: `W${i}`,
       kind: 'COMPANY',
     }));
-    const control = { tenant: { findMany: () => Promise.resolve(tenants) } };
+    const control = {
+      tenant: {
+        findMany: () => {
+          if (finds) finds.n++;
+          return Promise.resolve(tenants);
+        },
+      },
+    };
     const manager = {
       getClient: (id: string) => {
         const i = Number(id.slice(1));
@@ -113,6 +120,18 @@ describe('over-budget alert', () => {
       ['ws-1', 5.7, true],
       ['ws-0', 2.9, false],
     ]);
+  });
+  it('the staff rollup is cached for 10 minutes per window, so Desk polling does not walk every workspace', async () => {
+    const finds = { n: 0 };
+    const s = svc([20, 70], finds);
+    const t = new Date('2026-11-05T10:00:00Z');
+    const a = await s.staff(7, t);
+    expect(await s.staff(7, new Date(t.getTime() + 9 * 60_000))).toBe(a);
+    expect(finds.n).toBe(1);
+    await s.staff(14, t); // another window is its own entry
+    expect(finds.n).toBe(2);
+    await s.staff(7, new Date(t.getTime() + 11 * 60_000));
+    expect(finds.n).toBe(3);
   });
   it('scan warns once per workspace over budget, sets the gauge, and waits 6 hours', async () => {
     const s = svc([20, 70]);

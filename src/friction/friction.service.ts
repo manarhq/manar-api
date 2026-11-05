@@ -15,6 +15,17 @@ import {
 } from './friction';
 
 const UNASSIGNED = '_unassigned';
+const STAFF_CACHE_MS = 10 * 60_000;
+
+export type StaffRow = {
+  tenantId: string;
+  slug: string;
+  name: string;
+  kind: string;
+  developers: number;
+  avgPromptsPerDeveloperPerDay: number;
+  overBudget: boolean;
+} & FrictionNumbers;
 const DAY = 86_400_000;
 
 interface RolledRow {
@@ -34,6 +45,11 @@ interface RolledRow {
 export class FrictionService {
   private readonly logger = new Logger(FrictionService.name);
   private lastScan = 0;
+  /** The staff rollup walks every workspace: keep it for a few minutes per window. */
+  private readonly staffCache = new Map<
+    number,
+    { at: number; value: StaffRow[] }
+  >();
 
   constructor(
     private readonly control: ControlPrismaService,
@@ -189,25 +205,26 @@ export class FrictionService {
     };
   }
 
-  /** Staff: the same numbers per workspace, flagged above the budget. */
-  async staff(days: number, now: Date = new Date()) {
+  /**
+   * Staff: the same numbers per workspace, flagged above the budget. Cached for 10 minutes per
+   * window, so Desk polling and the alert scan do not walk every workspace each time.
+   */
+  async staff(days: number, now: Date = new Date()): Promise<StaffRow[]> {
+    const hit = this.staffCache.get(days);
+    if (hit && now.getTime() - hit.at < STAFF_CACHE_MS) return hit.value;
+    const value = await this.computeStaff(days, now);
+    this.staffCache.set(days, { at: now.getTime(), value });
+    return value;
+  }
+
+  private async computeStaff(days: number, now: Date): Promise<StaffRow[]> {
     const tenants = await this.control.tenant.findMany({
       where: { status: 'ACTIVE', kind: { not: 'SAMPLE' } },
       select: { id: true, slug: true, name: true, kind: true },
       orderBy: { createdAt: 'asc' },
       take: 1000,
     });
-    const out: Array<
-      {
-        tenantId: string;
-        slug: string;
-        name: string;
-        kind: string;
-        developers: number;
-        avgPromptsPerDeveloperPerDay: number;
-        overBudget: boolean;
-      } & FrictionNumbers
-    > = [];
+    const out: StaffRow[] = [];
     // ponytail: one workspace at a time; the tenant client cache holds 50, so a very large
     // fleet should read a nightly platform rollup instead.
     for (const t of tenants) {
