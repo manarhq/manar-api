@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { OpenBaoModule } from '../openbao/openbao.module';
 import { CompositeSecretProvider } from './composite-secret-provider';
+import { AuthCache } from './auth-cache.service';
 import { ControlPrismaService } from './control-prisma.service';
 import { EnvSecretProvider } from './env-secret-provider';
 import { OpenBaoSecretProvider } from './openbao-secret-provider';
@@ -22,11 +23,17 @@ import { TenantDatabaseManager } from './tenant-database-manager.service';
   imports: [OpenBaoModule],
   providers: [
     ControlPrismaService,
+    AuthCache,
     EnvSecretProvider,
     OpenBaoSecretProvider,
     { provide: SECRET_PROVIDER, useClass: CompositeSecretProvider },
     TenantDatabaseManager,
   ],
-  exports: [ControlPrismaService, SECRET_PROVIDER, TenantDatabaseManager],
+  exports: [
+    ControlPrismaService,
+    AuthCache,
+    SECRET_PROVIDER,
+    TenantDatabaseManager,
+  ],
 })
 export class DatabaseModule {}

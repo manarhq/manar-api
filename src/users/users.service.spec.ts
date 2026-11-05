@@ -13,11 +13,18 @@ function make(
     grantedBy: null,
     ...initial,
   };
+  const order: string[] = [];
+  const authCache = { invalidate: vi.fn(() => order.push('invalidate')) };
   const self: { control: object } = { control: {} };
   const control = {
-    $transaction: vi.fn((fn: (tx: object) => unknown) => fn(self.control)),
+    $transaction: vi.fn(async (fn: (tx: object) => unknown) => {
+      const r = await fn(self.control);
+      order.push('commit');
+      return r;
+    }),
     $executeRaw: vi.fn(() => Promise.resolve(1)),
     membership: {
+      findUnique: vi.fn(() => Promise.resolve(m ?? null)),
       findMany: vi.fn(() => Promise.resolve(m ? [m] : [])),
       // the other-owners count (the target itself is excluded by the query)
       count: vi.fn(() => Promise.resolve(otherOwners.length)),
@@ -51,7 +58,9 @@ function make(
   self.control = control;
   const audit = { recordSafely: vi.fn() };
   return {
-    svc: new UsersService(audit as never, control as never),
+    svc: new UsersService(audit as never, control as never, authCache as never),
+    order,
+    authCache,
     client: client as never,
     control,
     audit,
@@ -186,6 +195,33 @@ describe('UsersService roles live in Membership', () => {
       status: 'ACTIVE',
     });
     await svc.revokeRole(client, { ...base, role: 'AUDITOR' });
-    expect(control.$transaction).not.toHaveBeenCalled();
+    // It takes the workspace lock (no stale role sets) but never counts owners.
+    expect(control.membership.count).not.toHaveBeenCalled();
+  });
+});
+
+describe('UsersService invalidates the auth cache only after the commit', () => {
+  it('grant and revoke: commit first, then invalidate', async () => {
+    const { svc, client, order } = make({
+      role: 'AUDITOR',
+      extraRoles: ['SOC_OPERATOR'],
+      status: 'ACTIVE',
+    });
+    await svc.grantRole(client, { ...base, role: 'DEVELOPER' });
+    await svc.revokeRole(client, { ...base, role: 'SOC_OPERATOR' });
+    expect(order).toEqual(['commit', 'invalidate', 'commit', 'invalidate']);
+  });
+
+  it('a failed transaction invalidates nothing', async () => {
+    const { svc, client, control, authCache } = make({
+      role: 'AUDITOR',
+      extraRoles: [],
+      status: 'ACTIVE',
+    });
+    control.membership.upsert.mockRejectedValueOnce(new Error('db down'));
+    await expect(
+      svc.grantRole(client, { ...base, role: 'DEVELOPER' }),
+    ).rejects.toThrow('db down');
+    expect(authCache.invalidate).not.toHaveBeenCalled();
   });
 });

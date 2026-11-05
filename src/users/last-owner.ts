@@ -36,6 +36,22 @@ export async function hasAnotherOwner(
 }
 
 /**
+ * Runs `fn` in a transaction holding the per-workspace advisory lock `owners:<tenantId>`: the one
+ * lock for everything that derives a role set from a membership (grant, every revoke) and for the
+ * last-owner count. `fn` must re-read the membership it changes through `tx`, after the lock.
+ */
+export async function withWorkspaceLock<T>(
+  control: ControlPrismaService,
+  tenantId: string,
+  fn: (tx: Db) => Promise<T>,
+): Promise<T> {
+  return control.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owners:${tenantId}`}))`;
+    return fn(tx);
+  });
+}
+
+/**
  * Takes `owner` out of the workspace's owners (a role revoke, or removing the member) only if
  * another active owner remains. Lock, count and write are one transaction under the per-workspace
  * advisory lock `owners:<tenantId>`, so two owners removing each other at the same moment cannot
@@ -47,8 +63,7 @@ export async function withOwnerLock<T>(
   owner: OwnerRef,
   write: (tx: Db) => Promise<T>,
 ): Promise<T> {
-  return control.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owners:${tenantId}`}))`;
+  return withWorkspaceLock(control, tenantId, async (tx) => {
     if (!(await hasAnotherOwner(tx, tenantId, owner))) {
       throw new LastOwnerError();
     }

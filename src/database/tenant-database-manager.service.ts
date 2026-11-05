@@ -2,8 +2,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AuthCache } from './auth-cache.service';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Client as PgClient } from 'pg';
 import { Prisma as ControlPrisma } from '../generated/control-client/client';
@@ -117,6 +124,7 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     private readonly control: ControlPrismaService,
     private readonly configService: ConfigService<AppConfig, true>,
     @Inject(SECRET_PROVIDER) private readonly secretProvider: SecretProvider,
+    @Optional() private readonly authCache?: AuthCache,
   ) {
     this.maxCacheSize = configService.get('TENANT_DB_CLIENT_CACHE_MAX', {
       infer: true,
@@ -477,6 +485,8 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     if (result.count !== 1) {
       throw new TenantLifecycleConflictError(tenantId, from);
     }
+    // After the commit: cached memberships of a suspended workspace must stop resolving now.
+    this.authCache?.invalidate();
     await this.evict(tenantId);
   }
 
@@ -502,6 +512,7 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       }),
     ]);
 
+    this.authCache?.invalidate();
     await this.evict(tenantId);
   }
 

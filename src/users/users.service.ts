@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import { canGrantRole, privilegeRank } from '../auth/role-privilege';
 import type { RoleName } from '../auth/roles';
+import { AuthCache } from '../database/auth-cache.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { rolesOf, splitRoles } from '../auth/membership.service';
 import {
@@ -12,7 +13,7 @@ import {
   cursorWhereClause,
   toCursorPage,
 } from '../common/pagination/cursor-pagination';
-import { withOwnerLock } from './last-owner';
+import { withOwnerLock, withWorkspaceLock } from './last-owner';
 import {
   LastOwnerError,
   PrivilegeEscalationError,
@@ -110,6 +111,7 @@ export class UsersService {
   constructor(
     private readonly auditService: AuditService,
     private readonly control: ControlPrismaService,
+    @Optional() private readonly authCache?: AuthCache,
   ) {}
 
   private membershipsFor(tenantId: string, issuer: string, subjects: string[]) {
@@ -180,32 +182,40 @@ export class UsersService {
     });
     if (!target) throw new UserNotFoundError(input.targetUserId);
 
-    const [existing] = await this.membershipsFor(input.tenantId, input.issuer, [
-      target.keycloakSubject,
-    ]);
-    const held = existing?.status === 'ACTIVE' ? rolesOf(existing) : [];
-    const split = splitRoles([...held, input.role]);
-    if (!split) throw new UserNotFoundError(input.targetUserId);
-    await this.control.membership.upsert({
-      where: {
-        issuer_subject_tenantId: {
-          issuer: input.issuer,
-          subject: target.keycloakSubject,
-          tenantId: input.tenantId,
-        },
-      },
-      create: {
+    const key = {
+      issuer_subject_tenantId: {
         issuer: input.issuer,
         subject: target.keycloakSubject,
         tenantId: input.tenantId,
-        ...split,
-        status: 'ACTIVE',
-        email: target.email || null,
-        displayName: target.displayName,
-        grantedBy: input.grantedByUserId,
       },
-      update: { ...split, status: 'ACTIVE', grantedBy: input.grantedByUserId },
+    };
+    await withWorkspaceLock(this.control, input.tenantId, async (tx) => {
+      // Fresh read under the workspace lock: the role set is computed from this row only, so a
+      // concurrent revoke or grant can never be overwritten with a stale set.
+      const existing = await tx.membership.findUnique({ where: key });
+      const held = existing?.status === 'ACTIVE' ? rolesOf(existing) : [];
+      const split = splitRoles([...held, input.role]);
+      if (!split) throw new UserNotFoundError(input.targetUserId);
+      await tx.membership.upsert({
+        where: key,
+        create: {
+          issuer: input.issuer,
+          subject: target.keycloakSubject,
+          tenantId: input.tenantId,
+          ...split,
+          status: 'ACTIVE',
+          email: target.email || null,
+          displayName: target.displayName,
+          grantedBy: input.grantedByUserId,
+        },
+        update: {
+          ...split,
+          status: 'ACTIVE',
+          grantedBy: input.grantedByUserId,
+        },
+      });
     });
+    this.authCache?.invalidate(); // after the commit
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
       eventType: AUDIT_EVENT_TYPES.USER_ROLE_GRANTED,
@@ -240,59 +250,58 @@ export class UsersService {
     });
     if (!target) throw new UserNotFoundError(input.targetUserId);
 
-    const [existing] = await this.membershipsFor(input.tenantId, input.issuer, [
-      target.keycloakSubject,
-    ]);
-    if (existing?.status === 'ACTIVE') {
+    const key = {
+      issuer_subject_tenantId: {
+        issuer: input.issuer,
+        subject: target.keycloakSubject,
+        tenantId: input.tenantId,
+      },
+    };
+    // Re-reads the membership under the workspace lock and computes the new set from that row.
+    const write = async (db: Pick<ControlPrismaService, 'membership'>) => {
+      const existing = await db.membership.findUnique({ where: key });
+      if (existing?.status !== 'ACTIVE') return;
       const split = splitRoles(
         rolesOf(existing).filter((r) => r !== input.role),
       );
-      const write = (db: Pick<ControlPrismaService, 'membership'>) =>
-        db.membership.update({
-          where: {
-            issuer_subject_tenantId: {
-              issuer: input.issuer,
-              subject: target.keycloakSubject,
-              tenantId: input.tenantId,
+      await db.membership.update({
+        where: key,
+        data: split
+          ? { ...split, grantedBy: input.revokedByUserId }
+          : {
+              status: 'REMOVED',
+              extraRoles: [],
+              grantedBy: input.revokedByUserId,
             },
-          },
-          data: split
-            ? { ...split, grantedBy: input.revokedByUserId }
-            : {
-                status: 'REMOVED',
-                extraRoles: [],
-                grantedBy: input.revokedByUserId,
-              },
-        });
-      if (
-        input.role === 'TENANT_OWNER' &&
-        rolesOf(existing).includes(input.role)
-      ) {
-        try {
-          await withOwnerLock(
-            this.control,
-            input.tenantId,
-            { issuer: input.issuer, subject: target.keycloakSubject },
-            write,
-          );
-        } catch (error) {
-          if (error instanceof LastOwnerError) {
-            await this.auditService.recordSafely(tenantClient, input.tenantId, {
-              eventType: AUDIT_EVENT_TYPES.USER_ROLE_REVOKE_REFUSED,
-              actor: { type: 'human', id: input.revokedByUserId },
-              data: {
-                targetUserId: input.targetUserId,
-                role: input.role,
-                reason: 'last_owner',
-              },
-            });
-          }
-          throw error;
-        }
+      });
+    };
+    try {
+      if (input.role === 'TENANT_OWNER') {
+        // The owner count and the write sit under the same lock (#53).
+        await withOwnerLock(
+          this.control,
+          input.tenantId,
+          { issuer: input.issuer, subject: target.keycloakSubject },
+          write,
+        );
       } else {
-        await write(this.control);
+        await withWorkspaceLock(this.control, input.tenantId, write);
       }
+    } catch (error) {
+      if (error instanceof LastOwnerError) {
+        await this.auditService.recordSafely(tenantClient, input.tenantId, {
+          eventType: AUDIT_EVENT_TYPES.USER_ROLE_REVOKE_REFUSED,
+          actor: { type: 'human', id: input.revokedByUserId },
+          data: {
+            targetUserId: input.targetUserId,
+            role: input.role,
+            reason: 'last_owner',
+          },
+        });
+      }
+      throw error;
     }
+    this.authCache?.invalidate(); // after the commit
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
       eventType: AUDIT_EVENT_TYPES.USER_ROLE_REVOKED,

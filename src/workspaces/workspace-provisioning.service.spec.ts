@@ -524,7 +524,10 @@ describe('SAMPLE workspaces', () => {
       deprovisionTenant: vi.fn(),
       dangerouslyDropTenantDatabase: vi.fn(),
     });
+    const invalidate = vi.fn();
+    (svc as any).authCache = { invalidate };
     await svc.deleteWorkspace('s');
+    expect(invalidate).toHaveBeenCalledTimes(1); // after the delete committed
     expect((manager as any).deprovisionTenant).toHaveBeenCalledWith('s');
     expect((manager as any).dangerouslyDropTenantDatabase).toHaveBeenCalledWith(
       's',

@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
+import { AuthCache } from '../database/auth-cache.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 
 /** An issuer this API accepts human tokens from. `boundTenant` is set only for a legacy per-tenant realm. */
@@ -32,6 +33,7 @@ export class KnownIssuerRegistry {
   constructor(
     private readonly control: ControlPrismaService,
     configService: ConfigService<AppConfig, true>,
+    @Optional() private readonly cache?: AuthCache,
   ) {
     this.configured = new Set(
       (configService.get('AUTH_ISSUERS', { infer: true }) ?? '')
@@ -51,24 +53,20 @@ export class KnownIssuerRegistry {
   async resolveTrusted(issuer: string): Promise<TrustedIssuer | null> {
     const normalized = issuer.replace(/\/+$/, '');
     if (this.configured.has(normalized)) return { issuerUrl: normalized };
-    const tenant = await this.control.tenant.findUnique({
-      where: { keycloakIssuerUrl: issuer },
-    });
-    if (!tenant?.keycloakIssuerUrl) return null;
-    return {
-      issuerUrl: tenant.keycloakIssuerUrl,
-      boundTenant: { id: tenant.id, slug: tenant.slug },
+    const load = async (): Promise<TrustedIssuer | null> => {
+      const tenant = await this.control.tenant.findUnique({
+        where: { keycloakIssuerUrl: issuer },
+        select: { id: true, slug: true, keycloakIssuerUrl: true },
+      });
+      if (!tenant?.keycloakIssuerUrl) return null;
+      return {
+        issuerUrl: tenant.keycloakIssuerUrl,
+        boundTenant: { id: tenant.id, slug: tenant.slug },
+      };
     };
+    return this.cache ? this.cache.remember(`i\n${issuer}`, load) : load();
   }
 
-  /**
-   * Returns the matching tenant's identity + its *server-recorded* issuer
-   * URL (not the caller-supplied string — they're identical by
-   * construction of the `where` clause, but returning the DB value keeps
-   * every downstream consumer using a value this deployment vouches for),
-   * or `null` if `issuer` doesn't match any `ACTIVE` tenant's provisioned
-   * realm. Never falls back to any default issuer.
-   */
   async resolveByIssuer(issuer: string): Promise<KnownIssuer | null> {
     const tenant = await this.control.tenant.findUnique({
       where: { keycloakIssuerUrl: issuer },

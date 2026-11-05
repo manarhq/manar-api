@@ -14,6 +14,9 @@ import {
 
 export { ACCEPTED_SIGNING_ALGORITHMS } from './token-verifier.service';
 
+/** `UserProfile.lastSeenAt` is rewritten at most this often per user. */
+export const LAST_SEEN_WRITE_MS = 5 * 60_000;
+
 /** The BFF sends the workspace the user picked in the switcher in this header. */
 export const WORKSPACE_HEADER = 'x-manar-workspace';
 
@@ -63,19 +66,33 @@ export class JwtAuthGuard implements CanActivate {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       workspace.tenantId,
     );
-    const userProfile = await tenantClient.userProfile.upsert({
+    // A read per request; the row is written only when it is new, its identity fields changed,
+    // or lastSeenAt is older than LAST_SEEN_WRITE_MS.
+    const found = await tenantClient.userProfile.findUnique({
       where: { keycloakSubject: identity.subject },
-      create: {
-        keycloakSubject: identity.subject,
-        email: identity.email ?? '',
-        displayName: identity.displayName ?? identity.subject,
-      },
-      update: {
-        lastSeenAt: new Date(),
-        ...(identity.email ? { email: identity.email } : {}),
-        ...(identity.displayName ? { displayName: identity.displayName } : {}),
-      },
     });
+    const email = identity.email || undefined;
+    const displayName = identity.displayName || undefined;
+    const stale =
+      !found ||
+      Date.now() - found.lastSeenAt.getTime() >= LAST_SEEN_WRITE_MS ||
+      (email !== undefined && email !== found.email) ||
+      (displayName !== undefined && displayName !== found.displayName);
+    const userProfile = !stale
+      ? found
+      : await tenantClient.userProfile.upsert({
+          where: { keycloakSubject: identity.subject },
+          create: {
+            keycloakSubject: identity.subject,
+            email: identity.email ?? '',
+            displayName: identity.displayName ?? identity.subject,
+          },
+          update: {
+            lastSeenAt: new Date(),
+            ...(email ? { email } : {}),
+            ...(displayName ? { displayName } : {}),
+          },
+        });
 
     request.authContext = {
       issuer: identity.issuer,
