@@ -397,4 +397,19 @@ describe('Users & Roles (e2e)', () => {
       ),
     ).toBe(false);
   });
+
+  it('10. the only TENANT_OWNER cannot be stripped, not even by themselves: 409 last_owner, role intact', async () => {
+    const response = await request(app.getHttpServer() as App)
+      .delete(`/users/${ownerProfileId}/role-bindings/TENANT_OWNER`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(409);
+    expect(JSON.stringify(response.body)).toContain('last_owner');
+
+    const check = await request(app.getHttpServer() as App)
+      .get(`/users/${ownerProfileId}`)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200);
+    const checkBody = check.body as { roles: { role: string }[] };
+    expect(checkBody.roles.map((r) => r.role)).toContain('TENANT_OWNER');
+  });
 });

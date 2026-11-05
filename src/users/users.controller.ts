@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   Delete,
   ForbiddenException,
@@ -33,7 +34,11 @@ import {
   parseLimit,
 } from '../common/pagination/cursor-pagination';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
-import { PrivilegeEscalationError, UserNotFoundError } from './users.errors';
+import {
+  LastOwnerError,
+  PrivilegeEscalationError,
+  UserNotFoundError,
+} from './users.errors';
 import { UsersService } from './users.service';
 import { GrantRoleRequestSchema } from './users.validation';
 import {
@@ -52,6 +57,9 @@ async function mapUserErrors<T>(operation: () => Promise<T>): Promise<T> {
     }
     if (error instanceof PrivilegeEscalationError) {
       throw new ForbiddenException(error.message);
+    }
+    if (error instanceof LastOwnerError) {
+      throw new ConflictException('last_owner');
     }
     throw error;
   }
@@ -217,6 +225,12 @@ export class UsersController {
     status: 404,
     type: ErrorResponseDto,
     description: 'User not found.',
+  })
+  @ApiResponse({
+    status: 409,
+    type: ErrorResponseDto,
+    description:
+      'last_owner: the target is the last active TENANT_OWNER of the workspace.',
   })
   async revokeRole(
     @CurrentAuth() auth: AuthContext,
