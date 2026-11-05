@@ -1,3 +1,7 @@
+import {
+  AI_SWITCHED_OFF_REASON,
+  AiAdvisoryClient,
+} from '../ai-advisory/ai-advisory-client.service';
 import { UsageMeterService } from '../billing/usage-meter.service';
 import {
   Body,
@@ -78,6 +82,7 @@ export class IncidentsController {
     private readonly incidentsService: IncidentsService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly meter: UsageMeterService,
+    private readonly aiAdvisory: AiAdvisoryClient,
   ) {}
 
   @Post()
@@ -198,13 +203,24 @@ export class IncidentsController {
       auth.tenant.id,
     );
     // One AI action (paid extra), given back when no model answered.
-    return this.meter.ai(auth.tenant.id, () =>
-      mapIncidentErrors(() =>
-        this.incidentsService.summarizeIncident(tenantClient, {
-          ...input,
-          tenantId: auth.tenant.id,
-        }),
-      ),
+    return this.meter.ai(
+      auth.tenant.id,
+      () =>
+        mapIncidentErrors(() =>
+          this.incidentsService.summarizeIncident(tenantClient, {
+            ...input,
+            tenantId: auth.tenant.id,
+          }),
+        ),
+      async () =>
+        (await this.aiAdvisory.aiGate(auth.tenant.id)) === 'switched_off'
+          ? {
+              available: false,
+              reason: AI_SWITCHED_OFF_REASON,
+              result: null,
+              contextEventCount: 0,
+            }
+          : null,
     );
   }
 

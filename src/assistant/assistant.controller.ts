@@ -20,6 +20,7 @@ import { CurrentAuth } from '../auth/auth-context';
 import type { AuthContext } from '../auth/auth-context';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import { CatalogService } from '../platform/catalog.service';
 import { AssistantChatSchema, AssistantService } from './assistant.service';
 import type { AssistantChatResponse } from './assistant.service';
 
@@ -41,6 +42,7 @@ export class AssistantController {
   constructor(
     private readonly assistant: AssistantService,
     private readonly meter: UsageMeterService,
+    private readonly catalog: CatalogService,
   ) {}
 
   @Post('chat')
@@ -73,8 +75,14 @@ export class AssistantController {
     // JwtAuthGuard already verified this exact header.
     if (!authorization) throw new UnauthorizedException();
     // One AI action (paid extra), given back when no model answered or the request failed.
-    return this.meter.ai(auth.tenant.id, () =>
-      this.assistant.chat(auth, authorization, body),
+    return this.meter.ai(
+      auth.tenant.id,
+      () => this.assistant.chat(auth, authorization, body),
+      // "Allow external AI" off: answered politely before anything is metered.
+      async () =>
+        (await this.catalog.externalAiSwitchedOff(auth.tenant.id, 'assistant'))
+          ? ({ available: false, reason: 'ai_switched_off' } as const)
+          : null,
     );
   }
 }

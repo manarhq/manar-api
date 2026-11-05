@@ -28,6 +28,9 @@ import {
   type AiAdvisoryProvider,
 } from './ai-advisory.config';
 
+/** What an AI endpoint answers (`reason`) when the workspace has "Allow external AI" off. The console shows a polite EN/AR notice for it. */
+export const AI_SWITCHED_OFF_REASON = 'ai_switched_off' as const;
+
 export interface RiskAdvisory {
   score: number;
   confidence: number;
@@ -685,37 +688,49 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     rpcName: string,
     classification?: DataClassification,
   ): Promise<boolean> {
-    if (!isExternalAiProvider(this.provider)) return true;
-
-    if (classification === 'RESTRICTED') {
+    const state = await this.aiGate(tenantId, classification);
+    if (state !== 'allowed') {
       this.logger.log(
-        `Skipping manar-ai ${rpcName} for tenant "${tenantId}": the tool action's classification is RESTRICTED — no RPC attempted to external provider "${this.provider}" regardless of this tenant's allowExternalAi flag (Section 53 data classification enforcement).`,
+        `Skipping manar-ai ${rpcName} for tenant "${tenantId}": ${state} on external provider "${this.provider}" — no RPC attempted (Section 53/54 enforcement).`,
       );
-      return false;
     }
+    return state === 'allowed';
+  }
 
+  /**
+   * THE gate for every AI feature that sends a workspace's content to a model through manar-ai:
+   * `allowed`, or why not. Every RPC above goes through it, and any new AI endpoint (streaming
+   * included) must call it before it reads or sends anything, then answer with
+   * `AI_SWITCHED_OFF_REASON` when the state is `switched_off`. Fails closed: a failed tenant
+   * lookup is `unknown`, never `allowed`.
+   *
+   * - `switched_off`: the provider is external and the workspace has "Allow external AI" off (or
+   *   is air-gapped). The polite "AI features are switched off" case.
+   * - `air_gapped`: the workspace is air-gapped; no external provider, whatever the flag says.
+   * - `restricted`: the tool action's data is RESTRICTED; never sent externally, whatever the flag.
+   * - `unknown`: the tenant row could not be read.
+   */
+  async aiGate(
+    tenantId: string,
+    classification?: DataClassification,
+  ): Promise<
+    'allowed' | 'switched_off' | 'air_gapped' | 'restricted' | 'unknown'
+  > {
+    if (!isExternalAiProvider(this.provider)) return 'allowed';
+    if (classification === 'RESTRICTED') return 'restricted';
     try {
       const tenant = await this.control.tenant.findUnique({
         where: { id: tenantId },
         select: { allowExternalAi: true, residency: true },
       });
       // An air-gapped tenant's boundary admits no external provider, whatever the flag says.
-      if (
-        tenant?.allowExternalAi === true &&
-        tenant.residency !== 'AIR_GAPPED'
-      ) {
-        return true;
-      }
-
-      this.logger.log(
-        `Skipping manar-ai ${rpcName} for tenant "${tenantId}": provider "${this.provider}" is external and this tenant's allowExternalAi is not true or its residency is AIR_GAPPED — no RPC attempted (Section 54 data residency enforcement).`,
-      );
-      return false;
+      if (tenant?.residency === 'AIR_GAPPED') return 'air_gapped';
+      return tenant?.allowExternalAi === true ? 'allowed' : 'switched_off';
     } catch (error) {
       this.logger.warn(
         `Could not resolve tenant "${tenantId}"'s allowExternalAi flag before an external-provider AI call — failing closed (treating as disallowed): ${error instanceof Error ? error.message : String(error)}`,
       );
-      return false;
+      return 'unknown';
     }
   }
 

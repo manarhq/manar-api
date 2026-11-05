@@ -260,6 +260,45 @@ describe('CatalogService.llmGate (LLM proxy and assistant)', () => {
     });
   });
 
+  it('externalAiSwitchedOff is true only when "Allow external AI" is the sole blocker', async () => {
+    const env = { LLM_PROVIDER: 'azure_openai' };
+    // Azure OpenAI, workspace has the switch off: switched off.
+    await expect(
+      make({ env }).service.externalAiSwitchedOff('t1', 'assistant'),
+    ).resolves.toBe(true);
+    // Switch on: not switched off.
+    await expect(
+      make({
+        env,
+        tenant: { residency: 'CUSTOM_REGION', allowExternalAi: true },
+      }).service.externalAiSwitchedOff('t1', 'assistant'),
+    ).resolves.toBe(false);
+    // Another refusal (residency) is not reported as switched off.
+    await expect(
+      make({
+        env,
+        tenant: { residency: 'UAE', allowExternalAi: true },
+      }).service.externalAiSwitchedOff('t1', 'assistant'),
+    ).resolves.toBe(false);
+    // A local model is never gated by the switch.
+    await expect(
+      make().service.externalAiSwitchedOff('t1', 'assistant'),
+    ).resolves.toBe(false);
+  });
+
+  it('an air-gapped workspace is refused every external model, even with allowExternalAi on; a local model is fine', async () => {
+    const tenant = { residency: 'AIR_GAPPED', allowExternalAi: true };
+    await expect(
+      make({ env: { LLM_PROVIDER: 'azure_openai' }, tenant }).service.llmGate(
+        't1',
+        'assistant',
+      ),
+    ).rejects.toEqual(new CatalogDenied('llm_air_gapped'));
+    await expect(
+      make({ tenant }).service.llmGate('t1', 'assistant'),
+    ).resolves.toEqual({ route: null, quota: null });
+  });
+
   it('applies the external-AI and residency rules to the deployment default too', async () => {
     const env = { LLM_PROVIDER: 'azure_openai' };
     await expect(

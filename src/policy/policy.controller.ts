@@ -1,3 +1,7 @@
+import {
+  AI_SWITCHED_OFF_REASON,
+  AiAdvisoryClient,
+} from '../ai-advisory/ai-advisory-client.service';
 import { UsageMeterService } from '../billing/usage-meter.service';
 import {
   BadRequestException,
@@ -125,6 +129,7 @@ export class PolicyController {
     private readonly policyService: PolicyService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly meter: UsageMeterService,
+    private readonly aiAdvisory: AiAdvisoryClient,
   ) {}
 
   @Post()
@@ -250,17 +255,31 @@ export class PolicyController {
     );
 
     // One AI action (paid extra), given back when no model answered.
-    const result = await this.meter.ai(auth.tenant.id, () =>
-      mapPolicyErrors(() =>
-        this.policyService.suggestPolicy(tenantClient, auth.tenant.id, {
-          ...input,
-          authorId: auth.user.id,
-        }),
-      ),
+    const result = await this.meter.ai(
+      auth.tenant.id,
+      () =>
+        mapPolicyErrors(() =>
+          this.policyService.suggestPolicy(tenantClient, auth.tenant.id, {
+            ...input,
+            authorId: auth.user.id,
+          }),
+        ),
+      async () =>
+        (await this.aiAdvisory.aiGate(auth.tenant.id)) === 'switched_off'
+          ? {
+              available: false,
+              reason: AI_SWITCHED_OFF_REASON,
+              policyId: null,
+              version: null,
+              explanation: null,
+              confidence: null,
+            }
+          : null,
     );
 
     return {
       available: result.available,
+      ...('reason' in result ? { reason: result.reason } : {}),
       policyId: result.policyId,
       version: result.version ? shapeVersion(result.version) : null,
       explanation: result.explanation,

@@ -7,6 +7,7 @@ export const allowAllCatalog = (): CatalogService =>
     resolveTaskPack: (_t: string, _a: string, requested?: string) =>
       Promise.resolve(requested ?? null),
     hiddenTools: () => Promise.resolve([]),
+    externalAiSwitchedOff: () => Promise.resolve(false),
     llmGate: () => Promise.resolve({ route: null, quota: null }),
     recordTokens: () => Promise.resolve(0),
   }) as unknown as CatalogService;

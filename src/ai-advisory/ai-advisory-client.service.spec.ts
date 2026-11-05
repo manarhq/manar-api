@@ -479,6 +479,76 @@ describe('AiAdvisoryClient', () => {
       expect(fakeServer.callCounts.analyzeDlp).toBe(0);
     });
 
+    const allSix = (client: AiAdvisoryClient) => {
+      const t = { tenantId: 't' };
+      return Promise.all([
+        client.analyzeRisk({ actionDescription: 'x', context: '', ...t }),
+        client.analyzePromptInjection({ content: 'x', source: 'tool', ...t }),
+        client.analyzeDlp({ content: 'x', ...t }),
+        client.summarizeIncident({ description: 'x', relatedEvents: [], ...t }),
+        client.suggestPolicy({ naturalLanguageDescription: 'x', ...t }),
+        client.investigateAudit({ question: 'x', retrievedContext: [], ...t }),
+      ]);
+    };
+
+    it('Azure OpenAI + switch off: none of the six AI calls (risk, prompt injection, DLP, incident summary, policy suggestion, audit investigation) reaches manar-ai', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'azure_openai',
+        }),
+        fakeControlPrismaService(false),
+      );
+      expect(await allSix(client)).toEqual([
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ]);
+      expect(Object.values(fakeServer.callCounts)).toEqual([0, 0, 0, 0, 0, 0]);
+      expect(await client.aiGate('t')).toBe('switched_off');
+    });
+
+    it('Azure OpenAI + switch on: all six reach manar-ai (the gate is the only thing that stops them)', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'azure_openai',
+        }),
+        fakeControlPrismaService(true),
+      );
+      await allSix(client);
+      expect(Object.values(fakeServer.callCounts)).toEqual([1, 1, 1, 1, 1, 1]);
+      expect(await client.aiGate('t')).toBe('allowed');
+    });
+
+    it('aiGate tells apart switched off, restricted data and an unreadable tenant row', async () => {
+      const cfg = fakeConfigService({
+        AI_ADVISORY_GRPC_TARGET: target,
+        AI_ADVISORY_PROVIDER: 'azure_openai',
+      });
+      expect(
+        await new AiAdvisoryClient(cfg, fakeControlPrismaService(true)).aiGate(
+          't',
+          'RESTRICTED',
+        ),
+      ).toBe('restricted');
+      expect(
+        await new AiAdvisoryClient(
+          cfg,
+          fakeControlPrismaService('throw'),
+        ).aiGate('t'),
+      ).toBe('unknown');
+      expect(
+        await new AiAdvisoryClient(
+          cfg,
+          fakeControlPrismaService(true, 'AIR_GAPPED'),
+        ).aiGate('t'),
+      ).toBe('air_gapped');
+    });
+
     it('an undeclared provider in production counts as external; in development it is the local default', async () => {
       const prod = new AiAdvisoryClient(
         fakeConfigService({

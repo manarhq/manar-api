@@ -360,6 +360,29 @@ server's own received-call counters (`fakeServer.callCounts.analyzeRisk`
 etc. staying at `0`) — proving the RPC was never attempted, not merely
 that the function happened to return `null` for some unspecified reason.
 
+### Every AI feature and the "Allow external AI" switch
+
+With Azure OpenAI Global (prompts may be processed outside the UAE after DLP redaction), the
+switch is the customer's control. Off means nothing is sent to any model for that workspace,
+and the feature answers `available: false, reason: "ai_switched_off"` (EN/AR notice in the
+console), never an error and never a metered action.
+
+| Feature                                 | Path                                                                    | Gate                                                                                                                                                                                                                                                                       |
+| --------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Risk advisory on approvals              | `approval.activities` -> `RiskEngine` -> `AiAdvisoryClient.analyzeRisk` | `aiGate` (null: deterministic score only)                                                                                                                                                                                                                                  |
+| DLP advisory, tool params/results       | `CredentialBrokerService` -> `analyzeDlp`                               | `aiGate`; the pattern floor in `dlp-classification.ts` always runs                                                                                                                                                                                                         |
+| Prompt-injection advisory               | `CredentialBrokerService` -> `analyzePromptInjection`                   | `aiGate`                                                                                                                                                                                                                                                                   |
+| Incident Summarize                      | `POST /incidents/summarize`                                             | controller pre-check (`aiGate`) + `summarizeIncident`                                                                                                                                                                                                                      |
+| AI Investigate                          | `POST /audit/investigate`                                               | controller pre-check + `investigateAudit`                                                                                                                                                                                                                                  |
+| Suggest Policy                          | `POST /policies/suggest`                                                | controller pre-check + `suggestPolicy`                                                                                                                                                                                                                                     |
+| Assistant chat                          | `POST /assistant/chat` -> `LlmUpstreamClient`                           | `CatalogService.externalAiSwitchedOff` pre-check + `llmGate`                                                                                                                                                                                                               |
+| Agent LLM proxy (customer's own agents) | `LlmProxyService` -> `LlmUpstreamClient`                                | `llmGate`: an external model is refused with `llm_external_not_allowed` while the switch is off, and with `llm_air_gapped` for an air-gapped workspace. DLP stays required on every route: manar-ai unavailable is 503 `enforcement_dependency_unavailable`, never skipped |
+
+New AI endpoints (streaming included) must call `AiAdvisoryClient.aiGate(tenantId)` (manar-ai
+RPCs) or `CatalogService.llmGate` / `externalAiSwitchedOff` (direct model calls) before reading
+or sending anything, and answer with `AI_SWITCHED_OFF_REASON` on `switched_off`. Pass the answer
+to `UsageMeterService.ai(..., switchedOff)` so a switched-off workspace is never metered or paused.
+
 ## Known limitations
 
 - **`SSRF_ALLOWED_HOSTS` is a coarse, hostname-only exception mechanism**,

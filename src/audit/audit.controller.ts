@@ -1,3 +1,7 @@
+import {
+  AI_SWITCHED_OFF_REASON,
+  AiAdvisoryClient,
+} from '../ai-advisory/ai-advisory-client.service';
 import { UsageMeterService } from '../billing/usage-meter.service';
 import {
   BadRequestException,
@@ -104,6 +108,7 @@ export class AuditController {
     private readonly checkpointSigner: CheckpointSigner,
     private readonly entitlements: EntitlementsService,
     private readonly meter: UsageMeterService,
+    private readonly aiAdvisory: AiAdvisoryClient,
   ) {}
 
   /** Events older than the plan's window are hidden (never deleted): the lower bound moves up to it. */
@@ -229,34 +234,45 @@ export class AuditController {
       auth.tenant.id,
     );
     // One AI action (paid extra), given back when no model answered.
-    return this.meter.ai(auth.tenant.id, async () =>
-      this.auditSearchService.investigateAudit({
-        tenantId: auth.tenant.id,
-        tenantClient,
-        question: input.question,
-        filters: {
-          eventType: input.eventType
-            ? input.eventType
-                .split(',')
-                .map((s) => s.trim())
-                .filter(Boolean)
-            : undefined,
-          correlationId: input.correlationId,
-          agentId: input.agentId,
-          taskId: input.taskId,
-          toolId: input.toolId,
-          actionId: input.actionId,
-          decision: input.decision,
-          riskMin: input.riskMin,
-          riskMax: input.riskMax,
-          from: await this.clampFrom(
-            auth.tenant.id,
-            parseDateParam(input.from, 'from'),
-          ),
-          to: parseDateParam(input.to, 'to'),
-        },
-        contextLimit: input.contextLimit ?? 10,
-      }),
+    return this.meter.ai(
+      auth.tenant.id,
+      async () =>
+        this.auditSearchService.investigateAudit({
+          tenantId: auth.tenant.id,
+          tenantClient,
+          question: input.question,
+          filters: {
+            eventType: input.eventType
+              ? input.eventType
+                  .split(',')
+                  .map((s) => s.trim())
+                  .filter(Boolean)
+              : undefined,
+            correlationId: input.correlationId,
+            agentId: input.agentId,
+            taskId: input.taskId,
+            toolId: input.toolId,
+            actionId: input.actionId,
+            decision: input.decision,
+            riskMin: input.riskMin,
+            riskMax: input.riskMax,
+            from: await this.clampFrom(
+              auth.tenant.id,
+              parseDateParam(input.from, 'from'),
+            ),
+            to: parseDateParam(input.to, 'to'),
+          },
+          contextLimit: input.contextLimit ?? 10,
+        }),
+      async () =>
+        (await this.aiAdvisory.aiGate(auth.tenant.id)) === 'switched_off'
+          ? {
+              available: false,
+              reason: AI_SWITCHED_OFF_REASON,
+              result: null,
+              contextEventCount: 0,
+            }
+          : null,
     );
   }
 
