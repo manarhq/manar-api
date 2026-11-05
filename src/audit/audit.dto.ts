@@ -14,6 +14,22 @@ export class VerifyAuditChainResponseDto {
       "Present only when valid=false: the AuditEvent.id where verification first failed, 'audit_partition_state:<n>' for a partition whose tail disagrees with its bookkeeping row, 'checkpoint:<seq>' for a signed checkpoint that fails, or 'unsealed:<partition>' when events older than the grace period are not covered by any checkpoint.",
   })
   brokenAt?: string;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When the last nightly FULL verification passed. Null when none has run yet or the last one failed; never shown as verified in those cases.',
+  })
+  lastFullVerifiedAt!: string | null;
+
+  @ApiProperty({
+    enum: ['passed', 'failed', 'never'],
+    description:
+      'Outcome of the last nightly full verification. `failed` forces valid=false.',
+  })
+  fullCheck!: 'passed' | 'failed' | 'never';
 }
 
 /** `GET /audit/checkpoints/public-key`. */

@@ -216,10 +216,9 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
         index: this.indexName,
         id: document.eventId,
         body: document,
-        // Tests assert on read-after-write within the same process — a
-        // near-real-time-only refresh policy would make those flaky for no
-        // production benefit at this event volume.
-        refresh: true,
+        // No refresh: a forced refresh per event made every audit write cost a segment flush.
+        // Search sees the event within the index refresh interval (1 s default); `getById` is
+        // real-time. Tests that count/search call `refresh()` first.
       }),
     );
   }
@@ -232,12 +231,15 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
    * a real tenant's history would take hours. Retrying the whole batch is
    * safe because every item is keyed by `eventId`.
    */
-  async bulkUpsertAuditEvents(documents: AuditEventDocument[]): Promise<void> {
+  async bulkUpsertAuditEvents(
+    documents: AuditEventDocument[],
+    opts: { refresh?: boolean } = {},
+  ): Promise<void> {
     if (documents.length === 0) return;
     await this.ensureIndexExists();
     await this.withRetry('bulkUpsertAuditEvents', async () => {
       const response = await this.client.bulk({
-        refresh: true,
+        refresh: opts.refresh ?? true,
         body: documents.flatMap((document) => [
           { index: { _index: this.indexName, _id: document.eventId } },
           document,
@@ -254,6 +256,14 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
         );
       }
     });
+  }
+
+  /** Makes everything indexed so far searchable now (tests, and reindex verification). */
+  async refresh(): Promise<void> {
+    await this.ensureIndexExists();
+    await this.withRetry('refresh', () =>
+      this.client.indices.refresh({ index: this.indexName }),
+    );
   }
 
   /** Fetches one document by `eventId` — used by tests and `audit:reindex`'s own verification. */

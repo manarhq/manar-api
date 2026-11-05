@@ -13,7 +13,10 @@ import {
   AUDIT_EVENTS_TOPIC,
   DomainEventEnvelope,
 } from '../domain-event-envelope';
-import { OpenSearchIndexService } from './opensearch-client.service';
+import {
+  AuditEventDocument,
+  OpenSearchIndexService,
+} from './opensearch-client.service';
 import { extractAuditSearchFields } from './audit-search-fields';
 import { RedisPubSubService } from '../live/redis-pubsub.service';
 
@@ -55,6 +58,10 @@ import { RedisPubSubService } from '../live/redis-pubsub.service';
  */
 @Injectable()
 export class AuditIndexerService implements OnModuleInit, OnModuleDestroy {
+  /** Largest Bulk request, and the longest a partial batch waits at the broker. */
+  static readonly BATCH_MAX = 200;
+  static readonly FLUSH_MS = 250;
+
   private readonly logger = new Logger(AuditIndexerService.name);
   private readonly groupId = `manar-audit-indexer-${randomUUID()}`;
   private consumer: KafkaJS.Consumer | undefined;
@@ -111,14 +118,28 @@ export class AuditIndexerService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.consumer = kafka.consumer({
-      kafkaJS: { groupId: this.groupId, fromBeginning: false },
+      kafkaJS: {
+        groupId: this.groupId,
+        fromBeginning: false,
+        maxWaitTimeInMs: AuditIndexerService.FLUSH_MS,
+      },
+      'js.consumer.max.batch.size': AuditIndexerService.BATCH_MAX,
     });
     await this.consumer.connect();
     await this.consumer.subscribe({ topic: AUDIT_EVENTS_TOPIC });
 
+    // One Bulk request per fetched batch instead of a refreshed index call per event. A batch
+    // never exceeds BATCH_MAX messages and a partial batch is delivered after FLUSH_MS.
+    // Offsets are resolved only after the batch was handed to OpenSearch, so a crash mid-batch
+    // redelivers it (at-least-once; indexing is idempotent by eventId).
     await this.consumer.run({
-      eachMessage: async ({ message }) => {
-        await this.handleMessage(message.value?.toString('utf8'));
+      eachBatchAutoResolve: false,
+      eachBatch: async (payload) => {
+        const { messages } = payload.batch;
+        await this.handleBatch(messages.map((m) => m.value?.toString('utf8')));
+        const last = messages[messages.length - 1];
+        if (last) payload.resolveOffset(last.offset);
+        await payload.heartbeat();
       },
     });
 
@@ -127,56 +148,72 @@ export class AuditIndexerService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private async handleMessage(raw: string | undefined): Promise<void> {
-    if (!raw) return;
-    let envelope: DomainEventEnvelope;
-    try {
-      envelope = JSON.parse(raw) as DomainEventEnvelope;
-    } catch (error) {
-      this.logger.warn(
-        `Skipping unparseable audit-events message: ${errorMessage(error)}`,
-      );
-      return;
+  /** Bulk-indexes a batch, then publishes each event to the live feed. Never throws on index errors. */
+  async handleBatch(raws: (string | undefined)[]): Promise<void> {
+    const envelopes: DomainEventEnvelope[] = [];
+    for (const raw of raws) {
+      if (!raw) continue;
+      try {
+        envelopes.push(JSON.parse(raw) as DomainEventEnvelope);
+      } catch (error) {
+        this.logger.warn(
+          `Skipping unparseable audit-events message: ${errorMessage(error)}`,
+        );
+      }
     }
+    if (envelopes.length === 0) return;
 
+    const documents = envelopes.map(toDocument);
     try {
-      // Phase 11b Part 1 (Section 66's GET /audit filters) — real, indexed
-      // search fields derived from this same envelope's actor/data, added
-      // alongside the unindexed actor/data blobs (never replacing them —
-      // see extractAuditSearchFields's own doc comment).
-      const searchFields = extractAuditSearchFields(
-        envelope.eventType,
-        envelope.actor,
-        envelope.data,
-      );
-      await this.openSearchIndexService.upsertAuditEvent({
-        eventId: envelope.eventId,
-        tenantId: envelope.tenantId,
-        // `sequence` defaults to 0 only for a hand-crafted envelope that
-        // omits it (e.g. Phase 9a's own idempotency test fixture, which
-        // never reaches this consumer in practice) — every envelope this
-        // codebase's own `AuditService.record` actually publishes sets it
-        // (see `domain-event-envelope.ts`'s doc comment); `audit:reindex`
-        // (reading straight from Postgres) is the authoritative source for
-        // this value regardless.
-        sequence: envelope.sequence ?? 0,
-        eventType: envelope.eventType,
-        correlationId: envelope.correlationId,
-        actor: envelope.actor,
-        timestamp: envelope.timestamp,
-        data: envelope.data,
-        previousHash: envelope.previousHash ?? null,
-        eventHash: envelope.eventHash ?? envelope.eventId,
-        ...searchFields,
+      await this.openSearchIndexService.bulkUpsertAuditEvents(documents, {
+        refresh: false,
       });
-    } catch (error) {
-      this.logger.error(
-        `Failed to index audit event "${envelope.eventId}" into OpenSearch: ${errorMessage(error)}`,
+    } catch (bulkError) {
+      // One bad document must not hold back the rest: retry them one by one and log the
+      // failures (audit:reindex heals any that stay missing, as before batching).
+      this.logger.warn(
+        `Bulk index of ${documents.length} audit event(s) failed (${errorMessage(bulkError)}); retrying one by one`,
       );
+      for (const document of documents) {
+        try {
+          await this.openSearchIndexService.upsertAuditEvent(document);
+        } catch (error) {
+          this.logger.error(
+            `Failed to index audit event "${document.eventId}" into OpenSearch: ${errorMessage(error)}`,
+          );
+        }
+      }
     }
 
-    await this.redisPubSubService.publish(envelope);
+    for (const envelope of envelopes) {
+      await this.redisPubSubService.publish(envelope);
+    }
   }
+}
+
+/**
+ * Phase 11b Part 1 (Section 66's GET /audit filters): real, indexed search fields derived from
+ * the envelope's actor/data, added alongside the unindexed actor/data blobs. `sequence` defaults
+ * to 0 only for a hand-crafted envelope that omits it; `audit:reindex` is authoritative.
+ */
+function toDocument(envelope: DomainEventEnvelope): AuditEventDocument {
+  return {
+    eventId: envelope.eventId,
+    tenantId: envelope.tenantId,
+    sequence: envelope.sequence ?? 0,
+    eventType: envelope.eventType,
+    correlationId: envelope.correlationId,
+    actor: envelope.actor,
+    timestamp: envelope.timestamp,
+    data: envelope.data,
+    previousHash: envelope.previousHash ?? null,
+    eventHash: envelope.eventHash ?? envelope.eventId,
+    ...extractAuditSearchFields(
+      envelope.eventType,
+      envelope.actor,
+      envelope.data,
+    ),
+  };
 }
 
 function errorMessage(error: unknown): string {

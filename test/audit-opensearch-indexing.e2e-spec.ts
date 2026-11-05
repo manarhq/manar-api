@@ -356,6 +356,7 @@ describe('OpenSearch audit-event indexing (e2e)', () => {
 
       expect(doc).not.toBeNull();
       expect((doc?.data as { marker?: string })?.marker).toBe('redelivered');
+      await openSearchIndexService.refresh(); // indexing no longer refreshes per event
       expect(await openSearchIndexService.count(tenant.id)).toBe(1);
     } finally {
       await indexer.onModuleDestroy();

@@ -351,6 +351,17 @@ model AuditSealMark {
   @@map("audit_seal_marks")
 }
 
+/// Result of the newest nightly FULL audit verification per tenant (worker job). The badge
+/// shows `verifiedAt` only while `valid`; a failed or missing full check is never "verified".
+model AuditFullVerification {
+  tenantId   String   @id
+  verifiedAt DateTime
+  valid      Boolean
+  brokenAt   String?
+
+  @@map("audit_full_verifications")
+}
+
 /// Who may use which workspace, and as what (spec 4.1). The only source of roles: the token's
 /// `realm_access` is never read. `subject` is the Keycloak `sub`, never an email, so two sign-in
 /// methods with the same email are two separate subjects with separate memberships.

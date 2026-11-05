@@ -333,6 +333,15 @@ JWT-guarded to `AUDITOR`/`SECURITY_ADMIN`/`TENANT_OWNER` — `AUDITOR`'s
 first real consumer anywhere in this codebase (the role has existed since
 Phase 3, but no endpoint had gated on it until now).
 
+**Incremental on the endpoint, full every night (5 Nov 2026).** The console polls
+`GET /audit/verify`, so it runs `verifyAuditChain(..., { incremental: true })`, which resumes from
+the last verified SEAL. A worker job (`AuditFullVerifyJob`, 22:00 UTC = 02:00 UAE, off with
+`AUDIT_FULL_VERIFY_JOB=false`) runs the full walk for every ACTIVE tenant and stores the result in
+the control database (`audit_full_verifications`). The response adds `lastFullVerifiedAt` (time of
+the last full check that passed; `null` when none has run or the last one failed) and `fullCheck`
+(`passed`, `failed`, `never`). A failed last full check forces `valid: false`; the UI must not show
+"verified" unless `valid` and `fullCheck === 'passed'`.
+
 ## Retrofit points
 
 Every call listed here uses `AuditService.recordSafely` — additive
@@ -466,6 +475,12 @@ message, it upserts the event into OpenSearch by `eventId`
 existing document at that id, so Kafka's at-least-once redelivery never
 double-indexes. **Postgres remains authoritative** — the index is a
 queryable projection, never a second source of truth.
+
+Indexing is batched (5 Nov 2026): the consumer takes up to `AuditIndexerService.BATCH_MAX` (200)
+messages per fetch, waiting at most `FLUSH_MS` (250 ms), and sends one Bulk request without
+`refresh` (search sees new events within the index refresh interval, 1 s by default). Offsets are
+resolved only after the batch was handed to OpenSearch. If the Bulk fails, documents are upserted
+one by one so a single bad document cannot stall the rest. `audit:reindex` still refreshes once per page.
 
 A single, tenant-tagged index (`OPENSEARCH_AUDIT_INDEX`, default
 `manar-audit-events`) rather than one index per tenant, for MVP
