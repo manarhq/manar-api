@@ -219,6 +219,9 @@ export const AUDIT_EVENT_TYPES = {
   /** Claude Code ran with CLAUDE_CONFIG_DIR away from ~/.claude. */
   PROTECT_TAMPER_CONFIG_DIR: 'protect.tamper.config_dir',
 
+  /** The device service came back after a crash or kill; data carries how long it was away. */
+  HOST_SERVICE_RESTARTED: 'service.restarted',
+
   // AI spend tracker and secrets-in-prompt guard (DOOR).
   /** DOOR replaced a secret in an outbound prompt with a mask. Data: tool, kind, count, masked sample; never the prompt. */
   DOOR_SECRET_MASKED: 'door.secret.masked',
