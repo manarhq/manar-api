@@ -503,6 +503,7 @@ describe('SAMPLE workspaces', () => {
     (control as any).$transaction = tx;
     for (const k of [
       'auditSealMark',
+      'auditFullVerification',
       'secretReference',
       'reportShare',
       'weeklyReportCard',

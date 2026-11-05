@@ -351,6 +351,24 @@ model AuditSealMark {
   @@map("audit_seal_marks")
 }
 
+/// Newest FULL audit verification per tenant (nightly worker job, platform verify, CLI).
+/// `verifiedAt` is when the newest run STARTED (an older run never overwrites a newer one);
+/// `result` is passed | failed | error (a run that threw is never "verified"); `lastPassedAt` is
+/// the start of the newest passing run, kept across later failures and errors. `claimedAt` is the
+/// worker claim of a run in progress (two replicas never walk one tenant at once).
+model AuditFullVerification {
+  tenantId     String    @id
+  verifiedAt   DateTime?
+  result       String?
+  brokenAt     String?
+  lastPassedAt DateTime?
+  durationMs   Int?
+  claimedAt    DateTime?
+  updatedAt    DateTime  @updatedAt
+
+  @@map("audit_full_verifications")
+}
+
 /// Who may use which workspace, and as what (spec 4.1). The only source of roles: the token's
 /// `realm_access` is never read. `subject` is the Keycloak `sub`, never an email, so two sign-in
 /// methods with the same email are two separate subjects with separate memberships.

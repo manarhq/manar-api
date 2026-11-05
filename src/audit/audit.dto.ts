@@ -4,7 +4,7 @@ import { ApiProperty } from '@nestjs/swagger';
 export class VerifyAuditChainResponseDto {
   @ApiProperty({
     description:
-      "True iff every event's hash and chain linkage verified correctly.",
+      'True only when the whole log is covered and verified (status "verified"). A partial result (incremental passed, no recent full check) is false with no brokenAt.',
   })
   valid!: boolean;
 
@@ -14,6 +14,37 @@ export class VerifyAuditChainResponseDto {
       "Present only when valid=false: the AuditEvent.id where verification first failed, 'audit_partition_state:<n>' for a partition whose tail disagrees with its bookkeeping row, 'checkpoint:<seq>' for a signed checkpoint that fails, or 'unsealed:<partition>' when events older than the grace period are not covered by any checkpoint.",
   })
   brokenAt?: string;
+
+  @ApiProperty({
+    enum: ['verified', 'partial', 'broken'],
+    description:
+      'verified: whole log covered (valid=true). partial: the incremental check passed but no recent full check did (valid=false, nothing is broken). broken: valid=false with brokenAt.',
+  })
+  status!: 'verified' | 'partial' | 'broken';
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'Start of the newest full verification that passed. May be old or belong to an earlier night: check fullCheck.',
+  })
+  lastFullVerifiedAt!: string | null;
+
+  @ApiProperty({
+    enum: ['passed', 'stale', 'failed', 'error', 'never'],
+    description:
+      'Newest full verification: passed (within 26 h), stale (passed but older), failed (found a break), error (the run could not complete), never.',
+  })
+  fullCheck!: 'passed' | 'stale' | 'failed' | 'error' | 'never';
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Present on a partial result: the signed checkpoint the incremental check resumed from. Events up to it were covered by an earlier run.',
+    example: { sealSeq: '1234', at: '2026-11-05T10:00:00.000Z' },
+  })
+  coveredFrom?: { sealSeq: string; at: string };
 }
 
 /** `GET /audit/checkpoints/public-key`. */

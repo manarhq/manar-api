@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { AuditService } from './audit.service';
+import { AuditFullVerifyService } from './audit-full-verify.service';
 import { AuditCheckpointService } from './checkpoint/audit-checkpoint.service';
 import { AuditProofService } from './checkpoint/audit-proof.service';
 import { CHECKPOINT_PUBLIC_KEYS } from './checkpoint/checkpoint-format';
@@ -28,6 +29,7 @@ import { KafkaPublisherService } from './kafka-publisher.service';
   providers: [
     KafkaPublisherService,
     AuditService,
+    AuditFullVerifyService,
     CheckpointSigner,
     AuditCheckpointService,
     AuditProofService,
@@ -37,6 +39,7 @@ import { KafkaPublisherService } from './kafka-publisher.service';
   ],
   exports: [
     AuditService,
+    AuditFullVerifyService,
     CheckpointSigner,
     AuditCheckpointService,
     AuditProofService,

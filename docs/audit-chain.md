@@ -333,6 +333,36 @@ JWT-guarded to `AUDITOR`/`SECURITY_ADMIN`/`TENANT_OWNER` — `AUDITOR`'s
 first real consumer anywhere in this codebase (the role has existed since
 Phase 3, but no endpoint had gated on it until now).
 
+**Incremental on the endpoint, full every night (5 Nov 2026).** The console polls
+`GET /audit/verify`, so it runs `verifyAuditChain(..., { incremental: true })`, which resumes from
+the last verified SEAL and skips the events that run already covered. The worker checks every hour
+which tenants are due (`AuditFullVerifyJob`; off with `AUDIT_FULL_VERIFY_JOB=false`): a tenant is due
+when its newest full run started before the last 22:00 UTC (02:00 UAE), so a worker restarted after
+22:00 still runs tonight, and an errored run is retried after 6 h. Each tenant is claimed with a
+conditional write, so two worker replicas never walk one tenant at once, and a run that started
+earlier never overwrites the result of one that started later. The nightly job, the platform
+`POST /platform/v1/tenants/:id/audit/verify` and `pnpm manar audit:verify` all record their result in
+`audit_full_verifications` (control database).
+
+Response of `GET /audit/verify`:
+
+| Field                | Meaning                                                                                                                                           |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `valid`              | `true` only when the whole log is covered: the incremental check passed and either it walked everything or the last full check passed within 26 h |
+| `status`             | `verified`, `partial` (incremental passed, no recent full pass; nothing is known to be broken) or `broken` (`brokenAt` set)                       |
+| `fullCheck`          | `passed`, `stale` (passed, but older than 26 h), `failed`, `error` (the run threw, e.g. an unreadable row) or `never`                             |
+| `lastFullVerifiedAt` | start of the newest full check that passed (may be old: read `fullCheck`)                                                                         |
+| `coveredFrom`        | on `partial`: the SEAL (`sealSeq`, `at`) the incremental check resumed from                                                                       |
+
+A run that throws stores `error`, so an earlier `passed` never outlives a night the check could not
+complete.
+
+**Detection window.** The incremental check does not re-read events an earlier run covered, so a
+change to already-verified events is found by the next full check, within about 24 hours
+(`test/audit-full-verify.e2e-spec.ts` pins this). Metrics (scraped from the API process, no tenant
+label): `manar_audit_full_verify_last_success_timestamp` (alert past 26 h) and
+`manar_audit_full_verify_last_duration_seconds`.
+
 ## Retrofit points
 
 Every call listed here uses `AuditService.recordSafely` — additive
@@ -466,6 +496,16 @@ message, it upserts the event into OpenSearch by `eventId`
 existing document at that id, so Kafka's at-least-once redelivery never
 double-indexes. **Postgres remains authoritative** — the index is a
 queryable projection, never a second source of truth.
+
+Indexing is batched (5 Nov 2026): the consumer takes up to `AuditIndexerService.BATCH_MAX` (200)
+messages per fetch, waiting at most `FLUSH_MS` (250 ms), and sends one Bulk request without
+`refresh` (search sees new events within the index refresh interval, 1 s by default). Items that
+fail with 429 or 5xx are resent (only those); items the index refuses for good (4xx) are logged and
+skipped. If OpenSearch cannot take the batch at all, the handler throws, the offsets are not
+resolved and the consumer redelivers the batch while the process runs. The consumer group id is
+random per process start and begins at the topic end, so events produced while the process was down
+are not replayed: `audit:reindex` heals that gap (Postgres is authoritative). `audit:reindex` still
+refreshes once per page.
 
 A single, tenant-tagged index (`OPENSEARCH_AUDIT_INDEX`, default
 `manar-audit-events`) rather than one index per tenant, for MVP

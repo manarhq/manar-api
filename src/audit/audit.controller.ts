@@ -33,6 +33,10 @@ import { EntitlementsService } from '../billing/entitlements.service';
 import { AuditSearchService } from './audit-search.service';
 import { AuditService } from './audit.service';
 import {
+  AuditFullVerifyService,
+  composeVerifyResponse,
+} from './audit-full-verify.service';
+import {
   AuditCheckpointIndexError,
   AuditEventNotCheckpointedError,
   AuditEventNotFoundError,
@@ -104,6 +108,7 @@ export class AuditController {
     private readonly checkpointSigner: CheckpointSigner,
     private readonly entitlements: EntitlementsService,
     private readonly meter: UsageMeterService,
+    private readonly fullVerify: AuditFullVerifyService,
   ) {}
 
   /** Events older than the plan's window are hidden (never deleted): the lower bound moves up to it. */
@@ -264,7 +269,7 @@ export class AuditController {
   @ApiOperation({
     summary: 'Verify the tamper-evident audit chain',
     description:
-      "Walks every AuditEvent in recorded order, recomputing each row's hash and confirming chain linkage (anchor-aware: tolerates retention-pruned history). Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER.",
+      'Incremental check: resumes from the last verified SEAL (cheap enough to poll). A nightly worker job walks every AuditEvent in recorded order and stores the result: `lastFullVerifiedAt` is when the last passing full check started (may be old: read `fullCheck`: passed, stale, failed, error or never). `valid` is true only when the whole log is covered: the incremental check passed and either it walked everything or the last full check passed within 26 h. Otherwise `status` is `partial` (verified since `coveredFrom`, last full check at `lastFullVerifiedAt`) or `broken`. A change to already-verified events is found by the next nightly full check. Anchor-aware: tolerates retention-pruned history. Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER.',
   })
   @ApiResponse({ status: 200, type: VerifyAuditChainResponseDto })
   @ApiResponse({ status: 401, type: ErrorResponseDto })
@@ -273,7 +278,13 @@ export class AuditController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    return this.auditService.verifyAuditChain(tenantClient, auth.tenant.id);
+    const [result, full] = await Promise.all([
+      this.auditService.verifyAuditChain(tenantClient, auth.tenant.id, {
+        incremental: true,
+      }),
+      this.fullVerify.status(auth.tenant.id),
+    ]);
+    return composeVerifyResponse(result, full);
   }
 
   @Get('events/:id/proof')

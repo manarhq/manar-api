@@ -126,6 +126,37 @@ export function recordCloudMcpDcrSweep(
   cloudMcpDcrUnconfirmed.set(unconfirmed);
 }
 
+type AuditVerifyReader = () => Promise<{
+  lastSuccessSeconds: number | null;
+  lastDurationSeconds: number | null;
+}>;
+let auditVerifyReader: AuditVerifyReader | null = null;
+new Gauge({
+  name: 'manar_audit_full_verify_last_success_timestamp',
+  help: 'Unix time the newest full audit verification (any tenant) started and passed. Alert when it is older than 26 h.',
+  registers: [registry],
+  async collect() {
+    const v = await auditVerifyReader?.().catch(() => null);
+    if (v?.lastSuccessSeconds != null) this.set(v.lastSuccessSeconds);
+  },
+});
+new Gauge({
+  name: 'manar_audit_full_verify_last_duration_seconds',
+  help: 'Duration of the newest full audit verification run (any tenant).',
+  registers: [registry],
+  async collect() {
+    const v = await auditVerifyReader?.().catch(() => null);
+    if (v?.lastDurationSeconds != null) this.set(v.lastDurationSeconds);
+  },
+});
+
+/** Wires the two audit-verify gauges to the control database (read on each scrape; no labels). */
+export function registerAuditVerifyMetrics(
+  reader: AuditVerifyReader | null,
+): void {
+  auditVerifyReader = reader;
+}
+
 const licenseStatus = new Gauge({
   name: 'manar_license_status',
   help: 'Licence status: 1 for the current status, 0 for the others. Soft limit, never enforced.',

@@ -1,8 +1,17 @@
 import { X509Certificate } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AuditService } from '../audit/audit.service';
+import {
+  AuditService,
+  type VerifyAuditChainResult,
+} from '../audit/audit.service';
+import { AuditFullVerifyService } from '../audit/audit-full-verify.service';
 import type { AuditEventType } from '../audit/audit-event-types';
 import type { AppConfig } from '../config/env.validation';
 import { ControlPrismaService } from '../database/control-prisma.service';
@@ -62,6 +71,7 @@ export class PlatformOpsService {
     private readonly kv: OpenBaoKvClient,
     private readonly pki: OpenBaoPkiClient,
     private readonly audit: AuditService,
+    @Optional() private readonly fullVerify?: AuditFullVerifyService,
   ) {}
 
   private async activeTenantClient(id: string): Promise<TenantPrismaClient> {
@@ -106,15 +116,25 @@ export class PlatformOpsService {
   /** Full chain check of one tenant's audit log. */
   async verifyTenantAudit(id: string) {
     const db = await this.activeTenantClient(id);
-    return this.verify(db, id);
+    // A full check is recorded like the nightly one (it is the same claim of "verified").
+    return this.verify(db, id, {
+      run: this.fullVerify
+        ? () => this.fullVerify!.verifyTenant(id)
+        : undefined,
+    });
   }
 
   private async verify(
     db: TenantPrismaClient,
     tenantId: string,
-    opts: { incremental?: boolean } = {},
+    opts: {
+      incremental?: boolean;
+      run?: () => Promise<VerifyAuditChainResult>;
+    } = {},
   ) {
-    const result = await this.audit.verifyAuditChain(db, tenantId, opts);
+    const result = opts.run
+      ? await opts.run()
+      : await this.audit.verifyAuditChain(db, tenantId, opts);
     const states = await db.auditPartitionState.aggregate({
       _sum: { eventCount: true },
     });

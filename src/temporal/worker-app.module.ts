@@ -10,6 +10,7 @@ import { BillingWorkerModule } from '../billing/billing.module';
 import { AuditModule } from '../audit/audit.module';
 import { AuditRetentionModule } from '../audit/retention/audit-retention.module';
 import { AuditCheckpointScheduler } from '../audit/checkpoint/audit-checkpoint.scheduler';
+import { AuditFullVerifyJob } from '../audit/audit-full-verify.job';
 import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { AiAdvisoryModule } from '../ai-advisory/ai-advisory.module';
@@ -69,6 +70,8 @@ import { GrowthActivitiesFactory } from './activities/growth.activities';
   providers: [
     // SEALs: signed audit checkpoints every second (docs/audit-chain.md).
     AuditCheckpointScheduler,
+    // Nightly full audit-chain walk per tenant (the console polls the incremental mode).
+    AuditFullVerifyJob,
     // Weekly AI report card, Sunday night (features track).
     ReportCardService,
     WeeklyReportJob,
