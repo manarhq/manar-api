@@ -220,6 +220,7 @@ describe('Complete Demo (Phase 13, mandatory e2e acceptance test)', () => {
     const values = {
       AI_ADVISORY_GRPC_TARGET: grpcTarget,
       AI_ADVISORY_TIMEOUT_MS: 2000,
+      AI_ADVISORY_DLP_TIMEOUT_MS: 2000,
       AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
       AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
       AI_ADVISORY_LONGFORM_TIMEOUT_MS: 30_000,

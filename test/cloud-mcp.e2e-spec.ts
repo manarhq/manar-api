@@ -209,6 +209,7 @@ describe('Cloud agents: public MCP with OAuth (e2e)', () => {
           const values: Record<string, unknown> = {
             AI_ADVISORY_GRPC_TARGET: analysisTarget,
             AI_ADVISORY_TIMEOUT_MS: 2000,
+            AI_ADVISORY_DLP_TIMEOUT_MS: 2000,
             AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
             AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 30_000,
             AI_ADVISORY_LONGFORM_TIMEOUT_MS: 30_000,

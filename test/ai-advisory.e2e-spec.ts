@@ -345,6 +345,7 @@ describe('AI Advisory Pipeline Integration (e2e)', () => {
     const values = {
       AI_ADVISORY_GRPC_TARGET: overrides.grpcTarget,
       AI_ADVISORY_TIMEOUT_MS: overrides.timeoutMs ?? 2000,
+      AI_ADVISORY_DLP_TIMEOUT_MS: overrides.timeoutMs ?? 2000,
       AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD:
         overrides.circuitBreakerThreshold ?? 3,
       AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS:

@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ConfigService } from '@nestjs/config';
+import { status as grpcStatus } from '@grpc/grpc-js';
 import type { AppConfig } from '../config/env.validation';
 import type { ControlPrismaService } from '../database/control-prisma.service';
 import { FakeAnalysisServiceServer } from '../../test/support/fake-analysis-service-server';
-import { AiAdvisoryClient } from './ai-advisory-client.service';
+import {
+  AI_ADVISORY_MAX_MESSAGE_BYTES,
+  AiAdvisoryClient,
+  dlpChunks,
+} from './ai-advisory-client.service';
 
 function fakeConfigService(
   overrides: Partial<AppConfig> = {},
@@ -11,6 +16,7 @@ function fakeConfigService(
   const values: Partial<AppConfig> = {
     AI_ADVISORY_GRPC_TARGET: 'unset',
     AI_ADVISORY_TIMEOUT_MS: 300,
+    AI_ADVISORY_DLP_TIMEOUT_MS: 300,
     AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 3,
     AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 200,
     AI_ADVISORY_LONGFORM_TIMEOUT_MS: 500,
@@ -27,6 +33,7 @@ function fakeConfigService(
 /** A fake `ControlPrismaService` whose `tenant.findUnique` returns a fixed `allowExternalAi` value (or throws, for the fail-closed-on-error scenario) — never a real control DB connection. */
 function fakeControlPrismaService(
   allowExternalAi: boolean | 'throw' = true,
+  residency: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED' = 'UAE',
 ): ControlPrismaService {
   return {
     tenant: {
@@ -34,7 +41,7 @@ function fakeControlPrismaService(
         if (allowExternalAi === 'throw') {
           throw new Error('control DB unreachable');
         }
-        return Promise.resolve({ allowExternalAi });
+        return Promise.resolve({ allowExternalAi, residency });
       },
     },
   } as unknown as ControlPrismaService;
@@ -290,6 +297,153 @@ describe('AiAdvisoryClient', () => {
    * `analyzeRisk`/`analyzeDlp`/`analyzePromptInjection` dark for the
    * cooldown period.
    */
+  describe('dlp lane and half-open trial (E-015, E-035)', () => {
+    it("one tenant's failing DLP scans do not open the breaker for another tenant", async () => {
+      fakeServer.responseDelayMs = 300;
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_DLP_TIMEOUT_MS: 50,
+          AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 1,
+          AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 10_000,
+        }),
+        permissiveControl,
+      );
+      await client.analyzeDlp({ content: 'x', tenantId: 'slow-tenant' }); // opens slow-tenant's breaker
+      expect(fakeServer.callCounts.analyzeDlp).toBe(1);
+      await client.analyzeDlp({ content: 'x', tenantId: 'slow-tenant' });
+      expect(fakeServer.callCounts.analyzeDlp).toBe(1); // skipped: its breaker is open
+      fakeServer.responseDelayMs = 0;
+      const other = await client.analyzeDlp({
+        content: 'x',
+        tenantId: 'other',
+      });
+      expect(other).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(2);
+    }, 10_000);
+
+    it('scans content over the gRPC cap whole, in chunks under it, and keeps the worst severity', async () => {
+      const big = 'a'.repeat(5 * 1024 * 1024);
+      const chunks = dlpChunks(big);
+      expect(chunks.length).toBeGreaterThan(1);
+      for (const c of chunks) {
+        expect(Buffer.byteLength(c)).toBeLessThan(
+          AI_ADVISORY_MAX_MESSAGE_BYTES,
+        );
+      }
+      // every character is in some chunk
+      expect(chunks.reduce((n, c) => n + c.length, 0)).toBeGreaterThanOrEqual(
+        big.length,
+      );
+      fakeServer.dlpResult = { findings: [], overallSeverity: 4 };
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_DLP_TIMEOUT_MS: 5000,
+        }),
+        permissiveControl,
+      );
+      const result = await client.analyzeDlp({ content: big, tenantId: 't' });
+      expect(fakeServer.callCounts.analyzeDlp).toBe(chunks.length);
+      expect(result?.overallSeverity).toBe('SEVERITY_HIGH');
+    }, 20_000);
+
+    it('retries a transient UNAVAILABLE once inside the deadline', async () => {
+      fakeServer.failNextWith = grpcStatus.UNAVAILABLE;
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_DLP_TIMEOUT_MS: 2000,
+        }),
+        permissiveControl,
+      );
+      const result = await client.analyzeDlp({ content: 'x', tenantId: 't' });
+      expect(result).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(2);
+    });
+
+    it('a secret straddling a chunk boundary is whole in one chunk', () => {
+      const secret = 'S'.repeat(100);
+      const size = 20_000;
+      const content = 'x'.repeat(size - 50) + secret + 'y'.repeat(size);
+      expect(dlpChunks(content, size).some((c) => c.includes(secret))).toBe(
+        true,
+      );
+    });
+    it('AnalyzeDlp gets its own deadline: an LLM-slow DLP answer past the hot budget still arrives', async () => {
+      fakeServer.responseDelayMs = 400;
+      fakeServer.dlpResult = { findings: [], overallSeverity: 1 };
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_TIMEOUT_MS: 100,
+          AI_ADVISORY_DLP_TIMEOUT_MS: 2000,
+        }),
+        permissiveControl,
+      );
+      const dlp = await client.analyzeDlp({ content: 'x', tenantId: 't' });
+      expect(dlp).not.toBeNull();
+      expect(
+        await client.analyzeRisk({
+          actionDescription: 'x',
+          context: '',
+          tenantId: 't',
+        }),
+      ).toBeNull(); // the hot lane still times out at its own 100 ms
+    }, 10_000);
+
+    it('slow DLP calls open only the dlp breaker; risk keeps working', async () => {
+      fakeServer.responseDelayMs = 300;
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_TIMEOUT_MS: 1000,
+          AI_ADVISORY_DLP_TIMEOUT_MS: 50,
+          AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 1,
+          AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 10_000,
+        }),
+        permissiveControl,
+      );
+      await client.analyzeDlp({ content: 'x', tenantId: 't' }); // opens the dlp breaker
+      fakeServer.riskResult = {
+        score: 10,
+        confidence: 0.5,
+        signals: [],
+        explanation: '',
+        recommendedAction: 1,
+      };
+      const risk = await client.analyzeRisk({
+        actionDescription: 'x',
+        context: '',
+        tenantId: 't',
+      });
+      expect(risk).not.toBeNull();
+    }, 10_000);
+
+    it('after the cooldown lets exactly one trial through, not every concurrent call', async () => {
+      fakeServer.responseDelayMs = 300;
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_TIMEOUT_MS: 50,
+          AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: 1,
+          AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: 100,
+        }),
+        permissiveControl,
+      );
+      const risk = () =>
+        client.analyzeRisk({
+          actionDescription: 'x',
+          context: '',
+          tenantId: 't',
+        });
+      await risk(); // opens the breaker
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await Promise.all([risk(), risk(), risk(), risk()]);
+      expect(fakeServer.callCounts.analyzeRisk).toBe(2); // the opener plus one trial
+    }, 10_000);
+  });
+
   describe('lane isolation (hot vs longform)', () => {
     it("1. a long-form RPC delayed past the hot lane's budget, but inside the long-form deadline, succeeds (today it fails without lanes)", async () => {
       fakeServer.responseDelayMs = 2500; // longer than the hot lane's timeout below, shorter than the long-form one
@@ -463,6 +617,57 @@ describe('AiAdvisoryClient', () => {
    * requires).
    */
   describe('data residency enforcement (Section 54)', () => {
+    const dlp = (client: AiAdvisoryClient) =>
+      client.analyzeDlp({ content: 'x', tenantId: 't' });
+
+    it('Azure OpenAI is external: a tenant with allowExternalAi=false never reaches it (E-016)', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'azure_openai',
+        }),
+        fakeControlPrismaService(false),
+      );
+      expect(await dlp(client)).toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(0);
+    });
+
+    it('an undeclared provider in production counts as external; in development it is the local default', async () => {
+      const prod = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: undefined,
+          NODE_ENV: 'production',
+        }),
+        fakeControlPrismaService(false),
+      );
+      expect(await dlp(prod)).toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(0);
+
+      const dev = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: undefined,
+          NODE_ENV: 'development',
+        }),
+        fakeControlPrismaService(false),
+      );
+      expect(await dlp(dev)).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(1);
+    });
+
+    it('an air-gapped tenant never reaches an external provider, even with allowExternalAi=true', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'azure_openai',
+        }),
+        fakeControlPrismaService(true, 'AIR_GAPPED'),
+      );
+      expect(await dlp(client)).toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(0);
+    });
+
     it('an external provider + a tenant with allowExternalAi=false never reaches the network', async () => {
       const client = new AiAdvisoryClient(
         fakeConfigService({

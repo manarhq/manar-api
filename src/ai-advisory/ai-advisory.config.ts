@@ -77,6 +77,19 @@ export const AiAdvisoryConfigSchema = z.object({
   AI_ADVISORY_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
 
   /**
+   * Per-RPC deadline for `AnalyzeDlp` (its own **dlp lane**). manar-ai classifies DLP with an LLM
+   * whenever a provider is configured, which routinely takes longer than the hot lane's 2 s, so
+   * DLP gets its own deadline and its own breaker: slow classifications never open the hot
+   * lane's breaker for risk and prompt-injection signals. Shares the hot lane's threshold and
+   * cooldown values.
+   */
+  AI_ADVISORY_DLP_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10_000),
+
+  /**
    * Consecutive-failure threshold (timeout, transport error, or gRPC
    * status != OK) for the **hot lane** only, before `AiAdvisoryClient`'s
    * hot-lane circuit breaker opens and starts skipping hot-lane calls
@@ -110,7 +123,9 @@ export const AiAdvisoryConfigSchema = z.object({
     .number()
     .int()
     .positive()
-    .default(30_000),
+    // Above manar-ai's own 30 s provider timeout, so its structured "provider timed out" answer
+    // arrives instead of a deadline error that counts against the breaker.
+    .default(40_000),
 
   /**
    * Consecutive-failure threshold for the **long-form lane** only, before
@@ -133,25 +148,18 @@ export const AiAdvisoryConfigSchema = z.object({
     .default(30_000),
 
   /**
-   * Phase 12a (Section 54, data residency enforcement): which AI provider
-   * `manar-ai` is *currently configured* to use for this deployment.
-   * `manar-api` has no way to introspect `manar-ai`'s own `AI_PROVIDER`
-   * setting over the gRPC `AnalysisService` contract (there is no
-   * "describe yourself" RPC) — this is this side's own declaration of the
-   * same fact, which an operator must keep in sync with whatever
-   * `manar-ai`'s compose/deployment config actually sets. Only `anthropic`
-   * is "external" for the purpose of `AiAdvisoryClient`'s
-   * `allowExternalAi` gate below — `ollama`/`vllm` are self-hosted model
-   * backends, so a tenant's `allowExternalAi = false` never blocks calls
-   * against them (see docs/ai-security-model.md's "Data residency
-   * enforcement" section and `isExternalAiProvider` below). Defaults to
-   * `ollama`, matching `deploy/docker-compose.yml`'s own `manar-ai`
-   * service configuration (`docs/ai-security-model.md`'s "Local infra"
-   * section).
+   * Phase 12a (Section 54, data residency enforcement): which AI provider manar-ai is configured
+   * to use (its own `AI_PROVIDER`). manar-api cannot ask manar-ai over gRPC, so the operator
+   * declares the same value here. Only the self-hosted backends (`ollama`, `vllm`) stay inside the
+   * deployment; anything else, Azure OpenAI included, is external, and a tenant's
+   * `allowExternalAi = false` keeps its content away from it. Unset means `ollama` in development
+   * and test (the Compose stack) and "undeclared" in production, which is treated as external:
+   * a deployment that has not said where content goes gets the restrictive answer. See
+   * `aiAdvisoryProvider` and `isExternalAiProvider` below.
    */
   AI_ADVISORY_PROVIDER: z
-    .enum(['anthropic', 'ollama', 'vllm'])
-    .default('ollama'),
+    .enum(['anthropic', 'azure_openai', 'ollama', 'vllm'])
+    .optional(),
 
   /**
    * Gate 0 R5: a tool result the prompt-injection advisory flags with at
@@ -167,11 +175,25 @@ export const AiAdvisoryConfigSchema = z.object({
     .default(0.8),
 });
 
-/** The only provider this codebase currently treats as "external" (leaves this deployment's infrastructure) — see `AI_ADVISORY_PROVIDER`'s own doc comment. */
-export function isExternalAiProvider(
-  provider: AiAdvisoryConfig['AI_ADVISORY_PROVIDER'],
-): boolean {
-  return provider === 'anthropic';
+/** What `AI_ADVISORY_PROVIDER` resolves to; `undeclared` is production with nothing set. */
+export type AiAdvisoryProvider =
+  NonNullable<AiAdvisoryConfig['AI_ADVISORY_PROVIDER']> | 'undeclared';
+
+export function aiAdvisoryProvider(
+  declared: AiAdvisoryConfig['AI_ADVISORY_PROVIDER'],
+  nodeEnv: string | undefined,
+): AiAdvisoryProvider {
+  return declared ?? (nodeEnv === 'production' ? 'undeclared' : 'ollama');
+}
+
+const SELF_HOSTED_PROVIDERS: ReadonlySet<AiAdvisoryProvider> = new Set([
+  'ollama',
+  'vllm',
+]);
+
+/** True for every provider that is not a self-hosted backend inside this deployment. */
+export function isExternalAiProvider(provider: AiAdvisoryProvider): boolean {
+  return !SELF_HOSTED_PROVIDERS.has(provider);
 }
 
 export type AiAdvisoryConfig = z.infer<typeof AiAdvisoryConfigSchema>;

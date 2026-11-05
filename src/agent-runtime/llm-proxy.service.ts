@@ -17,6 +17,7 @@ import {
   EnforcementDependencyUnavailableException,
   failClosed,
 } from '../common/fail-closed/fail-closed';
+
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { AgentTaskAccessService, denied } from './agent-task-access.service';
 import { classifyDlp } from '../common/dlp/dlp-classification';
@@ -34,6 +35,9 @@ import type {
 import type { DlpClassification } from '../common/dlp/dlp-classification';
 import type { TaskRecord } from '../tasks/tasks.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
+
+const DLP_UNAVAILABLE_MESSAGE =
+  "Manar couldn't check this request for secrets, so it wasn't sent. Try again in a moment.";
 
 /** OpenAI-compatible request; unknown fields are dropped, `model` is ignored (manar-api picks the model). */
 export const ChatCompletionRequestSchema = z.object({
@@ -243,8 +247,13 @@ export class LlmProxyService {
       ].sort(),
       advisoryRedactedCounts: dlp.advisoryRedactedCounts,
     };
+    // No verdict (manar-ai down, slow past the dlp deadline, or the tenant's breaker open):
+    // the prompt is not sent. Fail closed.
     if (dlp.advisory === null) {
-      throw new EnforcementDependencyUnavailableException('dlp-advisory');
+      throw new EnforcementDependencyUnavailableException(
+        'dlp-advisory',
+        DLP_UNAVAILABLE_MESSAGE,
+      );
     }
     if (dlp.blocked) throw denied('dlp_policy_violation');
     return { tenantClient, task, budgetTask, route, limit, dlp };
