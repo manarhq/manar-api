@@ -367,6 +367,25 @@ switch is the customer's control. Off means nothing is sent to any model for tha
 and the feature answers `available: false, reason: "ai_switched_off"` (EN/AR notice in the
 console), never an error and never a metered action.
 
+**Default.** `allowExternalAi` is on for new Free, Pro and Company workspaces (opt-out; disclosed in
+the DPA and shown in Settings) and off for Government (`sector: GOVERNMENT`, recorded as an explicit
+choice) and `AIR_GAPPED` ones (`defaultAllowExternalAi`). `Tenant.sector` (null = unknown) is set at
+provisioning and backfilled from enterprise profiles and personal kind. `allowExternalAiChosen`
+records an owner's own choice; a settings change writes its audit event first and is refused (503) if
+that write fails.
+
+Existing workspaces are switched on only by `node dist/cli.js ai:default-on [--dry-run]`, never by a
+migration. It flips a workspace only on a hosted deployment, with sector COMMERCIAL, no recorded
+choice, and an audit history that provably covers its life (no retention anchor, oldest event at
+creation). Unknown sector is counted as `needsReview`; incomplete history as `historyIncomplete`
+(AI stays off and the owner sees "Turn on AI features?"). The dry run is read-only and prints counts
+only; `deploy/ops/ai-default-on-dry-run.job.yaml` runs it as a one-off Job in `manar-prod`.
+
+Known limits: audit-write failures from before this release left no record, so they cannot be
+excluded; and `aiGate` / `llmGate` read `allowExternalAi`, not `sector`, so a Government workspace
+with no recorded sector, no profile and the flag on is not blocked by the gate itself (provisioning
+a Government workspace sets the flag off).
+
 | Feature                                 | Path                                                                    | Gate                                                                                                                                                                                                                                                                       |
 | --------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Risk advisory on approvals              | `approval.activities` -> `RiskEngine` -> `AiAdvisoryClient.analyzeRisk` | `aiGate` (null: deterministic score only)                                                                                                                                                                                                                                  |
