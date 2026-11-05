@@ -59,6 +59,75 @@ export class WalletService implements OnModuleInit {
       this.meter.onLowBalance = (tenantId) => void this.maybeTopUp(tenantId);
   }
 
+  /**
+   * `GET /billing/usage/daily`: the workspace's own AI actions per UTC day for the last `days`
+   * days, split into those the monthly allowance covered and those that spent a credit (1 credit
+   * is 1 AI action). Counted from the same `usage_events` rows the meter writes, so a day's
+   * numbers always add up to the month figures on `GET /billing/usage` (an action given back
+   * because no model answered has no row). Only this workspace's rows are read.
+   */
+  async dailyAiUsage(tenantId: string, days: number, now = new Date()) {
+    const span = Math.min(Math.max(Math.trunc(days), 1), 90);
+    const today = Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+    );
+    const from = new Date(today - (span - 1) * DAY_MS);
+    const rows = await this.control.$queryRaw<
+      { day: string; source: string; n: number }[]
+    >`
+      SELECT to_char("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, "source", COUNT(*)::int AS n
+      FROM "usage_events"
+      WHERE "tenantId" = ${tenantId} AND "kind" = 'ai'::"UsageKind" AND "createdAt" >= ${from}
+      GROUP BY 1, 2`;
+    const byDay = new Map<string, { allowance: number; credits: number }>();
+    for (const r of rows) {
+      const d = byDay.get(r.day) ?? { allowance: 0, credits: 0 };
+      if (r.source === 'credits') d.credits += r.n;
+      else d.allowance += r.n;
+      byDay.set(r.day, d);
+    }
+    const out: {
+      date: string;
+      actions: number;
+      fromAllowance: number;
+      fromCredits: number;
+    }[] = [];
+    for (let i = 0; i < span; i++) {
+      const date = new Date(from.getTime() + i * DAY_MS)
+        .toISOString()
+        .slice(0, 10);
+      const d = byDay.get(date) ?? { allowance: 0, credits: 0 };
+      out.push({
+        date,
+        actions: d.allowance + d.credits,
+        fromAllowance: d.allowance,
+        fromCredits: d.credits,
+      });
+    }
+    const usage = await this.usage(tenantId, now);
+    return {
+      from: out[0]!.date,
+      to: out[out.length - 1]!.date,
+      days: out,
+      totals: {
+        actions: out.reduce((a, d) => a + d.actions, 0),
+        fromAllowance: out.reduce((a, d) => a + d.fromAllowance, 0),
+        fromCredits: out.reduce((a, d) => a + d.fromCredits, 0),
+      },
+      // The month, exactly as `GET /billing/usage` reports it.
+      month: {
+        month: usage.month,
+        plan: usage.plan,
+        used: usage.allowance.ai.used,
+        included: usage.allowance.ai.included,
+        creditsSpent: usage.wallet.creditsSpent,
+        creditBalance: usage.wallet.balance,
+      },
+    };
+  }
+
   /** `GET /billing/usage`: this month's use, the wallet, the bill so far and a forecast. */
   async usage(tenantId: string, now = new Date()) {
     const e = await this.entitlements.get(tenantId);

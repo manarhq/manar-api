@@ -246,3 +246,67 @@ export function startMetricsServer(
   server.listen(port, '0.0.0.0');
   return server;
 }
+
+const aiCalls = new Counter({
+  name: 'manar_ai_calls_total',
+  help: 'Model calls by feature, model and outcome.',
+  labelNames: ['feature', 'model', 'outcome'],
+  registers: [registry],
+});
+const aiTokens = new Counter({
+  name: 'manar_ai_tokens_total',
+  help: 'Model tokens by feature, model and direction.',
+  labelNames: ['feature', 'model', 'direction'],
+  registers: [registry],
+});
+const aiCostUsd = new Counter({
+  name: 'manar_ai_cost_usd_total',
+  help: 'Model cost in USD from the versioned price table, by feature and model.',
+  labelNames: ['feature', 'model'],
+  registers: [registry],
+});
+const AI_BUCKETS = [0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 300];
+const aiDuration = new Histogram({
+  name: 'manar_ai_call_duration_seconds',
+  help: 'Duration of one model call, request to last token.',
+  labelNames: ['feature', 'model'],
+  buckets: AI_BUCKETS,
+  registers: [registry],
+});
+const aiFirstToken = new Histogram({
+  name: 'manar_ai_first_token_seconds',
+  help: 'Time from the request to the first streamed token.',
+  labelNames: ['feature', 'model'],
+  buckets: AI_BUCKETS,
+  registers: [registry],
+});
+
+/** Model call totals. Feature and model only: never a workspace, user or any content as a label. */
+export function recordAiCall(call: {
+  feature: string;
+  model: string;
+  outcome: string;
+  inputTokens: number;
+  outputTokens: number;
+  seconds: number;
+  firstTokenSeconds?: number;
+  costUsd: number;
+}): void {
+  const model = call.model || 'unknown';
+  aiCalls.inc({ feature: call.feature, model, outcome: call.outcome });
+  aiTokens.inc(
+    { feature: call.feature, model, direction: 'input' },
+    call.inputTokens,
+  );
+  aiTokens.inc(
+    { feature: call.feature, model, direction: 'output' },
+    call.outputTokens,
+  );
+  aiCostUsd.inc({ feature: call.feature, model }, call.costUsd);
+  aiDuration.observe({ feature: call.feature, model }, call.seconds);
+  if (call.firstTokenSeconds !== undefined)
+    aiFirstToken.observe(
+      { feature: call.feature, model },
+      call.firstTokenSeconds,
+    );
+}
