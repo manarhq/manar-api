@@ -112,12 +112,12 @@ describe('8-hour grants on /host/v1/authorize', () => {
     });
     const ask = { effect: 'APPROVAL_REQUIRED' };
     it('allows inside the folder and audits the use', async () => {
-      const w = make({ patterns: ['~/proj/src/*'], policy: ask });
+      const w = make({ patterns: ['/home/sara/proj/src/*'], policy: ask });
       const r = await w.svc.authorize(host, edit('/home/sara/proj/src/a.ts'));
       expect(r).toMatchObject({ decision: 'ALLOW', grantId: 'g2' });
     });
     it('still asks outside the folder, for secrets and for ..', async () => {
-      const w = make({ patterns: ['~/proj/src/*'], policy: ask });
+      const w = make({ patterns: ['/home/sara/proj/src/*'], policy: ask });
       for (const res of [
         '/home/sara/proj/other/a.ts',
         '/home/sara/proj/src/.env',
@@ -129,7 +129,7 @@ describe('8-hour grants on /host/v1/authorize', () => {
     });
     it('is not looked up when nothing asks', async () => {
       const w = make({
-        patterns: ['~/proj/src/*'],
+        patterns: ['/home/sara/proj/src/*'],
         policy: { effect: 'ALLOW', matchedRule: {} },
       });
       await w.svc.authorize(host, edit('/home/sara/proj/src/a.ts'));

@@ -110,7 +110,10 @@ describe('rule offer after the 3rd identical approval (decision 37)', () => {
   it('offers the folder after 3 approvals, not after 2', async () => {
     const w = world();
     const m = await w.service.offersFor(w.client, [w.pending]);
-    expect(m.get('ap1')).toEqual({ scope: '~/proj/src/*', approvals: 3 });
+    expect(m.get('ap1')).toEqual({
+      scope: '/home/sara/proj/src/*',
+      approvals: 3,
+    });
     const few = world({ history: 2 });
     expect((await few.service.offersFor(few.client, [few.pending])).size).toBe(
       0,
@@ -183,7 +186,7 @@ describe('rule offer after the 3rd identical approval (decision 37)', () => {
       toolId: 'host.cursor',
       actionId: 'edit',
       origin: 'offer',
-      resourcePattern: '~/proj/src/*',
+      resourcePattern: '/home/sara/proj/src/*',
     });
   });
 
