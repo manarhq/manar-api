@@ -14,6 +14,7 @@ import { RolesGuard } from '../auth/roles.guard';
 import { parseBodyOrThrow } from '../agents/parse-body.util';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
+import { LearningService } from '../learning/learning.service';
 import { StartModeService } from './start-mode.service';
 import { SetStartModeRequestDto, StartModeResponseDto } from './workspace.dto';
 import { SetStartModeSchema } from './workspace.validation';
@@ -28,6 +29,7 @@ export class StartModeController {
   constructor(
     private readonly startMode: StartModeService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
+    private readonly learning: LearningService,
   ) {}
 
   @Get()
@@ -45,14 +47,17 @@ export class StartModeController {
       auth.tenant.id,
       auth.user.id,
     );
-    return { mode: s.mode };
+    return {
+      mode: s.mode,
+      learning: await this.learning.config(auth.tenant.id),
+    };
   }
 
   @Put()
   @ApiOperation({
     summary: 'Switch the start mode',
     description:
-      'Swaps the active policy set in one transaction and records start_mode.changed. Takes effect on the next decision.',
+      'Send `mode`, `learning` (on, off, default), or both. A new mode swaps the active policy set in one transaction and records start_mode.changed; learning records learning.changed. Both take effect on the next decision.',
   })
   @ApiBody({ type: SetStartModeRequestDto })
   @ApiResponse({ status: 200, type: StartModeResponseDto })
@@ -62,14 +67,25 @@ export class StartModeController {
     @CurrentAuth() auth: AuthContext,
     @Body() body: unknown,
   ): Promise<StartModeResponseDto> {
-    const { mode } = parseBodyOrThrow(SetStartModeSchema, body);
+    const { mode, learning } = parseBodyOrThrow(SetStartModeSchema, body);
     const client = await this.tenantDatabaseManager.getClient(auth.tenant.id);
-    const s = await this.startMode.set(
-      client,
-      auth.tenant.id,
-      auth.user.id,
-      mode,
-    );
-    return { mode: s.mode };
+    if (learning)
+      await this.learning.setWorkspace(
+        auth.tenant.id,
+        learning,
+        { id: auth.user.id },
+        client,
+      );
+    const s = mode
+      ? await this.startMode.set(client, auth.tenant.id, auth.user.id, mode)
+      : await this.startMode.currentOrSeed(
+          client,
+          auth.tenant.id,
+          auth.user.id,
+        );
+    return {
+      mode: s.mode,
+      learning: await this.learning.config(auth.tenant.id),
+    };
   }
 }

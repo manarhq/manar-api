@@ -11,6 +11,7 @@ import {
 } from '../approvals/allow-grants';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
+import { LearningService } from '../learning/learning.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
 import { resourceKindFor } from '../policy/resource-aliases';
@@ -96,6 +97,7 @@ export class HostAuthorizeService {
     @Optional()
     @Inject(HOST_APPROVAL_OPENER)
     private readonly approvals?: HostApprovalOpener,
+    @Optional() private readonly learning?: LearningService,
   ) {}
 
   async authorize(
@@ -117,6 +119,35 @@ export class HostAuthorizeService {
         `host authorize failed closed: ${error instanceof Error ? error.message : String(error)}`,
       );
       return { decision: 'DENY', reason: 'enforcement_dependency_unavailable' };
+    }
+    // Learning mode (decision 36): a new device is watched, not asked. The action runs, the audit
+    // record below keeps the real outcome with `learning: true`, and nothing is opened. Only
+    // asks that are not high risk, secret or destructive qualify (`learningMayAllow`); any
+    // failure here means the normal prompt.
+    let learned: HostAuthorizeDecision | null = null;
+    if (result.decision === 'APPROVAL_REQUIRED' && this.learning) {
+      try {
+        if (
+          await this.learning.serve(
+            client,
+            host.tenantId,
+            host,
+            request,
+            result.riskScore ?? 100,
+          )
+        ) {
+          learned = result;
+          result = {
+            decision: 'ALLOW',
+            reason: 'learning_would_ask',
+            riskScore: result.riskScore,
+          };
+        }
+      } catch (error) {
+        this.logger.warn(
+          `learning mode skipped: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     if (result.decision === 'APPROVAL_REQUIRED' && this.approvals) {
       try {
@@ -162,10 +193,12 @@ export class HostAuthorizeService {
         toolId: request.toolId,
         actionId: request.actionId,
         resource: redactForStorage(request.resource),
-        decision: result.decision,
-        reason: result.reason ?? null,
+        // The real outcome stays in the record; `served` is what the device was told.
+        decision: (learned ?? result).decision,
+        reason: (learned ?? result).reason ?? null,
         riskScore: result.riskScore ?? null,
         approvalId: result.approvalId ?? null,
+        ...(learned ? { learning: true, served: result.decision } : {}),
         caller,
         sessionId,
       },

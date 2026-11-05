@@ -3,7 +3,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { LearningService } from '../learning/learning.service';
 import { z } from 'zod';
 import { AuditService } from '../audit/audit.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
@@ -91,6 +93,7 @@ export class HostToolsService {
   constructor(
     private readonly tenants: TenantDatabaseManager,
     private readonly audit: AuditService,
+    @Optional() private readonly learning?: LearningService,
   ) {}
 
   /** `POST /host/v1/inventory`: the device's full list of AI tools. */
@@ -235,6 +238,10 @@ export class HostToolsService {
       take: 200,
     });
     const now = Date.now();
+    // While a device learns (decision 36) nothing it does is held, so its tools are not `governed`.
+    const learning = this.learning
+      ? await this.learning.windows(tenantId, hosts)
+      : new Map<string, { active: boolean; endsAt: Date | null }>();
     const tampered = await latestTamper(
       client,
       hosts.map((h) => h.id),
@@ -245,6 +252,7 @@ export class HostToolsService {
         const online =
           !!h.lastSeenAt && now - h.lastSeenAt.getTime() <= MONITORING_STALE_MS;
         const tamper = tampered.get(h.id) ?? null;
+        const learn = learning.get(h.id) ?? { active: false, endsAt: null };
         return {
           hostId: h.id,
           hostname: h.hostname,
@@ -254,6 +262,10 @@ export class HostToolsService {
           lastSeenAt: h.lastSeenAt?.toISOString() ?? null,
           /** The latest tampering the device reported in the last 7 days, or null. */
           tamper,
+          /** Learning mode: watched, not asked, until `endsAt`. Null when it is not learning. */
+          learning: learn.active
+            ? { endsAt: learn.endsAt?.toISOString() ?? null }
+            : null,
           tools: h.tools.map((t) => ({
             toolId: t.toolId,
             name: t.name,
@@ -266,7 +278,7 @@ export class HostToolsService {
             supportedModes: hostTool(t.toolId)?.modes ?? [],
             // A hook something took out of play recently is not counted as governing the tool.
             enforcement:
-              tamper && tamper.toolId === t.toolId
+              learn.active || (tamper && tamper.toolId === t.toolId)
                 ? capObserved(enforcementLabel(t.toolId, t, online))
                 : enforcementLabel(t.toolId, t, online),
           })),
