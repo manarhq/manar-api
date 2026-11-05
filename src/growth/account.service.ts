@@ -340,6 +340,32 @@ export class AccountService {
 
   private async executeOne(issuer: string, subject: string) {
     await this.assertNotSoleOwner(issuer, subject); // changed since the request: stop, keep the account
+    // 0. The one step that can still refuse, before anything is destroyed. An owner stops being an
+    //    owner under the same per-workspace lock as a role revoke (withOwnerLock), so two owners
+    //    deleting their accounts at once cannot orphan a company: the loser is refused here, with
+    //    the account untouched. The row is marked REMOVED, not deleted, so step 3 still finds the
+    //    company (also on the hourly retry) and the final delete takes it away.
+    for (const m of await this.control.membership.findMany({
+      where: { issuer, subject, status: 'ACTIVE', tenant: { kind: 'COMPANY' } },
+    })) {
+      if (m.role !== 'TENANT_OWNER' && !m.extraRoles.includes('TENANT_OWNER'))
+        continue;
+      try {
+        await withOwnerLock(
+          this.control,
+          m.tenantId,
+          { issuer, subject },
+          (tx) =>
+            tx.membership.updateMany({
+              where: { issuer, subject, tenantId: m.tenantId },
+              data: { status: 'REMOVED' },
+            }),
+        );
+      } catch (error) {
+        if (error instanceof LastOwnerError) throw new SoleOwnerError();
+        throw error;
+      }
+    }
     const owned = await this.control.tenant.findMany({
       where: {
         ownerIssuer: issuer,
@@ -403,31 +429,7 @@ export class AccountService {
       issuer,
       subject,
     );
-    // An owner's membership leaves under the same per-workspace lock as a role revoke
-    // (withOwnerLock), so two owners deleting their accounts at once cannot orphan a company.
-    for (const m of await this.control.membership.findMany({
-      where: { issuer, subject, status: 'ACTIVE', tenant: { kind: 'COMPANY' } },
-    })) {
-      if (m.role !== 'TENANT_OWNER' && !m.extraRoles.includes('TENANT_OWNER'))
-        continue;
-      try {
-        summary.companyMembershipsRemoved += (
-          await withOwnerLock(
-            this.control,
-            m.tenantId,
-            { issuer, subject },
-            (tx) =>
-              tx.membership.deleteMany({
-                where: { issuer, subject, tenantId: m.tenantId },
-              }),
-          )
-        ).count;
-      } catch (error) {
-        if (error instanceof LastOwnerError) throw new SoleOwnerError();
-        throw error;
-      }
-    }
-    summary.companyMembershipsRemoved += (
+    summary.companyMembershipsRemoved = (
       await this.control.membership.deleteMany({ where: { issuer, subject } })
     ).count;
     // 4. Product improvement data: stored samples and the PostHog person.

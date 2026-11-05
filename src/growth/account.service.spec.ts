@@ -62,6 +62,7 @@ function setup(
         opts.ownerLeaving === 'ok' || (opts.ownerLeaving && ++counts === 1)
           ? 1
           : 0,
+      updateMany: async () => (calls.push('owner-removed'), { count: 1 }),
       deleteMany: async () => (calls.push('memberships'), { count: 1 }),
     },
     tenant: {
@@ -191,17 +192,25 @@ describe('account deletion', () => {
     });
     expect(await svc.executeDue()).toEqual({ done: 0, failed: 0 });
   });
-  it('an owner who leaves a company with another owner is removed under the owner lock', async () => {
+  it('an owner leaving a company with another owner is removed under the owner lock, before anything is destroyed', async () => {
     const { svc, calls, getLocks } = setup({ ownerLeaving: 'ok' });
     expect(await svc.executeDue()).toEqual({ done: 1, failed: 0 });
     expect(getLocks()).toBe(1);
+    expect(calls.indexOf('owner-removed')).toBe(0);
+    expect(calls.indexOf('owner-removed')).toBeLessThan(
+      calls.indexOf('stripe:cancel'),
+    );
     expect(calls).toContain('memberships');
   });
-  it('stops, keeping the account, when the other owner went between the first check and the lock', async () => {
-    const { svc, row, getLocks } = setup({ ownerLeaving: 'raceLost' });
+  it('a lost last-owner race refuses cleanly: nothing is cancelled, deleted or unassigned', async () => {
+    const { svc, calls, row, hostUpdates, getLocks } = setup({
+      ownerLeaving: 'raceLost',
+    });
     expect(await svc.executeDue()).toEqual({ done: 0, failed: 1 });
     expect(getLocks()).toBe(1);
     expect(row.status).toBe('REFUSED');
+    expect(calls).toEqual([]); // no Stripe, tombstone, workspace, device, membership or Keycloak step
+    expect(hostUpdates).toEqual([]);
   });
   it('never deletes the sign-in account from a customer-hosted realm', async () => {
     const { svc, calls } = setup({ deployment: 'customer' });
