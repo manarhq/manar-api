@@ -47,8 +47,8 @@ export interface HostAuthorizeDecision {
   cacheable?: boolean;
   /** Which ask this is (`ceiling` or a policy rule); the approval and any scoped grant carry it. */
   askKey?: string;
-  /** Internal: the policy version that asked. Removed before the answer leaves the service. */
-  policyVersionId?: string;
+  /** Internal: every policy version that asks. Removed before the answer leaves the service. */
+  policyVersionIds?: string[];
 }
 
 /** Same as the default task ceiling for Claude Code: reads and fetches run, edits and shell ask. */
@@ -116,7 +116,7 @@ export class HostAuthorizeService {
           await this.learning.serve(client, host.tenantId, host, request, {
             riskScore: result.riskScore ?? 100,
             askKey: result.askKey ?? '',
-            policyVersionId: result.policyVersionId,
+            policyVersionIds: result.policyVersionIds,
           })
         ) {
           learned = result;
@@ -193,7 +193,7 @@ export class HostAuthorizeService {
     }
     // Internal bookkeeping stays inside the service.
     delete result.askKey;
-    delete result.policyVersionId;
+    delete result.policyVersionIds;
     return result;
   }
 
@@ -284,7 +284,7 @@ export class HostAuthorizeService {
         reason: 'policy_requires_approval',
         riskScore: base,
         askKey,
-        policyVersionId: policy.policyVersionId,
+        policyVersionIds: (policy.asks ?? []).map((a) => a.policyVersionId),
       };
     }
     if (!policy.matchedRule && base > HOST_RISK_CEILING) {

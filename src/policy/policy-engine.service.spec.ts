@@ -246,6 +246,59 @@ describe('PolicyEngine', () => {
     expect(result.effect).toBe('DENY');
   });
 
+  it('reports EVERY policy that asks, not only the one that wins (so one cannot shadow another)', async () => {
+    const ask = (id: string, policyId: string) =>
+      publishedVersion({
+        id,
+        policyId,
+        version: 1,
+        content: {
+          rules: [
+            {
+              toolId: 'edr',
+              actionId: 'isolate_host',
+              effect: 'APPROVAL_REQUIRED',
+              resourcePattern: '*',
+            },
+          ],
+        },
+      });
+    const allow = publishedVersion({
+      id: 'v0',
+      policyId: 'p0',
+      version: 1,
+      content: {
+        rules: [
+          {
+            toolId: 'edr',
+            actionId: 'isolate_host',
+            effect: 'ALLOW',
+            resourcePattern: '*',
+          },
+        ],
+      },
+    });
+    const engine = new PolicyEngine(fakeToolRegistry());
+    const result = await engine.evaluate(
+      fakeTenantClient([allow, ask('v1', 'p1'), ask('v2', 'p2')]),
+      'tenant-1',
+      { toolId: 'edr', actionId: 'isolate_host', resource: 'host-1' },
+    );
+    expect(result.effect).toBe('APPROVAL_REQUIRED');
+    expect(result.policyVersionId).toBe('v1'); // the one reported first...
+    expect(result.asks?.map((a) => a.policyVersionId).sort()).toEqual([
+      'v1',
+      'v2',
+    ]); // ...and the one behind it is not hidden
+    // nothing asks: no list
+    const none = await engine.evaluate(fakeTenantClient([allow]), 'tenant-1', {
+      toolId: 'edr',
+      actionId: 'isolate_host',
+      resource: 'host-1',
+    });
+    expect(none.asks).toBeUndefined();
+  });
+
   it('combines ALLOW + APPROVAL_REQUIRED -> APPROVAL_REQUIRED', async () => {
     const rows = [
       publishedVersion({

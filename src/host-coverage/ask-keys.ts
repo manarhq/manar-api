@@ -10,11 +10,19 @@ export const CEILING_ASK = 'ceiling';
 export function policyAskKey(policy: {
   policyVersionId?: string;
   matchedRule?: unknown;
+  asks?: Array<{ policyVersionId: string; matchedRule: unknown }>;
 }): string {
-  return `p:${createHash('sha256')
-    .update(
-      `${policy.policyVersionId ?? ''}|${JSON.stringify(policy.matchedRule ?? null)}`,
-    )
-    .digest('hex')
-    .slice(0, 24)}`;
+  // Every policy that asks is part of the key, so a grant made while one policy asked never
+  // answers a request that another policy also asks about.
+  const parts = (
+    policy.asks ?? [
+      {
+        policyVersionId: policy.policyVersionId ?? '',
+        matchedRule: policy.matchedRule ?? null,
+      },
+    ]
+  )
+    .map((a) => `${a.policyVersionId}|${JSON.stringify(a.matchedRule)}`)
+    .sort();
+  return `p:${createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 24)}`;
 }

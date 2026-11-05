@@ -19,6 +19,8 @@ function world(
     host?: Record<string, unknown> | null;
     /** What the policy version that asked is. */
     version?: { name: string; contentHash: string } | null;
+    /** By policy version id, for a request several policies ask about. */
+    versions?: Record<string, { name: string; contentHash: string }>;
     sites?: boolean;
   } = {},
 ) {
@@ -57,15 +59,12 @@ function world(
         ),
     },
     policyVersion: {
-      findUnique: () =>
-        Promise.resolve(
-          over.version
-            ? {
-                contentHash: over.version.contentHash,
-                policy: { name: over.version.name },
-              }
-            : null,
-        ),
+      findUnique: ({ where }: { where: { id: string } }) => {
+        const v = over.versions?.[where.id] ?? over.version;
+        return Promise.resolve(
+          v ? { contentHash: v.contentHash, policy: { name: v.name } } : null,
+        );
+      },
     },
     hostApproval: {
       findFirst: () => Promise.resolve(over.sites ? { id: 'a' } : null),
@@ -134,7 +133,7 @@ const serve = (
   ask: {
     riskScore: number;
     askKey: string;
-    policyVersionId?: string;
+    policyVersionIds?: string[];
   } = ceiling,
 ) => w.svc.serve(w.client, 't1', { hostId: 'h1' }, req, ask, NOW);
 
@@ -185,7 +184,7 @@ describe('which asks learning may quiet', () => {
     expect(await serve(world())).toBe(true);
   });
   it('the ask preset own rules, not strict, not watch, not an admin rule, not an unknown version', async () => {
-    const ask = { riskScore: 35, askKey: 'p:abc', policyVersionId: 'v1' };
+    const ask = { riskScore: 35, askKey: 'p:abc', policyVersionIds: ['v1'] };
     const v = (name: string, contentHash: string) =>
       world({ version: { name, contentHash } });
     expect(await serve(v(START_MODE_POLICY_NAME, hash('ask')), edit, ask)).toBe(
@@ -202,8 +201,47 @@ describe('which asks learning may quiet', () => {
     ).toBe(false);
     expect(await serve(v('my-rules', hash('ask')), edit, ask)).toBe(false);
     expect(await serve(world({ version: null }), edit, ask)).toBe(false);
+    // Several policies ask: every one of them must be the "ask" preset.
+    const presetAsk = {
+      name: START_MODE_POLICY_NAME,
+      contentHash: hash('ask'),
+    };
+    const admin = { name: 'my-rules', contentHash: 'x' };
+    const both = { ...ask, policyVersionIds: ['v-ask', 'v-custom'] };
     expect(
-      await serve(world(), edit, { ...ask, policyVersionId: undefined }),
+      await serve(
+        world({ versions: { 'v-ask': presetAsk, 'v-custom': admin } }),
+        edit,
+        both,
+      ),
+    ).toBe(false);
+    expect(
+      await serve(
+        world({ versions: { 'v-ask': presetAsk, 'v-custom': admin } }),
+        edit,
+        { ...both, policyVersionIds: ['v-custom', 'v-ask'] },
+      ),
+    ).toBe(false);
+    expect(
+      await serve(
+        world({
+          versions: {
+            'v-ask': presetAsk,
+            'v-strict': { ...presetAsk, contentHash: hash('strict') },
+          },
+        }),
+        edit,
+        { ...both, policyVersionIds: ['v-ask', 'v-strict'] },
+      ),
+    ).toBe(false);
+    expect(
+      await serve(world({ versions: { 'v-ask': presetAsk } }), edit, {
+        ...both,
+        policyVersionIds: ['v-ask', 'v-ask'],
+      }),
+    ).toBe(true);
+    expect(
+      await serve(world(), edit, { ...ask, policyVersionIds: undefined }),
     ).toBe(false);
   });
 });

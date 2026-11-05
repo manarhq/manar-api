@@ -113,7 +113,7 @@ export class LearningService {
     tenantId: string,
     host: { hostId: string },
     request: { toolId: string; actionId: string; resource: string },
-    ask: { riskScore: number; askKey: string; policyVersionId?: string },
+    ask: { riskScore: number; askKey: string; policyVersionIds?: string[] },
     now: Date = new Date(),
   ): Promise<boolean> {
     const actionId = request.actionId.toLowerCase();
@@ -171,18 +171,25 @@ export class LearningService {
 
   private async quietable(
     client: TenantPrismaClient,
-    ask: { askKey: string; policyVersionId?: string },
+    ask: { askKey: string; policyVersionIds?: string[] },
   ): Promise<boolean> {
     if (ask.askKey === CEILING_ASK) return true;
-    if (!ask.policyVersionId) return false;
-    const v = await client.policyVersion.findUnique({
-      where: { id: ask.policyVersionId },
-      select: { contentHash: true, policy: { select: { name: true } } },
-    });
-    return (
-      v?.policy.name === START_MODE_POLICY_NAME &&
-      modeForContentHash(v.contentHash) === 'ask'
-    );
+    // Every policy that asks must be the "ask" preset: if an admin's rule also asks, that rule
+    // is not quiet just because the preset happens to be the one reported.
+    const ids = [...new Set(ask.policyVersionIds ?? [])];
+    if (ids.length === 0) return false;
+    for (const id of ids) {
+      const v = await client.policyVersion.findUnique({
+        where: { id },
+        select: { contentHash: true, policy: { select: { name: true } } },
+      });
+      if (
+        v?.policy.name !== START_MODE_POLICY_NAME ||
+        modeForContentHash(v.contentHash) !== 'ask'
+      )
+        return false;
+    }
+    return true;
   }
 
   /** A person already approved a fetch to this origin on this device. */

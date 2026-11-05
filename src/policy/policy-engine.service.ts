@@ -22,6 +22,12 @@ export interface PolicyEvaluationResult {
   /** Which `Policy` `matchedRule` came from — present under the same condition as `matchedRule`. */
   policyId?: string;
   policyVersionId?: string;
+  /**
+   * EVERY policy whose first matching rule asks (APPROVAL_REQUIRED), not only the one reported
+   * above: a caller that wants to quiet or answer an ask must account for all of them, or one
+   * policy could hide another's rule behind it. Absent when nothing asks.
+   */
+  asks?: Array<{ policyVersionId: string; matchedRule: PolicyRule }>;
   /** Present only when `effect` is `DENY` because evaluation itself failed (Section 22's real fail-closed case) rather than because a rule's own effect was `DENY` — see module doc comment. */
   failureReason?: string;
 }
@@ -108,6 +114,7 @@ export class PolicyEngine {
     }
 
     let best: PolicyEvaluationResult = { effect: 'ALLOW' };
+    const asks: NonNullable<PolicyEvaluationResult['asks']> = [];
 
     for (const version of publishedVersions) {
       const parsed = PolicyContentSchema.safeParse(version.content);
@@ -134,6 +141,8 @@ export class PolicyEngine {
         policyId: version.policyId,
         policyVersionId: version.id,
       };
+      if (candidate.effect === 'APPROVAL_REQUIRED')
+        asks.push({ policyVersionId: version.id, matchedRule: matched });
       // The very first policy that actually matches anything becomes
       // `best` outright (even an ALLOW rule is more informative than the
       // untouched "nothing matched yet" default); after that, only a
@@ -147,7 +156,7 @@ export class PolicyEngine {
       }
     }
 
-    return best;
+    return asks.length > 0 ? { ...best, asks } : best;
   }
 
   /**
