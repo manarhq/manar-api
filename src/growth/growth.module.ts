@@ -19,6 +19,7 @@ import { MailerService } from './mailer.service';
 import { MembersService } from './members.service';
 import { PersonalTrialService } from './personal-trial.service';
 import { BillingTickService } from '../billing/billing-tick.service';
+import { FrictionService } from '../friction/friction.service';
 import { UsageAlertsService } from '../billing/usage-alerts.service';
 import { ProfileService } from './profile.service';
 
@@ -54,13 +55,20 @@ export class GrowthModule {}
 /** Growth track, worker: the hourly digest, trial reminders, billing tick and account deletion. */
 @Module({
   imports: [KeycloakModule, DataCollectionModule, RedisThrottlerStorageModule],
-  providers: [...SHARED, StripeGateway, BillingTickService, UsageAlertsService],
+  providers: [
+    ...SHARED,
+    StripeGateway,
+    BillingTickService,
+    UsageAlertsService,
+    FrictionService,
+  ],
   exports: [
     DigestService,
     AccountService,
     PersonalTrialService,
     BillingTickService,
     UsageAlertsService,
+    FrictionService,
     DataCollectionModule,
   ],
 })

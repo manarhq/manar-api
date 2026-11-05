@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { FrictionPlatformController } from '../friction/friction-platform.controller';
+import { FrictionModule } from '../friction/friction.module';
 import { PlatformAuthGuard } from './platform-auth.guard';
 import { PlatformOpsController } from './platform-ops.controller';
 import { PlatformOpsService } from './platform-ops.service';
@@ -8,7 +10,12 @@ import { PlatformSuspension } from './platform-suspension';
 
 /** Imported only into AppModule (the human HTTP app), never the agent mTLS listener. */
 @Module({
-  controllers: [PlatformController, PlatformOpsController],
+  imports: [FrictionModule],
+  controllers: [
+    PlatformController,
+    PlatformOpsController,
+    FrictionPlatformController,
+  ],
   providers: [
     PlatformService,
     PlatformAuthGuard,

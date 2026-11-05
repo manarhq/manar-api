@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { FrictionService } from '../../friction/friction.service';
 import { AccountService } from '../../growth/account.service';
 import { DataCollectionService } from '../../data-collection/data-collection.service';
 import { DigestService } from '../../growth/digest.service';
@@ -16,14 +17,25 @@ export class GrowthActivitiesFactory {
     private readonly billingTick: BillingTickService,
     private readonly alerts: UsageAlertsService,
     private readonly data: DataCollectionService,
+    private readonly friction: FrictionService,
   ) {}
+
+  private readonly logger = new Logger(GrowthActivitiesFactory.name);
 
   build(): GrowthActivities {
     return {
       sendDueDigests: () => this.digest.sendDue(),
       sendTrialReminders: () => this.trial.sendDue(),
       runBillingTick: () => this.billingTick.run(),
-      sendUsageAlerts: () => this.alerts.sendDue(),
+      sendUsageAlerts: async () => {
+        // Friction alert (decision 38): best effort, self-throttled to every 6 hours.
+        void this.friction
+          .scan()
+          .catch((e: unknown) =>
+            this.logger.warn(`friction scan failed: ${String(e)}`),
+          );
+        return this.alerts.sendDue();
+      },
       executeDueDeletions: () => this.account.executeDue(),
       purgeOldSamples: () => this.data.purgeOld(),
     };

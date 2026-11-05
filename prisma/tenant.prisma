@@ -2548,6 +2548,31 @@ model LearningObservation {
   @@map("learning_observations")
 }
 
+/// Friction (decision 38): one row per UTC day and device owner, rolled up from `host_approvals`.
+/// Counts and durations only; no tool, resource, summary or prompt text.
+model FrictionDaily {
+  id                  String   @id @default(uuid())
+  day                 DateTime @db.Date
+  /// Keycloak subject of the device owner; `_unassigned` for devices without one.
+  subject             String
+  prompts             Int      @default(0)
+  approvals           Int      @default(0)
+  denies              Int      @default(0)
+  /// Nobody answered in time.
+  expired             Int      @default(0)
+  /// Denied, then the same action was approved within 24 hours.
+  deniedLaterApproved Int      @default(0)
+  answered            Int      @default(0)
+  /// Sum of prompt-to-answer time over `answered`.
+  answerMs            Int      @default(0)
+  /// Time a tool waited on a person (answered or timed out, 2 minutes at most each).
+  blockedMs           Int      @default(0)
+  updatedAt           DateTime @updatedAt
+
+  @@unique([day, subject])
+  @@map("friction_daily")
+}
+
 /// "Always allow this here" was offered once for this device, tool, action and scope (decision 37).
 /// Spent when the person answers the request that carried it; no content is stored.
 model HostRuleOffer {

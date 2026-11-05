@@ -173,6 +173,17 @@ export function recordLicense(
   }
 }
 
+const frictionOverBudget = new Gauge({
+  name: 'manar_friction_workspaces_over_budget',
+  help: 'Workspaces averaging more than 5 prompts per developer per day over 7 days (decision 38). No tenant label: the staff API lists them.',
+  registers: [registry],
+});
+
+/** Sets the friction gauge (src/friction). */
+export function setFrictionOverBudget(count: number): void {
+  frictionOverBudget.set(count);
+}
+
 const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /** Bounded label: a reason code passes through, anything else is "other". */
