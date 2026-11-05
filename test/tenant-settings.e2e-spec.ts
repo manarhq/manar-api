@@ -12,6 +12,8 @@ import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import type { AppConfig } from '../src/config/env.validation';
 import { AiAdvisoryClient } from '../src/ai-advisory/ai-advisory-client.service';
+import { AuditService } from '../src/audit/audit.service';
+import { AiDefaultService } from '../src/tenant-settings/ai-default.service';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
@@ -199,9 +201,9 @@ describe('Tenant Settings (e2e)', () => {
 
     expect(body.tenantId).toBe(tenant.id);
     expect(body.slug).toBe(tenant.slug);
-    // Phase 2 defaults.
+    // Defaults: AI on for a new (non-Government, non-air-gapped) workspace, the rest off.
     expect(body.residency).toBe('UAE');
-    expect(body.allowExternalAi).toBe(false);
+    expect(body.allowExternalAi).toBe(true);
     expect(body.allowOutboundTelemetry).toBe(false);
     expect(body.allowCloudStorage).toBe(false);
 
@@ -330,5 +332,59 @@ describe('Tenant Settings (e2e)', () => {
     } finally {
       await fakeServer.stop();
     }
+  }, 30_000);
+
+  it('6. ai:default-on keeps an owner who turned AI off through PATCH (found in the real audit log), and the notice can be dismissed', async () => {
+    // Scenario 5 left allowExternalAi=false with a settings update on record; make the row look
+    // like an old workspace that predates the "chosen" flag.
+    await control.tenant.update({
+      where: { id: tenant.id },
+      data: {
+        allowExternalAi: false,
+        allowExternalAiChosen: false,
+        aiDefaultNoticePending: false,
+      },
+    });
+    const service = new AiDefaultService(
+      control,
+      tenantDatabaseManager,
+      app.get(AuditService),
+    );
+    const dry = await service.run({ dryRun: true });
+    expect(dry.keptExplicit).toBeGreaterThanOrEqual(1);
+    let row = await control.tenant.findUniqueOrThrow({
+      where: { id: tenant.id },
+    });
+    expect(row.allowExternalAiChosen).toBe(false); // dry run changes nothing
+
+    await service.run({ dryRun: false });
+    row = await control.tenant.findUniqueOrThrow({ where: { id: tenant.id } });
+    expect(row.allowExternalAi).toBe(false);
+    expect(row.allowExternalAiChosen).toBe(true);
+    expect(row.aiDefaultNoticePending).toBe(false);
+
+    await control.tenant.update({
+      where: { id: tenant.id },
+      data: { aiDefaultNoticePending: true },
+    });
+    const got = await request(app.getHttpServer() as App)
+      .get('/tenant/settings')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200);
+    expect(
+      (got.body as { aiDefaultNoticePending: boolean }).aiDefaultNoticePending,
+    ).toBe(true);
+    await request(app.getHttpServer() as App)
+      .post('/tenant/settings/ai-default-notice/dismiss')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(204);
+    const after = await request(app.getHttpServer() as App)
+      .get('/tenant/settings')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200);
+    expect(
+      (after.body as { aiDefaultNoticePending: boolean })
+        .aiDefaultNoticePending,
+    ).toBe(false);
   }, 30_000);
 });

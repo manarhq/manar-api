@@ -10,7 +10,8 @@ interface TenantCreateOptions {
   slug: string;
   name: string;
   residency: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
-  allowExternalAi: boolean;
+  allowExternalAi?: boolean;
+  government?: boolean;
   allowOutboundTelemetry: boolean;
   allowCloudStorage: boolean;
 }
@@ -50,6 +51,7 @@ export class TenantCreateCommand extends CommandRunner {
         name: options.name,
         residency: options.residency,
         allowExternalAi: options.allowExternalAi,
+        government: options.government,
         allowOutboundTelemetry: options.allowOutboundTelemetry,
         allowCloudStorage: options.allowCloudStorage,
       });
@@ -111,11 +113,18 @@ export class TenantCreateCommand extends CommandRunner {
   @Option({
     flags: '--allow-external-ai [boolean]',
     description:
-      'Allow this tenant to use external AI providers (default: false — safest)',
-    defaultValue: false,
+      'Allow this tenant to use external AI providers (default: true, false for --government or AIR_GAPPED)',
   })
   parseAllowExternalAi(value: string): boolean {
     return parseBoolean(value);
+  }
+
+  @Option({
+    flags: '--government',
+    description: 'A Government workspace: AI defaults off',
+  })
+  parseGovernment(): boolean {
+    return true;
   }
 
   @Option({

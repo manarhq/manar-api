@@ -25,6 +25,8 @@ export interface TenantSettings {
   allowOutboundTelemetry: boolean;
   allowCloudStorage: boolean;
   approvalsAdminsOnly: boolean;
+  /** `ai:default-on` switched AI on here and nobody has dismissed the notice yet. */
+  aiDefaultNoticePending: boolean;
   updatedAt: Date;
   sso: {
     realm: string;
@@ -127,7 +129,10 @@ export class TenantSettingsService {
           ? { residency: input.residency }
           : {}),
         ...(input.allowExternalAi !== undefined
-          ? { allowExternalAi: input.allowExternalAi }
+          ? {
+              allowExternalAi: input.allowExternalAi,
+              allowExternalAiChosen: true,
+            }
           : {}),
         ...(input.allowOutboundTelemetry !== undefined
           ? { allowOutboundTelemetry: input.allowOutboundTelemetry }
@@ -148,6 +153,14 @@ export class TenantSettingsService {
     await this.recordAuditEvent(tenantId, updatedByUserId, input);
 
     return this.toSettings(tenant);
+  }
+
+  /** Clears the one-time "AI is now on" notice for the workspace. Idempotent. */
+  async dismissAiDefaultNotice(tenantId: string): Promise<void> {
+    await this.control.tenant.update({
+      where: { id: tenantId },
+      data: { aiDefaultNoticePending: false },
+    });
   }
 
   private async recordAuditEvent(
@@ -172,6 +185,7 @@ export class TenantSettingsService {
     allowOutboundTelemetry: boolean;
     allowCloudStorage: boolean;
     approvalsAdminsOnly: boolean;
+    aiDefaultNoticePending: boolean;
     kind: string;
     updatedAt: Date;
     keycloakRealm: string | null;
@@ -212,6 +226,7 @@ export class TenantSettingsService {
       allowCloudStorage: tenant.allowCloudStorage,
       approvalsAdminsOnly:
         tenant.kind === 'COMPANY' && tenant.approvalsAdminsOnly,
+      aiDefaultNoticePending: tenant.aiDefaultNoticePending,
       updatedAt: tenant.updatedAt,
       sso,
       aiProvider: { provider, isExternal: isExternalAiProvider(provider) },

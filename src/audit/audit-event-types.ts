@@ -109,6 +109,8 @@ export const AUDIT_EVENT_TYPES = {
   USER_ROLE_REVOKE_REFUSED: 'user.role_revoke_refused',
   /** `PATCH /tenant/settings` updated one or more residency/AI-governance flags — see `TenantSettingsService.updateSettings`. */
   TENANT_SETTINGS_UPDATED: 'tenant.settings_updated',
+  /** `ai:default-on` switched AI on for this existing workspace (founder default of 5 Nov 2026); data carries no identifiers beyond the tenant's own log. */
+  TENANT_AI_DEFAULT_APPLIED: 'tenant.settings.ai_default_applied',
   /** Manar staff changed this tenant's feature flags, packs or LLM route through manar-fleet (src/platform/catalog.*). */
   CATALOG_UPDATED: 'catalog.updated',
 

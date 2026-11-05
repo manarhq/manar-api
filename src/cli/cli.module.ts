@@ -30,6 +30,8 @@ import {
 import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { LicenseVerifyCommand } from './commands/license-verify.command';
 import { BillingRetireLaunchOfferCommand } from './commands/billing-retire-launch-offer.command';
+import { AiDefaultOnCommand } from './commands/ai-default-on.command';
+import { AiDefaultService } from '../tenant-settings/ai-default.service';
 import { StripeGateway } from '../billing/stripe.gateway';
 
 /**
@@ -93,6 +95,8 @@ import { StripeGateway } from '../billing/stripe.gateway';
     WorkspaceProvisioningService,
     BillingRetireLaunchOfferCommand,
     StripeGateway,
+    AiDefaultOnCommand,
+    AiDefaultService,
   ],
 })
 export class CliModule {}

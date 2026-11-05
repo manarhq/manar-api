@@ -126,7 +126,12 @@ model Tenant {
   autoJoinSeatCap Int @default(25)
 
   residency              TenantResidency @default(UAE)
-  allowExternalAi        Boolean         @default(false)
+  /// New workspaces get true unless Government or air-gapped (`defaultAllowExternalAi`).
+  allowExternalAi        Boolean         @default(true)
+  /// True once an owner has set `allowExternalAi` by hand: a data migration or default change never overrides it.
+  allowExternalAiChosen  Boolean         @default(false)
+  /// Set by `ai:default-on` when it switched AI on for an existing workspace; cleared when an owner or admin dismisses the console notice.
+  aiDefaultNoticePending Boolean         @default(false)
   allowOutboundTelemetry Boolean         @default(false)
   allowCloudStorage      Boolean         @default(false)
   /// COMPANY: only approver roles decide approvals; a device owner can no longer decide their own.

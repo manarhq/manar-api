@@ -82,6 +82,12 @@ export class TenantSettingsResponseDto {
   })
   approvalsAdminsOnly!: boolean;
 
+  @ApiProperty({
+    description:
+      'True once, after `ai:default-on` switched AI on for this workspace, until an owner or admin dismisses the console notice.',
+  })
+  aiDefaultNoticePending!: boolean;
+
   @ApiProperty({ format: 'date-time' })
   updatedAt!: Date;
 

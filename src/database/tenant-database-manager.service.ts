@@ -27,11 +27,25 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * AI is on by default (opt-out, disclosed in the DPA and shown in Settings) for Free, Pro and
+ * Company workspaces; off for Government and for air-gapped ones, which no external model may reach.
+ */
+export function defaultAllowExternalAi(input: {
+  residency?: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
+  government?: boolean;
+}): boolean {
+  return input.residency !== 'AIR_GAPPED' && input.government !== true;
+}
+
 export interface ProvisionTenantInput {
   slug: string;
   name: string;
   residency?: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
+  /** Absent: `defaultAllowExternalAi`. */
   allowExternalAi?: boolean;
+  /** A Government workspace: AI defaults off. */
+  government?: boolean;
   allowOutboundTelemetry?: boolean;
   allowCloudStorage?: boolean;
   /** Hosted workspaces (spec 4.1). Absent for the legacy `tenant:create` path (COMPANY). */
@@ -654,7 +668,9 @@ export class TenantDatabaseManager implements OnModuleDestroy {
           ownerIssuer: input.ownerIssuer ?? null,
           entraTenantId: input.entraTenantId ?? null,
           residency: input.residency ?? 'UAE',
-          allowExternalAi: input.allowExternalAi ?? false,
+          allowExternalAi:
+            input.allowExternalAi ?? defaultAllowExternalAi(input),
+          allowExternalAiChosen: input.allowExternalAi !== undefined,
           allowOutboundTelemetry: input.allowOutboundTelemetry ?? false,
           allowCloudStorage: input.allowCloudStorage ?? false,
         },
