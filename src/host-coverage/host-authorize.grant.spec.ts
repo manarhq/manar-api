@@ -241,20 +241,29 @@ describe('8-hour grants on /host/v1/authorize', () => {
   });
 });
 
-describe('clearly safe shell commands score below the high-risk line', () => {
+describe('clearly read-only shell commands score 30 (below high risk, above the ceiling)', () => {
   const sh = (resource: string) => ({
     toolId: 'host.claude-code',
     actionId: 'shell',
     resource,
   });
-  it('read-only runs unasked, a dev loop asks but is not high risk', async () => {
+  it('with no rule they still ask, but are not high risk; test and build runs stay at 70', async () => {
     const w = make({});
-    expect(await w.svc.authorize(host, sh('ls -la'))).toMatchObject({
-      decision: 'ALLOW',
-      riskScore: 20,
-    });
-    expect(await w.svc.authorize(host, sh('pnpm test'))).toMatchObject({
+    expect(await w.svc.authorize(host, sh('ls -la src'))).toMatchObject({
       decision: 'APPROVAL_REQUIRED',
+      reason: 'risk_ceiling_exceeded',
+      riskScore: 30,
+    });
+    for (const c of ['pnpm test', 'cargo test', 'go test ./...', 'pytest'])
+      expect(await w.svc.authorize(host, sh(c))).toMatchObject({
+        decision: 'APPROVAL_REQUIRED',
+        riskScore: 70,
+      });
+  });
+  it('a workspace whose preset allows the rest still allows them', async () => {
+    const w = make({ policy: { effect: 'ALLOW', matchedRule: {} } });
+    expect(await w.svc.authorize(host, sh('ls -la src'))).toMatchObject({
+      decision: 'ALLOW',
       riskScore: 30,
     });
   });
@@ -266,6 +275,8 @@ describe('clearly safe shell commands score below the high-risk line', () => {
       'ls $(cat ~/.ssh/id_rsa)',
       '/bin/ls',
       'cat .env',
+      'grep -r password',
+      'rg --hidden key src',
     ])
       expect(await w.svc.authorize(host, sh(c))).toMatchObject({
         decision: 'APPROVAL_REQUIRED',
@@ -274,7 +285,7 @@ describe('clearly safe shell commands score below the high-risk line', () => {
   });
   it('a policy that asks still asks', async () => {
     const w = make({ policy: { effect: 'APPROVAL_REQUIRED' } });
-    expect((await w.svc.authorize(host, sh('ls -la'))).decision).toBe(
+    expect((await w.svc.authorize(host, sh('ls -la src'))).decision).toBe(
       'APPROVAL_REQUIRED',
     );
   });
