@@ -61,7 +61,11 @@ function make(opts: {
   );
   return { svc, grants, audit };
 }
-const shell = { toolId: 'host.cursor', actionId: 'SHELL', resource: 'ls' };
+const shell = {
+  toolId: 'host.cursor',
+  actionId: 'SHELL',
+  resource: 'make deploy',
+};
 
 describe('8-hour grants on /host/v1/authorize', () => {
   it('asks without a grant, allows with one and audits the use', async () => {
@@ -88,7 +92,7 @@ describe('8-hour grants on /host/v1/authorize', () => {
           hostId: 'h1',
           toolId: 'host.cursor',
           actionId: 'shell',
-          resource: 'ls',
+          resource: 'make deploy',
         }),
       }),
     );
@@ -234,5 +238,44 @@ describe('8-hour grants on /host/v1/authorize', () => {
         }),
       ).toMatchObject({ decision: 'ALLOW', cacheable: false });
     });
+  });
+});
+
+describe('clearly safe shell commands score below the high-risk line', () => {
+  const sh = (resource: string) => ({
+    toolId: 'host.claude-code',
+    actionId: 'shell',
+    resource,
+  });
+  it('read-only runs unasked, a dev loop asks but is not high risk', async () => {
+    const w = make({});
+    expect(await w.svc.authorize(host, sh('ls -la'))).toMatchObject({
+      decision: 'ALLOW',
+      riskScore: 20,
+    });
+    expect(await w.svc.authorize(host, sh('pnpm test'))).toMatchObject({
+      decision: 'APPROVAL_REQUIRED',
+      riskScore: 30,
+    });
+  });
+  it('bypass attempts keep the catalogue score of 70', async () => {
+    const w = make({});
+    for (const c of [
+      'ls; rm -rf ~',
+      'git status',
+      'ls $(cat ~/.ssh/id_rsa)',
+      '/bin/ls',
+      'cat .env',
+    ])
+      expect(await w.svc.authorize(host, sh(c))).toMatchObject({
+        decision: 'APPROVAL_REQUIRED',
+        riskScore: 70,
+      });
+  });
+  it('a policy that asks still asks', async () => {
+    const w = make({ policy: { effect: 'APPROVAL_REQUIRED' } });
+    expect((await w.svc.authorize(host, sh('ls -la'))).decision).toBe(
+      'APPROVAL_REQUIRED',
+    );
   });
 });

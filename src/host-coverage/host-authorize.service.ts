@@ -12,6 +12,8 @@ import {
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
+import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
+import { resourceKindFor } from '../policy/resource-aliases';
 import { KNOWN_HOST_TOOL_IDS, hostActionRisk } from '../tools/host-actions';
 import { redactForStorage } from '../contract/redact';
 import type { HostContext } from '../host-mtls/host-context';
@@ -184,8 +186,16 @@ export class HostAuthorizeService {
     if (!KNOWN_HOST_TOOL_IDS.includes(request.toolId))
       return { decision: 'DENY', reason: 'unknown_tool' };
     const actionId = request.actionId.toLowerCase();
-    const base = hostActionRisk(request.toolId, actionId);
-    if (base === null) return { decision: 'DENY', reason: 'unknown_action' };
+    const catalogue = hostActionRisk(request.toolId, actionId);
+    if (catalogue === null)
+      return { decision: 'DENY', reason: 'unknown_action' };
+    // A clearly safe command (read-only, or the project's own test/lint/build) scores below the
+    // high-risk line instead of 70. Policy rules, secrets and the kill switches still apply first.
+    const safe =
+      resourceKindFor(request.toolId, actionId) === 'command'
+        ? classifyCommand(request.resource)
+        : null;
+    const base = safe ? Math.min(catalogue, COMMAND_RISK[safe]) : catalogue;
 
     const kill = await this.killSwitches.checkAll(client, host.tenantId, {
       agentId: host.hostId,
