@@ -2268,6 +2268,9 @@ model Host {
   /// protected and its approvals go to approvers. Cleared when someone is assigned again.
   unassignedAt          DateTime?
   /// An admin restarted learning mode on this device (decision 36); null: it started at approval.
+  /// The first time this device was ever approved; set by a trigger and never moved, so a
+  /// re-approval cannot restart learning mode.
+  firstApprovedAt       DateTime?
   learningStartedAt     DateTime?
   /// An admin turned learning mode off for this device.
   learningOff           Boolean              @default(false)
@@ -2531,6 +2534,8 @@ model LearningObservation {
   toolId      String
   actionId    String
   scope       String
+  /// The ask this was seen under (`ceiling` or a policy rule); an accepted grant answers only it.
+  askKey      String    @default("")
   count       Int       @default(1)
   firstSeenAt DateTime  @default(now())
   lastSeenAt  DateTime  @default(now())
@@ -2538,7 +2543,7 @@ model LearningObservation {
   state       String    @default("NEW")
   decidedAt   DateTime?
 
-  @@unique([hostId, toolId, actionId, scope])
+  @@unique([hostId, toolId, actionId, scope, askKey])
   @@index([state, count])
   @@map("learning_observations")
 }

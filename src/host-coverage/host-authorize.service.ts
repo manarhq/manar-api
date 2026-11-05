@@ -1,6 +1,8 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { CEILING_ASK, policyAskKey } from './ask-keys';
+
+export { CEILING_ASK, policyAskKey };
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import {
@@ -45,25 +47,8 @@ export interface HostAuthorizeDecision {
   cacheable?: boolean;
   /** Which ask this is (`ceiling` or a policy rule); the approval and any scoped grant carry it. */
   askKey?: string;
-}
-
-/** The ask that comes from the risk ceiling: no rule matched. */
-export const CEILING_ASK = 'ceiling';
-
-/**
- * A policy ask is identified by the policy version and the exact rule that asked, so a grant made
- * for one rule never answers another, and republishing a policy ends the grants made for it.
- */
-export function policyAskKey(policy: {
+  /** Internal: the policy version that asked. Removed before the answer leaves the service. */
   policyVersionId?: string;
-  matchedRule?: unknown;
-}): string {
-  return `p:${createHash('sha256')
-    .update(
-      `${policy.policyVersionId ?? ''}|${JSON.stringify(policy.matchedRule ?? null)}`,
-    )
-    .digest('hex')
-    .slice(0, 24)}`;
 }
 
 /** Same as the default task ceiling for Claude Code: reads and fetches run, edits and shell ask. */
@@ -128,19 +113,19 @@ export class HostAuthorizeService {
     if (result.decision === 'APPROVAL_REQUIRED' && this.learning) {
       try {
         if (
-          await this.learning.serve(
-            client,
-            host.tenantId,
-            host,
-            request,
-            result.riskScore ?? 100,
-          )
+          await this.learning.serve(client, host.tenantId, host, request, {
+            riskScore: result.riskScore ?? 100,
+            askKey: result.askKey ?? '',
+            policyVersionId: result.policyVersionId,
+          })
         ) {
           learned = result;
           result = {
             decision: 'ALLOW',
             reason: 'learning_would_ask',
             riskScore: result.riskScore,
+            // Served only because the device is learning: the offline snapshot must not keep it.
+            cacheable: false,
           };
         }
       } catch (error) {
@@ -206,6 +191,9 @@ export class HostAuthorizeService {
     if (!recorded && result.decision === 'ALLOW') {
       return { decision: 'DENY', reason: 'enforcement_dependency_unavailable' };
     }
+    // Internal bookkeeping stays inside the service.
+    delete result.askKey;
+    delete result.policyVersionId;
     return result;
   }
 
@@ -296,6 +284,7 @@ export class HostAuthorizeService {
         reason: 'policy_requires_approval',
         riskScore: base,
         askKey,
+        policyVersionId: policy.policyVersionId,
       };
     }
     if (!policy.matchedRule && base > HOST_RISK_CEILING) {

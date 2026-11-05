@@ -84,7 +84,10 @@ describe('learning mode on /host/v1/authorize', () => {
     await w.svc.authorize(host, { ...edit, actionId: 'read' });
     expect(w.serve).not.toHaveBeenCalled();
     await w.svc.authorize(host, edit);
-    expect(w.serve.mock.calls[0]![4]).toBe(35);
+    expect(w.serve.mock.calls[0]![4]).toMatchObject({
+      riskScore: 35,
+      askKey: 'ceiling',
+    });
   });
   it('a failing learning check means the normal prompt', async () => {
     const w = make(true);

@@ -177,19 +177,20 @@ describe('8-hour grants on /host/v1/authorize', () => {
       const w = make({ patterns: ['/home/sara/proj/src/*'], policy: rule });
       const r = await w.svc.authorize(host, edit);
       expect(r.decision).toBe('APPROVAL_REQUIRED');
-      expect(r.askKey).toMatch(/^p:[0-9a-f]{24}$/);
+      expect(r).not.toHaveProperty('askKey'); // internal
     });
     it('a scope made for this rule answers it, republishing the policy does not', async () => {
-      const first = await make({ policy: rule }).svc.authorize(host, edit);
+      const key = policyAskKey(rule);
+      expect(key).toMatch(/^p:[0-9a-f]{24}$/);
       const mine = make({
         patterns: ['/home/sara/proj/src/*'],
-        grantAsk: first.askKey,
+        grantAsk: key,
         policy: rule,
       });
       expect((await mine.svc.authorize(host, edit)).decision).toBe('ALLOW');
       const republished = make({
         patterns: ['/home/sara/proj/src/*'],
-        grantAsk: first.askKey,
+        grantAsk: key,
         policy: { ...rule, policyVersionId: 'v2' },
       });
       expect((await republished.svc.authorize(host, edit)).decision).toBe(

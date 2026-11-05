@@ -1,5 +1,7 @@
 import { HANDOVER_ACTIONS } from '../approvals/decision-rights';
+import { scopeFor } from '../approvals/rule-scope';
 import { SITE_CONNECT_ACTION } from '../jail/jail-sites';
+import { classifyCommand } from '../policy/command-safety';
 import { resourceAliases, resourceKindFor } from '../policy/resource-aliases';
 
 /** A new device learns for this long after it is approved (decision 36). */
@@ -10,18 +12,22 @@ export const HIGH_RISK_FROM = 50;
 export const SUGGEST_AFTER = 3;
 
 export interface LearningHost {
-  approvedAt: Date | null;
+  /** The first time the device was ever approved; a re-approval does not move it. */
+  firstApprovedAt: Date | null;
   learningStartedAt: Date | null;
   learningOff: boolean;
 }
 
-/** Learning runs from approval (or an admin's restart) for `days`, unless switched off for the device. */
+/**
+ * Learning runs 7 days from the device's FIRST approval (or an admin's restart), unless switched
+ * off for the device. A device without one never learns (fail closed).
+ */
 export function learningWindow(
   host: LearningHost,
   days: number,
   now: Date,
 ): { active: boolean; endsAt: Date | null } {
-  const start = host.learningStartedAt ?? host.approvedAt;
+  const start = host.learningStartedAt ?? host.firstApprovedAt;
   if (host.learningOff || days <= 0 || !start)
     return { active: false, endsAt: null };
   const endsAt = new Date(start.getTime() + days * 86_400_000);
@@ -30,26 +36,41 @@ export function learningWindow(
 
 const BLOCKED_ALIAS = /^(secret-file|unsafe-path|unsafe-command|git-unsafe):/;
 
+export interface LearningCandidate {
+  /** The folder, origin or tool a suggestion would cover; null for a read-only command. */
+  scope: string | null;
+  /** A web fetch qualifies only for a site a person has already approved on this device. */
+  needsSeenSite: boolean;
+}
+
 /**
- * Whether an action that would have asked may run unasked while the device learns. Never for
- * high risk, a secret, a handover of a secret, a path that climbs out, a command the shell
- * expands, a risky git command, or a new site. The caller has already applied DENY, kill
- * switches and revoked-after-use blocks.
+ * Whether an action that would have asked MAY be quiet while the device learns, and under which
+ * scope; null means it keeps asking. Never: high risk, a secret, a secret handover, a climb out,
+ * a command the shell expands, a risky git command, a new site, a file action outside a home
+ * project folder (no scope: that is also every dot-folder at any depth), a command that is not
+ * clearly read-only. Run builds and tests are not read-only. The caller has already applied DENY,
+ * kill switches and revoked-after-use blocks, and checked which ask it is (`LearningService`).
  */
-export function learningMayAllow(input: {
+export function learningCandidate(input: {
   toolId: string;
   actionId: string;
   resource: string;
   riskScore: number;
-}): boolean {
+}): LearningCandidate | null {
   const a = input.actionId.toLowerCase();
-  if (input.riskScore >= HIGH_RISK_FROM) return false;
-  if (a === SITE_CONNECT_ACTION || HANDOVER_ACTIONS.includes(a)) return false;
+  if (input.riskScore >= HIGH_RISK_FROM) return null;
+  if (a === SITE_CONNECT_ACTION || HANDOVER_ACTIONS.includes(a)) return null;
   const kind =
     a === 'mcp' || a === 'webfetch'
       ? 'other'
       : resourceKindFor(input.toolId, a);
-  return !resourceAliases(input.resource, kind).some((x) =>
-    BLOCKED_ALIAS.test(x),
-  );
+  if (resourceAliases(input.resource, kind).some((x) => BLOCKED_ALIAS.test(x)))
+    return null;
+  if (kind === 'command')
+    return classifyCommand(input.resource)
+      ? { scope: null, needsSeenSite: false }
+      : null;
+  const scope = scopeFor(input.toolId, a, input.resource);
+  if (scope === null) return null;
+  return { scope, needsSeenSite: a === 'webfetch' };
 }

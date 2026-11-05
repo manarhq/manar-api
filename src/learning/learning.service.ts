@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -10,13 +11,18 @@ import {
   ALWAYS_GRANT_TTL_MS,
   createAllowGrant,
 } from '../approvals/allow-grants';
-import { scopeFor, scopeMatches } from '../approvals/rule-scope';
+import { scopeMatches } from '../approvals/rule-scope';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import {
+  START_MODE_POLICY_NAME,
+  modeForContentHash,
+} from '../workspace/start-mode.presets';
+import { CEILING_ASK } from '../host-coverage/ask-keys';
+import {
   LEARNING_DAYS,
   SUGGEST_AFTER,
-  learningMayAllow,
+  learningCandidate,
   learningWindow,
 } from './learning';
 
@@ -50,27 +56,41 @@ export class LearningService {
     });
     // Fail closed: an unknown workspace does not learn.
     if (!t) return { enabled: false, days: 0, source: 'default' };
+    // Government never learns, whatever is stored: it cannot be switched on.
+    if (await this.isGovernment(tenantId))
+      return { enabled: false, days: LEARNING_DAYS, source: 'default' };
     if (t.learningMode === 'on' || t.learningMode === 'off')
       return {
         enabled: t.learningMode === 'on',
         days: LEARNING_DAYS,
         source: 'workspace',
       };
+    return {
+      enabled: t.kind !== 'SAMPLE',
+      days: LEARNING_DAYS,
+      source: 'default',
+    };
+  }
+
+  private async isGovernment(tenantId: string): Promise<boolean> {
     const gov = await this.control.enterpriseProfile.findUnique({
       where: { tenantId },
       select: { sector: true },
     });
-    const off = t.kind === 'SAMPLE' || gov?.sector === 'GOVERNMENT';
-    return { enabled: !off, days: LEARNING_DAYS, source: 'default' };
+    return gov?.sector === 'GOVERNMENT';
   }
 
-  /** `default` clears the choice. */
+  /** `default` clears the choice. A Government workspace cannot turn learning on (403). */
   async setWorkspace(
     tenantId: string,
     value: LearningSwitch | 'default',
     actor: Actor,
     client: TenantPrismaClient,
   ): Promise<LearningConfig> {
+    if (value === 'on' && (await this.isGovernment(tenantId)))
+      throw new ForbiddenException(
+        'Learning mode is not available in a Government workspace. Nothing was changed.',
+      );
     await this.control.tenant.update({
       where: { id: tenantId },
       data: { learningMode: value === 'default' ? null : value },
@@ -93,27 +113,46 @@ export class LearningService {
     tenantId: string,
     host: { hostId: string },
     request: { toolId: string; actionId: string; resource: string },
-    riskScore: number,
+    ask: { riskScore: number; askKey: string; policyVersionId?: string },
     now: Date = new Date(),
   ): Promise<boolean> {
     const actionId = request.actionId.toLowerCase();
-    if (!learningMayAllow({ ...request, actionId, riskScore })) return false;
+    const candidate = learningCandidate({
+      ...request,
+      actionId,
+      riskScore: ask.riskScore,
+    });
+    if (!candidate) return false;
+    // Only the two kinds of ask learning may quiet: the risk ceiling, and the "ask" start-mode
+    // preset's own rules. Never the strict preset's rules ("outside the project", "new websites")
+    // and never a rule an admin wrote.
+    if (!(await this.quietable(client, ask))) return false;
     const cfg = await this.config(tenantId);
     if (!cfg.enabled) return false;
     const h = await client.host.findUnique({
       where: { id: host.hostId },
-      select: { approvedAt: true, learningStartedAt: true, learningOff: true },
+      select: {
+        firstApprovedAt: true,
+        learningStartedAt: true,
+        learningOff: true,
+      },
     });
     if (!h || !learningWindow(h, cfg.days, now).active) return false;
-    const scope =
-      scopeFor(request.toolId, actionId, request.resource) ?? UNSCOPED;
+    // A site never seen before stays an ask: a person must have approved this origin here before.
+    if (
+      candidate.needsSeenSite &&
+      !(await this.siteSeen(client, host.hostId, candidate.scope!))
+    )
+      return false;
+    const scope = candidate.scope ?? UNSCOPED;
     await client.learningObservation.upsert({
       where: {
-        hostId_toolId_actionId_scope: {
+        hostId_toolId_actionId_scope_askKey: {
           hostId: host.hostId,
           toolId: request.toolId,
           actionId,
           scope,
+          askKey: ask.askKey,
         },
       },
       create: {
@@ -121,6 +160,7 @@ export class LearningService {
         toolId: request.toolId,
         actionId,
         scope,
+        askKey: ask.askKey,
         firstSeenAt: now,
         lastSeenAt: now,
       },
@@ -129,12 +169,48 @@ export class LearningService {
     return true;
   }
 
+  private async quietable(
+    client: TenantPrismaClient,
+    ask: { askKey: string; policyVersionId?: string },
+  ): Promise<boolean> {
+    if (ask.askKey === CEILING_ASK) return true;
+    if (!ask.policyVersionId) return false;
+    const v = await client.policyVersion.findUnique({
+      where: { id: ask.policyVersionId },
+      select: { contentHash: true, policy: { select: { name: true } } },
+    });
+    return (
+      v?.policy.name === START_MODE_POLICY_NAME &&
+      modeForContentHash(v.contentHash) === 'ask'
+    );
+  }
+
+  /** A person already approved a fetch to this origin on this device. */
+  private async siteSeen(
+    client: TenantPrismaClient,
+    hostId: string,
+    scope: string,
+  ): Promise<boolean> {
+    const origin = scope.slice(0, -1); // `https://host/`
+    const seen = await client.hostApproval.findFirst({
+      where: {
+        hostId,
+        actionId: 'webfetch',
+        status: 'APPROVED',
+        decidedBy: { not: null },
+        resource: { startsWith: origin },
+      },
+      select: { id: true },
+    });
+    return seen !== null;
+  }
+
   /** Per device: is it learning, and until when (for the device list and the enforcement label). */
   async windows(
     tenantId: string,
     hosts: Array<{
       id: string;
-      approvedAt: Date | null;
+      firstApprovedAt: Date | null;
       learningStartedAt: Date | null;
       learningOff: boolean;
     }>,
@@ -165,7 +241,7 @@ export class LearningService {
         select: {
           id: true,
           hostname: true,
-          approvedAt: true,
+          firstApprovedAt: true,
           learningStartedAt: true,
           learningOff: true,
         },
@@ -213,6 +289,7 @@ export class LearningService {
           scope: r.scope,
           count: r.count,
           lastSeenAt: r.lastSeenAt,
+          lastsDays: Math.round(ALWAYS_GRANT_TTL_MS / 86_400_000),
         })),
     };
   }
@@ -226,7 +303,7 @@ export class LearningService {
   ) {
     const o = await client.learningObservation.findUnique({ where: { id } });
     if (!o) throw new NotFoundException('That suggestion was not found.');
-    if (o.state !== 'NEW' || o.scope === UNSCOPED)
+    if (o.state !== 'NEW' || o.scope === UNSCOPED || !o.askKey)
       throw new ConflictException('That suggestion was already answered.');
     const host = await client.host.findUnique({
       where: { id: o.hostId },
@@ -256,7 +333,7 @@ export class LearningService {
         createdBy: actor.id,
         sourceId: o.id,
         now,
-        always: { origin: 'learning', pattern: o.scope },
+        always: { origin: 'learning', pattern: o.scope, askKey: o.askKey },
       });
     });
     await this.audit.recordSafely(client, tenantId, {
