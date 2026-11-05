@@ -130,8 +130,9 @@ export class AuditIndexerService implements OnModuleInit, OnModuleDestroy {
 
     // One Bulk request per fetched batch instead of a refreshed index call per event. A batch
     // never exceeds BATCH_MAX messages and a partial batch is delivered after FLUSH_MS.
-    // Offsets are resolved only after the batch was handed to OpenSearch, so a crash mid-batch
-    // redelivers it (at-least-once; indexing is idempotent by eventId).
+    // Offsets are resolved only after OpenSearch accepted the batch; a failed batch is redelivered
+    // while this process runs. The group id is random per start and starts at the topic end, so
+    // events produced while the process was down are not replayed: audit:reindex heals that gap.
     await this.consumer.run({
       eachBatchAutoResolve: false,
       eachBatch: async (payload) => {
@@ -148,7 +149,7 @@ export class AuditIndexerService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  /** Bulk-indexes a batch, then publishes each event to the live feed. Never throws on index errors. */
+  /** Publishes each event to the live feed and bulk-indexes the batch. Throws if OpenSearch cannot take it. */
   async handleBatch(raws: (string | undefined)[]): Promise<void> {
     const envelopes: DomainEventEnvelope[] = [];
     for (const raw of raws) {
@@ -163,30 +164,24 @@ export class AuditIndexerService implements OnModuleInit, OnModuleDestroy {
     }
     if (envelopes.length === 0) return;
 
+    // The live feed first: it does not depend on indexing, and a redelivered batch only repeats
+    // events there (best-effort stream).
+    for (const envelope of envelopes) {
+      await this.redisPubSubService.publish(envelope);
+    }
+
     const documents = envelopes.map(toDocument);
-    try {
+    // A request-level failure (OpenSearch down, 5xx after retries) throws: the batch is not
+    // resolved, so the consumer redelivers it while this process runs. Items the index refuses
+    // for good are logged and skipped; audit:reindex heals them.
+    const { rejected } =
       await this.openSearchIndexService.bulkUpsertAuditEvents(documents, {
         refresh: false,
       });
-    } catch (bulkError) {
-      // One bad document must not hold back the rest: retry them one by one and log the
-      // failures (audit:reindex heals any that stay missing, as before batching).
-      this.logger.warn(
-        `Bulk index of ${documents.length} audit event(s) failed (${errorMessage(bulkError)}); retrying one by one`,
+    for (const r of rejected) {
+      this.logger.error(
+        `OpenSearch rejected audit event "${r.eventId}" (${r.reason}); skipped`,
       );
-      for (const document of documents) {
-        try {
-          await this.openSearchIndexService.upsertAuditEvent(document);
-        } catch (error) {
-          this.logger.error(
-            `Failed to index audit event "${document.eventId}" into OpenSearch: ${errorMessage(error)}`,
-          );
-        }
-      }
-    }
-
-    for (const envelope of envelopes) {
-      await this.redisPubSubService.publish(envelope);
     }
   }
 }

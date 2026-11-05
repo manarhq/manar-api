@@ -45,25 +45,35 @@ export class AuditReindexService {
       if (page.length === 0) break;
 
       // One Bulk request (and one refresh) per page, not one per event.
-      await this.openSearchIndexService.bulkUpsertAuditEvents(
-        page.map((event) => ({
-          eventId: event.id,
-          tenantId,
-          sequence: event.sequence,
-          eventType: event.eventType,
-          correlationId: event.correlationId,
-          actor: event.actor,
-          timestamp: event.timestamp.toISOString(),
-          data: event.data,
-          previousHash: event.previousHash,
-          eventHash: event.eventHash,
-          // Phase 11b Part 1 — same derived search fields the live indexer
-          // populates (AuditIndexerService.handleMessage); a from-scratch
-          // reindex must reconstruct GET /audit's filterable fields exactly
-          // as faithfully as everything else.
-          ...extractAuditSearchFields(event.eventType, event.actor, event.data),
-        })),
-      );
+      const { rejected } =
+        await this.openSearchIndexService.bulkUpsertAuditEvents(
+          page.map((event) => ({
+            eventId: event.id,
+            tenantId,
+            sequence: event.sequence,
+            eventType: event.eventType,
+            correlationId: event.correlationId,
+            actor: event.actor,
+            timestamp: event.timestamp.toISOString(),
+            data: event.data,
+            previousHash: event.previousHash,
+            eventHash: event.eventHash,
+            // Phase 11b Part 1 — same derived search fields the live indexer
+            // populates (AuditIndexerService.handleMessage); a from-scratch
+            // reindex must reconstruct GET /audit's filterable fields exactly
+            // as faithfully as everything else.
+            ...extractAuditSearchFields(
+              event.eventType,
+              event.actor,
+              event.data,
+            ),
+          })),
+        );
+      if (rejected.length > 0) {
+        throw new Error(
+          `Reindex: OpenSearch rejected ${rejected.length} event(s), first ${rejected[0]!.eventId}: ${rejected[0]!.reason}`,
+        );
+      }
       count += page.length;
 
       cursorSequence = page[page.length - 1]!.sequence;

@@ -4,7 +4,7 @@ import { ApiProperty } from '@nestjs/swagger';
 export class VerifyAuditChainResponseDto {
   @ApiProperty({
     description:
-      "True iff every event's hash and chain linkage verified correctly.",
+      'True only when the whole log is covered and verified (status "verified"). A partial result (incremental passed, no recent full check) is false with no brokenAt.',
   })
   valid!: boolean;
 
@@ -16,20 +16,35 @@ export class VerifyAuditChainResponseDto {
   brokenAt?: string;
 
   @ApiProperty({
+    enum: ['verified', 'partial', 'broken'],
+    description:
+      'verified: whole log covered (valid=true). partial: the incremental check passed but no recent full check did (valid=false, nothing is broken). broken: valid=false with brokenAt.',
+  })
+  status!: 'verified' | 'partial' | 'broken';
+
+  @ApiProperty({
     type: String,
     format: 'date-time',
     nullable: true,
     description:
-      'When the last nightly FULL verification passed. Null when none has run yet or the last one failed; never shown as verified in those cases.',
+      'Start of the newest full verification that passed. May be old or belong to an earlier night: check fullCheck.',
   })
   lastFullVerifiedAt!: string | null;
 
   @ApiProperty({
-    enum: ['passed', 'failed', 'never'],
+    enum: ['passed', 'stale', 'failed', 'error', 'never'],
     description:
-      'Outcome of the last nightly full verification. `failed` forces valid=false.',
+      'Newest full verification: passed (within 26 h), stale (passed but older), failed (found a break), error (the run could not complete), never.',
   })
-  fullCheck!: 'passed' | 'failed' | 'never';
+  fullCheck!: 'passed' | 'stale' | 'failed' | 'error' | 'never';
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Present on a partial result: the signed checkpoint the incremental check resumed from. Events up to it were covered by an earlier run.',
+    example: { sealSeq: '1234', at: '2026-11-05T10:00:00.000Z' },
+  })
+  coveredFrom?: { sealSeq: string; at: string };
 }
 
 /** `GET /audit/checkpoints/public-key`. */

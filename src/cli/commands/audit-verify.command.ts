@@ -1,6 +1,7 @@
-import { Logger } from '@nestjs/common';
+import { Logger, Optional } from '@nestjs/common';
 import { Command, CommandRunner, Option } from 'nest-commander';
 import { AuditService } from '../../audit/audit.service';
+import { AuditFullVerifyService } from '../../audit/audit-full-verify.service';
 import { ControlPrismaService } from '../../database/control-prisma.service';
 import { TenantDatabaseManager } from '../../database/tenant-database-manager.service';
 
@@ -27,6 +28,7 @@ export class AuditVerifyCommand extends CommandRunner {
     private readonly control: ControlPrismaService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly auditService: AuditService,
+    @Optional() private readonly fullVerify?: AuditFullVerifyService,
   ) {
     super();
   }
@@ -45,7 +47,10 @@ export class AuditVerifyCommand extends CommandRunner {
     for (const { id } of tenants) {
       const client = await this.tenantDatabaseManager.getClient(id);
       const events = await client.auditEvent.count();
-      const result = await this.auditService.verifyAuditChain(client, id);
+      // Recorded like the nightly run, so the console shows this check too.
+      const result = this.fullVerify
+        ? await this.fullVerify.verifyTenant(id)
+        : await this.auditService.verifyAuditChain(client, id);
       if (result.valid) {
         this.logger.log(`tenant ${id}: chain valid (${events} events)`);
       } else {

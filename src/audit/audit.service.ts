@@ -69,7 +69,15 @@ export interface AuditEventRecord {
 }
 
 export type VerifyAuditChainResult =
-  { valid: true } | { valid: false; brokenAt: string };
+  | {
+      valid: true;
+      /**
+       * Set only by an incremental run that resumed from a SEAL: events the walk skipped were
+       * covered by an earlier run, up to this SEAL. Absent when the whole log was walked.
+       */
+      coveredFrom?: { sealSeq: string; at: Date };
+    }
+  | { valid: false; brokenAt: string };
 
 /** An event whose id, time and correlation are fixed when `record` is called. */
 interface PendingAuditEvent {
@@ -671,7 +679,12 @@ export class AuditService implements OnModuleDestroy {
       hash: last.hash,
       heads: last.heads,
     });
-    return { valid: true };
+    return start
+      ? {
+          valid: true,
+          coveredFrom: { sealSeq: String(start.seq), at: start.createdAt },
+        }
+      : { valid: true };
   }
 
   /**

@@ -225,37 +225,58 @@ export class OpenSearchIndexService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Same upsert-by-`eventId` contract as `upsertAuditEvent`, for many
-   * documents in one Bulk request with one refresh. `audit:reindex` uses it:
-   * a refresh per document cost about 250 ms each on the CI runner's disk,
-   * so reindexing even a dozen events overran a 5 s test (pipeline 894), and
-   * a real tenant's history would take hours. Retrying the whole batch is
-   * safe because every item is keyed by `eventId`.
+   * documents in one Bulk request. `audit:reindex` refreshes once per page
+   * (a refresh per document cost about 250 ms each, pipeline 894); the live
+   * indexer does not refresh. Every item is keyed by `eventId`, so resending
+   * is safe. Only the items that failed are resent: 429 and 5xx items are
+   * retried (and the call throws if they still fail, so the caller can have
+   * Kafka redeliver); items the index rejects for good (a 4xx such as a
+   * mapping error) are returned in `rejected` and never retried.
    */
   async bulkUpsertAuditEvents(
     documents: AuditEventDocument[],
     opts: { refresh?: boolean } = {},
-  ): Promise<void> {
-    if (documents.length === 0) return;
+  ): Promise<{ rejected: { eventId: string; reason: string }[] }> {
+    const rejected: { eventId: string; reason: string }[] = [];
+    if (documents.length === 0) return { rejected };
     await this.ensureIndexExists();
-    await this.withRetry('bulkUpsertAuditEvents', async () => {
-      const response = await this.client.bulk({
-        refresh: opts.refresh ?? true,
-        body: documents.flatMap((document) => [
-          { index: { _index: this.indexName, _id: document.eventId } },
-          document,
-        ]),
-      });
+    let pending = documents;
+    for (let attempt = 1; ; attempt += 1) {
+      const batch = pending;
+      const response = await this.withRetry('bulkUpsertAuditEvents', () =>
+        this.client.bulk({
+          refresh: opts.refresh ?? true,
+          body: batch.flatMap((document) => [
+            { index: { _index: this.indexName, _id: document.eventId } },
+            document,
+          ]),
+        }),
+      );
       const body = response.body as {
         errors: boolean;
-        items: { index?: { error?: { type?: string } } }[];
+        items: { index?: { status?: number; error?: { type?: string } } }[];
       };
-      if (body.errors) {
-        const failed = body.items.filter((item) => item.index?.error);
+      if (!body.errors) return { rejected };
+      pending = [];
+      body.items.forEach((item, i) => {
+        const error = item.index?.error;
+        if (!error) return;
+        const status = item.index?.status ?? 500;
+        if (status === 429 || status >= 500) pending.push(batch[i]!);
+        else
+          rejected.push({
+            eventId: batch[i]!.eventId,
+            reason: error.type ?? `HTTP ${status}`,
+          });
+      });
+      if (pending.length === 0) return { rejected };
+      if (attempt >= RETRY_ATTEMPTS) {
         throw new Error(
-          `OpenSearch bulk upsert failed for ${failed.length}/${documents.length} document(s): ${failed[0]?.index?.error?.type ?? 'unknown'}`,
+          `OpenSearch bulk upsert: ${pending.length} document(s) still failing after ${attempt} attempts`,
         );
       }
-    });
+      await delay(RETRY_DELAY_MS * attempt);
+    }
   }
 
   /** Makes everything indexed so far searchable now (tests, and reindex verification). */

@@ -66,7 +66,7 @@ export interface EvidenceBundleContent {
    * finds that root in `proof.checkpoint.roots`, and verifies the
    * checkpoint's Ed25519 signature with `checkpointPublicKey`. Events
    * directly after one another in a partition also link by `previousHash`.
-   * `GET /audit/verify` remains the full-log check.
+   * `GET /audit/verify` is the log-wide check: incremental, plus the nightly full check it reports.
    */
   events: {
     id: string;

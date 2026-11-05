@@ -17,13 +17,11 @@ const msg = (n: number, tenantId = 't1') =>
   });
 
 function setup(
-  bulk: (docs: { eventId: string }[]) => Promise<void> = () =>
-    Promise.resolve(),
+  bulk: (docs: { eventId: string }[]) => Promise<{
+    rejected: { eventId: string; reason: string }[];
+  }> = () => Promise.resolve({ rejected: [] }),
 ) {
-  const os = {
-    bulkUpsertAuditEvents: vi.fn(bulk),
-    upsertAuditEvent: vi.fn(() => Promise.resolve()),
-  };
+  const os = { bulkUpsertAuditEvents: vi.fn(bulk) };
   const redis = { publish: vi.fn(() => Promise.resolve()) };
   const indexer = new AuditIndexerService(
     {} as ConfigService<never, true>,
@@ -54,23 +52,28 @@ describe('AuditIndexerService.handleBatch', () => {
       ['e3', 't1'],
     ]);
     expect(opts).toEqual({ refresh: false });
-    expect(os.upsertAuditEvent).not.toHaveBeenCalled();
     expect(redis.publish).toHaveBeenCalledTimes(3);
   });
 
-  it('falls back to single upserts when the bulk fails, so one bad document cannot stall the batch', async () => {
-    const { indexer, os, redis } = setup(() =>
-      Promise.reject(new Error('mapper_parsing_exception')),
+  it('throws when OpenSearch cannot take the batch, so the consumer redelivers it', async () => {
+    const { indexer, redis } = setup(() =>
+      Promise.reject(new Error('ECONNREFUSED')),
     );
-    os.upsertAuditEvent.mockImplementation(((d: { eventId: string }) =>
-      d.eventId === 'e2'
-        ? Promise.reject(new Error('poison'))
-        : Promise.resolve()) as never);
+    await expect(indexer.handleBatch([msg(1), msg(2)])).rejects.toThrow(
+      'ECONNREFUSED',
+    );
+    expect(redis.publish).toHaveBeenCalledTimes(2); // the live feed does not wait for indexing
+  });
+
+  it('logs and skips items the index refuses for good; the batch still completes', async () => {
+    const { indexer } = setup(() =>
+      Promise.resolve({
+        rejected: [{ eventId: 'e2', reason: 'mapper_parsing_exception' }],
+      }),
+    );
     await expect(
       indexer.handleBatch([msg(1), msg(2), msg(3)]),
     ).resolves.toBeUndefined();
-    expect(os.upsertAuditEvent).toHaveBeenCalledTimes(3);
-    expect(redis.publish).toHaveBeenCalledTimes(3);
   });
 
   it('bounds batches', () => {

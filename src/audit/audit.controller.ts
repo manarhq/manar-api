@@ -269,7 +269,7 @@ export class AuditController {
   @ApiOperation({
     summary: 'Verify the tamper-evident audit chain',
     description:
-      'Incremental check: resumes from the last verified SEAL (cheap enough to poll). A nightly worker job walks every AuditEvent in recorded order and stores the result: `lastFullVerifiedAt` is the time of the last full check that passed (null when none has run yet or the last one failed), `fullCheck` is passed, failed or never. A failed last full check makes `valid` false. Anchor-aware: tolerates retention-pruned history. Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER.',
+      'Incremental check: resumes from the last verified SEAL (cheap enough to poll). A nightly worker job walks every AuditEvent in recorded order and stores the result: `lastFullVerifiedAt` is when the last passing full check started (may be old: read `fullCheck`: passed, stale, failed, error or never). `valid` is true only when the whole log is covered: the incremental check passed and either it walked everything or the last full check passed within 26 h. Otherwise `status` is `partial` (verified since `coveredFrom`, last full check at `lastFullVerifiedAt`) or `broken`. A change to already-verified events is found by the next nightly full check. Anchor-aware: tolerates retention-pruned history. Requires AUDITOR, SECURITY_ADMIN, or TENANT_OWNER.',
   })
   @ApiResponse({ status: 200, type: VerifyAuditChainResponseDto })
   @ApiResponse({ status: 401, type: ErrorResponseDto })

@@ -301,7 +301,17 @@ describe('OpenSearch audit-event indexing (e2e)', () => {
     // warm-up wait) avoids a race between "subscribed" and "actually
     // ready to receive," the same reasoning `test/audit-live-sse.e2e-spec.ts`
     // documents for its own SSE connections.
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    // Wait for the partition assignment itself (a fixed sleep was flaky on a cold broker).
+    const consumer = (
+      indexer as unknown as {
+        consumer: { assignment(): unknown[] };
+      }
+    ).consumer;
+    const assignedBy = Date.now() + 30_000;
+    while (consumer.assignment().length === 0 && Date.now() < assignedBy) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(consumer.assignment().length).toBeGreaterThan(0);
 
     try {
       const brokers = (process.env.KAFKA_BROKERS ?? 'localhost:29092')

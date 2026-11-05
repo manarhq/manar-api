@@ -314,6 +314,7 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     }
     await this.control.$transaction([
       this.control.auditSealMark.deleteMany({ where: { tenantId } }),
+      this.control.auditFullVerification.deleteMany({ where: { tenantId } }),
       this.control.secretReference.deleteMany({ where: { tenantId } }),
       this.control.reportShare.deleteMany({ where: { tenantId } }),
       this.control.weeklyReportCard.deleteMany({ where: { tenantId } }),

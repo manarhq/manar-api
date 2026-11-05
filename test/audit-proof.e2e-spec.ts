@@ -534,11 +534,11 @@ describe('Audit proofs (e2e)', () => {
         );
       }
       await markedCheckpoints.createCheckpoint(t.client, t.id);
-      expect(
-        await markedAudit.verifyAuditChain(t.client, t.id, {
-          incremental: true,
-        }),
-      ).toEqual({ valid: true });
+      const resumed = await markedAudit.verifyAuditChain(t.client, t.id, {
+        incremental: true,
+      });
+      expect(resumed.valid).toBe(true);
+      expect(resumed.valid && resumed.coveredFrom).toBeTruthy();
 
       // The watermark is now SEAL 2. Events after it are still checked.
       const newer = [];

@@ -351,13 +351,20 @@ model AuditSealMark {
   @@map("audit_seal_marks")
 }
 
-/// Result of the newest nightly FULL audit verification per tenant (worker job). The badge
-/// shows `verifiedAt` only while `valid`; a failed or missing full check is never "verified".
+/// Newest FULL audit verification per tenant (nightly worker job, platform verify, CLI).
+/// `verifiedAt` is when the newest run STARTED (an older run never overwrites a newer one);
+/// `result` is passed | failed | error (a run that threw is never "verified"); `lastPassedAt` is
+/// the start of the newest passing run, kept across later failures and errors. `claimedAt` is the
+/// worker claim of a run in progress (two replicas never walk one tenant at once).
 model AuditFullVerification {
-  tenantId   String   @id
-  verifiedAt DateTime
-  valid      Boolean
-  brokenAt   String?
+  tenantId     String    @id
+  verifiedAt   DateTime?
+  result       String?
+  brokenAt     String?
+  lastPassedAt DateTime?
+  durationMs   Int?
+  claimedAt    DateTime?
+  updatedAt    DateTime  @updatedAt
 
   @@map("audit_full_verifications")
 }

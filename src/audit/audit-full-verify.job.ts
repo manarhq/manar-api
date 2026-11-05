@@ -6,48 +6,50 @@ import {
 } from '@nestjs/common';
 import { AuditFullVerifyService } from './audit-full-verify.service';
 
-/** Next 22:00 UTC (02:00 in the UAE) strictly after `now`. */
-export function nextFullVerifyAt(now: Date): Date {
-  const d = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 22),
-  );
-  return d.getTime() > now.getTime() ? d : new Date(d.getTime() + 86_400_000);
-}
-
-/** Worker-side nightly timer. Off with AUDIT_FULL_VERIFY_JOB=false. */
+/**
+ * Worker-side: checks every hour (and at start) which tenants are due. The schedule lives in the
+ * database: a tenant is due when its newest run started before the last 22:00 UTC (02:00 UAE), so
+ * a worker restarted after 22:00 still runs tonight. Off with AUDIT_FULL_VERIFY_JOB=false.
+ */
 @Injectable()
 export class AuditFullVerifyJob
   implements OnApplicationBootstrap, OnApplicationShutdown
 {
+  static readonly TICK_MS = 3_600_000;
   private readonly logger = new Logger(AuditFullVerifyJob.name);
   private timer?: NodeJS.Timeout;
+  private running = false;
 
   constructor(private readonly full: AuditFullVerifyService) {}
 
   onApplicationBootstrap(): void {
     if (process.env.AUDIT_FULL_VERIFY_JOB === 'false') return;
-    this.schedule();
+    void this.tick();
+    this.timer = setInterval(
+      () => void this.tick(),
+      AuditFullVerifyJob.TICK_MS,
+    );
+    this.timer.unref();
   }
 
   onApplicationShutdown(): void {
-    clearTimeout(this.timer);
+    clearInterval(this.timer);
   }
 
-  private schedule(): void {
-    const wait = nextFullVerifyAt(new Date()).getTime() - Date.now();
-    this.timer = setTimeout(() => {
-      void this.full
-        .runAll()
-        .then((r) =>
-          this.logger.log(
-            `Nightly full audit verification: ${r.checked} checked, ${r.failed} failed`,
-          ),
-        )
-        .catch((e) =>
-          this.logger.error(`Nightly full audit verification: ${String(e)}`),
-        )
-        .finally(() => this.schedule());
-    }, wait);
-    this.timer.unref();
+  async tick(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+    try {
+      const r = await this.full.runAll();
+      if (r.checked > 0) {
+        this.logger.log(
+          `Full audit verification: ${r.checked} checked, ${r.failed} failed, ${r.errored} errored`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(`Full audit verification tick: ${String(error)}`);
+    } finally {
+      this.running = false;
+    }
   }
 }

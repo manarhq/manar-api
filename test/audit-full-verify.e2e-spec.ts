@@ -73,10 +73,10 @@ describe('Audit full verification (e2e)', () => {
     await control.$disconnect();
   }, 60_000);
 
-  it('stores the nightly result; a tampered log is a failed full check and the badge is never valid', async () => {
+  async function tenantWithEvents(label: string) {
     const t = await manager.provisionTenant({
-      slug: `fullv-${randomUUID().slice(0, 8)}`,
-      name: 'Audit full verify',
+      slug: `fullv-${label}-${randomUUID().slice(0, 8)}`,
+      name: `Audit full verify ${label}`,
     });
     provisioned.push({
       tenantId: t.id,
@@ -95,29 +95,41 @@ describe('Audit full verification (e2e)', () => {
       );
     }
     await checkpoints.createCheckpoint(client, t.id);
+    return { id: t.id, client };
+  }
 
+  async function addSealedEvent(t: {
+    id: string;
+    client: Parameters<typeof audit.record>[0];
+  }) {
+    await audit.record(t.client, t.id, {
+      eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
+      actor: { type: 'agent', id: 'late' },
+      data: {},
+    });
+    await checkpoints.createCheckpoint(t.client, t.id);
+  }
+
+  it('full vs incremental cost, and a tampered log is a failed full check; the incremental result after a tamper is pinned', async () => {
+    const t = await tenantWithEvents('tamper');
     expect((await full.status(t.id)).state).toBe('never');
 
     let started = performance.now();
-    expect(await full.verifyTenant(t.id)).toBe(true);
+    expect((await full.verifyTenant(t.id)).valid).toBe(true);
     const fullMs = performance.now() - started;
     const status = await full.status(t.id);
     expect(status.state).toBe('passed');
     expect(status.lastFullVerifiedAt).toBeInstanceOf(Date);
 
     // The console's poll: incremental, resuming from the watermark the full walk just set.
-    await audit.record(client, t.id, {
-      eventType: AUDIT_EVENT_TYPES.TASK_CREATED,
-      actor: { type: 'agent', id: 'late' },
-      data: {},
-    });
-    await checkpoints.createCheckpoint(client, t.id);
+    await addSealedEvent(t);
     started = performance.now();
-    const incremental = await audit.verifyAuditChain(client, t.id, {
+    const incremental = await audit.verifyAuditChain(t.client, t.id, {
       incremental: true,
     });
     const incrementalMs = performance.now() - started;
-    expect(incremental).toEqual({ valid: true });
+    expect(incremental).toMatchObject({ valid: true });
+    expect(incremental.valid && incremental.coveredFrom).toBeTruthy();
     process.stderr.write(
       JSON.stringify({
         events,
@@ -126,16 +138,49 @@ describe('Audit full verification (e2e)', () => {
       }),
     );
 
-    // Tamper with one stored event: the next nightly run records a failure.
-    await client.$executeRaw`UPDATE "audit_events" SET "data" = '{"tampered":true}'::jsonb WHERE "id" = (SELECT "id" FROM "audit_events" LIMIT 1)`;
-    expect(await full.verifyTenant(t.id)).toBe(false);
+    // Tamper with an event the watermark already covers. PINNED: the incremental check does not
+    // re-walk covered events, so it still passes (the documented detection window); the next full
+    // check finds it.
+    await t.client
+      .$executeRaw`UPDATE "audit_events" SET "data" = '{"tampered":true}'::jsonb WHERE "id" = (SELECT "id" FROM "audit_events" ORDER BY "sequence" LIMIT 1)`;
+    const afterTamper = await audit.verifyAuditChain(t.client, t.id, {
+      incremental: true,
+    });
+    expect(afterTamper.valid).toBe(true);
+    expect(
+      composeVerifyResponse(afterTamper, await full.status(t.id)),
+    ).toMatchObject({
+      valid: true,
+      fullCheck: 'passed',
+    });
+
+    expect((await full.verifyTenant(t.id)).valid).toBe(false);
     const failed = await full.status(t.id);
     expect(failed.state).toBe('failed');
-    expect(failed.lastFullVerifiedAt).toBeNull();
-    expect(composeVerifyResponse({ valid: true }, failed)).toMatchObject({
+    expect(composeVerifyResponse(afterTamper, failed)).toMatchObject({
       valid: false,
+      status: 'broken',
       fullCheck: 'failed',
-      lastFullVerifiedAt: null,
+    });
+  }, 300_000);
+
+  it("a run that cannot complete (timestamp 'infinity') is an error result: the old pass no longer counts", async () => {
+    const t = await tenantWithEvents('infinity');
+    expect((await full.verifyTenant(t.id)).valid).toBe(true);
+    await addSealedEvent(t);
+    await t.client
+      .$executeRaw`UPDATE "audit_events" SET "timestamp" = 'infinity' WHERE "id" = (SELECT "id" FROM "audit_events" ORDER BY "sequence" LIMIT 1)`;
+
+    await expect(full.verifyTenant(t.id)).rejects.toThrow();
+    const s = await full.status(t.id);
+    expect(s.state).toBe('error');
+    const resumed = await audit.verifyAuditChain(t.client, t.id, {
+      incremental: true,
+    });
+    expect(composeVerifyResponse(resumed, s)).toMatchObject({
+      valid: false,
+      status: 'partial',
+      fullCheck: 'error',
     });
   }, 300_000);
 });
