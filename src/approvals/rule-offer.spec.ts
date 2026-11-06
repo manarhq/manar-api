@@ -10,6 +10,7 @@ type Row = {
   resource: string;
   highRisk: boolean;
   askKey: string | null;
+  resolvedPath?: string | null;
   status: string;
   decision: string | null;
   decidedBy: string | null;
@@ -24,6 +25,7 @@ function world(
     resource?: string;
     highRisk?: boolean;
     askKey?: string | null;
+    resolvedPath?: string;
   } = {},
 ) {
   const rows: Row[] = [];
@@ -50,6 +52,7 @@ function world(
     resource: over.resource ?? '/home/sara/proj/src/new.ts',
     highRisk: over.highRisk ?? false,
     askKey: over.askKey === undefined ? 'ceiling' : over.askKey,
+    resolvedPath: over.resolvedPath ?? null,
     status: 'PENDING',
     decision: null,
     decidedBy: null,
@@ -243,6 +246,38 @@ describe('rule offer after the 3rd identical approval (decision 37)', () => {
       actionId: 'edit',
       origin: 'offer',
       resourcePattern: '/home/sara/proj/src/*',
+    });
+  });
+
+  describe('an 8-hour grant for a link is bound to its real target', () => {
+    const eightHours = (w: ReturnType<typeof world>) =>
+      w.service.decide(w.client, 't1', {
+        approvalId: 'ap1',
+        subject: 'owner',
+        decision: 'approve_8h',
+        via: 'console',
+        ownerMayOperate: true,
+      });
+    it('records the canonical target', async () => {
+      const w = world({ resolvedPath: '/home/sara//.ssh/./authorized_keys' });
+      await eightHours(w);
+      expect(w.grants[0]).toMatchObject({
+        resolvedPath: '/home/sara/.ssh/authorized_keys',
+        askKey: 'ceiling',
+      });
+    });
+    it('a plain file records none', async () => {
+      const w = world({ resolvedPath: '/home/sara/proj/src/new.ts' });
+      await eightHours(w);
+      expect(w.grants[0]).not.toHaveProperty('resolvedPath');
+    });
+    it('a target that cannot be normalised creates NO grant (never a plain one)', async () => {
+      const w = world({
+        resolvedPath: '/home/sara/proj/../.ssh/authorized_keys',
+      });
+      const r = await eightHours(w);
+      expect(w.grants).toHaveLength(0);
+      expect(r.status).toBe('APPROVED');
     });
   });
 
