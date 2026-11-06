@@ -47,6 +47,9 @@ const SENSITIVE = new RegExp(
       'id_[^/]*',
       '[^/]*_history',
       '\\.?credentials[^/]*',
+      '[^/]*\\.(tfvars|env)',
+      '(secrets?|credentials)[^/]*\\.ya?ml',
+      'database\\.yml',
       '\\.git-credentials',
       'hosts\\.yml',
       'auth\\.json',
@@ -298,6 +301,17 @@ export function classifyCommand(command: string): CommandClass | null {
     case 'rg': {
       const p = parse(args, SPECS.rg!);
       if (!p) return null;
+      // rg walks every non-hidden file of a folder, committed secrets included (keys/server.pem,
+      // terraform.tfstate), and prints matching lines: it is read-only only when it prints names
+      // or counts, never contents.
+      const namesOnly = [
+        '--files',
+        '-l',
+        '--files-with-matches',
+        '-c',
+        '--count',
+      ].some((f) => p.seen.has(f));
+      if (!namesOnly) return null;
       const need = p.seen.has('--files') || p.seen.has('-e') ? 1 : 2;
       return p.operands.length >= need ? 'read-only' : null;
     }

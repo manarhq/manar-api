@@ -159,6 +159,18 @@ export function canonicalOrigin(raw: string): string | null {
  */
 export const MCP_READ_ONLY: Set<string> = new Set();
 
+/** True when a file action's (resolved) path names a secret or an unsafe place. */
+export function resolvedIsSecret(
+  toolId: string,
+  actionId: string,
+  path: string,
+): boolean {
+  const a = actionId.toLowerCase();
+  const kind = kindOf(toolId, a);
+  if (kind === 'command' || kind === 'other') return false;
+  return resourceAliases(path, 'path').some(blockedAlias);
+}
+
 /**
  * True when Manar cannot vouch that a file path is what it looks like. The device sends
  * `resolvedPath` (where the path really points once symlinks are followed; a project folder can

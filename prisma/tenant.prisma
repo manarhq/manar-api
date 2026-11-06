@@ -2232,6 +2232,12 @@ model Host {
   approvedBy            String?
   approvedAt            DateTime?
   lastSeenAt            DateTime?
+  /// What the device's User-Agent said on its last config poll (manar-edge/<version> (<os>; <arch>)).
+  /// Null for devices that have not polled since this column exists, and for old agents that send none.
+  agentVersion          String?
+  agentOs               String?
+  agentArch             String?
+  agentVersionSeenAt    DateTime?
   registeredFromIp      String
   /// SHA-256 of the SubjectPublicKeyInfo the machine is bound to.
   keyFingerprint        String
@@ -2606,6 +2612,11 @@ model HostApproval {
   selfConfirmedAt  DateTime?
   /// Which ask opened this (`ceiling`, or a hash of the policy version and rule); see `ApprovalAllowGrant.askKey`.
   askKey           String?
+  /// Where the device says a file path really points (symlinks followed); null when it did not say.
+  resolvedPath     String?
+  /// The device could not vouch for the path (missing, unclean or different from `resource`): no
+  /// "always allow" offer is made for this request.
+  pathLinked       Boolean           @default(false)
 
   @@index([hostId, status, expiresAt])
   @@index([createdAt, id])
