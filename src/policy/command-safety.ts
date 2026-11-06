@@ -39,32 +39,50 @@ export const COMMAND_RISK: Record<CommandClass, number> = { 'read-only': 30 };
 /** Letters, digits and the punctuation of relative paths and flags. */
 const PLAIN = /^[A-Za-z0-9_+,./=-]+$/;
 
+/** File extensions that hold secrets. A backup or editor suffix (`.bak`, `.old`, `.local`) keeps them secret. */
+const SECRET_EXTENSIONS = [
+  'pem',
+  'key',
+  'pfx',
+  'p12',
+  'kdbx',
+  'tfstate',
+  'tfvars',
+  'ppk',
+  'jks',
+  'keystore',
+  'env',
+];
+/** Whole file names that hold secrets (also with a suffix: `database.yml.orig`). */
+const SECRET_NAMES = [
+  '\\.git-credentials',
+  'hosts\\.yml',
+  'auth\\.json',
+  '\\.vault-token',
+  '\\.pgpass',
+  '\\.netrc',
+  '\\.npmrc',
+  '\\.pypirc',
+  'database\\.yml',
+  '(secrets?|credentials)[^/]*\\.ya?ml',
+];
+/** The optional suffix after a sensitive name or extension. */
+const BACKUP_SUFFIX = '(\\.[^/]*)?';
+
 const SENSITIVE = new RegExp(
   '(^|[/=])(' +
     [
+      `[^/]*\\.(${SECRET_EXTENSIONS.join('|')})${BACKUP_SUFFIX}`,
+      ...SECRET_NAMES.map((n) => `${n}${BACKUP_SUFFIX}`),
       '\\.env[^/]*',
-      '[^/]*\\.(pem|key|pfx|p12|kdbx|tfstate|ppk|jks|keystore)',
       'id_[^/]*',
       '[^/]*_history',
       '\\.?credentials[^/]*',
-      '[^/]*\\.tfvars(\\.[^/]*)?',
-      '[^/]*\\.env',
-      '(secrets?|credentials)[^/]*\\.ya?ml',
-      'database\\.yml',
-      '\\.git-credentials',
-      'hosts\\.yml',
-      'auth\\.json',
-      '\\.vault-token',
-      '\\.pgpass',
       '[^/]*kubeconfig[^/]*',
       '\\.kube',
-      '\\.netrc',
-      '\\.npmrc',
-      '\\.pypirc',
       '\\.ssh',
       '\\.aws',
       '\\.gnupg',
-      '\\.kube',
       '\\.azure',
       '\\.docker',
       '\\.git',
