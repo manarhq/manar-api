@@ -50,6 +50,7 @@ import { TenantSettingsModule } from './tenant-settings/tenant-settings.module';
 import { WorkspaceModule } from './workspace/workspace.module';
 import { ContactModule } from './contact/contact.module';
 import { GrowthModule } from './growth/growth.module';
+import { FrictionModule } from './friction/friction.module';
 import { DataCollectionHttpModule } from './data-collection/data-collection.module';
 import { KeycloakModule } from './keycloak/keycloak.module';
 import { ComplianceModule } from './compliance/compliance.module';
@@ -120,6 +121,7 @@ import {
     WorkspaceModule,
     ContactModule,
     GrowthModule,
+    FrictionModule,
     DataCollectionHttpModule,
     // Phase 15a: Data Classification, Compliance Mapping & Incidents.
     ComplianceModule,

@@ -351,6 +351,15 @@ model EdgeState {
   @@map("edge_state")
 }
 
+/// When a periodic job that must run once per interval across all replicas last ran
+/// (a conditional upsert in the service). Currently the friction alert check.
+model JobRun {
+  name  String   @id
+  ranAt DateTime
+
+  @@map("job_runs")
+}
+
 /// The newest audit SEAL (signed checkpoint) of each tenant, kept outside the
 /// tenant's own database. The worker refuses to seal, and verification
 /// fails, when the tenant database no longer holds this SEAL unchanged, so
