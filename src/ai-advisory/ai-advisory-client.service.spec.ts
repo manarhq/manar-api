@@ -54,6 +54,12 @@ const permissiveControl = fakeControlPrismaService(true);
  * fake server, as appropriate); this spec is scoped to `AiAdvisoryClient`
  * in isolation.
  */
+/** The six unary RPCs' counters (the streaming variants have their own). */
+const unaryCounts = (server: { callCounts: Record<string, number> }) =>
+  Object.entries(server.callCounts)
+    .filter(([name]) => !name.startsWith('stream'))
+    .map(([, n]) => n);
+
 describe('AiAdvisoryClient', () => {
   let fakeServer: FakeAnalysisServiceServer;
   let target: string;
@@ -507,7 +513,7 @@ describe('AiAdvisoryClient', () => {
         null,
         null,
       ]);
-      expect(Object.values(fakeServer.callCounts)).toEqual([0, 0, 0, 0, 0, 0]);
+      expect(unaryCounts(fakeServer)).toEqual([0, 0, 0, 0, 0, 0]);
       expect(await client.aiGate('t')).toBe('switched_off');
     });
 
@@ -520,7 +526,7 @@ describe('AiAdvisoryClient', () => {
         fakeControlPrismaService(true),
       );
       await allSix(client);
-      expect(Object.values(fakeServer.callCounts)).toEqual([1, 1, 1, 1, 1, 1]);
+      expect(unaryCounts(fakeServer)).toEqual([1, 1, 1, 1, 1, 1]);
       expect(await client.aiGate('t')).toBe('allowed');
     });
 
