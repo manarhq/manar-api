@@ -73,3 +73,19 @@ export function withOwnerLock<T>(
 ): Promise<T> {
   return withOwnerLocks(control, [tenantId], owner, write);
 }
+
+/**
+ * Runs `fn` in a transaction holding the per-workspace advisory lock `owners:<tenantId>` (the same
+ * key as {@link withOwnerLocks}): for everything that derives a role set from a membership (grant,
+ * every revoke). `fn` must re-read the membership it changes through `tx`, after the lock.
+ */
+export async function withWorkspaceLock<T>(
+  control: ControlPrismaService,
+  tenantId: string,
+  fn: (tx: Db) => Promise<T>,
+): Promise<T> {
+  return control.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owners:${tenantId}`}))`;
+    return fn(tx);
+  });
+}

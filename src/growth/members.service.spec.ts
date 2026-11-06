@@ -79,6 +79,7 @@ function setup(
       },
     },
   };
+  const authCache = { invalidate: vi.fn() };
   const svc = new MembersService(
     control as never,
     {
@@ -93,15 +94,17 @@ function setup(
     {
       get: (k: string) => (k === 'MANAR_LINK_SECRET' ? SECRET : undefined),
     } as never,
+    authCache as never,
   );
-  return { svc, memberships, invites };
+  return { svc, memberships, invites, authCache };
 }
 
 describe('Microsoft auto-join', () => {
   it('joins on the verified tid of a Microsoft sign-in', async () => {
-    const { svc, memberships } = setup();
+    const { svc, memberships, authCache } = setup();
     expect((await svc.autoJoin(identity())).tenantId).toBe('t');
     expect(memberships.create).toHaveBeenCalledOnce();
+    expect(authCache.invalidate).toHaveBeenCalledOnce();
   });
   it('never matches on email domain, other sign-in methods or the consumer tenant', async () => {
     for (const over of [
@@ -186,6 +189,7 @@ describe('invites', () => {
       token,
     );
     expect(s.memberships.create).toHaveBeenCalledOnce();
+    expect(s.authCache.invalidate).toHaveBeenCalledOnce(); // invite accept
   });
   it('refuses to invite a placeholder address', async () => {
     const s = setup();

@@ -60,6 +60,7 @@ const mem = (
 function setup(
   rows: M[],
   identity: Partial<VerifiedIdentity> & { subject: string },
+  profile: Record<string, unknown> | null = null,
 ) {
   const control = {
     membership: {
@@ -89,7 +90,10 @@ function setup(
     email: '',
     displayName: 'x',
   });
-  const getClient = vi.fn().mockResolvedValue({ userProfile: { upsert } });
+  const findUnique = vi.fn().mockResolvedValue(profile);
+  const getClient = vi
+    .fn()
+    .mockResolvedValue({ userProfile: { upsert, findUnique } });
   const guard = new JwtAuthGuard(
     {
       verify: () => Promise.resolve({ wids: [], issuer: 'iss-a', ...identity }),
@@ -107,7 +111,7 @@ function setup(
     await guard.canActivate(context);
     return request;
   };
-  return { run, getClient };
+  return { run, getClient, upsert };
 }
 
 describe('JwtAuthGuard: tenant and roles come from Membership', () => {
@@ -259,5 +263,40 @@ describe('a sub is only unique within its issuer', () => {
   it('the auth context carries the issuer', async () => {
     const { run } = setup([mem('s1', T('co'), 'AUDITOR')], { subject: 's1' });
     expect((await run()).authContext?.issuer).toBe('iss-a');
+  });
+});
+
+describe('JwtAuthGuard: lastSeenAt is written at most every 5 minutes', () => {
+  const rows = [mem('s1', T('co'), 'AUDITOR')];
+  const profile = (ageMs: number, extra = {}) => ({
+    id: 'u1',
+    keycloakSubject: 's1',
+    email: 'a@x.test',
+    displayName: 'A',
+    lastSeenAt: new Date(Date.now() - ageMs),
+    ...extra,
+  });
+  const id = { subject: 's1', email: 'a@x.test', displayName: 'A' };
+
+  it('does not write for a profile seen a minute ago', async () => {
+    const { run, upsert } = setup(rows, id, profile(60_000));
+    const req = await run();
+    expect(upsert).not.toHaveBeenCalled();
+    expect(req.authContext?.user.id).toBe('u1');
+  });
+
+  it('writes once the last write is older than 5 minutes', async () => {
+    const { run, upsert } = setup(rows, id, profile(6 * 60_000));
+    await run();
+    expect(upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes at once when the name or email changed, and creates a missing profile', async () => {
+    const changed = setup(rows, { ...id, email: 'new@x.test' }, profile(1000));
+    await changed.run();
+    expect(changed.upsert).toHaveBeenCalledTimes(1);
+    const created = setup(rows, id, null);
+    await created.run();
+    expect(created.upsert).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,6 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, Optional } from '@nestjs/common';
 import { failClosed } from '../common/fail-closed/fail-closed';
+import { AuthCache } from '../database/auth-cache.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import { privilegeRank } from './role-privilege';
 import { isRoleName, ROLES, type RoleName } from './roles';
@@ -48,7 +49,10 @@ export function rolesOf(m: {
  */
 @Injectable()
 export class MembershipService {
-  constructor(private readonly control: ControlPrismaService) {}
+  constructor(
+    private readonly control: ControlPrismaService,
+    @Optional() private readonly cache?: AuthCache,
+  ) {}
 
   async resolveActive(input: {
     issuer: string;
@@ -67,19 +71,37 @@ export class MembershipService {
     }
     const wanted = requestedTenantId ?? boundTenantId;
 
-    const rows = await failClosed('control-db', () =>
-      this.control.membership.findMany({
-        where: {
-          issuer,
-          subject,
-          status: 'ACTIVE',
-          ...(wanted ? { tenantId: wanted } : {}),
-          tenant: { status: 'ACTIVE' },
-        },
-        include: { tenant: true },
-        orderBy: { createdAt: 'asc' },
-      }),
-    );
+    const load = () =>
+      failClosed('control-db', () =>
+        this.control.membership.findMany({
+          where: {
+            issuer,
+            subject,
+            status: 'ACTIVE',
+            ...(wanted ? { tenantId: wanted } : {}),
+            tenant: { status: 'ACTIVE' },
+          },
+          select: {
+            id: true,
+            tenantId: true,
+            role: true,
+            extraRoles: true,
+            tenant: { select: { slug: true, kind: true } },
+          },
+          orderBy: { createdAt: 'asc' },
+        }),
+      );
+    // Up to 30 s old; every role or status change invalidates it (AuthCache). Empty = not cached.
+    const rows =
+      (await (this.cache
+        ? this.cache.remember(
+            `m\n${issuer}\n${subject}\n${wanted ?? ''}`,
+            async () => {
+              const r = await load();
+              return r.length ? r : null;
+            },
+          )
+        : load())) ?? [];
     // No selection: the personal workspace first, otherwise the oldest membership. A SAMPLE
     // workspace is never a default: it is reached only by choosing it.
     const m = wanted

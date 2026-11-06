@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
+import { AuthCache } from '../database/auth-cache.service';
 import {
   ConflictException,
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
@@ -64,6 +66,7 @@ export class AccountService {
     private readonly config: ConfigService<AppConfig, true>,
     private readonly data: DataCollectionService,
     private readonly audit: GrowthAuditService,
+    @Optional() private readonly authCache?: AuthCache,
   ) {}
 
   // ---- export ----
@@ -378,6 +381,8 @@ export class AccountService {
         if (error instanceof LastOwnerError) throw new SoleOwnerError();
         throw error;
       }
+      // Right after the commit that removed the owner roles, not only at the end of the deletion.
+      void this.authCache?.invalidate();
     }
     const owned = await this.control.tenant.findMany({
       where: {
@@ -445,6 +450,7 @@ export class AccountService {
     summary.companyMembershipsRemoved = (
       await this.control.membership.deleteMany({ where: { issuer, subject } })
     ).count;
+    void this.authCache?.invalidate(); // after the delete: the person's cached roles must go now
     // 4. Product improvement data: stored samples and the PostHog person.
     await this.data.deleteUserData(issuer, subject);
     await this.control.userDataPreference.deleteMany({

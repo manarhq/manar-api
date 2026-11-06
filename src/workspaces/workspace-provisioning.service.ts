@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { AuthCache } from '../database/auth-cache.service';
 import {
   ConflictException,
   ForbiddenException,
@@ -8,6 +9,7 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { authSetting } from '../auth/auth.config';
@@ -125,6 +127,7 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
     private readonly control: ControlPrismaService,
     private readonly config: ConfigService<AppConfig, true>,
     private readonly throttle: RedisThrottlerStorageService,
+    @Optional() private readonly authCache?: AuthCache,
   ) {}
 
   async createWorkspace(
@@ -326,6 +329,7 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
       this.control.tenantDatabaseBinding.deleteMany({ where: { tenantId } }),
       this.control.tenant.delete({ where: { id: tenantId } }),
     ]);
+    void this.authCache?.invalidate();
   }
 
   /** True when a new sign-up must wait: a backlog exists, provisioning is saturated, or the database count is near its limit. */

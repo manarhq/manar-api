@@ -149,6 +149,7 @@ function setup(
       record: async (tenantId: string, type: string) =>
         void audits.push(`${tenantId}:${type}`),
     } as never,
+    { invalidate: () => void calls.push('auth-cache') } as never,
   );
   return { svc, calls, row, hostUpdates, mails, audits, getLocks: () => locks };
 }
@@ -157,7 +158,7 @@ describe('account deletion', () => {
   it('runs Stripe, devices, workspace, memberships, Keycloak in that order', async () => {
     const { svc, calls, row } = setup();
     expect(await svc.executeDue()).toEqual({ done: 1, failed: 0 });
-    expect(calls).toEqual([
+    expect(calls.filter((c) => c !== 'auth-cache')).toEqual([
       'stripe:cancel',
       'stripe:del',
       'tombstone:p-1',
@@ -212,6 +213,15 @@ describe('account deletion', () => {
       calls.indexOf('stripe:cancel'),
     );
     expect(calls).toContain('memberships');
+  });
+  it('the auth cache is invalidated right after the owner removal commits, before anything is destroyed', async () => {
+    const { svc, calls } = setup({ ownerLeaving: 'ok' });
+    await svc.executeDue();
+    const removed = calls.findIndex((c) => c.startsWith('owner-removed'));
+    expect(calls[removed + 1]).toBe('auth-cache');
+    expect(calls.indexOf('auth-cache')).toBeLessThan(
+      calls.indexOf('stripe:cancel'),
+    );
   });
   it('a lost last-owner race refuses cleanly: nothing is cancelled, deleted or unassigned', async () => {
     const { svc, calls, row, hostUpdates, getLocks } = setup({

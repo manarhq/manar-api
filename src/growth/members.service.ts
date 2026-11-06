@@ -5,11 +5,13 @@ import {
   GoneException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { splitRoles } from '../auth/membership.service';
+import { AuthCache } from '../database/auth-cache.service';
 import type { RoleName } from '../auth/roles';
 import type { VerifiedIdentity } from '../auth/token-verifier.service';
 import {
@@ -49,6 +51,7 @@ export class MembersService {
     private readonly audit: GrowthAuditService,
     private readonly contact: ContactEmailService,
     private readonly config: ConfigService<AppConfig, true>,
+    @Optional() private readonly authCache?: AuthCache,
   ) {}
 
   private secret(): string {
@@ -228,6 +231,7 @@ export class MembersService {
           },
         });
     }
+    void this.authCache?.invalidate(); // the new member's roles are visible on every replica now
     await this.audit.record(
       invite.tenantId,
       AUDIT_EVENT_TYPES.WORKSPACE_INVITE_ACCEPTED,
@@ -323,6 +327,7 @@ export class MembersService {
           ...data,
         },
       });
+    void this.authCache?.invalidate();
     await this.audit.record(
       tenant.id,
       AUDIT_EVENT_TYPES.WORKSPACE_MEMBER_AUTOJOINED,
