@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../database/database.module';
+import { AiTelemetryModule } from '../ai-telemetry/ai-telemetry.module';
 import { AiAdvisoryClient } from './ai-advisory-client.service';
 
 /**
@@ -16,7 +17,7 @@ import { AiAdvisoryClient } from './ai-advisory-client.service';
  * `OpenBaoModule`.
  */
 @Module({
-  imports: [DatabaseModule],
+  imports: [DatabaseModule, AiTelemetryModule],
   providers: [AiAdvisoryClient],
   exports: [AiAdvisoryClient],
 })
