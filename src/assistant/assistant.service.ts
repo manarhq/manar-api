@@ -27,6 +27,7 @@ import {
 } from '../platform/catalog.service';
 import { failClosed } from '../common/fail-closed/fail-closed';
 import { RedisThrottlerStorageService } from '../rate-limit/redis-throttler-storage.service';
+import { AiTelemetryService } from '../ai-telemetry/ai-telemetry.service';
 import { AssistantReader } from './assistant-reader.service';
 import { cleanAnswer, dataBlock, systemPrompt } from './assistant.prompt';
 import {
@@ -91,6 +92,27 @@ const WITHHELD = {
     'Data loss prevention found credential-shaped or sensitive content in this record, so it is not shown to the assistant. The operator can open the source page to read it.',
 };
 
+/** What the streaming endpoint wants to hear while a question is answered. */
+export interface ChatHooks {
+  /** Everything that can fail with a normal HTTP status has passed; a model call comes next. */
+  onReady?: () => void;
+  /** Each piece of the answer text as the model writes it. */
+  onToken?: (text: string) => void;
+  /** The model asked for these tools: the text so far was thinking aloud, not the answer. */
+  onTools?: (names: string[]) => void;
+  /** Aborts the model call (the person pressed stop or closed the page). */
+  signal?: AbortSignal;
+}
+
+/** A positive number from config, else `fallback` (test doubles return strings for every key). */
+const positive = (value: unknown, fallback: number): number => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+/** Tools that act on what other tools in the same round read: they run after those finish. */
+const RUNS_AFTER_READS = new Set(['prepare_for_human']);
+
 interface ToolCall {
   id?: string;
   function?: { name?: string; arguments?: string };
@@ -116,12 +138,14 @@ export class AssistantService {
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly config: ConfigService<AppConfig, true>,
     private readonly catalog: CatalogService,
+    private readonly telemetry: AiTelemetryService,
   ) {}
 
   async chat(
     auth: AuthContext,
     authorization: string,
     rawBody: unknown,
+    hooks?: ChatHooks,
   ): Promise<AssistantChatResponse> {
     const body = parseBodyOrThrow(AssistantChatSchema, rawBody);
     await this.enforceRateLimit(auth);
@@ -129,6 +153,7 @@ export class AssistantService {
       this.catalog.llmGate(auth.tenant.id, 'assistant'),
     );
     const budget = { quota, spent: false };
+    hooks?.onReady?.();
 
     const started = Date.now();
     const locale = body.locale;
@@ -204,6 +229,7 @@ export class AssistantService {
           budget,
           messages,
           last ? undefined : tools,
+          hooks,
         );
         const calls = reply.tool_calls?.slice(0, MAX_CALLS_PER_ROUND) ?? [];
         if (calls.length === 0 || last) {
@@ -215,7 +241,13 @@ export class AssistantService {
           content: reply.content ?? '',
           tool_calls: calls,
         });
-        for (const call of calls) {
+        hooks?.onTools?.(calls.map((c) => c.function?.name ?? ''));
+        // Independent reads run together; a tool that acts on what the others read waits for them.
+        const outputs = new Array<{
+          name: string;
+          dlp: Awaited<ReturnType<typeof classifyDlp>>;
+        }>(calls.length);
+        const run = async (call: ToolCall, at: number): Promise<void> => {
           const name = call.function?.name ?? '';
           const output = await this.runTool(
             name,
@@ -223,7 +255,18 @@ export class AssistantService {
             ctx,
             meta,
           );
-          const dlp = await classifyDlp(output, analyze);
+          outputs[at] = { name, dlp: await classifyDlp(output, analyze) };
+        };
+        const isLate = (c: ToolCall) =>
+          RUNS_AFTER_READS.has(c.function?.name ?? '');
+        await Promise.all(
+          calls.flatMap((c, at) => (isLate(c) ? [] : [run(c, at)])),
+        );
+        for (const [at, c] of calls.entries()) {
+          if (isLate(c)) await run(c, at);
+        }
+        for (const [at, call] of calls.entries()) {
+          const { name, dlp } = outputs[at]!;
           if (dlp.blocked) meta.dlpWithheld++;
           if (
             dlp.piiTypes.length ||
@@ -315,6 +358,7 @@ export class AssistantService {
     budget: { quota: number | null; spent: boolean },
     messages: unknown[],
     tools: ReturnType<typeof toolSchemas> | undefined,
+    hooks?: ChatHooks,
   ): Promise<ModelMessage> {
     // A chat runs several model rounds; once the month's quota is spent, the next one is refused.
     if (budget.spent)
@@ -322,18 +366,75 @@ export class AssistantService {
         decision: 'DENY',
         reason: 'llm_token_quota_exhausted',
       });
-    const ollama =
-      (route?.provider ?? this.config.get('LLM_PROVIDER', { infer: true })) ===
-      'ollama';
-    const response = await this.upstream.chat(
-      {
-        messages,
-        ...(tools ? { tools, tool_choice: 'auto' } : {}),
-        // Small local models answer faster and stay on task without a thinking pass.
-        ...(ollama ? { reasoning_effort: 'none', temperature: 0.2 } : {}),
-      },
-      route,
+    const provider =
+      route?.provider ?? this.config.get('LLM_PROVIDER', { infer: true });
+    const ollama = provider === 'ollama';
+    const request = {
+      messages,
+      ...(tools ? { tools, tool_choice: 'auto' } : {}),
+      // Small local models answer faster and stay on task without a thinking pass.
+      ...(ollama
+        ? { reasoning_effort: 'none' as const, temperature: 0.2 }
+        : {}),
+    };
+    // One round is bounded far below the agents' 180 s proxy timeout: a stuck round fails fast.
+    const roundMs = positive(
+      this.config.get('ASSISTANT_LLM_ROUND_TIMEOUT_MS', { infer: true }),
+      45_000,
     );
+    const idleMs = positive(
+      this.config.get('LLM_STREAM_IDLE_MS', { infer: true }),
+      20_000,
+    );
+    const started = Date.now();
+    let firstToken: number | undefined;
+    const call = {
+      tenantId,
+      feature: 'assistant' as const,
+      provider: String(provider ?? 'unknown'),
+      model: route?.model ?? 'unknown',
+      inputTokens: 0,
+      outputTokens: 0,
+    };
+    let response;
+    try {
+      response = hooks?.onToken
+        ? await this.upstream.chatStream(
+            request,
+            route,
+            (text) => {
+              firstToken ??= Date.now() - started;
+              hooks.onToken?.(text);
+            },
+            {
+              signal: hooks.signal,
+              firstTokenMs: roundMs,
+              idleMs,
+              totalMs: roundMs * 2,
+            },
+          )
+        : await this.upstream.chat(request, route, hooks?.signal, roundMs);
+    } catch (error) {
+      void this.telemetry.record({
+        ...call,
+        latencyMs: Date.now() - started,
+        outcome: hooks?.signal?.aborted ? 'cancelled' : 'unavailable',
+      });
+      throw error;
+    }
+    const usage = response.body.usage;
+    const contentChars = JSON.stringify(response.body.choices ?? '').length;
+    void this.telemetry.record({
+      ...call,
+      provider: response.provider,
+      model: response.model,
+      inputTokens:
+        usage?.prompt_tokens ?? Math.ceil(JSON.stringify(messages).length / 4),
+      outputTokens: usage?.completion_tokens ?? Math.ceil(contentChars / 4),
+      latencyMs: Date.now() - started,
+      firstTokenMs: firstToken,
+      outcome: 'ok',
+    });
     // Counts toward the tenant's monthly quota; an unwritable counter refuses the answer.
     const monthTotal = await failClosed('limits-store', () =>
       this.catalog.recordTokens(tenantId, chargedTokens(response, messages)),

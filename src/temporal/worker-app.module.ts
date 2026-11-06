@@ -14,6 +14,7 @@ import { KillSwitchesModule } from '../kill-switches/kill-switches.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { AiAdvisoryModule } from '../ai-advisory/ai-advisory.module';
 import { ToolsModule } from '../tools/tools.module';
+import { AiTelemetryModule } from '../ai-telemetry/ai-telemetry.module';
 import { ApprovalActivitiesFactory } from './activities/approval.activities';
 import { AuditRetentionActivitiesFactory } from './activities/audit-retention.activities';
 import { WebhookDeliveryActivitiesFactory } from './activities/webhook-delivery.activities';
@@ -39,11 +40,15 @@ import { WeeklyReportJob } from '../workspace/weekly-report.job';
 import { ContactModule } from '../contact/contact.module';
 import { GrowthWorkerModule } from '../growth/growth.module';
 import { GrowthActivitiesFactory } from './activities/growth.activities';
+import { AiJobsModule } from '../ai-jobs/ai-jobs.module';
+import { PolicySuggestActivitiesFactory } from './activities/policy-suggest.activities';
 
 @Module({
   imports: [
     AppConfigModule,
     DatabaseModule,
+    AiTelemetryModule,
+    AiJobsModule,
     OpenBaoModule,
     AuditModule,
     KillSwitchesModule,
@@ -76,6 +81,7 @@ import { GrowthActivitiesFactory } from './activities/growth.activities';
     AuditRetentionActivitiesFactory,
     WebhookDeliveryActivitiesFactory,
     GrowthActivitiesFactory,
+    PolicySuggestActivitiesFactory,
   ],
   exports: [
     ApprovalActivitiesFactory,
