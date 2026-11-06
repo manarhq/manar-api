@@ -83,7 +83,11 @@ function make(opts: {
   );
   return { svc, grants, audit, open, evaluate };
 }
-const shell = { toolId: 'host.cursor', actionId: 'SHELL', resource: 'ls' };
+const shell = {
+  toolId: 'host.cursor',
+  actionId: 'SHELL',
+  resource: 'make deploy',
+};
 
 describe('8-hour grants on /host/v1/authorize', () => {
   it('asks without a grant, allows with one and audits the use', async () => {
@@ -110,7 +114,7 @@ describe('8-hour grants on /host/v1/authorize', () => {
           hostId: 'h1',
           toolId: 'host.cursor',
           actionId: 'shell',
-          resource: 'ls',
+          resource: 'make deploy',
         }),
       }),
     );
@@ -499,5 +503,55 @@ describe('8-hour grants on /host/v1/authorize', () => {
         }),
       ).toMatchObject({ decision: 'ALLOW', cacheable: false });
     });
+  });
+});
+
+describe('clearly read-only shell commands score 30 (below high risk, above the ceiling)', () => {
+  const sh = (resource: string) => ({
+    toolId: 'host.claude-code',
+    actionId: 'shell',
+    resource,
+  });
+  it('with no rule they still ask, but are not high risk; test and build runs stay at 70', async () => {
+    const w = make({});
+    expect(await w.svc.authorize(host, sh('ls -la src'))).toMatchObject({
+      decision: 'APPROVAL_REQUIRED',
+      reason: 'risk_ceiling_exceeded',
+      riskScore: 30,
+    });
+    for (const c of ['pnpm test', 'cargo test', 'go test ./...', 'pytest'])
+      expect(await w.svc.authorize(host, sh(c))).toMatchObject({
+        decision: 'APPROVAL_REQUIRED',
+        riskScore: 70,
+      });
+  });
+  it('a workspace whose preset allows the rest still allows them', async () => {
+    const w = make({ policy: { effect: 'ALLOW', matchedRule: {} } });
+    expect(await w.svc.authorize(host, sh('ls -la src'))).toMatchObject({
+      decision: 'ALLOW',
+      riskScore: 30,
+    });
+  });
+  it('bypass attempts keep the catalogue score of 70', async () => {
+    const w = make({});
+    for (const c of [
+      'ls; rm -rf ~',
+      'git status',
+      'ls $(cat ~/.ssh/id_rsa)',
+      '/bin/ls',
+      'cat .env',
+      'grep -r password',
+      'rg --hidden key src',
+    ])
+      expect(await w.svc.authorize(host, sh(c))).toMatchObject({
+        decision: 'APPROVAL_REQUIRED',
+        riskScore: 70,
+      });
+  });
+  it('a policy that asks still asks', async () => {
+    const w = make({ policy: { effect: 'APPROVAL_REQUIRED' } });
+    expect((await w.svc.authorize(host, sh('ls -la src'))).decision).toBe(
+      'APPROVAL_REQUIRED',
+    );
   });
 });

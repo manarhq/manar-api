@@ -12,6 +12,8 @@ import {
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
+import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
+import { resourceKindFor } from '../policy/resource-aliases';
 import { HIGH_RISK_SCORE } from '../approvals/host-approval-opener.service';
 import {
   canonicalAbsolute,
@@ -236,11 +238,18 @@ export class HostAuthorizeService {
     const catalogue = hostActionRisk(request.toolId, actionId);
     if (catalogue === null)
       return { decision: 'DENY', reason: 'unknown_action' };
+    // A clearly safe command (read-only, or the project's own test/lint/build) scores below the
+    // high-risk line instead of 70. Policy rules, secrets and the kill switches still apply first.
+    const safe =
+      resourceKindFor(request.toolId, actionId) === 'command'
+        ? classifyCommand(request.resource)
+        : null;
+    const scored = safe ? Math.min(catalogue, COMMAND_RISK[safe]) : catalogue;
     // The real target of a link is a secret (`docs -> ~/.ssh`): high risk, console only. This only
     // ever restricts; the policy still sees the path that was asked for.
     const base = resolvedIsSecret(request, actionId)
-      ? Math.max(catalogue, HIGH_RISK_SCORE)
-      : catalogue;
+      ? Math.max(scored, HIGH_RISK_SCORE)
+      : scored;
 
     const kill = await this.killSwitches.checkAll(client, host.tenantId, {
       agentId: host.hostId,
@@ -259,7 +268,8 @@ export class HostAuthorizeService {
     )
       return { decision: 'DENY', reason: 'revoked_after_use' };
 
-    // "Approve for 8 hours" (spec 4.6): looked up before the policy runs, used only to satisfy an
+    // Grants (spec 4.6): the exact "Approve for 8 hours" grant is read here, before the policy runs;
+    // a scoped "always allow here" grant is read only when something asks. Either only satisfies an
     // approval requirement below. A policy DENY and the kill switches above are never overridden.
     const target = {
       toolId: request.toolId,
