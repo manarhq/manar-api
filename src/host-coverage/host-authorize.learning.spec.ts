@@ -40,6 +40,7 @@ const edit = {
   toolId: 'host.cursor',
   actionId: 'edit',
   resource: '/home/sara/proj/a.ts',
+  resolvedPath: '/home/sara/proj/a.ts',
 };
 
 describe('learning mode on /host/v1/authorize', () => {

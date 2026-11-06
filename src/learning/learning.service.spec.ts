@@ -135,7 +135,15 @@ const serve = (
     askKey: string;
     policyVersionIds?: string[];
   } = ceiling,
-) => w.svc.serve(w.client, 't1', { hostId: 'h1' }, req, ask, NOW);
+) =>
+  w.svc.serve(
+    w.client,
+    't1',
+    { hostId: 'h1' },
+    { resolvedPath: req.resource, ...req },
+    ask,
+    NOW,
+  );
 
 describe('who learns (decision 36)', () => {
   it.each([
@@ -316,6 +324,16 @@ describe('serving an ask while a device learns', () => {
     const seen = world({ sites: true });
     expect(await serve(seen, fetchReq, ask)).toBe(true);
     expect(seen.obs[0]).toMatchObject({ scope: 'https://docs.x.io/*' });
+  });
+  it('needs the device to vouch for a file path: absent, different or outside the home project asks', async () => {
+    const w = world();
+    expect(await serve(w)).toBe(true);
+    for (const resolvedPath of [
+      undefined,
+      '/home/sara/.ssh/authorized_keys',
+      '/etc/hosts',
+    ])
+      expect(await serve(w, { ...edit, resolvedPath } as never)).toBe(false);
   });
   it('not after 7 days from the FIRST approval, not when off for the device or the workspace', async () => {
     expect(await serve(world({ host: { firstApprovedAt: day(8) } }))).toBe(
