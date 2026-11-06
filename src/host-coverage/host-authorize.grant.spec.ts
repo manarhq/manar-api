@@ -152,6 +152,29 @@ describe('8-hour grants on /host/v1/authorize', () => {
           'APPROVAL_REQUIRED',
         );
     });
+    it('a link inside the project (resolvedPath differs) gets no scope and no offer key', async () => {
+      const w = make({
+        patterns: ['/home/sara/proj/docs/*'],
+        policy: ask,
+        grantAsk: policyAskKey({
+          policyVersionId: undefined,
+          matchedRule: undefined,
+        }),
+      });
+      const link = '/home/sara/proj/docs/authorized_keys';
+      const r = await w.svc.authorize(host, {
+        ...edit(link),
+        resolvedPath: '/home/sara/.ssh/authorized_keys',
+      });
+      expect(r.decision).toBe('APPROVAL_REQUIRED');
+      expect(r.askKey).toBeUndefined();
+      expect(w.grants.findMany).not.toHaveBeenCalled();
+      // Same path, device reports it unchanged, or an older device sends nothing: as before.
+      for (const extra of [{ resolvedPath: link }, {}])
+        expect(
+          (await w.svc.authorize(host, { ...edit(link), ...extra })).decision,
+        ).toBe('ALLOW');
+    });
     it('is not looked up when nothing asks', async () => {
       const w = make({
         patterns: ['/home/sara/proj/src/*'],

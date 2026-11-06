@@ -14,6 +14,7 @@ import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
 import { resourceKindFor } from '../policy/resource-aliases';
+import { pathLinked } from '../approvals/rule-scope';
 import { KNOWN_HOST_TOOL_IDS, hostActionRisk } from '../tools/host-actions';
 import { redactForStorage } from '../contract/redact';
 import type { HostContext } from '../host-mtls/host-context';
@@ -26,6 +27,11 @@ export const HostAuthorizeSchema = z.object({
   toolId: z.string().min(1).max(128),
   actionId: z.string().min(1).max(128),
   resource: z.string().min(1).max(2048),
+  /**
+   * Where a file `resource` really points once symlinks are followed (sent by newer devices). When
+   * it differs from `resource`, no folder scope is offered or applied and learning stays out.
+   */
+  resolvedPath: z.string().min(1).max(2048).optional(),
 });
 export type HostAuthorizeRequest = z.infer<typeof HostAuthorizeSchema>;
 
@@ -229,12 +235,21 @@ export class HostAuthorizeService {
     );
     // A narrow "always allow here" scope is looked up only if something asks (below).
     // A grant made for one ask never answers another (a grant without a key is an older one).
+    // A path that is a link to somewhere else gets no scope, offered or applied: only the exact one.
+    const linked = pathLinked(
+      request.toolId,
+      actionId,
+      request.resource,
+      request.resolvedPath,
+    );
     let grant: { id: string } | null = null;
     const scoped = async (askKey: string) => {
       grant =
         exact && (!exact.askKey || exact.askKey === askKey)
           ? exact
-          : await findLivePatternGrant(client, host.hostId, target, askKey);
+          : linked
+            ? null
+            : await findLivePatternGrant(client, host.hostId, target, askKey);
       return grant;
     };
     const policy = await this.policy.evaluate(client, host.tenantId, {
@@ -263,7 +278,8 @@ export class HostAuthorizeService {
         decision: 'APPROVAL_REQUIRED',
         reason: 'policy_requires_approval',
         riskScore: base,
-        askKey,
+        // No key, no "always allow" offer for it.
+        askKey: linked ? undefined : askKey,
       };
     }
     if (!policy.matchedRule && base > HOST_RISK_CEILING) {
@@ -278,7 +294,7 @@ export class HostAuthorizeService {
         decision: 'APPROVAL_REQUIRED',
         reason: 'risk_ceiling_exceeded',
         riskScore: base,
-        askKey: CEILING_ASK,
+        askKey: linked ? undefined : CEILING_ASK,
       };
     }
     return { decision: 'ALLOW', riskScore: base };
