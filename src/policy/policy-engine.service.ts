@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { ToolRegistryService } from '../tools/tool-registry.service';
@@ -172,6 +173,29 @@ export class PolicyEngine {
     }
     return [...latestByPolicy.values()];
   }
+}
+
+/**
+ * The tenant's effective policy version: a short hash of the id of the latest PUBLISHED version of
+ * every policy (the same versions `evaluate` stamps on decisions as `policyVersionId`). It changes
+ * when any policy is published or withdrawn, and carries no policy content. Throws on a read
+ * failure; the caller decides what a missing value means.
+ */
+export async function effectivePolicyVersion(
+  tenantClient: TenantPrismaClient,
+): Promise<string> {
+  const rows = await tenantClient.policyVersion.findMany({
+    where: { status: 'PUBLISHED' },
+    orderBy: [{ policyId: 'asc' }, { version: 'desc' }],
+    select: { id: true, policyId: true },
+  });
+  const latest = new Map<string, string>();
+  for (const r of rows)
+    if (!latest.has(r.policyId)) latest.set(r.policyId, r.id);
+  return createHash('sha256')
+    .update([...latest.values()].sort().join(','))
+    .digest('hex')
+    .slice(0, 16);
 }
 
 /** First-match-wins within a single policy's rule list (Section 21) — see docs/policy-model.md. */

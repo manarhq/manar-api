@@ -469,6 +469,7 @@ describe('HostAuthorizeService', () => {
     expect(await down.svc.authorize(hostA, req('read'))).toEqual({
       decision: 'DENY',
       reason: 'enforcement_dependency_unavailable',
+      cacheable: false,
     });
     expect(
       (await make({ auditOk: false }).svc.authorize(hostA, req('read')))

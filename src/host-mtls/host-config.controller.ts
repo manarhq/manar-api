@@ -19,6 +19,7 @@ import { PauseService } from '../pause/pause.service';
 import { SecretsService } from '../secrets/secrets.service';
 import { DataCollectionService } from '../data-collection/data-collection.service';
 import { JailSitesService } from '../jail/jail-sites.service';
+import { effectivePolicyVersion } from '../policy/policy-engine.service';
 import { CurrentHost, type HostContext } from './host-context';
 import { HostAuthGuard } from './host-auth.guard';
 
@@ -55,6 +56,22 @@ export class HostConfigController {
     } catch (e) {
       this.logger.warn(`secret features unavailable: ${(e as Error).message}`);
       return [];
+    }
+  }
+
+  /**
+   * The tenant's effective policy version, so the device drops cached offline allows when it
+   * changes. Null on any failure or an unapproved device: the device then keeps what it has.
+   */
+  private async policyVersion(host: HostContext): Promise<string | null> {
+    if (host.status !== 'APPROVED') return null;
+    try {
+      return await effectivePolicyVersion(
+        await this.tenants.getClient(host.tenantId),
+      );
+    } catch (e) {
+      this.logger.warn(`policy version unavailable: ${(e as Error).message}`);
+      return null;
     }
   }
 
@@ -131,6 +148,9 @@ export class HostConfigController {
         .map((p) => p.trim())
         .filter((p) => p.length > 0 && p.length <= 512)
         .slice(0, 100),
+      // Tenant-wide effective policy version (opaque, no policy content): a change makes the
+      // device drop its cached offline allows.
+      policyVersion: await this.policyVersion(host),
       // Tools whose owner turned protection off; the device restores their backups.
       tools: await this.tools.instructions(host),
       // DOOR: secrets guard mode and tools paused by the monthly spend cap.
