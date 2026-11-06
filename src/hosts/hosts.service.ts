@@ -513,7 +513,14 @@ export class HostsService {
                 },
               })
             : await tx.host.create({
-                data: { machineId: input.machineId, ...fresh },
+                data: {
+                  machineId: input.machineId,
+                  ...fresh,
+                  // The machine's learning-mode anchor follows the machine, not the row: a removed
+                  // or cloned record's first approval carries over, so re-enrolling cannot restart
+                  // the 7 days. Null when the machine was never approved.
+                  firstApprovedAt: found?.firstApprovedAt ?? undefined,
+                },
               });
         const registered = await this.audit.recordInTransaction(tx, tenant.id, {
           eventType: AUDIT_EVENT_TYPES.HOST_REGISTERED,

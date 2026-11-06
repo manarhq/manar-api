@@ -546,6 +546,12 @@ describe('Add device re-install (e2e)', () => {
     expect(old.status).toBe('REMOVED');
     expect(old.machineId).toBe(`removed:${result.hostId}`);
     expect(old.hostname).toBe('LAPTOP');
+    // Learning mode's 7 days follow the machine: re-enrolling does not restart them.
+    expect(old.firstApprovedAt).not.toBeNull();
+    const again2 = await t.client.host.findUniqueOrThrow({
+      where: { id: fresh.hostId },
+    });
+    expect(again2.firstApprovedAt).toEqual(old.firstApprovedAt);
   }, 60_000);
 
   it('the device cap is checked before the code is used', async () => {

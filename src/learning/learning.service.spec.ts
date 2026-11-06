@@ -172,6 +172,12 @@ describe('who learns (decision 36)', () => {
       w.svc.setWorkspace('t1', 'on', { id: 'u' }, w.client),
     ).rejects.toThrow(/not available in a Government workspace/);
     expect(w.control.tenant.update).not.toHaveBeenCalled();
+    const err = await w.svc
+      .setWorkspace('t1', 'on', { id: 'u' }, w.client)
+      .catch((e: ForbiddenException) => e);
+    expect((err as ForbiddenException).getResponse()).toMatchObject({
+      code: 'learning_not_available_government',
+    });
     // off and default are fine
     await w.svc.setWorkspace('t1', 'off', { id: 'u' }, w.client);
     await w.svc.setWorkspace('t1', 'default', { id: 'u' }, w.client);
