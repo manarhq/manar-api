@@ -70,7 +70,8 @@ describe.skipIf(!url)('friction refresh under concurrency (postgres)', () => {
   });
 
   it('a second read right after does not rewrite the rollup', async () => {
-    const svc = new FrictionService({} as never, {} as never);
+    const svc = new FrictionService({} as never, {} as never); // one process
+    await new Promise((r) => setTimeout(r, 20));
     const stamp = async () =>
       (await db.frictionDaily.aggregate({ _max: { updatedAt: true } }))._max
         .updatedAt;

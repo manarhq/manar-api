@@ -54,6 +54,11 @@ interface RolledRow {
 export class FrictionService {
   private readonly logger = new Logger(FrictionService.name);
   private lastScan = 0;
+  /** When this process last finished a rollup for a workspace client, and how many days it covered. */
+  private readonly refreshed = new WeakMap<
+    object,
+    { at: number; days: number }
+  >();
   /** The staff rollup walks every workspace: keep it for a few minutes per window. */
   private readonly staffCache = new Map<
     number,
@@ -79,14 +84,15 @@ export class FrictionService {
     freshForMs = 0,
   ): Promise<void> {
     const range = dayRange(now, days);
-    if (freshForMs > 0) {
-      const last = await client.frictionDaily.aggregate({
-        where: { day: { gte: range[0]! } },
-        _max: { updatedAt: true },
-      });
-      const at = last._max.updatedAt?.getTime();
-      if (at !== undefined && Date.now() - at < freshForMs) return;
-    }
+    // A window at least this wide was rolled up by this process a moment ago.
+    const ran = this.refreshed.get(client);
+    if (
+      freshForMs > 0 &&
+      ran &&
+      ran.days >= days &&
+      Date.now() - ran.at < freshForMs
+    )
+      return;
     const have = new Set(
       (
         await client.frictionDaily.findMany({
@@ -100,7 +106,10 @@ export class FrictionService {
     const need = range.filter(
       (d) => recent.has(dayKey(d)) || !have.has(dayKey(d)),
     );
-    if (need.length === 0) return;
+    if (need.length === 0) {
+      this.refreshed.set(client, { at: Date.now(), days });
+      return;
+    }
     const from = need[0]!;
     const to = new Date(range[range.length - 1]!.getTime() + DAY);
     const rows = await client.$queryRaw<RolledRow[]>`
@@ -152,6 +161,7 @@ export class FrictionService {
         })),
       });
     });
+    this.refreshed.set(client, { at: Date.now(), days });
   }
 
   private async developers(client: TenantPrismaClient): Promise<number> {
