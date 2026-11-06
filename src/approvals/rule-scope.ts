@@ -152,6 +152,32 @@ export function canonicalOrigin(raw: string): string | null {
 
 // ---------------------------------------------------------------- public
 
+/**
+ * MCP tools (`server/tool`) that only read and may be offered an "always allow" scope. Deliberately
+ * empty: a tool name says nothing about what the server does with it (`github/delete_repository`,
+ * `postgres/execute_sql`), so MCP keeps asking until a person has vetted a tool here.
+ */
+export const MCP_READ_ONLY: Set<string> = new Set();
+
+/**
+ * True when the device reported where a file path really points (symlinks followed, `resolvedPath`)
+ * and it is not the path that was asked for, or is not a path Manar can read. A project folder can
+ * hold a link such as `docs -> ~/.ssh`; the server cannot see it, the device can. No
+ * `resolvedPath` (older devices) is not a mismatch: behaviour stays as before.
+ */
+export function pathLinked(
+  toolId: string,
+  actionId: string,
+  resource: string,
+  resolvedPath: string | undefined | null,
+): boolean {
+  if (resolvedPath === undefined || resolvedPath === null) return false;
+  const kind = kindOf(toolId, actionId.toLowerCase());
+  if (kind === 'command' || kind === 'other') return false;
+  const real = canonicalAbsolute(resolvedPath);
+  return real === null || real !== canonicalAbsolute(resource);
+}
+
 export function scopeFor(
   toolId: string,
   actionId: string,
@@ -165,8 +191,10 @@ export function scopeFor(
       const o = canonicalOrigin(resource);
       return o ? `${o}/*` : null;
     }
-    // mcp: `server/tool`, exact (no `*`, so it can never widen).
-    return /^[\w.@-]+\/[\w.@:-]+$/.test(resource) ? resource : null;
+    // mcp: `server/tool`, exact (no `*`, so it can never widen), and only for a vetted read-only tool.
+    return MCP_READ_ONLY.has(resource) && /^[\w.@-]+\/[\w.@:-]+$/.test(resource)
+      ? resource
+      : null;
   }
   return folderScope(resource);
 }
@@ -186,7 +214,7 @@ export function scopeMatches(
       const o = canonicalOrigin(resource);
       return o !== null && `${o}/*` === pattern;
     }
-    return pattern === resource;
+    return pattern === resource && MCP_READ_ONLY.has(resource);
   }
   return pathMatches(pattern, resource);
 }
