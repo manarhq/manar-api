@@ -374,7 +374,17 @@ describe('device config', () => {
       { instructions: () => Promise.resolve({ unprotect: [] }) } as never,
       { isPaused: () => Promise.resolve(false) } as never,
       { doorConfig: () => Promise.reject(new Error('db down')) } as never,
-      { getClient: () => Promise.resolve({}) } as never,
+      {
+        getClient: () =>
+          Promise.resolve({
+            tool: { findMany: () => Promise.resolve([]) },
+            policyVersion: { findMany: () => Promise.resolve([]) },
+            killSwitch: { findMany: () => Promise.resolve([]) },
+            workspacePause: { findUnique: () => Promise.resolve(null) },
+            approvalAllowGrant: { findMany: () => Promise.resolve([]) },
+            toolAction: { findMany: () => Promise.resolve([]) },
+          }),
+      } as never,
       {
         features: () => Promise.resolve([]),
         vaultGrants: () => Promise.resolve([]),
@@ -387,11 +397,17 @@ describe('device config', () => {
           }),
       } as never,
       {} as never,
+      { isActive: () => Promise.resolve(false) } as never,
     );
-    const cfg = await c.config(host('h1') as never, { headers: {} } as never);
+    const cfg = await c.config(
+      { ...host('h1'), status: 'APPROVED' } as never,
+      { headers: {} } as never,
+    );
     expect(cfg.offlineReadsAllowed).toBe(true);
     expect(cfg.offlineReadDeny).toEqual([]);
     expect(cfg.door).toEqual({ unavailable: true });
     expect(cfg.tools).toEqual({ unprotect: [] });
+    expect(cfg.policyVersion).toMatch(/^[0-9a-f]{16}$/);
+    expect(cfg.offlineReadsAllowed).toBe(true);
   });
 });
