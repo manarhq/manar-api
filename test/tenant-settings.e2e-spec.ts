@@ -6,12 +6,14 @@ import {
   FastifyAdapter,
   NestFastifyApplication,
 } from '@nestjs/platform-fastify';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import type { AppConfig } from '../src/config/env.validation';
 import { AiAdvisoryClient } from '../src/ai-advisory/ai-advisory-client.service';
+import { AuditService } from '../src/audit/audit.service';
+import { AiDefaultService } from '../src/tenant-settings/ai-default.service';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
@@ -199,7 +201,7 @@ describe('Tenant Settings (e2e)', () => {
 
     expect(body.tenantId).toBe(tenant.id);
     expect(body.slug).toBe(tenant.slug);
-    // Phase 2 defaults.
+    // Defaults: provisioned with no sector, so AI is off (it is on only for a recorded commercial sector); the rest off.
     expect(body.residency).toBe('UAE');
     expect(body.allowExternalAi).toBe(false);
     expect(body.allowOutboundTelemetry).toBe(false);
@@ -253,7 +255,7 @@ describe('Tenant Settings (e2e)', () => {
     };
     expect(patchBody.allowCloudStorage).toBe(true);
     expect(patchBody.residency).toBe('CUSTOM_REGION');
-    // Untouched field is unchanged.
+    // Untouched field is unchanged (provisioned without a sector: AI off).
     expect(patchBody.allowExternalAi).toBe(false);
 
     // Persists across a fresh GET, not just echoed back in the PATCH response.
@@ -330,5 +332,106 @@ describe('Tenant Settings (e2e)', () => {
     } finally {
       await fakeServer.stop();
     }
+  }, 30_000);
+
+  it('6. ai:default-on keeps an owner who turned AI off through PATCH (found in the real audit log), and the notice can be dismissed', async () => {
+    // Scenario 5 left allowExternalAi=false with a settings update on record; make the row look
+    // like an old workspace that predates the "chosen" flag.
+    await control.tenant.update({
+      where: { id: tenant.id },
+      data: {
+        sector: 'COMMERCIAL',
+        allowExternalAi: false,
+        allowExternalAiChosen: false,
+        aiDefaultNoticePending: false,
+      },
+    });
+    const service = new AiDefaultService(
+      control,
+      tenantDatabaseManager,
+      app.get(AuditService),
+      // The command only flips on hosted deployments; the e2e app runs as a customer one.
+      {
+        get: (key: string, opts?: object): unknown =>
+          key === 'MANAR_DEPLOYMENT'
+            ? 'hosted'
+            : app.get(ConfigService).get(key, opts as never),
+      } as unknown as ConfigService<AppConfig, true>,
+    );
+    const dry = await service.run({ dryRun: true });
+    expect(dry.keptExplicit).toBeGreaterThanOrEqual(1);
+    let row = await control.tenant.findUniqueOrThrow({
+      where: { id: tenant.id },
+    });
+    expect(row.allowExternalAiChosen).toBe(false); // dry run changes nothing
+
+    await service.run({ dryRun: false });
+    row = await control.tenant.findUniqueOrThrow({ where: { id: tenant.id } });
+    expect(row.allowExternalAi).toBe(false);
+    expect(row.allowExternalAiChosen).toBe(true);
+    expect(row.aiDefaultNoticePending).toBe(false);
+
+    await control.tenant.update({
+      where: { id: tenant.id },
+      data: { aiDefaultNoticePending: true },
+    });
+    const got = await request(app.getHttpServer() as App)
+      .get('/tenant/settings')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200);
+    expect(
+      (got.body as { aiDefaultNoticePending: boolean }).aiDefaultNoticePending,
+    ).toBe(true);
+    await request(app.getHttpServer() as App)
+      .post('/tenant/settings/ai-default-notice/dismiss')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(204);
+    const after = await request(app.getHttpServer() as App)
+      .get('/tenant/settings')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200);
+    expect(
+      (after.body as { aiDefaultNoticePending: boolean })
+        .aiDefaultNoticePending,
+    ).toBe(false);
+  }, 30_000);
+
+  it('7. the dismiss is admin-only and audited; any change to allowExternalAi clears both notices', async () => {
+    await request(app.getHttpServer() as App)
+      .post('/tenant/settings/ai-default-notice/dismiss')
+      .set('Authorization', `Bearer ${plainToken}`)
+      .expect(403);
+
+    await control.tenant.update({
+      where: { id: tenant.id },
+      data: { aiDefaultNoticePending: true, aiOptInNoticePending: true },
+    });
+    await request(app.getHttpServer() as App)
+      .post('/tenant/settings/ai-default-notice/dismiss')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(204);
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    expect(
+      await tenantClient.auditEvent.count({
+        where: { eventType: 'tenant.settings.ai_notice_dismissed' },
+      }),
+    ).toBeGreaterThanOrEqual(1);
+
+    await control.tenant.update({
+      where: { id: tenant.id },
+      data: { aiDefaultNoticePending: true, aiOptInNoticePending: true },
+    });
+    await request(app.getHttpServer() as App)
+      .patch('/tenant/settings')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ allowExternalAi: true })
+      .expect(200);
+    const row = await control.tenant.findUniqueOrThrow({
+      where: { id: tenant.id },
+    });
+    expect(row).toMatchObject({
+      aiDefaultNoticePending: false,
+      aiOptInNoticePending: false,
+    });
   }, 30_000);
 });

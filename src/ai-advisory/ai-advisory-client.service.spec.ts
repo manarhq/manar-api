@@ -27,6 +27,7 @@ function fakeConfigService(
 /** A fake `ControlPrismaService` whose `tenant.findUnique` returns a fixed `allowExternalAi` value (or throws, for the fail-closed-on-error scenario) — never a real control DB connection. */
 function fakeControlPrismaService(
   allowExternalAi: boolean | 'throw' = true,
+  residency: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED' = 'UAE',
 ): ControlPrismaService {
   return {
     tenant: {
@@ -34,7 +35,7 @@ function fakeControlPrismaService(
         if (allowExternalAi === 'throw') {
           throw new Error('control DB unreachable');
         }
-        return Promise.resolve({ allowExternalAi });
+        return Promise.resolve({ allowExternalAi, residency });
       },
     },
   } as unknown as ControlPrismaService;
@@ -53,6 +54,12 @@ const permissiveControl = fakeControlPrismaService(true);
  * fake server, as appropriate); this spec is scoped to `AiAdvisoryClient`
  * in isolation.
  */
+/** The six unary RPCs' counters (the streaming variants have their own). */
+const unaryCounts = (server: { callCounts: Record<string, number> }) =>
+  Object.entries(server.callCounts)
+    .filter(([name]) => !name.startsWith('stream'))
+    .map(([, n]) => n);
+
 describe('AiAdvisoryClient', () => {
   let fakeServer: FakeAnalysisServiceServer;
   let target: string;
@@ -463,6 +470,127 @@ describe('AiAdvisoryClient', () => {
    * requires).
    */
   describe('data residency enforcement (Section 54)', () => {
+    const dlp = (client: AiAdvisoryClient) =>
+      client.analyzeDlp({ content: 'x', tenantId: 't' });
+
+    it('Azure OpenAI is external: a tenant with allowExternalAi=false never reaches it (E-016)', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'azure_openai',
+        }),
+        fakeControlPrismaService(false),
+      );
+      expect(await dlp(client)).toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(0);
+    });
+
+    const allSix = (client: AiAdvisoryClient) => {
+      const t = { tenantId: 't' };
+      return Promise.all([
+        client.analyzeRisk({ actionDescription: 'x', context: '', ...t }),
+        client.analyzePromptInjection({ content: 'x', source: 'tool', ...t }),
+        client.analyzeDlp({ content: 'x', ...t }),
+        client.summarizeIncident({ description: 'x', relatedEvents: [], ...t }),
+        client.suggestPolicy({ naturalLanguageDescription: 'x', ...t }),
+        client.investigateAudit({ question: 'x', retrievedContext: [], ...t }),
+      ]);
+    };
+
+    it('Azure OpenAI + switch off: none of the six AI calls (risk, prompt injection, DLP, incident summary, policy suggestion, audit investigation) reaches manar-ai', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'azure_openai',
+        }),
+        fakeControlPrismaService(false),
+      );
+      expect(await allSix(client)).toEqual([
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ]);
+      expect(unaryCounts(fakeServer)).toEqual([0, 0, 0, 0, 0, 0]);
+      expect(await client.aiGate('t')).toBe('switched_off');
+    });
+
+    it('Azure OpenAI + switch on: all six reach manar-ai (the gate is the only thing that stops them)', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'azure_openai',
+        }),
+        fakeControlPrismaService(true),
+      );
+      await allSix(client);
+      expect(unaryCounts(fakeServer)).toEqual([1, 1, 1, 1, 1, 1]);
+      expect(await client.aiGate('t')).toBe('allowed');
+    });
+
+    it('aiGate tells apart switched off, restricted data and an unreadable tenant row', async () => {
+      const cfg = fakeConfigService({
+        AI_ADVISORY_GRPC_TARGET: target,
+        AI_ADVISORY_PROVIDER: 'azure_openai',
+      });
+      expect(
+        await new AiAdvisoryClient(cfg, fakeControlPrismaService(true)).aiGate(
+          't',
+          'RESTRICTED',
+        ),
+      ).toBe('restricted');
+      expect(
+        await new AiAdvisoryClient(
+          cfg,
+          fakeControlPrismaService('throw'),
+        ).aiGate('t'),
+      ).toBe('unknown');
+      expect(
+        await new AiAdvisoryClient(
+          cfg,
+          fakeControlPrismaService(true, 'AIR_GAPPED'),
+        ).aiGate('t'),
+      ).toBe('air_gapped');
+    });
+
+    it('an undeclared provider in production counts as external; in development it is the local default', async () => {
+      const prod = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: undefined,
+          NODE_ENV: 'production',
+        }),
+        fakeControlPrismaService(false),
+      );
+      expect(await dlp(prod)).toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(0);
+
+      const dev = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: undefined,
+          NODE_ENV: 'development',
+        }),
+        fakeControlPrismaService(false),
+      );
+      expect(await dlp(dev)).not.toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(1);
+    });
+
+    it('an air-gapped tenant never reaches an external provider, even with allowExternalAi=true', async () => {
+      const client = new AiAdvisoryClient(
+        fakeConfigService({
+          AI_ADVISORY_GRPC_TARGET: target,
+          AI_ADVISORY_PROVIDER: 'azure_openai',
+        }),
+        fakeControlPrismaService(true, 'AIR_GAPPED'),
+      );
+      expect(await dlp(client)).toBeNull();
+      expect(fakeServer.callCounts.analyzeDlp).toBe(0);
+    });
+
     it('an external provider + a tenant with allowExternalAi=false never reaches the network', async () => {
       const client = new AiAdvisoryClient(
         fakeConfigService({

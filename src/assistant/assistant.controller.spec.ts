@@ -60,6 +60,7 @@ describe('POST /assistant/chat/stream', () => {
     const c = new AssistantController(
       assistant as unknown as AssistantService,
       meter() as never,
+      { externalAiSwitchedOff: async () => false } as never,
     );
     await c.chatStream(auth, 'Bearer x', {}, reply(raw));
     expect(raw.events()).toEqual(['token', 'tool', 'token', 'done']);
@@ -72,7 +73,11 @@ describe('POST /assistant/chat/stream', () => {
     const assistant = {
       chat: vi.fn(() => Promise.reject(new HttpException('slow down', 429))),
     };
-    const c = new AssistantController(assistant as never, meter() as never);
+    const c = new AssistantController(
+      assistant as never,
+      meter() as never,
+      { externalAiSwitchedOff: async () => false } as never,
+    );
     await expect(
       c.chatStream(auth, 'Bearer x', {}, reply(raw)),
     ).rejects.toMatchObject({
@@ -89,7 +94,11 @@ describe('POST /assistant/chat/stream', () => {
         throw new HttpException({ reason: 'llm_token_quota_exhausted' }, 403);
       }),
     };
-    const c = new AssistantController(assistant as never, meter() as never);
+    const c = new AssistantController(
+      assistant as never,
+      meter() as never,
+      { externalAiSwitchedOff: async () => false } as never,
+    );
     await c.chatStream(auth, 'Bearer x', {}, reply(raw));
     expect(raw.events()).toEqual(['error']);
     expect(raw.chunks.join('')).toContain('"code":403');
@@ -107,7 +116,11 @@ describe('POST /assistant/chat/stream', () => {
         return { available: false, reason: 'model_unavailable' };
       }),
     };
-    const c = new AssistantController(assistant as never, m as never);
+    const c = new AssistantController(
+      assistant as never,
+      m as never,
+      { externalAiSwitchedOff: async () => false } as never,
+    );
     await c.chatStream(auth, 'Bearer x', {}, reply(raw));
     expect(m.released).toBe(0);
   });
@@ -122,7 +135,11 @@ describe('POST /assistant/chat/stream', () => {
         return { available: false, reason: 'model_unavailable' };
       }),
     };
-    const c = new AssistantController(assistant as never, m as never);
+    const c = new AssistantController(
+      assistant as never,
+      m as never,
+      { externalAiSwitchedOff: async () => false } as never,
+    );
     await c.chatStream(auth, 'Bearer x', {}, reply(raw));
     expect(m.released).toBe(1);
   });

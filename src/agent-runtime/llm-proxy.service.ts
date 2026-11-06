@@ -243,6 +243,8 @@ export class LlmProxyService {
       ].sort(),
       advisoryRedactedCounts: dlp.advisoryRedactedCounts,
     };
+    // DLP unavailable is always fail closed, whatever the AI switch says. With the switch off an
+    // external model is refused at the catalog above, so this only concerns an internal model.
     if (dlp.advisory === null) {
       throw new EnforcementDependencyUnavailableException('dlp-advisory');
     }

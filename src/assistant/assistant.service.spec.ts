@@ -384,6 +384,20 @@ describe('AssistantService', () => {
     expect(recorded).not.toContain('Bearer');
   });
 
+  it('AI switched off for the workspace: a polite notice, nothing read, nothing sent to a model', async () => {
+    const catalog = {
+      ...allowAllCatalog(),
+      externalAiSwitchedOff: () => Promise.resolve(true),
+    } as unknown as CatalogService;
+    const { service, upstream, reads, audits } = setup({ catalog });
+    await expect(
+      service.chat(auth(), 'Bearer t', ask('how many agents?')),
+    ).resolves.toEqual({ available: false, reason: 'ai_switched_off' });
+    expect(upstream.chat).not.toHaveBeenCalled();
+    expect(reads).toHaveLength(0);
+    expect(audits).toHaveLength(0);
+  });
+
   it('rejects a body with extra fields such as tenantId', async () => {
     const { service } = setup({});
     await expect(
