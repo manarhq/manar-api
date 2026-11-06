@@ -382,7 +382,7 @@ export class AccountService {
         throw error;
       }
       // Right after the commit that removed the owner roles, not only at the end of the deletion.
-      this.authCache?.invalidate();
+      void this.authCache?.invalidate();
     }
     const owned = await this.control.tenant.findMany({
       where: {
@@ -450,7 +450,7 @@ export class AccountService {
     summary.companyMembershipsRemoved = (
       await this.control.membership.deleteMany({ where: { issuer, subject } })
     ).count;
-    this.authCache?.invalidate(); // after the delete: the person's cached roles must go now
+    void this.authCache?.invalidate(); // after the delete: the person's cached roles must go now
     // 4. Product improvement data: stored samples and the PostHog person.
     await this.data.deleteUserData(issuer, subject);
     await this.control.userDataPreference.deleteMany({

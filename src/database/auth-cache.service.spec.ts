@@ -43,4 +43,17 @@ describe('AuthCache', () => {
     expect(await cache.remember('k', fresh)).toEqual(['NEW']);
     expect(fresh).toHaveBeenCalledTimes(1);
   });
+
+  it('the TTL runs from when the load started, not when it finished', async () => {
+    const cache = new AuthCache();
+    const slow = vi.fn(async () => {
+      await vi.advanceTimersByTimeAsync(20_000); // a slow database read
+      return ['A'];
+    });
+    await cache.remember('k', slow);
+    await vi.advanceTimersByTimeAsync(AuthCache.TTL_MS - 20_000 + 1);
+    // 30 s after the load began (10 s after it ended): expired, so loaded again.
+    await cache.remember('k', slow);
+    expect(slow).toHaveBeenCalledTimes(2);
+  });
 });

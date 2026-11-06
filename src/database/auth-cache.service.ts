@@ -31,6 +31,9 @@ const CHANNEL = 'manar:auth-cache-invalidate';
 export class AuthCache implements OnModuleInit, OnModuleDestroy {
   static readonly TTL_MS = 30_000;
   static readonly MAX_ENTRIES = 10_000;
+  /** A silent subscriber is detected within SOCKET_TIMEOUT_MS, far inside the 30 s TTL. */
+  static readonly PING_INTERVAL_MS = 1_000;
+  static readonly SOCKET_TIMEOUT_MS = 5_000;
 
   private readonly logger = new Logger(AuthCache.name);
   private readonly origin = randomUUID();
@@ -63,12 +66,20 @@ export class AuthCache implements OnModuleInit, OnModuleDestroy {
       (k) => this.config!.get(k, { infer: true }),
       {
         connectTimeout: timeout,
+        // A half-open connection (a network partition that sends no FIN) would otherwise look
+        // healthy while invalidations are lost. The client pings every PING_INTERVAL_MS and the
+        // socket is closed when nothing, not even a pong, arrives for SOCKET_TIMEOUT_MS; the
+        // 'reconnecting' event below then bypasses and clears the cache.
+        socketTimeout: AuthCache.SOCKET_TIMEOUT_MS,
         // Keep trying in the background; start-up never waits for it.
         reconnectStrategy: (retries: number) =>
           Math.min(2000, 100 * 2 ** Math.min(retries, 5)),
       },
     );
-    this.publisher = createClient(options);
+    this.publisher = createClient({
+      ...options,
+      pingInterval: AuthCache.PING_INTERVAL_MS,
+    });
     this.publisher.on('error', () => undefined);
     this.publisherConnecting = this.publisher.connect().catch(() => undefined);
 
@@ -122,10 +133,12 @@ export class AuthCache implements OnModuleInit, OnModuleDestroy {
     const hit = this.entries.get(key);
     if (hit && Date.now() - hit.at < AuthCache.TTL_MS) return hit.value as T;
     const generation = this.generation;
+    // The TTL runs from when the load started: the value is at most that old when it is stored.
+    const startedAt = Date.now();
     const value = await load();
     if (value !== null && generation === this.generation && this.active) {
       if (this.entries.size >= AuthCache.MAX_ENTRIES) this.entries.clear();
-      this.entries.set(key, { at: Date.now(), value });
+      this.entries.set(key, { at: startedAt, value });
     }
     return value;
   }
@@ -145,7 +158,12 @@ export class AuthCache implements OnModuleInit, OnModuleDestroy {
         new Promise((r) => setTimeout(r, this.connectTimeoutMs)),
       ]);
     }
-    if (!publisher.isReady) return;
+    if (!publisher.isReady) {
+      this.logger.warn(
+        'Auth cache invalidation not published (Redis publisher not ready); other replicas rely on their own bypass',
+      );
+      return;
+    }
     await publisher.publish(CHANNEL, this.origin).catch((e: unknown) => {
       this.logger.warn(`Auth cache invalidation not published: ${String(e)}`);
     });

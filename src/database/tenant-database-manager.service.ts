@@ -486,7 +486,7 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       throw new TenantLifecycleConflictError(tenantId, from);
     }
     // After the commit: cached memberships of a suspended workspace must stop resolving now.
-    this.authCache?.invalidate();
+    void this.authCache?.invalidate();
     await this.evict(tenantId);
   }
 
@@ -512,7 +512,7 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       }),
     ]);
 
-    this.authCache?.invalidate();
+    void this.authCache?.invalidate();
     await this.evict(tenantId);
   }
 

@@ -326,7 +326,7 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
       this.control.tenantDatabaseBinding.deleteMany({ where: { tenantId } }),
       this.control.tenant.delete({ where: { id: tenantId } }),
     ]);
-    this.authCache?.invalidate();
+    void this.authCache?.invalidate();
   }
 
   /** True when a new sign-up must wait: a backlog exists, provisioning is saturated, or the database count is near its limit. */

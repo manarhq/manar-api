@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { authSetting } from '../auth/auth.config';
@@ -12,6 +13,7 @@ import type { RoleName } from '../auth/roles';
 import type { VerifiedIdentity } from '../auth/token-verifier.service';
 import type { AppConfig } from '../config/env.validation';
 import { failClosed } from '../common/fail-closed/fail-closed';
+import { AuthCache } from '../database/auth-cache.service';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import {
   WorkspaceProvisioningService,
@@ -79,6 +81,7 @@ export class WorkspacesService {
     private readonly control: ControlPrismaService,
     private readonly provisioning: WorkspaceProvisioningService,
     private readonly config: ConfigService<AppConfig, true>,
+    @Optional() private readonly authCache?: AuthCache,
   ) {}
 
   async list(who: {
@@ -338,6 +341,7 @@ export class WorkspacesService {
         grantedBy: approvedBy,
       },
     });
+    void this.authCache?.invalidate(); // approval: the roles are live on every replica now
   }
 
   private trialEnabled(): boolean {

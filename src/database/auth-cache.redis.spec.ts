@@ -1,5 +1,6 @@
 import { createServer, connect, type Server, type Socket } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { Logger } from '@nestjs/common';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthCache } from './auth-cache.service';
 
 const url = process.env.REDIS_URL;
@@ -10,6 +11,8 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 class Proxy {
   private server?: Server;
   private sockets = new Set<Socket>();
+  /** Half-open: sockets stay up but nothing is forwarded either way. */
+  frozen = false;
   constructor(readonly port: number) {}
   start(): Promise<void> {
     this.server = createServer((client) => {
@@ -19,7 +22,8 @@ class Proxy {
         s.on('close', () => this.sockets.delete(s));
         s.on('error', () => undefined);
       }
-      client.pipe(upstream).pipe(client);
+      client.on('data', (d) => this.frozen || upstream.write(d));
+      upstream.on('data', (d) => this.frozen || client.write(d));
     });
     return new Promise((r) => this.server!.listen(this.port, '127.0.0.1', r));
   }
@@ -114,6 +118,41 @@ describe.skipIf(!url)('AuthCache across replicas (redis)', () => {
     await until(() => caching(b));
     expect(await b.remember('m', load)).toEqual(['AUDITOR']); // never the old entry
   }, 30_000);
+
+  it('a half-open subscriber (no FIN, no data) stops serving the cache within seconds', async () => {
+    const proxy = new Proxy(await freePort());
+    proxies.push(proxy);
+    await proxy.start();
+    const b = make(`redis://127.0.0.1:${proxy.port}`);
+    await until(() => caching(b));
+    const load = () => Promise.resolve(['x']);
+    expect(await b.remember('h', load)).toEqual(['x']);
+
+    proxy.frozen = true; // an invalidation sent now would never arrive
+    const t0 = Date.now();
+    await until(async () => !(await caching(b)), 12_000);
+    expect(Date.now() - t0).toBeLessThan(AuthCache.SOCKET_TIMEOUT_MS + 3000);
+
+    proxy.frozen = false;
+    await until(() => caching(b), 15_000); // reconnects, clears, serves again
+  }, 40_000);
+
+  it('warns when an invalidation cannot be published because Redis is not ready', async () => {
+    const warn = vi
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => {});
+    try {
+      const c = new AuthCache(config(`redis://127.0.0.1:${await freePort()}`));
+      c.onModuleInit();
+      live.push(c);
+      await c.invalidate();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('invalidation not published'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
   it('start-up does not wait for Redis, and without it every lookup goes to the database', async () => {
     const port = await freePort(); // nothing listens here

@@ -120,14 +120,16 @@ function world(deployment: 'hosted' | 'customer' = 'hosted') {
     });
     return { tenantId: tenant.id, status: 'ACTIVE' as const };
   });
+  const authCache = { invalidate: vi.fn() };
   const svc = new WorkspacesService(
     control as unknown as ControlPrismaService,
     { createWorkspace } as unknown as WorkspaceProvisioningService,
     {
       get: (k: string) => (k === 'MANAR_DEPLOYMENT' ? deployment : undefined),
     } as never,
+    authCache as never,
   );
-  return { svc, tenants, memberships, createWorkspace };
+  return { svc, tenants, memberships, createWorkspace, authCache };
 }
 
 describe('personal workspaces are keyed by subject, never by email', () => {
@@ -306,12 +308,14 @@ describe('company workspaces (spec 7a)', () => {
   });
 
   it('only an admin decision activates a request, with Member (DEVELOPER) by default', async () => {
-    const { svc, memberships } = world();
+    const { svc, memberships, authCache } = world();
     const { tenantId } = await svc.startCompanyTrial(admin, 'Acme');
     await svc.requestToJoin(id({ subject: 'colleague', tid: 'tid-acme' }));
     const pending = memberships.find((m) => m.subject === 'colleague');
+    expect(authCache.invalidate).not.toHaveBeenCalled();
     await svc.decideJoinRequest(tenantId, pending.id, 'approve', 'admin');
     expect(pending).toMatchObject({ status: 'ACTIVE', role: 'DEVELOPER' });
+    expect(authCache.invalidate).toHaveBeenCalledOnce(); // approval reaches every replica
   });
 
   it("an admin of one company cannot decide another company's request", async () => {

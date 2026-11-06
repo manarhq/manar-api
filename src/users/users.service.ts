@@ -215,7 +215,7 @@ export class UsersService {
         },
       });
     });
-    this.authCache?.invalidate(); // after the commit
+    void this.authCache?.invalidate(); // after the commit
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
       eventType: AUDIT_EVENT_TYPES.USER_ROLE_GRANTED,
@@ -301,7 +301,7 @@ export class UsersService {
       }
       throw error;
     }
-    this.authCache?.invalidate(); // after the commit
+    void this.authCache?.invalidate(); // after the commit
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {
       eventType: AUDIT_EVENT_TYPES.USER_ROLE_REVOKED,
