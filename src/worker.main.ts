@@ -9,6 +9,7 @@ import { ApprovalActivitiesFactory } from './temporal/activities/approval.activi
 import { AuditRetentionActivitiesFactory } from './temporal/activities/audit-retention.activities';
 import { WebhookDeliveryActivitiesFactory } from './temporal/activities/webhook-delivery.activities';
 import { GrowthActivitiesFactory } from './temporal/activities/growth.activities';
+import { PolicySuggestActivitiesFactory } from './temporal/activities/policy-suggest.activities';
 import { ensureGrowthSchedule } from './growth/growth-schedule';
 import { Connection } from '@temporalio/client';
 import type { AppConfig } from './config/env.validation';
@@ -102,6 +103,7 @@ async function bootstrap(): Promise<void> {
     ...appContext.get(AuditRetentionActivitiesFactory).build(),
     ...appContext.get(WebhookDeliveryActivitiesFactory).build(),
     ...appContext.get(GrowthActivitiesFactory).build(),
+    ...appContext.get(PolicySuggestActivitiesFactory).build(),
   };
 
   installWorkerMetrics(

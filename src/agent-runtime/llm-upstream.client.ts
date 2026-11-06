@@ -130,19 +130,21 @@ const PASSED_REJECTIONS = new Set([400, 404, 413, 422]);
 export class LlmUpstreamClient {
   constructor(private readonly config: ConfigService<AppConfig, true>) {}
 
-  async chat(
+  /** Where a request goes: the provider's URL, headers and model, and the request shaped for it. */
+  private resolve(
     request: UpstreamChatRequest,
     route?: LlmRouteOverride | null,
-    /** Aborts the call (the client went away); the timeout applies either way. */
-    signal?: AbortSignal,
-  ): Promise<UpstreamChatResponse> {
+  ): {
+    provider: LlmProvider;
+    url: string;
+    model: string;
+    headers: Record<string, string>;
+    request: UpstreamChatRequest;
+  } {
     const provider: LlmProvider =
       route?.provider ??
       this.config.get('LLM_PROVIDER', { infer: true }) ??
       'ollama';
-    const timeoutMs = this.config.get('LLM_UPSTREAM_TIMEOUT_MS', {
-      infer: true,
-    });
     let url: string;
     let model: string;
     const headers: Record<string, string> = {
@@ -180,13 +182,35 @@ export class LlmUpstreamClient {
       url = `${this.config.get('LLM_OLLAMA_BASE_URL', { infer: true }).replace(/\/+$/, '')}/chat/completions`;
       model = route?.model ?? this.config.get('LLM_MODEL', { infer: true });
     }
+    return { provider, url, model, headers, request };
+  }
+
+  async chat(
+    request: UpstreamChatRequest,
+    route?: LlmRouteOverride | null,
+    /** Aborts the call (the client went away); the timeout applies either way. */
+    signal?: AbortSignal,
+    /** Per-call timeout; the deployment's `LLM_UPSTREAM_TIMEOUT_MS` when absent. */
+    timeoutOverrideMs?: number,
+  ): Promise<UpstreamChatResponse> {
+    const {
+      provider,
+      url,
+      model,
+      headers,
+      request: shaped,
+    } = this.resolve(request, route);
+    const configuredMs = this.config.get('LLM_UPSTREAM_TIMEOUT_MS', {
+      infer: true,
+    });
+    const timeoutMs = timeoutOverrideMs ?? configuredMs;
 
     let response: Response;
     try {
       response = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ ...request, model, stream: false }),
+        body: JSON.stringify({ ...shaped, model, stream: false }),
         signal: signal
           ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
           : AbortSignal.timeout(timeoutMs),
@@ -210,6 +234,98 @@ export class LlmUpstreamClient {
       throw new LlmUpstreamError('not a chat completion');
     }
     return { body, provider, model };
+  }
+
+  /**
+   * Streaming `chat`: the same request with `stream: true`. `onContent` gets each piece of the
+   * answer text as it arrives; the return value is the assembled response, shaped like `chat`'s
+   * (message with content and tool calls, usage, model) so callers treat both alike.
+   *
+   * Bounded three ways: `firstTokenMs` to the first byte, `idleMs` of silence between chunks, and
+   * `totalMs` overall. `signal` is the client going away.
+   */
+  async chatStream(
+    request: UpstreamChatRequest,
+    route: LlmRouteOverride | null | undefined,
+    onContent: (text: string) => void,
+    limits: {
+      signal?: AbortSignal;
+      firstTokenMs: number;
+      idleMs: number;
+      totalMs: number;
+    },
+  ): Promise<UpstreamChatResponse> {
+    const {
+      provider,
+      url,
+      model,
+      headers,
+      request: shaped,
+    } = this.resolve(request, route);
+    const ctl = new AbortController();
+    const total = setTimeout(() => ctl.abort(), limits.totalMs);
+    let wait = setTimeout(() => ctl.abort(), limits.firstTokenMs);
+    const touch = (): void => {
+      clearTimeout(wait);
+      wait = setTimeout(() => ctl.abort(), limits.idleMs);
+    };
+    const onClientGone = (): void => ctl.abort();
+    limits.signal?.addEventListener('abort', onClientGone, { once: true });
+    if (limits.signal?.aborted) ctl.abort();
+    try {
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: { ...headers, Accept: 'text/event-stream' },
+          body: JSON.stringify({
+            ...shaped,
+            model,
+            stream: true,
+            stream_options: { include_usage: true },
+          }),
+          signal: ctl.signal,
+        });
+      } catch (error) {
+        throw new LlmUpstreamError(
+          error instanceof Error ? error.name : 'request failed',
+        );
+      }
+      if (!response.ok || !response.body) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new LlmUpstreamError(`HTTP ${response.status}`);
+      }
+      touch();
+      const acc = new StreamAccumulator(model);
+      try {
+        const decoder = new TextDecoder();
+        let pending = '';
+        for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+          touch();
+          pending += decoder.decode(chunk, { stream: true });
+          let nl: number;
+          while ((nl = pending.indexOf('\n')) !== -1) {
+            const line = pending.slice(0, nl).trimEnd();
+            pending = pending.slice(nl + 1);
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (data === '[DONE]') continue;
+            const text = acc.add(data);
+            if (text) onContent(text);
+          }
+        }
+      } catch (error) {
+        if (error instanceof LlmUpstreamError) throw error;
+        throw new LlmUpstreamError(
+          error instanceof Error ? error.name : 'stream failed',
+        );
+      }
+      return { body: acc.body(), provider, model };
+    } finally {
+      clearTimeout(total);
+      clearTimeout(wait);
+      limits.signal?.removeEventListener('abort', onClientGone);
+    }
   }
 
   /** Model ids served in Anthropic format (`LLM_ANTHROPIC_MODELS`). */
@@ -297,5 +413,76 @@ export class LlmUpstreamClient {
       });
     }
     throw new LlmUpstreamError(`HTTP ${response.status}`);
+  }
+}
+
+/** Builds the non-streaming response shape from OpenAI-style `chat.completion.chunk` events. */
+class StreamAccumulator {
+  private content = '';
+  private model: string;
+  private usage: UpstreamChatResponse['body']['usage'];
+  private readonly calls: { id: string; name: string; args: string }[] = [];
+
+  constructor(model: string) {
+    this.model = model;
+  }
+
+  /** Adds one event's JSON; returns the answer text it carried, if any. */
+  add(json: string): string {
+    let chunk: {
+      model?: string;
+      usage?: UpstreamChatResponse['body']['usage'] | null;
+      choices?: {
+        delta?: {
+          content?: string | null;
+          tool_calls?: {
+            index?: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }[];
+        };
+      }[];
+    };
+    try {
+      chunk = JSON.parse(json) as typeof chunk;
+    } catch {
+      throw new LlmUpstreamError('invalid stream event');
+    }
+    if (chunk.model) this.model = chunk.model;
+    if (chunk.usage) this.usage = chunk.usage;
+    const delta = chunk.choices?.[0]?.delta;
+    for (const call of delta?.tool_calls ?? []) {
+      const at = call.index ?? 0;
+      const slot = (this.calls[at] ??= { id: '', name: '', args: '' });
+      if (call.id) slot.id = call.id;
+      if (call.function?.name) slot.name += call.function.name;
+      if (call.function?.arguments) slot.args += call.function.arguments;
+    }
+    const text = delta?.content ?? '';
+    this.content += text;
+    return text;
+  }
+
+  body(): UpstreamChatResponse['body'] {
+    const toolCalls = this.calls
+      .filter((c) => c.name)
+      .map((c) => ({
+        id: c.id,
+        type: 'function',
+        function: { name: c.name, arguments: c.args },
+      }));
+    return {
+      model: this.model,
+      ...(this.usage ? { usage: this.usage } : {}),
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: this.content,
+            ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+          },
+        },
+      ],
+    };
   }
 }

@@ -36,6 +36,7 @@ function setup(opts: {
   catalog?: CatalogService;
   replies?: Reply[];
   read?: (path: string) => ReadResult;
+  readAsync?: (path: string) => Promise<ReadResult>;
   upstreamError?: boolean;
   hits?: number;
   advisory?: null | { findings: never[] };
@@ -44,6 +45,7 @@ function setup(opts: {
   const reader = {
     get: vi.fn((path: string, authorization: string) => {
       reads.push({ path, authorization });
+      if (opts.readAsync) return opts.readAsync(path);
       return Promise.resolve(
         opts.read?.(path) ?? { ok: true, body: { items: [] } },
       );
@@ -51,18 +53,38 @@ function setup(opts: {
   } as unknown as AssistantReader;
   const sent: { messages: unknown[]; tools?: unknown[] }[] = [];
   const replies = [...(opts.replies ?? [{ content: 'ok' }])];
-  const upstream = {
-    chat: vi.fn((req: { messages: unknown[]; tools?: unknown[] }) => {
+  const upstream: Record<string, unknown> & { chat: ReturnType<typeof vi.fn> } =
+    {
+      chat: vi.fn((req: { messages: unknown[]; tools?: unknown[] }) => {
+        sent.push(structuredClone(req));
+        if (opts.upstreamError)
+          return Promise.reject(new LlmUpstreamError('HTTP 404'));
+        return Promise.resolve({
+          body: { choices: [{ message: replies.shift() ?? { content: '' } }] },
+          provider: 'ollama',
+          model: 'm',
+        });
+      }),
+    };
+  upstream.chatStream = vi.fn(
+    (
+      req: { messages: unknown[]; tools?: unknown[] },
+      _route: unknown,
+      onContent: (t: string) => void,
+    ) => {
       sent.push(structuredClone(req));
-      if (opts.upstreamError)
-        return Promise.reject(new LlmUpstreamError('HTTP 404'));
+      const reply = replies.shift() ?? { content: '' };
+      for (const word of (reply.content ?? '').split(/(?<= )/)) onContent(word);
       return Promise.resolve({
-        body: { choices: [{ message: replies.shift() ?? { content: '' } }] },
-        provider: 'ollama',
-        model: 'm',
+        body: {
+          choices: [{ message: reply }],
+          usage: { prompt_tokens: 120, completion_tokens: 30 },
+        },
+        provider: 'azure_openai',
+        model: 'gpt-5-mini',
       });
-    }),
-  };
+    },
+  );
   const aiAdvisory = {
     analyzeDlp: vi.fn(() =>
       Promise.resolve(
@@ -84,6 +106,7 @@ function setup(opts: {
   };
   const tenantDatabaseManager = { getClient: vi.fn(() => Promise.resolve({})) };
   const config = { get: vi.fn(() => 'ollama') };
+  const telemetry = { record: vi.fn(() => Promise.resolve()) };
   const service = new AssistantService(
     reader,
     upstream as never,
@@ -93,8 +116,9 @@ function setup(opts: {
     tenantDatabaseManager as never,
     config as never,
     opts.catalog ?? allowAllCatalog(),
+    telemetry as never,
   );
-  return { service, reads, sent, upstream, throttle, audits };
+  return { service, reads, sent, upstream, throttle, audits, telemetry };
 }
 
 const ask = (content: string, extra: object = {}) => ({
@@ -365,5 +389,142 @@ describe('AssistantService', () => {
     await expect(
       service.chat(auth(), 'Bearer t', { ...ask('hi'), tenantId: 'other' }),
     ).rejects.toBeInstanceOf(HttpException);
+  });
+
+  describe('streaming, parallel reads and telemetry', () => {
+    it('hands the answer over word by word, after the checks that can fail with a status', async () => {
+      const { service, upstream } = setup({
+        replies: [{ content: 'Nothing is pending right now.' }],
+      });
+      const events: string[] = [];
+      const answer = await service.chat(auth(), 'Bearer x', ask('pending?'), {
+        onReady: () => events.push('ready'),
+        onToken: (t) => events.push(`token:${t}`),
+      });
+      expect(events[0]).toBe('ready');
+      expect(
+        events
+          .filter((e) => e.startsWith('token:'))
+          .map((e) => e.slice(6))
+          .join(''),
+      ).toBe('Nothing is pending right now.');
+      expect(answer).toMatchObject({
+        available: true,
+        answer: 'Nothing is pending right now.',
+      });
+      expect(upstream.chat).not.toHaveBeenCalled();
+    });
+
+    it('does not start the stream when the checks refuse the request', async () => {
+      const { service } = setup({ hits: ASSISTANT_RATE_LIMIT.limit + 1 });
+      const onReady = vi.fn();
+      await expect(
+        service.chat(auth(), 'Bearer x', ask('hi'), {
+          onReady,
+          onToken: vi.fn(),
+        }),
+      ).rejects.toMatchObject({ status: 429 });
+      expect(onReady).not.toHaveBeenCalled();
+    });
+
+    it('tells the stream when the model turns to tools, so the thinking-aloud text can be dropped', async () => {
+      const { service } = setup({
+        replies: [
+          {
+            content: 'Let me look. ',
+            tool_calls: [call('list_pending_approvals', {})],
+          },
+          { content: 'None.' },
+        ],
+      });
+      const seen: string[] = [];
+      await service.chat(auth(), 'Bearer x', ask('pending?'), {
+        onToken: (t) => seen.push(t),
+        onTools: (names) => seen.push(`tools:${names.join(',')}`),
+      });
+      expect(seen).toEqual([
+        'Let ',
+        'me ',
+        'look. ',
+        'tools:list_pending_approvals',
+        'None.',
+      ]);
+    });
+
+    it('runs independent reads together, and the hand-off tool after them, answering in the order asked', async () => {
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const { service, sent } = setup({
+        replies: [
+          {
+            tool_calls: [
+              call('list_pending_approvals', {}, 'a'),
+              call('get_agent_activity', { agent: 'bot' }, 'b'),
+              call(
+                'prepare_for_human',
+                { kind: 'open_record', record: 'agent', id: ID },
+                'c',
+              ),
+            ],
+          },
+          { content: 'done' },
+        ],
+        readAsync: async () => {
+          inFlight++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((r) => setTimeout(r, 30));
+          inFlight--;
+          return { ok: true, body: { items: [] } };
+        },
+      });
+      await service.chat(auth(), 'Bearer x', ask('pending?'));
+      expect(maxInFlight).toBeGreaterThanOrEqual(2);
+      const ids = (
+        sent.at(-1)!.messages as { role: string; tool_call_id?: string }[]
+      )
+        .filter((m) => m.role === 'tool')
+        .map((m) => m.tool_call_id);
+      expect(ids).toEqual(['a', 'b', 'c']);
+    });
+
+    it('bounds each model round far below the 180 s agent timeout', async () => {
+      const { service, upstream } = setup({ replies: [{ content: 'ok' }] });
+      await service.chat(auth(), 'Bearer x', ask('hi'));
+      const args = upstream.chat.mock.calls[0] as unknown[];
+      expect(args[3]).toBe(45_000);
+    });
+
+    it('records tokens, model, feature and latency per call and never any content', async () => {
+      const { service, telemetry } = setup({
+        replies: [{ content: 'the secret answer text' }],
+      });
+      await service.chat(auth(), 'Bearer x', ask('a private question'), {
+        onToken: () => undefined,
+      });
+      expect(telemetry.record).toHaveBeenCalledTimes(1);
+      const rec = (telemetry.record.mock.calls[0] as unknown[])[0] as Record<
+        string,
+        unknown
+      >;
+      expect(rec).toMatchObject({
+        tenantId: 't-acme',
+        feature: 'assistant',
+        provider: 'azure_openai',
+        model: 'gpt-5-mini',
+        inputTokens: 120,
+        outputTokens: 30,
+        outcome: 'ok',
+      });
+      expect(typeof rec.latencyMs).toBe('number');
+      expect(JSON.stringify(rec)).not.toMatch(/secret answer|private question/);
+    });
+
+    it('records an unavailable outcome when no model answers', async () => {
+      const { service, telemetry } = setup({ upstreamError: true });
+      await service.chat(auth(), 'Bearer x', ask('hi'));
+      expect((telemetry.record.mock.calls[0] as unknown[])[0]).toMatchObject({
+        outcome: 'unavailable',
+      });
+    });
   });
 });
