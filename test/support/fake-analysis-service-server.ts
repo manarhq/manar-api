@@ -1,6 +1,7 @@
 import * as grpc from '@grpc/grpc-js';
 import {
   AnalysisServiceService,
+  type AnalysisEvent,
   type AnalysisServiceServer,
   type AuditInvestigationResult,
   type DlpAnalysisResult,
@@ -40,7 +41,18 @@ export class FakeAnalysisServiceServer {
     summarizeIncident: 0,
     suggestPolicy: 0,
     investigateAudit: 0,
+    streamSummarizeIncident: 0,
+    streamSuggestPolicy: 0,
+    streamInvestigateAudit: 0,
   };
+
+  /** Text pieces the streaming RPCs send before the result; `streamGapMs` apart. */
+  streamDeltas: string[] = [];
+  /** Character counts the policy stream sends as progress before the result. */
+  streamProgress: number[] = [];
+  streamGapMs = 0;
+  /** When set, the streaming RPCs fail with this status after the deltas instead of sending the result. */
+  streamFailsWith: grpc.status | undefined;
 
   /** Artificial delay (ms) before responding to any RPC — set high to exercise `AiAdvisoryClient`'s timeout path. */
   responseDelayMs = 0;
@@ -132,6 +144,32 @@ export class FakeAnalysisServiceServer {
         };
         this.respond(callback, () => this.auditInvestigationResult);
       },
+      streamSummarizeIncident: (call) => {
+        this.callCounts.streamSummarizeIncident += 1;
+        void this.stream(call, () => ({
+          incidentSummary: this.incidentSummaryResult,
+        }));
+      },
+      streamSuggestPolicy: (call) => {
+        this.callCounts.streamSuggestPolicy += 1;
+        void this.stream(
+          call,
+          () => ({ policyDraft: this.policyDraftResult }),
+          this.streamProgress.map((characters) => ({
+            progress: { characters },
+          })),
+        );
+      },
+      streamInvestigateAudit: (call) => {
+        this.callCounts.streamInvestigateAudit += 1;
+        this.lastInvestigateAuditRequest = {
+          question: call.request.question,
+          retrievedContext: call.request.retrievedContext,
+        };
+        void this.stream(call, () => ({
+          auditInvestigation: this.auditInvestigationResult,
+        }));
+      },
     };
     this.server.addService(AnalysisServiceService, impl);
 
@@ -143,6 +181,33 @@ export class FakeAnalysisServiceServer {
       );
     });
     return `127.0.0.1:${port}`;
+  }
+
+  private async stream(
+    call: grpc.ServerWritableStream<unknown, AnalysisEvent>,
+    result: () => AnalysisEvent,
+    extra: AnalysisEvent[] = [],
+  ): Promise<void> {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let cancelled = false;
+    call.on('cancelled', () => (cancelled = true));
+    if (this.responseDelayMs > 0) await sleep(this.responseDelayMs);
+    for (const progress of extra) {
+      if (cancelled) return;
+      call.write(progress);
+    }
+    for (const text of this.streamDeltas) {
+      if (cancelled) return;
+      call.write({ delta: { text } });
+      if (this.streamGapMs > 0) await sleep(this.streamGapMs);
+    }
+    if (cancelled) return;
+    if (this.streamFailsWith !== undefined) {
+      call.emit('error', { code: this.streamFailsWith, details: 'fake' });
+      return;
+    }
+    call.write(result());
+    call.end();
   }
 
   private respond<T>(

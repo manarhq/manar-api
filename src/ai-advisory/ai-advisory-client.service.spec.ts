@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '../config/env.validation';
 import type { ControlPrismaService } from '../database/control-prisma.service';
@@ -797,5 +797,168 @@ describe('AiAdvisoryClient', () => {
       expect(result).not.toBeNull();
       expect(fakeServer.callCounts.analyzeRisk).toBe(1);
     });
+  });
+});
+
+describe('AiAdvisoryClient streaming and cost telemetry', () => {
+  let fakeServer: FakeAnalysisServiceServer;
+  let target: string;
+  const record = vi.fn(() => Promise.resolve());
+  const make = (overrides: Partial<AppConfig> = {}) =>
+    new AiAdvisoryClient(
+      fakeConfigService({ AI_ADVISORY_GRPC_TARGET: target, ...overrides }),
+      permissiveControl,
+      { record } as never,
+    );
+
+  beforeEach(async () => {
+    record.mockClear();
+    fakeServer = new FakeAnalysisServiceServer();
+    target = await fakeServer.start();
+    fakeServer.incidentSummaryResult = {
+      summary: 'Three denials.',
+      keyEvents: ['denied x3'],
+      probableRootCause: 'retry loop',
+      recommendedNextSteps: ['check'],
+      confidence: 0.8,
+      explanation: 'e',
+      usage: { inputTokens: 900, outputTokens: 120, model: 'gpt-5-mini' },
+    };
+  });
+  afterEach(async () => {
+    await fakeServer.stop();
+  });
+
+  const input = {
+    description: 'secret incident text',
+    relatedEvents: ['x'],
+    tenantId: 'tenant-1',
+  };
+
+  it('hands over the text as it arrives, then returns the same result as the unary call', async () => {
+    fakeServer.streamDeltas = ['Three ', 'denials', '.'];
+    const seen: string[] = [];
+    const result = await make().summarizeIncidentStream(input, {
+      onDelta: (t) => seen.push(t),
+    });
+    expect(seen).toEqual(['Three ', 'denials', '.']);
+    expect(result).toMatchObject({
+      summary: 'Three denials.',
+      confidence: 0.8,
+    });
+    expect(fakeServer.callCounts.streamSummarizeIncident).toBe(1);
+    expect(fakeServer.callCounts.summarizeIncident).toBe(0);
+  });
+
+  it('records tokens, model, feature and outcome, never the text', async () => {
+    fakeServer.streamDeltas = ['Three denials.'];
+    await make().summarizeIncidentStream(input, { onDelta: () => undefined });
+    expect(record).toHaveBeenCalledTimes(1);
+    const rec = (record.mock.calls[0] as unknown[])[0] as Record<
+      string,
+      unknown
+    >;
+    expect(rec).toMatchObject({
+      tenantId: 'tenant-1',
+      feature: 'incident_summary',
+      provider: 'ollama',
+      model: 'gpt-5-mini',
+      inputTokens: 900,
+      outputTokens: 120,
+      outcome: 'ok',
+    });
+    expect(JSON.stringify(rec)).not.toMatch(/secret incident|Three denials/);
+  });
+
+  it('records the unary call too', async () => {
+    await make().summarizeIncident(input);
+    expect((record.mock.calls[0] as unknown[])[0]).toMatchObject({
+      feature: 'incident_summary',
+      inputTokens: 900,
+      outputTokens: 120,
+      outcome: 'ok',
+    });
+  });
+
+  it('is null and counted as unavailable when manar-ai answers with its zero-confidence marker', async () => {
+    fakeServer.incidentSummaryResult = {
+      ...fakeServer.incidentSummaryResult,
+      confidence: 0,
+    };
+    await expect(make().summarizeIncidentStream(input)).resolves.toBeNull();
+    expect((record.mock.calls[0] as unknown[])[0]).toMatchObject({
+      outcome: 'unavailable',
+    });
+  });
+
+  it('is null (never throws) when the stream fails, and counts an error', async () => {
+    fakeServer.streamDeltas = ['partial'];
+    fakeServer.streamFailsWith = 13; // INTERNAL
+    await expect(make().summarizeIncidentStream(input)).resolves.toBeNull();
+    expect((record.mock.calls[0] as unknown[])[0]).toMatchObject({
+      outcome: 'error',
+    });
+  });
+
+  it('stops the call when the person stops it, without tripping the circuit breaker', async () => {
+    fakeServer.streamDeltas = ['a', 'b', 'c', 'd'];
+    fakeServer.streamGapMs = 50;
+    const ctl = new AbortController();
+    const client = make({ AI_ADVISORY_LONGFORM_TIMEOUT_MS: 5000 });
+    const run = client.summarizeIncidentStream(input, {
+      onDelta: () => ctl.abort(),
+      signal: ctl.signal,
+    });
+    await expect(run).resolves.toBeNull();
+    expect((record.mock.calls[0] as unknown[])[0]).toMatchObject({
+      outcome: 'cancelled',
+    });
+    // Three stops in a row would open a threshold-3 breaker if they counted as failures.
+    for (let i = 0; i < 3; i++) {
+      const c = new AbortController();
+      await client.summarizeIncidentStream(input, {
+        onDelta: () => c.abort(),
+        signal: c.signal,
+      });
+    }
+    fakeServer.streamDeltas = [];
+    fakeServer.streamGapMs = 0;
+    await expect(client.summarizeIncidentStream(input)).resolves.not.toBeNull();
+  });
+
+  it('streams policy drafts and audit answers through the same path', async () => {
+    fakeServer.streamProgress = [120, 480];
+    fakeServer.policyDraftResult = {
+      rules: [],
+      explanation: 'none',
+      confidence: 0.6,
+      usage: { inputTokens: 10, outputTokens: 20, model: 'gpt-5' },
+    };
+    fakeServer.auditInvestigationResult = {
+      answer: 'Because of rule 4.',
+      citations: ['e1'],
+      confidence: 0.7,
+      explanation: 'ok',
+      usage: { inputTokens: 30, outputTokens: 40, model: 'gpt-5' },
+    };
+    const client = make();
+    await expect(
+      client.suggestPolicyStream({
+        naturalLanguageDescription: 'd',
+        tenantId: 't',
+      }),
+    ).resolves.toMatchObject({ explanation: 'none' });
+    await expect(
+      client.investigateAuditStream({
+        question: 'q',
+        retrievedContext: ['c'],
+        tenantId: 't',
+      }),
+    ).resolves.toMatchObject({ answer: 'Because of rule 4.' });
+    expect(
+      record.mock.calls
+        .map((c) => (c as unknown[])[0] as { feature: string })
+        .map((r) => r.feature),
+    ).toEqual(['policy_suggest', 'audit_investigate']);
   });
 });

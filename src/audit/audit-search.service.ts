@@ -3,6 +3,7 @@ import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-cli
 import {
   AiAdvisoryClient,
   type AuditInvestigationAdvisory,
+  type StreamHooks,
 } from '../ai-advisory/ai-advisory-client.service';
 import {
   maxClassification,
@@ -177,6 +178,8 @@ export class AuditSearchService {
    */
   async investigateAudit(
     input: InvestigateAuditInput,
+    /** Present on the streaming endpoint: the answer text goes to `hooks.onDelta` as it is written. */
+    hooks?: StreamHooks,
   ): Promise<InvestigateAuditResult> {
     const page = await this.search({
       tenantId: input.tenantId,
@@ -216,12 +219,15 @@ export class AuditSearchService {
     }
     const classification = maxClassification(resolvedClassifications);
 
-    const advisory = await this.aiAdvisoryClient.investigateAudit({
+    const request = {
       question: input.question,
       retrievedContext,
       tenantId: input.tenantId,
       classification,
-    });
+    };
+    const advisory = hooks
+      ? await this.aiAdvisoryClient.investigateAuditStream(request, hooks)
+      : await this.aiAdvisoryClient.investigateAudit(request);
 
     return {
       available: advisory !== null,

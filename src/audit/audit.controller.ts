@@ -8,18 +8,23 @@ import {
   NotFoundException,
   Param,
   ParseUUIDPipe,
+  HttpCode,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiBody,
   ApiOperation,
+  ApiProduces,
   ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import type { FastifyReply } from 'fastify';
+import { runAiStream } from '../ai-advisory/ai-stream';
 import { CurrentAuth } from '../auth/auth-context';
 import type { AuthContext } from '../auth/auth-context';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -230,34 +235,73 @@ export class AuditController {
     );
     // One AI action (paid extra), given back when no model answered.
     return this.meter.ai(auth.tenant.id, async () =>
-      this.auditSearchService.investigateAudit({
-        tenantId: auth.tenant.id,
-        tenantClient,
-        question: input.question,
-        filters: {
-          eventType: input.eventType
-            ? input.eventType
-                .split(',')
-                .map((s) => s.trim())
-                .filter(Boolean)
-            : undefined,
-          correlationId: input.correlationId,
-          agentId: input.agentId,
-          taskId: input.taskId,
-          toolId: input.toolId,
-          actionId: input.actionId,
-          decision: input.decision,
-          riskMin: input.riskMin,
-          riskMax: input.riskMax,
-          from: await this.clampFrom(
-            auth.tenant.id,
-            parseDateParam(input.from, 'from'),
-          ),
-          to: parseDateParam(input.to, 'to'),
-        },
-        contextLimit: input.contextLimit ?? 10,
-      }),
+      this.auditSearchService.investigateAudit(
+        await this.investigateInput(auth, tenantClient, input),
+      ),
     );
+  }
+
+  @Post('investigate/stream')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'AI-advisory audit investigation, streamed (SSE)',
+    description:
+      'Same request, retrieval, roles, metering and result as `POST /audit/investigate`, as a `text/event-stream`: `delta` `{t}` events carry the answer text as the model writes it (already redacted; append them), then `done` with the response body of the plain endpoint (its `result.answer` replaces the streamed text), or `error` `{code}`. A `: heartbeat` comment goes out every 10 seconds. Closing the connection stops the model call. 400, 402 and 403 are ordinary JSON responses sent before the stream starts.',
+  })
+  @ApiBody({ type: InvestigateAuditRequestDto })
+  @ApiProduces('text/event-stream')
+  @ApiResponse({ status: 200, description: 'text/event-stream' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async investigateStream(
+    @CurrentAuth() auth: AuthContext,
+    @Body() body: unknown,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const input = parseBodyOrThrow(InvestigateAuditSchema, body);
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    const request = await this.investigateInput(auth, tenantClient, input);
+    await runAiStream(reply, this.meter, auth.tenant.id, (hooks) =>
+      this.auditSearchService.investigateAudit(request, hooks),
+    );
+  }
+
+  /** The tenant-scoped retrieval request both investigate endpoints run. */
+  private async investigateInput(
+    auth: AuthContext,
+    tenantClient: Awaited<ReturnType<TenantDatabaseManager['getClient']>>,
+    input: ReturnType<typeof InvestigateAuditSchema.parse>,
+  ) {
+    return {
+      tenantId: auth.tenant.id,
+      tenantClient,
+      question: input.question,
+      filters: {
+        eventType: input.eventType
+          ? input.eventType
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : undefined,
+        correlationId: input.correlationId,
+        agentId: input.agentId,
+        taskId: input.taskId,
+        toolId: input.toolId,
+        actionId: input.actionId,
+        decision: input.decision,
+        riskMin: input.riskMin,
+        riskMax: input.riskMax,
+        from: await this.clampFrom(
+          auth.tenant.id,
+          parseDateParam(input.from, 'from'),
+        ),
+        to: parseDateParam(input.to, 'to'),
+      },
+      contextLimit: input.contextLimit ?? 10,
+    };
   }
 
   @Get('verify')
