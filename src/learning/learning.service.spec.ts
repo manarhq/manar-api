@@ -176,7 +176,7 @@ describe('who learns (decision 36)', () => {
       .setWorkspace('t1', 'on', { id: 'u' }, w.client)
       .catch((e: ForbiddenException) => e);
     expect((err as ForbiddenException).getResponse()).toMatchObject({
-      code: 'learning_not_available_government',
+      reason: 'learning_not_available_government',
     });
     // off and default are fine
     await w.svc.setWorkspace('t1', 'off', { id: 'u' }, w.client);
