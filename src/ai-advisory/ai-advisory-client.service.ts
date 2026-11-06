@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as grpc from '@grpc/grpc-js';
 import {
@@ -9,6 +9,7 @@ import {
   dlpFinding_TypeToJSON,
   policyRuleDraft_EffectToJSON,
   riskAnalysisResult_RecommendedActionToJSON,
+  type AnalysisEvent,
   type AuditInvestigationResult,
   type DlpAnalysisResult,
   type IncidentSummaryResult,
@@ -19,6 +20,10 @@ import {
 import type { AppConfig } from '../config/env.validation';
 import { getCorrelationId } from '../logging/correlation-id.store';
 import { ControlPrismaService } from '../database/control-prisma.service';
+import {
+  AiTelemetryService,
+  type AiFeature,
+} from '../ai-telemetry/ai-telemetry.service';
 import type { DataClassification } from '../common/data-classification';
 import {
   aiAdvisoryTlsEnabled,
@@ -207,6 +212,7 @@ export class AiAdvisoryClient implements OnModuleDestroy {
   constructor(
     configService: ConfigService<AppConfig, true>,
     private readonly control: ControlPrismaService,
+    @Optional() private readonly telemetry?: AiTelemetryService,
   ) {
     const target = configService.get('AI_ADVISORY_GRPC_TARGET', {
       infer: true,
@@ -477,17 +483,22 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('longform', 'SummarizeIncident', () =>
-      this.promisify<IncidentSummaryResult>('longform', (deadline, callback) =>
-        this.client.summarizeIncident(
-          {
-            description: input.description,
-            relatedEvents: input.relatedEvents,
-            correlationId: input.correlationId ?? this.resolveCorrelationId(),
-          },
-          new grpc.Metadata(),
-          { deadline },
-          callback,
+    const result = await this.timed('incident_summary', input.tenantId, () =>
+      this.call('longform', 'SummarizeIncident', () =>
+        this.promisify<IncidentSummaryResult>(
+          'longform',
+          (deadline, callback) =>
+            this.client.summarizeIncident(
+              {
+                description: input.description,
+                relatedEvents: input.relatedEvents,
+                correlationId:
+                  input.correlationId ?? this.resolveCorrelationId(),
+              },
+              new grpc.Metadata(),
+              { deadline },
+              callback,
+            ),
         ),
       ),
     );
@@ -535,16 +546,18 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('longform', 'SuggestPolicy', () =>
-      this.promisify<PolicyDraftResult>('longform', (deadline, callback) =>
-        this.client.suggestPolicy(
-          {
-            naturalLanguageDescription: input.naturalLanguageDescription,
-            correlationId: input.correlationId ?? this.resolveCorrelationId(),
-          },
-          new grpc.Metadata(),
-          { deadline },
-          callback,
+    const result = await this.timed('policy_suggest', input.tenantId, () =>
+      this.call('longform', 'SuggestPolicy', () =>
+        this.promisify<PolicyDraftResult>('longform', (deadline, callback) =>
+          this.client.suggestPolicy(
+            {
+              naturalLanguageDescription: input.naturalLanguageDescription,
+              correlationId: input.correlationId ?? this.resolveCorrelationId(),
+            },
+            new grpc.Metadata(),
+            { deadline },
+            callback,
+          ),
         ),
       ),
     );
@@ -598,20 +611,23 @@ export class AiAdvisoryClient implements OnModuleDestroy {
     ) {
       return null;
     }
-    const result = await this.call('longform', 'InvestigateAudit', () =>
-      this.promisify<AuditInvestigationResult>(
-        'longform',
-        (deadline, callback) =>
-          this.client.investigateAudit(
-            {
-              question: input.question,
-              retrievedContext: input.retrievedContext,
-              correlationId: input.correlationId ?? this.resolveCorrelationId(),
-            },
-            new grpc.Metadata(),
-            { deadline },
-            callback,
-          ),
+    const result = await this.timed('audit_investigate', input.tenantId, () =>
+      this.call('longform', 'InvestigateAudit', () =>
+        this.promisify<AuditInvestigationResult>(
+          'longform',
+          (deadline, callback) =>
+            this.client.investigateAudit(
+              {
+                question: input.question,
+                retrievedContext: input.retrievedContext,
+                correlationId:
+                  input.correlationId ?? this.resolveCorrelationId(),
+              },
+              new grpc.Metadata(),
+              { deadline },
+              callback,
+            ),
+        ),
       ),
     );
     if (!result) return null;
@@ -622,6 +638,203 @@ export class AiAdvisoryClient implements OnModuleDestroy {
       confidence: result.confidence,
       explanation: result.explanation,
     };
+  }
+
+  /**
+   * Streaming `summarizeIncident` (performance program, decision 5): the same request and the
+   * same result, with the summary text handed to `onDelta` as the model writes it. `null` on any
+   * failure, exactly like the unary call.
+   */
+  async summarizeIncidentStream(
+    input: Parameters<AiAdvisoryClient['summarizeIncident']>[0],
+    hooks: StreamHooks = {},
+  ): Promise<IncidentSummaryAdvisory | null> {
+    if (
+      !(await this.residencyAllows(
+        input.tenantId,
+        'StreamSummarizeIncident',
+        input.classification,
+      ))
+    ) {
+      return null;
+    }
+    hooks.onReady?.();
+    const result = await this.timed('incident_summary', input.tenantId, () =>
+      this.call('longform', 'StreamSummarizeIncident', () =>
+        this.consumeStream(
+          (metadata, options) =>
+            this.client.streamSummarizeIncident(
+              {
+                description: input.description,
+                relatedEvents: input.relatedEvents,
+                correlationId:
+                  input.correlationId ?? this.resolveCorrelationId(),
+              },
+              metadata,
+              options,
+            ),
+          (e) => e.incidentSummary,
+          hooks,
+        ),
+      ),
+    );
+    return result && result !== CANCELLED ? mapIncident(result) : null;
+  }
+
+  /** Streaming `suggestPolicy`: `onProgress` gets the character count so far; the draft arrives only when complete and validated. */
+  async suggestPolicyStream(
+    input: Parameters<AiAdvisoryClient['suggestPolicy']>[0],
+    hooks: StreamHooks = {},
+  ): Promise<PolicyDraftAdvisory | null> {
+    if (
+      !(await this.residencyAllows(
+        input.tenantId,
+        'StreamSuggestPolicy',
+        input.classification,
+      ))
+    ) {
+      return null;
+    }
+    hooks.onReady?.();
+    const result = await this.timed('policy_suggest', input.tenantId, () =>
+      this.call('longform', 'StreamSuggestPolicy', () =>
+        this.consumeStream(
+          (metadata, options) =>
+            this.client.streamSuggestPolicy(
+              {
+                naturalLanguageDescription: input.naturalLanguageDescription,
+                correlationId:
+                  input.correlationId ?? this.resolveCorrelationId(),
+              },
+              metadata,
+              options,
+            ),
+          (e) => e.policyDraft,
+          hooks,
+        ),
+      ),
+    );
+    return result && result !== CANCELLED ? mapPolicy(result) : null;
+  }
+
+  /** Streaming `investigateAudit`: `onDelta` gets the answer text, already redacted by manar-ai. */
+  async investigateAuditStream(
+    input: Parameters<AiAdvisoryClient['investigateAudit']>[0],
+    hooks: StreamHooks = {},
+  ): Promise<AuditInvestigationAdvisory | null> {
+    if (
+      !(await this.residencyAllows(
+        input.tenantId,
+        'StreamInvestigateAudit',
+        input.classification,
+      ))
+    ) {
+      return null;
+    }
+    hooks.onReady?.();
+    const result = await this.timed('audit_investigate', input.tenantId, () =>
+      this.call('longform', 'StreamInvestigateAudit', () =>
+        this.consumeStream(
+          (metadata, options) =>
+            this.client.streamInvestigateAudit(
+              {
+                question: input.question,
+                retrievedContext: input.retrievedContext,
+                correlationId:
+                  input.correlationId ?? this.resolveCorrelationId(),
+              },
+              metadata,
+              options,
+            ),
+          (e) => e.auditInvestigation,
+          hooks,
+        ),
+      ),
+    );
+    return result && result !== CANCELLED ? mapAudit(result) : null;
+  }
+
+  /**
+   * Reads one server-streaming call to its end: text deltas go to `onDelta`, the event carrying
+   * the result is returned. Bounded by the long-form deadline (or `hooks.deadlineMs`), and
+   * cancelled the moment `hooks.signal` aborts, which resolves to `CANCELLED` rather than
+   * counting against the circuit breaker: a person pressing stop is not a manar-ai failure.
+   */
+  private consumeStream<R>(
+    open: (
+      metadata: grpc.Metadata,
+      options: { deadline: grpc.Deadline },
+    ) => grpc.ClientReadableStream<AnalysisEvent>,
+    pick: (event: AnalysisEvent) => R | undefined,
+    hooks: StreamHooks,
+  ): Promise<R | typeof CANCELLED> {
+    const deadline =
+      Date.now() + (hooks.deadlineMs ?? this.timeoutMsFor('longform'));
+    return new Promise((resolve, reject) => {
+      const stream = open(new grpc.Metadata(), { deadline });
+      let result: R | undefined;
+      let settled = false;
+      const done = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        hooks.signal?.removeEventListener('abort', onAbort);
+        fn();
+      };
+      const onAbort = (): void => {
+        stream.cancel();
+        done(() => resolve(CANCELLED));
+      };
+      if (hooks.signal?.aborted) return onAbort();
+      hooks.signal?.addEventListener('abort', onAbort, { once: true });
+      stream.on('data', (event: AnalysisEvent) => {
+        if (event.delta) hooks.onDelta?.(event.delta.text);
+        if (event.progress) hooks.onProgress?.(event.progress.characters);
+        const picked = pick(event);
+        if (picked !== undefined) result = picked;
+      });
+      stream.on('error', (error: Error) => done(() => reject(error)));
+      stream.on('end', () =>
+        done(() =>
+          result === undefined
+            ? reject(new Error('stream ended without a result'))
+            : resolve(result),
+        ),
+      );
+    });
+  }
+
+  /**
+   * Records the call (tokens, model, latency, outcome) in the cost telemetry. Counts only: never
+   * content. `null` is a failed call, `CANCELLED` a stop, confidence 0 manar-ai's "no answer".
+   */
+  private async timed<
+    R extends { confidence: number; usage?: UsageLike } | typeof CANCELLED,
+  >(
+    feature: AiFeature,
+    tenantId: string,
+    run: () => Promise<R | null>,
+  ): Promise<R | null> {
+    const started = Date.now();
+    const result = await run();
+    const usage = result && result !== CANCELLED ? result.usage : undefined;
+    await this.telemetry?.record({
+      tenantId,
+      feature,
+      provider: this.provider,
+      model: usage?.model || 'unknown',
+      inputTokens: usage?.inputTokens ?? 0,
+      outputTokens: usage?.outputTokens ?? 0,
+      latencyMs: Date.now() - started,
+      outcome:
+        result === null
+          ? 'error'
+          : result === CANCELLED
+            ? 'cancelled'
+            : result.confidence <= 0
+              ? 'unavailable'
+              : 'ok',
+    });
+    return result;
   }
 
   private resolveCorrelationId(): string {
@@ -799,4 +1012,74 @@ export class AiAdvisoryClient implements OnModuleDestroy {
   private timeoutMsFor(lane: AiRpcLane): number {
     return this.timeoutMsByLane[lane];
   }
+}
+
+/** Marker: the stream was stopped by the caller. */
+const CANCELLED = Symbol('cancelled');
+
+interface UsageLike {
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+}
+
+/** What a caller of a `*Stream` method can pass in. */
+export interface StreamHooks {
+  /** Each piece of text as the model writes it (summaries and investigations; redacted). */
+  onDelta?: (text: string) => void;
+  /** Characters of structured output written so far (policy drafts: counts only, never text). */
+  onProgress?: (characters: number) => void;
+  /** Stops the call (the person pressed stop or closed the page). */
+  signal?: AbortSignal;
+  /** Overrides the long-form deadline: background jobs may run for minutes. */
+  deadlineMs?: number;
+  /** The checks that can refuse a call have passed and the RPC is about to start. */
+  onReady?: () => void;
+}
+
+function mapIncident(
+  result: IncidentSummaryResult,
+): IncidentSummaryAdvisory | null {
+  if (result.confidence <= 0) return null;
+  return {
+    summary: result.summary,
+    keyEvents: result.keyEvents,
+    probableRootCause: result.probableRootCause,
+    recommendedNextSteps: result.recommendedNextSteps,
+    confidence: result.confidence,
+    explanation: result.explanation,
+  };
+}
+
+function mapPolicy(result: PolicyDraftResult): PolicyDraftAdvisory | null {
+  if (result.confidence <= 0) return null;
+  return {
+    rules: result.rules.map((rule) => ({
+      name: rule.name,
+      toolId: rule.toolId,
+      actionId: rule.actionId,
+      resourcePattern: rule.resourcePattern,
+      effect: policyRuleDraft_EffectToJSON(rule.effect).replace(
+        /^EFFECT_/,
+        '',
+      ) as 'ALLOW' | 'DENY' | 'APPROVAL_REQUIRED',
+      riskWeight: rule.riskWeight,
+      riskFloor: rule.riskFloor,
+      description: rule.description,
+    })),
+    explanation: result.explanation,
+    confidence: result.confidence,
+  };
+}
+
+function mapAudit(
+  result: AuditInvestigationResult,
+): AuditInvestigationAdvisory | null {
+  if (result.confidence <= 0) return null;
+  return {
+    answer: result.answer,
+    citations: result.citations,
+    confidence: result.confidence,
+    explanation: result.explanation,
+  };
 }

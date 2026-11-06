@@ -3,6 +3,7 @@ import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-cli
 import {
   AiAdvisoryClient,
   type IncidentSummaryAdvisory,
+  type StreamHooks,
 } from '../ai-advisory/ai-advisory-client.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
@@ -269,6 +270,8 @@ export class IncidentsService {
   async summarizeIncident(
     tenantClient: TenantPrismaClient,
     input: SummarizeIncidentInput,
+    /** Present on the streaming endpoint: the summary text goes to `hooks.onDelta` as it is written. */
+    hooks?: StreamHooks,
   ): Promise<SummarizeIncidentResult> {
     let baseDescription = input.description ?? '';
     let relatedCorrelationIds: string[] = [];
@@ -339,12 +342,15 @@ export class IncidentsService {
     }
     const classification = maxClassification(resolvedClassifications);
 
-    const advisory = await this.aiAdvisoryClient.summarizeIncident({
+    const request = {
       description: baseDescription,
       relatedEvents,
       tenantId: input.tenantId,
       classification,
-    });
+    };
+    const advisory = hooks
+      ? await this.aiAdvisoryClient.summarizeIncidentStream(request, hooks)
+      : await this.aiAdvisoryClient.summarizeIncident(request);
 
     return {
       available: advisory !== null,

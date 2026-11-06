@@ -199,6 +199,21 @@ export async function ensureHostClaudeCodeTool(
 }
 
 /**
+ * Host actions that only read files or folders. The device's offline folder rule (manar-edge
+ * internal/protect/offline.go, `ReadsAllowed`) serves the generic action `read`, and its hook maps
+ * every read-type tool call (read_file, view, ls, glob, grep, ...) to `read`. Claude Code agent
+ * mode names these actions itself, so they are listed too: a published DENY or ask rule on any of
+ * them must switch the offline folder rule off. Pinned to the edge list in host-authorize.cacheable.spec.ts.
+ */
+export const READ_HOST_ACTIONS: readonly string[] = [
+  'read',
+  'glob',
+  'grep',
+  'ls',
+  'notebookread',
+];
+
+/**
  * The other AI tools on a device (public launch spec 4.5 and 6). Their hooks send these generic
  * action ids, mapped from each tool's own event names by manar-edge `internal/protect`:
  * `shell` (resource: the command), `read` / `edit` / `write` (the file path), `mcp` (the
@@ -252,6 +267,11 @@ export const HOST_GENERIC_ACTIONS: readonly HostActionDefinition[] = [
     resourceKind: 'other',
   },
 ];
+
+/** Every action id a host tool can be asked about. */
+export const ALL_HOST_ACTION_IDS: ReadonlySet<string> = new Set(
+  [...HOST_CLAUDE_CODE_ACTIONS, ...HOST_GENERIC_ACTIONS].map((a) => a.name),
+);
 
 /** How a tool can be protected. A device may never report more than its entry allows. */
 export type ProtectMode = 'hook' | 'mcp' | 'gateway' | 'none';

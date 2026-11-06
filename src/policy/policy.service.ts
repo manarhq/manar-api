@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
-import { AiAdvisoryClient } from '../ai-advisory/ai-advisory-client.service';
+import {
+  AiAdvisoryClient,
+  type PolicyDraftAdvisory,
+} from '../ai-advisory/ai-advisory-client.service';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import {
@@ -319,7 +322,25 @@ export class PolicyService {
       naturalLanguageDescription: input.naturalLanguageDescription,
       tenantId,
     });
+    return this.persistSuggestion(tenantClient, input, advisory);
+  }
 
+  /**
+   * Turns manar-ai's draft into a DRAFT `PolicyVersion` (see `suggestPolicy`'s doc comment for the
+   * rules: schema-validated, never published, nothing created when there is no usable draft).
+   * Shared by the plain endpoint and the background job.
+   */
+  async persistSuggestion(
+    tenantClient: TenantPrismaClient,
+    input: SuggestPolicyRequest & { authorId: string },
+    advisory: PolicyDraftAdvisory | null,
+  ): Promise<{
+    available: boolean;
+    policyId: string | null;
+    version: Awaited<ReturnType<PolicyService['createVersion']>> | null;
+    explanation: string | null;
+    confidence: number | null;
+  }> {
     if (!advisory || advisory.rules.length === 0) {
       return {
         available: false,
