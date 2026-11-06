@@ -276,6 +276,14 @@ export class SuggestPolicyResponseDto {
   @ApiProperty()
   available!: boolean;
 
+  @ApiProperty({
+    required: false,
+    enum: ['ai_switched_off'],
+    description:
+      'Present when `available` is false because the workspace has "Allow external AI" off. Nothing was sent to any model.',
+  })
+  reason?: 'ai_switched_off';
+
   @ApiProperty({ nullable: true, format: 'uuid' })
   policyId!: string | null;
 

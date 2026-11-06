@@ -1,3 +1,8 @@
+import {
+  AI_SWITCHED_OFF_REASON,
+  aiSwitchedOff,
+  AiAdvisoryClient,
+} from '../ai-advisory/ai-advisory-client.service';
 import { UsageMeterService } from '../billing/usage-meter.service';
 import {
   BadRequestException,
@@ -109,6 +114,7 @@ export class AuditController {
     private readonly checkpointSigner: CheckpointSigner,
     private readonly entitlements: EntitlementsService,
     private readonly meter: UsageMeterService,
+    private readonly aiAdvisory: AiAdvisoryClient,
   ) {}
 
   /** Events older than the plan's window are hidden (never deleted): the lower bound moves up to it. */
@@ -234,10 +240,13 @@ export class AuditController {
       auth.tenant.id,
     );
     // One AI action (paid extra), given back when no model answered.
-    return this.meter.ai(auth.tenant.id, async () =>
-      this.auditSearchService.investigateAudit(
-        await this.investigateInput(auth, tenantClient, input),
-      ),
+    return this.meter.ai(
+      auth.tenant.id,
+      async () =>
+        this.auditSearchService.investigateAudit(
+          await this.investigateInput(auth, tenantClient, input),
+        ),
+      () => this.switchedOffAnswer(auth.tenant.id),
     );
   }
 
@@ -264,9 +273,24 @@ export class AuditController {
       auth.tenant.id,
     );
     const request = await this.investigateInput(auth, tenantClient, input);
-    await runAiStream(reply, this.meter, auth.tenant.id, (hooks) =>
-      this.auditSearchService.investigateAudit(request, hooks),
+    await runAiStream(
+      reply,
+      this.meter,
+      auth.tenant.id,
+      (hooks) => this.auditSearchService.investigateAudit(request, hooks),
+      () => this.switchedOffAnswer(auth.tenant.id),
     );
+  }
+
+  private async switchedOffAnswer(tenantId: string) {
+    return aiSwitchedOff(await this.aiAdvisory.aiGate(tenantId))
+      ? {
+          available: false as const,
+          reason: AI_SWITCHED_OFF_REASON,
+          result: null,
+          contextEventCount: 0,
+        }
+      : null;
   }
 
   /** The tenant-scoped retrieval request both investigate endpoints run. */

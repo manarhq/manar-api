@@ -214,6 +214,9 @@ config:
   REDIS_URL: redis://valkey-primary.manar-platform.svc:6379
   REDIS_TIMEOUT_MS: '1000'
   AI_ADVISORY_GRPC_TARGET: manar-ai.manar-prod.svc:50051
+  # Declare manar-ai's AI_PROVIDER here (AI_ADVISORY_PROVIDER: ollama | vllm | azure_openai |
+  # anthropic). Unset counts as an external provider, so tenants with allowExternalAi=false get
+  # no AI advisory until it is declared.
   AI_ADVISORY_TIMEOUT_MS: '2000'
   AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: '5'
   AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'

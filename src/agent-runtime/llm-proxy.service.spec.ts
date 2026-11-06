@@ -277,6 +277,37 @@ describe('LlmProxyService', () => {
     expect(upstream.chat).not.toHaveBeenCalled();
   });
 
+  it('AI switched off, internal model: DLP is still required (503 when it is down)', async () => {
+    const down = setup({ advisory: null });
+    await expectDeny(
+      down.service.complete(AGENT, 'task-1', body('what is 2+2')),
+      503,
+      'enforcement_dependency_unavailable',
+    );
+    expect(down.upstream.chat).not.toHaveBeenCalled();
+
+    const ok = setup({ advisory: CLEAN });
+    await ok.service.complete(AGENT, 'task-1', body('what is 2+2'));
+    expect(ok.upstream.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('switched off or air-gapped with an external route: refused by the catalog before DLP or any upstream call', async () => {
+    for (const reason of ['llm_external_not_allowed', 'llm_air_gapped']) {
+      const catalog = {
+        ...allowAllCatalog(),
+        llmGate: () => Promise.reject(new CatalogDenied(reason)),
+      } as unknown as CatalogService;
+      const { service, upstream, aiAdvisory } = setup({ catalog });
+      await expectDeny(
+        service.complete(AGENT, 'task-1', body('hi')),
+        403,
+        reason,
+      );
+      expect(aiAdvisory.analyzeDlp).not.toHaveBeenCalled();
+      expect(upstream.chat).not.toHaveBeenCalled();
+    }
+  });
+
   it('blocks a secret the deterministic floor finds even when the advisory says clean', async () => {
     const { service, upstream, aiAdvisory } = setup({ advisory: CLEAN });
     await expectDeny(

@@ -1,3 +1,8 @@
+import {
+  AI_SWITCHED_OFF_REASON,
+  aiSwitchedOff,
+  AiAdvisoryClient,
+} from '../ai-advisory/ai-advisory-client.service';
 import type { FastifyReply } from 'fastify';
 import { UsageMeterService } from '../billing/usage-meter.service';
 import { runAiStream } from '../ai-advisory/ai-stream';
@@ -83,6 +88,7 @@ export class IncidentsController {
     private readonly incidentsService: IncidentsService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly meter: UsageMeterService,
+    private readonly aiAdvisory: AiAdvisoryClient,
   ) {}
 
   @Post()
@@ -203,14 +209,28 @@ export class IncidentsController {
       auth.tenant.id,
     );
     // One AI action (paid extra), given back when no model answered.
-    return this.meter.ai(auth.tenant.id, () =>
-      mapIncidentErrors(() =>
-        this.incidentsService.summarizeIncident(tenantClient, {
-          ...input,
-          tenantId: auth.tenant.id,
-        }),
-      ),
+    return this.meter.ai(
+      auth.tenant.id,
+      () =>
+        mapIncidentErrors(() =>
+          this.incidentsService.summarizeIncident(tenantClient, {
+            ...input,
+            tenantId: auth.tenant.id,
+          }),
+        ),
+      () => this.switchedOffAnswer(auth.tenant.id),
     );
+  }
+
+  private async switchedOffAnswer(tenantId: string) {
+    return aiSwitchedOff(await this.aiAdvisory.aiGate(tenantId))
+      ? {
+          available: false as const,
+          reason: AI_SWITCHED_OFF_REASON,
+          result: null,
+          contextEventCount: 0,
+        }
+      : null;
   }
 
   @Post('summarize/stream')
@@ -234,14 +254,19 @@ export class IncidentsController {
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
-    await runAiStream(reply, this.meter, auth.tenant.id, (hooks) =>
-      mapIncidentErrors(() =>
-        this.incidentsService.summarizeIncident(
-          tenantClient,
-          { ...input, tenantId: auth.tenant.id },
-          hooks,
+    await runAiStream(
+      reply,
+      this.meter,
+      auth.tenant.id,
+      (hooks) =>
+        mapIncidentErrors(() =>
+          this.incidentsService.summarizeIncident(
+            tenantClient,
+            { ...input, tenantId: auth.tenant.id },
+            hooks,
+          ),
         ),
-      ),
+      () => this.switchedOffAnswer(auth.tenant.id),
     );
   }
 

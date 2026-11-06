@@ -25,15 +25,15 @@ export class TenantSsoInfoDto {
 
 export class TenantAiProviderInfoDto {
   @ApiProperty({
-    enum: ['anthropic', 'ollama', 'vllm'],
+    enum: ['anthropic', 'azure_openai', 'ollama', 'vllm', 'undeclared'],
     description:
       "Which provider manar-ai is currently configured to use for this deployment (AI_ADVISORY_PROVIDER, manar-api-side config -- see AiAdvisoryConfigSchema's doc comment for why manar-api cannot ask manar-ai this directly). Deployment-wide, not per-tenant.",
   })
-  provider!: 'anthropic' | 'ollama' | 'vllm';
+  provider!: 'anthropic' | 'azure_openai' | 'ollama' | 'vllm' | 'undeclared';
 
   @ApiProperty({
     description:
-      'Whether this provider is treated as leaving this deployment\'s own infrastructure -- only true for "anthropic". Governs whether this tenant\'s allowExternalAi flag has any effect.',
+      'Whether this provider is treated as leaving this deployment\'s own infrastructure -- true for everything except the self-hosted "ollama" and "vllm" (production with no provider declared counts as external). Governs whether this tenant\'s allowExternalAi flag has any effect.',
   })
   isExternal!: boolean;
 }
@@ -81,6 +81,18 @@ export class TenantSettingsResponseDto {
       'Company workspaces: when true only approver roles decide approvals; a device owner or agent creator can no longer decide their own. Always false for a personal workspace.',
   })
   approvalsAdminsOnly!: boolean;
+
+  @ApiProperty({
+    description:
+      'True once, after `ai:default-on` switched AI on for this workspace, until an owner or admin dismisses the console notice.',
+  })
+  aiDefaultNoticePending!: boolean;
+
+  @ApiProperty({
+    description:
+      'True when AI is off and `ai:default-on` could not prove from the audit history that nobody chose that: the console asks "Turn on AI features?". Cleared by dismissing or by any change to allowExternalAi.',
+  })
+  aiOptInNoticePending!: boolean;
 
   @ApiProperty({ format: 'date-time' })
   updatedAt!: Date;

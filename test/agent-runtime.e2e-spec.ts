@@ -1262,6 +1262,11 @@ describe('Agent runtime: manifest, governed MCP server, LLM proxy (e2e)', () => 
   describe('LLM proxy, Anthropic format', () => {
     let claudeTask: { id: string };
     beforeAll(async () => {
+      // A new workspace starts with AI on; this block begins from the switch off.
+      await control.tenant.update({
+        where: { id: tenant.id },
+        data: { residency: 'UAE', allowExternalAi: false },
+      });
       claudeTask = await createTask({
         allowedToolActions: [],
         allowedResourceSelectors: [],
