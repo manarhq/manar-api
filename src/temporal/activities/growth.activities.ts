@@ -28,13 +28,15 @@ export class GrowthActivitiesFactory {
       sendTrialReminders: () => this.trial.sendDue(),
       runBillingTick: () => this.billingTick.run(),
       sendUsageAlerts: async () => {
-        // Friction alert (decision 38): best effort, self-throttled to every 6 hours.
-        void this.friction
-          .scan()
-          .catch((e: unknown) =>
-            this.logger.warn(`friction scan failed: ${String(e)}`),
-          );
-        return this.alerts.sendDue();
+        const sent = await this.alerts.sendDue();
+        // Friction alert (decision 38): awaited so the activity owns the work, after the alerts so
+        // a slow rollup never delays them. Once per 6 hours across replicas; a failure only logs.
+        try {
+          await this.friction.scan();
+        } catch (e: unknown) {
+          this.logger.warn(`friction scan failed: ${String(e)}`);
+        }
+        return sent;
       },
       executeDueDeletions: () => this.account.executeDue(),
       purgeOldSamples: () => this.data.purgeOld(),

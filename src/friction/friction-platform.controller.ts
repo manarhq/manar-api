@@ -29,13 +29,17 @@ export class FrictionPlatformController {
     description: '1 to 90, default 7',
   })
   async list(@Query('days') days?: string) {
-    const workspaces = await this.friction.staff(parseDays(days, 7));
+    const { workspaces, failed } = await this.friction.staffReport(
+      parseDays(days, 7),
+    );
     // Keeps the gauge and the warn log current whenever Desk looks.
     void this.friction.scan().catch(() => undefined);
     return {
       budget: 5,
       overBudget: workspaces.filter((w) => w.overBudget).length,
       workspaces,
+      // Workspaces that could not be read this time (also in the log); empty when all were.
+      failed,
     };
   }
 }

@@ -16,6 +16,8 @@ import {
 
 const UNASSIGNED = '_unassigned';
 const STAFF_CACHE_MS = 10 * 60_000;
+/** The console report reuses a rollup written this recently. */
+const REPORT_FRESH_MS = 30_000;
 
 export type StaffRow = {
   tenantId: string;
@@ -27,6 +29,13 @@ export type StaffRow = {
   overBudget: boolean;
 } & FrictionNumbers;
 const DAY = 86_400_000;
+const SCAN_EVERY_MS = 6 * 3_600_000;
+
+/** The staff list, and the workspaces that could not be read (so a gap is never silent). */
+export interface StaffReport {
+  workspaces: StaffRow[];
+  failed: string[];
+}
 
 interface RolledRow {
   day: Date;
@@ -48,7 +57,7 @@ export class FrictionService {
   /** The staff rollup walks every workspace: keep it for a few minutes per window. */
   private readonly staffCache = new Map<
     number,
-    { at: number; value: StaffRow[] }
+    { at: number; value: StaffReport }
   >();
 
   constructor(
@@ -66,8 +75,18 @@ export class FrictionService {
     client: TenantPrismaClient,
     days: number,
     now: Date = new Date(),
+    /** Skip the work when the rollup was written this recently (the console GET passes one). */
+    freshForMs = 0,
   ): Promise<void> {
     const range = dayRange(now, days);
+    if (freshForMs > 0) {
+      const last = await client.frictionDaily.aggregate({
+        where: { day: { gte: range[0]! } },
+        _max: { updatedAt: true },
+      });
+      const at = last._max.updatedAt?.getTime();
+      if (at !== undefined && Date.now() - at < freshForMs) return;
+    }
     const have = new Set(
       (
         await client.frictionDaily.findMany({
@@ -113,11 +132,12 @@ export class FrictionService {
       GROUP BY 1, 2`;
     const needKeys = new Set(need.map(dayKey));
     const fresh = rows.filter((r) => needKeys.has(dayKey(r.day)));
-    await client.$transaction([
-      client.frictionDaily.deleteMany({
-        where: { day: { in: need } },
-      }),
-      client.frictionDaily.createMany({
+    // One writer at a time per workspace database: two readers refreshing the same day would
+    // otherwise both insert it (unique key) and one request would fail with a 500.
+    await client.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('friction_daily'))`;
+      await tx.frictionDaily.deleteMany({ where: { day: { in: need } } });
+      await tx.frictionDaily.createMany({
         data: fresh.map((r) => ({
           day: r.day,
           subject: r.subject,
@@ -130,8 +150,8 @@ export class FrictionService {
           answerMs: Math.round(r.answer_ms),
           blockedMs: Math.round(r.blocked_ms),
         })),
-      }),
-    ]);
+      });
+    });
   }
 
   private async developers(client: TenantPrismaClient): Promise<number> {
@@ -158,7 +178,7 @@ export class FrictionService {
     days: number,
     now: Date = new Date(),
   ) {
-    await this.refresh(client, days, now);
+    await this.refresh(client, days, now, REPORT_FRESH_MS);
     const range = dayRange(now, days);
     const all = (await client.frictionDaily.findMany({
       where: { day: { gte: range[0]! } },
@@ -210,6 +230,13 @@ export class FrictionService {
    * window, so Desk polling and the alert scan do not walk every workspace each time.
    */
   async staff(days: number, now: Date = new Date()): Promise<StaffRow[]> {
+    return (await this.staffReport(days, now)).workspaces;
+  }
+
+  async staffReport(
+    days: number,
+    now: Date = new Date(),
+  ): Promise<StaffReport> {
     const hit = this.staffCache.get(days);
     if (hit && now.getTime() - hit.at < STAFF_CACHE_MS) return hit.value;
     const value = await this.computeStaff(days, now);
@@ -217,7 +244,7 @@ export class FrictionService {
     return value;
   }
 
-  private async computeStaff(days: number, now: Date): Promise<StaffRow[]> {
+  private async computeStaff(days: number, now: Date): Promise<StaffReport> {
     const tenants = await this.control.tenant.findMany({
       where: { status: 'ACTIVE', kind: { not: 'SAMPLE' } },
       select: { id: true, slug: true, name: true, kind: true },
@@ -225,6 +252,7 @@ export class FrictionService {
       take: 1000,
     });
     const out: StaffRow[] = [];
+    const failed: string[] = [];
     // ponytail: one workspace at a time; the tenant client cache holds 50, so a very large
     // fleet should read a nightly platform rollup instead.
     for (const t of tenants) {
@@ -249,24 +277,37 @@ export class FrictionService {
           ...totals,
         });
       } catch (error) {
+        failed.push(t.slug);
         this.logger.warn(
           `friction rollup failed for ${t.slug}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
-    return out.sort(
-      (a, b) => b.avgPromptsPerDeveloperPerDay - a.avgPromptsPerDeveloperPerDay,
-    );
+    if (failed.length > 0)
+      this.logger.warn(
+        `friction rollup skipped ${failed.length} workspace(s): ${failed.slice(0, 20).join(', ')}`,
+      );
+    return {
+      workspaces: out.sort(
+        (a, b) =>
+          b.avgPromptsPerDeveloperPerDay - a.avgPromptsPerDeveloperPerDay,
+      ),
+      failed,
+    };
   }
 
   /**
    * Alert path (decision 38): one warn line per workspace over budget and a gauge with the count
-   * (no tenant label; the per-workspace list is the staff API). Rate-limited to once per 6 hours
-   * per process so an hourly tick stays cheap.
+   * (no tenant label; the per-workspace list is the staff API). Once per 6 hours across all
+   * replicas (a stamp in the control database), so an hourly tick stays cheap. The gauge is set by
+   * the replica that ran the check: read it with max() across replicas.
    */
   async scan(now: Date = new Date()): Promise<number> {
-    if (now.getTime() - this.lastScan < 6 * 3_600_000) return 0;
+    // This process asked recently: no database round trip.
+    if (now.getTime() - this.lastScan < SCAN_EVERY_MS) return 0;
     this.lastScan = now.getTime();
+    // One replica per interval wins the stamp; the others return at once.
+    if (!(await this.claimScan(now))) return 0;
     const over = (await this.staff(7, now)).filter((w) => w.overBudget);
     for (const w of over)
       this.logger.warn(
@@ -274,5 +315,15 @@ export class FrictionService {
       );
     setFrictionOverBudget(over.length);
     return over.length;
+  }
+
+  /** Conditional upsert: true only for the caller that moved `ranAt` (or created the row). */
+  private async claimScan(now: Date): Promise<boolean> {
+    const due = new Date(now.getTime() - SCAN_EVERY_MS);
+    const n = await this.control.$executeRaw`
+      INSERT INTO job_runs (name, "ranAt") VALUES ('friction-scan', ${now})
+      ON CONFLICT (name) DO UPDATE SET "ranAt" = ${now}
+      WHERE job_runs."ranAt" <= ${due}`;
+    return n > 0;
   }
 }

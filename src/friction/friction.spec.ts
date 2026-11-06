@@ -78,7 +78,14 @@ describe('friction numbers', () => {
 });
 
 describe('over-budget alert', () => {
-  function svc(avgPrompts: number[], finds?: { n: number }) {
+  /** Stands for the `job_runs` row: shared by every service built with the same stamp. */
+  const newStamp = () => ({ at: null as Date | null });
+  function svc(
+    avgPrompts: number[],
+    finds?: { n: number },
+    stamp = newStamp(),
+    failing: string[] = [],
+  ) {
     const tenants = avgPrompts.map((_, i) => ({
       id: `t${i}`,
       slug: `ws-${i}`,
@@ -86,6 +93,11 @@ describe('over-budget alert', () => {
       kind: 'COMPANY',
     }));
     const control = {
+      $executeRaw: (_s: unknown, now: Date, _n: Date, due: Date) => {
+        if (stamp.at && stamp.at > due) return Promise.resolve(0);
+        stamp.at = now;
+        return Promise.resolve(1);
+      },
       tenant: {
         findMany: () => {
           if (finds) finds.n++;
@@ -96,6 +108,7 @@ describe('over-budget alert', () => {
     const manager = {
       getClient: (id: string) => {
         const i = Number(id.slice(1));
+        if (failing.includes(id)) return Promise.reject(new Error('no db'));
         return Promise.resolve({
           frictionDaily: {
             findMany: () => Promise.resolve([row({ prompts: avgPrompts[i]! })]),
@@ -132,6 +145,32 @@ describe('over-budget alert', () => {
     expect(finds.n).toBe(2);
     await s.staff(7, new Date(t.getTime() + 11 * 60_000));
     expect(finds.n).toBe(3);
+  });
+  it('a workspace that cannot be read is listed as failed, not silently left out', async () => {
+    const s = svc([20, 70, 30], undefined, undefined, ['t1']);
+    const warn = vi
+      .spyOn(
+        (s as unknown as { logger: { warn: (m: string) => void } }).logger,
+        'warn',
+      )
+      .mockImplementation(() => undefined);
+    const r = await s.staffReport(7);
+    expect(r.failed).toEqual(['ws-1']);
+    expect(r.workspaces.map((w) => w.slug).sort()).toEqual(['ws-0', 'ws-2']);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('ws-1');
+  });
+  it('the 6-hour limit holds across processes: a second replica does not run the check', async () => {
+    const stamp = newStamp();
+    const a = svc([20, 70], undefined, stamp);
+    const b = svc([20, 70], undefined, stamp);
+    vi.spyOn(
+      (a as unknown as { logger: { warn: (m: string) => void } }).logger,
+      'warn',
+    ).mockImplementation(() => undefined);
+    const now = new Date('2026-11-05T10:00:00Z');
+    expect(await a.scan(now)).toBe(1);
+    expect(await b.scan(new Date(now.getTime() + 60_000))).toBe(0);
+    expect(await b.scan(new Date(now.getTime() + 7 * 3_600_000))).toBe(1);
   });
   it('scan warns once per workspace over budget, sets the gauge, and waits 6 hours', async () => {
     const s = svc([20, 70]);
