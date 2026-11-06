@@ -40,15 +40,23 @@ function setup(
     /** The intent / completion audit write throws for these ids. */
     failIntent?: string[];
     failCompletion?: string[];
+    /** The guarded flip itself throws for these ids. */
+    failFlip?: string[];
     /** Runs between the intent write and the guarded flip (a concurrent change). */
     midRun?: (id: string) => void;
   } = {},
 ) {
   const readOnly = vi.fn().mockResolvedValue(1);
-  const events = new Map<string, { eventType: string; data: any }[]>();
+  let clock = 1000;
+  const events = new Map<
+    string,
+    { eventType: string; data: any; timestamp: Date }[]
+  >();
   const control = {
     /** The guarded flip, evaluated the way the SQL does. */
     $executeRaw: vi.fn((_s: TemplateStringsArray, id: string) => {
+      if (opts.failFlip?.includes(id))
+        return Promise.reject(new Error('flip down'));
       const r = rows.find((x) => x.id === id);
       const gov = (opts.government ?? []).includes(id);
       const ok =
@@ -118,9 +126,11 @@ function setup(
             auditEvent: {
               findMany: (args: { where: { eventType: string } }) =>
                 Promise.resolve(
-                  (events.get(id) ?? []).filter(
-                    (e) => e.eventType === args.where.eventType,
-                  ),
+                  (events.get(id) ?? [])
+                    .filter((e) => e.eventType === args.where.eventType)
+                    .sort(
+                      (a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+                    ),
                 ),
               findFirst: (args: { where?: object }) => {
                 if (args.where) {
@@ -162,7 +172,10 @@ function setup(
           opts.failCompletion?.includes(id)
         )
           return Promise.reject(new Error('audit down'));
-        events.set(id, [...(events.get(id) ?? []), input]);
+        events.set(id, [
+          ...(events.get(id) ?? []),
+          { ...input, timestamp: new Date(++clock) },
+        ]);
         return Promise.resolve({});
       },
     ),
@@ -396,7 +409,11 @@ describe('ai:default-on', () => {
     second.audit.record.mockClear();
     second.events.set('a', [
       ...(first.events.get('a') ?? []),
-      { eventType: written.eventType, data: written.data },
+      {
+        eventType: written.eventType,
+        data: written.data,
+        timestamp: new Date(1e9),
+      },
     ]);
     expect((await second.service.run({ dryRun: false })).reconciled).toBe(0);
   });
@@ -419,5 +436,60 @@ describe('ai:default-on', () => {
       )
       .filter((e) => e.eventType.endsWith('_applied'));
     expect(completions.map((e) => e.data.applied)).toEqual([false, false]);
+  });
+
+  it('a flip that throws closes its own intent as not applied, and a later run never reports it applied', async () => {
+    const rows = [row('a')];
+    const first = setup(rows, { failFlip: ['a'] });
+    const r1 = await first.service.run({ dryRun: false });
+    expect(r1).toMatchObject({ flip: 0, failed: 1 });
+    const closed = first.audit.record.mock.calls.at(-1)![2] as unknown as {
+      data: { applied: boolean; error: string };
+    };
+    expect(closed.data).toMatchObject({ applied: false, error: 'Error' });
+
+    // Run 2 flips for real; run 3 must not mark run 1's intent applied.
+    const second = setup(rows);
+    second.events.set('a', first.events.get('a') ?? []);
+    await second.service.run({ dryRun: false });
+    expect(rows[0]!.allowExternalAi).toBe(true);
+    const third = setup(rows);
+    third.events.set('a', second.events.get('a') ?? []);
+    await third.service.run({ dryRun: false });
+    const applied = (third.events.get('a') ?? []).filter(
+      (e) =>
+        e.eventType.endsWith('_applied') &&
+        (e.data as { applied: boolean }).applied === true,
+    );
+    expect(applied).toHaveLength(1);
+  });
+
+  it('reconcile: only the newest orphan intent can be applied; older orphans are superseded', async () => {
+    const rows = [row('a', { allowExternalAi: true })];
+    const { service, events, audit } = setup(rows);
+    const ev = (eventType: string, intentId: string, t: number) => ({
+      eventType,
+      data: { intentId },
+      timestamp: new Date(t),
+    });
+    // Run 1 died without a completion, run 2 flipped but its completion was lost.
+    events.set('a', [
+      ev('tenant.settings.ai_default_intent', 'I1', 1),
+      ev('tenant.settings.ai_default_intent', 'I2', 2),
+    ]);
+    const counts = await service.run({ dryRun: false });
+    expect(counts.reconciled).toBe(2);
+    const written = audit.record.mock.calls.map(
+      (c) => c[2] as unknown as { data: Record<string, unknown> },
+    );
+    expect(written.find((w) => w.data.intentId === 'I2')!.data).toMatchObject({
+      applied: true,
+      reconciled: true,
+    });
+    expect(written.find((w) => w.data.intentId === 'I1')!.data).toEqual({
+      intentId: 'I1',
+      applied: false,
+      superseded: true,
+    });
   });
 });

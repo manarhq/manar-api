@@ -73,6 +73,8 @@ export class AiDefaultService {
   async run(options: {
     dryRun: boolean;
     includeEnterprise?: boolean;
+    /** Only these workspaces (staff trial runs, tests on a shared database). Absent: all. */
+    onlyTenantIds?: string[];
   }): Promise<AiDefaultCounts> {
     const counts: AiDefaultCounts = {
       flip: 0,
@@ -93,8 +95,9 @@ export class AiDefaultService {
     };
     const hosted =
       this.config.get('MANAR_DEPLOYMENT', { infer: true }) === 'hosted';
-    const { rows, onByDefault } = await this.control.$transaction(
-      async (tx) => {
+    const only = options.onlyTenantIds ? new Set(options.onlyTenantIds) : null;
+    const { rows: allRows, onByDefault: allOn } =
+      await this.control.$transaction(async (tx) => {
         await tx.$executeRaw`SET TRANSACTION READ ONLY`;
         const government = new Set(
           (
@@ -136,9 +139,10 @@ export class AiDefaultService {
           })),
           onByDefault: on.map((t) => t.id),
         };
-      },
-    );
+      });
 
+    const rows = only ? allRows.filter((t) => only.has(t.id)) : allRows;
+    const onByDefault = only ? allOn.filter((id) => only.has(id)) : allOn;
     for (const t of rows) {
       if (t.residency === 'AIR_GAPPED') counts.skippedAirGapped++;
       else if (t.government) counts.skippedGovernment++;
@@ -259,7 +263,27 @@ export class AiDefaultService {
         data: { intentId, from: false, to: true },
       });
       // 2. The guarded flip.
-      const count = await this.guardedFlip(tenantId);
+      let count: number;
+      try {
+        count = await this.guardedFlip(tenantId);
+      } catch (error) {
+        // The flip did not happen. Say so against this intent, so no later run can report it as
+        // applied; if even that cannot be written, the reconcile pass supersedes it.
+        await this.audit
+          .record(client, tenantId, {
+            eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_APPLIED,
+            actor,
+            data: {
+              intentId,
+              applied: false,
+              error: error instanceof Error ? error.constructor.name : 'error',
+            },
+          })
+          .catch(() => {
+            counts.completionFailed++;
+          });
+        throw error;
+      }
       if (count === 1) counts.flip++;
       else {
         counts.changedMidRun++;
@@ -306,16 +330,17 @@ export class AiDefaultService {
       const client = await this.tenants.getClient(tenantId);
       const [intents, done] = await client.$transaction(async (tx) => {
         await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        const select = { data: true, timestamp: true } as const;
         return [
           await tx.auditEvent.findMany({
             where: { eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_INTENT },
-            select: { data: true },
+            select,
             orderBy: { timestamp: 'desc' },
             take: 200,
           }),
           await tx.auditEvent.findMany({
             where: { eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_APPLIED },
-            select: { data: true },
+            select,
             orderBy: { timestamp: 'desc' },
             take: 200,
           }),
@@ -324,22 +349,28 @@ export class AiDefaultService {
       const idOf = (e: { data: unknown }) =>
         (e.data as { intentId?: unknown } | null)?.intentId;
       const completed = new Set(done.map(idOf));
-      const missing = intents
-        .map(idOf)
-        .filter((id): id is string => typeof id === 'string')
-        .filter((id) => !completed.has(id));
-      for (const intentId of missing) {
+      const newestCompletion = done[0]?.timestamp.getTime() ?? -Infinity;
+      // Newest first. Only the newest orphan with no completion after it can have applied the
+      // flip (the row is on); any older orphan was superseded and is closed as not applied, so the
+      // log never shows two switch-ons.
+      const orphans = intents
+        .filter((e) => typeof idOf(e) === 'string' && !completed.has(idOf(e)))
+        .map((e) => ({ id: idOf(e) as string, at: e.timestamp.getTime() }));
+      for (const [i, o] of orphans.entries()) {
         counts.reconciled++;
         if (options.dryRun) continue;
+        const applies = i === 0 && o.at >= newestCompletion;
         await this.audit.record(client, tenantId, {
           eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_APPLIED,
           actor: { type: 'system', id: 'ai:default-on' },
-          data: {
-            intentId,
-            applied: true,
-            allowExternalAi: true,
-            reconciled: true,
-          },
+          data: applies
+            ? {
+                intentId: o.id,
+                applied: true,
+                allowExternalAi: true,
+                reconciled: true,
+              }
+            : { intentId: o.id, applied: false, superseded: true },
         });
       }
     } catch (error) {
