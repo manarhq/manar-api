@@ -5,6 +5,7 @@ import {
   Logger,
   Post,
   Req,
+  ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
@@ -19,7 +20,8 @@ import { PauseService } from '../pause/pause.service';
 import { SecretsService } from '../secrets/secrets.service';
 import { DataCollectionService } from '../data-collection/data-collection.service';
 import { JailSitesService } from '../jail/jail-sites.service';
-import { effectivePolicyVersion } from '../policy/policy-engine.service';
+import { effectivePolicyVersion } from '../policy/effective-policy-version';
+import { PlatformKillSwitchService } from '../kill-switches/platform-kill-switch.service';
 import { CurrentHost, type HostContext } from './host-context';
 import { HostAuthGuard } from './host-auth.guard';
 
@@ -44,6 +46,7 @@ export class HostConfigController {
     private readonly jail: JailSitesService,
     private readonly data: DataCollectionService,
     private readonly hosts: HostsAdminService,
+    private readonly platformKill: PlatformKillSwitchService,
   ) {}
 
   /** Secret blocking flags. Any failure reads as "off": a lookup problem must never lock a person out. */
@@ -60,18 +63,24 @@ export class HostConfigController {
   }
 
   /**
-   * The tenant's effective policy version, so the device drops cached offline allows when it
-   * changes. Null on any failure or an unapproved device: the device then keeps what it has.
+   * The effective policy version (see `effectivePolicyVersion`): the device drops its cached
+   * offline allows when it changes. A device that is not APPROVED gets a fixed `revoked:<status>`
+   * value so it drops them too. A read failure fails the poll (503), like `vaultGrants`: the
+   * device must never read "no value" as "keep the cache".
    */
-  private async policyVersion(host: HostContext): Promise<string | null> {
-    if (host.status !== 'APPROVED') return null;
+  private async policyVersion(host: HostContext): Promise<string> {
+    if (host.status !== 'APPROVED') return `revoked:${host.status}`;
     try {
       return await effectivePolicyVersion(
         await this.tenants.getClient(host.tenantId),
+        host.hostId,
+        await this.platformKill.isActive(),
       );
     } catch (e) {
-      this.logger.warn(`policy version unavailable: ${(e as Error).message}`);
-      return null;
+      this.logger.error(`policy version unavailable: ${(e as Error).message}`);
+      throw new ServiceUnavailableException(
+        'enforcement_dependency_unavailable',
+      );
     }
   }
 
@@ -148,8 +157,8 @@ export class HostConfigController {
         .map((p) => p.trim())
         .filter((p) => p.length > 0 && p.length <= 512)
         .slice(0, 100),
-      // Tenant-wide effective policy version (opaque, no policy content): a change makes the
-      // device drop its cached offline allows.
+      // Opaque token over everything that can flip a cached ALLOW (policy, kill switches, blocks,
+      // tool registry); no content. A change makes the device drop its cached offline allows.
       policyVersion: await this.policyVersion(host),
       // Tools whose owner turned protection off; the device restores their backups.
       tools: await this.tools.instructions(host),
