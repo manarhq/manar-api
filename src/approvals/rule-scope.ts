@@ -160,10 +160,13 @@ export function canonicalOrigin(raw: string): string | null {
 export const MCP_READ_ONLY: Set<string> = new Set();
 
 /**
- * True when the device reported where a file path really points (symlinks followed, `resolvedPath`)
- * and it is not the path that was asked for, or is not a path Manar can read. A project folder can
- * hold a link such as `docs -> ~/.ssh`; the server cannot see it, the device can. No
- * `resolvedPath` (older devices) is not a mismatch: behaviour stays as before.
+ * True when Manar cannot vouch that a file path is what it looks like. The device sends
+ * `resolvedPath` (where the path really points once symlinks are followed; a project folder can
+ * hold a link such as `docs -> ~/.ssh`, which only the device can see). Cannot vouch when it is
+ * missing (the device could not resolve it, or is older), is not a clean path, or differs from the
+ * path asked for. Then no learning, no "always allow" offer and no folder scope for it: the person
+ * is asked as usual. Plain policy decisions and exact grants are unaffected. Not about commands,
+ * MCP or web fetches.
  */
 export function pathLinked(
   toolId: string,
@@ -171,9 +174,9 @@ export function pathLinked(
   resource: string,
   resolvedPath: string | undefined | null,
 ): boolean {
-  if (resolvedPath === undefined || resolvedPath === null) return false;
   const kind = kindOf(toolId, actionId.toLowerCase());
   if (kind === 'command' || kind === 'other') return false;
+  if (resolvedPath === undefined || resolvedPath === null) return true;
   const real = canonicalAbsolute(resolvedPath);
   return real === null || real !== canonicalAbsolute(resource);
 }
