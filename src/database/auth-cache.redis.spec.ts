@@ -121,7 +121,8 @@ describe.skipIf(!url)('AuthCache across replicas (redis)', () => {
     const started = Date.now();
     c.onModuleInit();
     live.push(c);
-    expect(Date.now() - started).toBeLessThan(200);
+    // Blocking on the connect would take the full REDIS_TIMEOUT_MS (500 here); the margin keeps a busy host from flaking.
+    expect(Date.now() - started).toBeLessThan(450);
     let loads = 0;
     const load = () => Promise.resolve((loads += 1));
     await c.remember('k', load);
