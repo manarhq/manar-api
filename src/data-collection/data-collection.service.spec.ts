@@ -71,6 +71,19 @@ function setup(
       }),
     },
   };
+  const order: string[] = [];
+  Object.assign(control, {
+    $executeRaw: async (strings: TemplateStringsArray) => {
+      order.push(strings.join('?'));
+      return 0;
+    },
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      order.push('begin');
+      const r = await fn(control);
+      order.push('commit');
+      return r;
+    },
+  });
   const cfg: Record<string, string | undefined> =
     opts.posthog === false
       ? {}
@@ -82,7 +95,7 @@ function setup(
     posthog,
     audit as never,
   );
-  return { svc, control, samples, audit, posthog };
+  return { svc, control, samples, audit, posthog, order };
 }
 
 const batch = (over: Partial<DeviceTelemetry> = {}): DeviceTelemetry => ({
@@ -214,6 +227,17 @@ describe('opt-out and retention', () => {
     );
     expect(await f.svc.purgeOld(now)).toEqual({ deleted: 1 });
     expect(f.samples.map((s) => s.id)).toEqual(['new']);
+  });
+
+  it('the purge raises the statement timeout for its own transaction only (SET LOCAL, not a session SET)', async () => {
+    const f = setup();
+    await f.svc.purgeOld(new Date('2026-01-01T00:00:00Z'));
+    expect(f.order).toEqual([
+      'begin',
+      "SET LOCAL statement_timeout = '120s'",
+      'commit',
+    ]);
+    expect(f.order.join(' ')).not.toMatch(/SET statement_timeout|SET SESSION/);
   });
 });
 

@@ -191,6 +191,15 @@ timeout is set on the role instead (`ALTER ROLE manar_api IN DATABASE manar_cont
 statement_timeout = '30s'`, manar-infra#192) and the client `DB_QUERY_TIMEOUT_MS` still bounds each
 query. Tenant pools connect directly and do send it.
 
+The role-level 30 s limit also covers the worker's control-DB queries. Reviewed (6 Nov): the billing
+tick, usage alerts, digests, trial reminders, checkpoint scheduler, AI telemetry and job queues, and
+account deletion run short per-row or indexed statements and stay far under 30 s. The audit retention,
+webhook and approval activities and the evidence export read tenant databases (tenant pools, 120 s in
+the worker). The one bulk control statement, the hourly product-sample purge, runs in a transaction
+with `SET LOCAL statement_timeout = '120s'` (safe through PgBouncer transaction mode; a session
+`SET` is not). Control migrations (`prisma migrate deploy`) connect as the same role, so a
+long DDL on a large control table needs `SET LOCAL statement_timeout = 0` in its migration.
+
 Evicting a tenant client from the LRU cache does not cut queries still running on it: the pool is
 disconnected `DB_QUERY_TIMEOUT_MS` + 5 s later (every query is bounded by that), and concurrent cache
 misses for one tenant share a single client build.
@@ -222,7 +231,8 @@ manar-infra `clusters/azure-uaenorth`; there is no HPA today). Enforced by
 
 The 1000 is not reachable: a tenant client only holds server connections while it has queries in
 flight (idle connections close after 10 s), and Keycloak, Temporal and OpenFGA sit far below their
-maxima. The spec therefore counts the tenant pools at 50% simultaneous use (250), which gives
+maxima. The spec therefore **assumes that at most half of the tenant pool ceiling is busy at once** (250 of 500;
+an assumption, to be checked against `pg_stat_activity` and k6 numbers), which gives
 **756 of 859 (88%), headroom 103**, and fails above 90%. If k6 numbers or `pg_stat_activity` show tenant
 use closer to the ceiling, lower `TENANT_DB_CLIENT_CACHE_MAX` (each step of 5 frees 40 connections at
 today's replicas) before raising any other number. Changing a replica count in the overlay changes
