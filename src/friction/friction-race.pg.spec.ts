@@ -50,7 +50,14 @@ describe.skipIf(!url)('friction refresh under concurrency (postgres)', () => {
         },
       });
   });
-  afterAll(async () => db?.$disconnect());
+  afterAll(async () => {
+    // The database is reused between runs: leave it empty.
+    await db?.frictionDaily.deleteMany();
+    await db?.hostApproval.deleteMany();
+    await db?.host.deleteMany();
+    await db?.hostGroup.deleteMany();
+    await db?.$disconnect();
+  });
 
   it('8 concurrent reports all succeed and agree', async () => {
     const svc = new FrictionService({} as never, {} as never);

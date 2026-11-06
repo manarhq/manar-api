@@ -186,8 +186,6 @@ const cursor = (
 
 import { classifyCommand } from '../policy/command-safety';
 
-import { classifyCommand } from '../policy/command-safety';
-
 describe('REVIEW HIGH-1: learning never quiets strict or admin asks', () => {
   it.each([
     ['strict', cursor('edit', '/etc/hosts')],

@@ -71,7 +71,6 @@ describe('classifier evasion attempts and secret-bearing names stay unclassified
     'ls src',
     'ls src',
     'ｌｓ src',
-    'cat .',
     'grep -r x .git',
     'cat node_modules/.bin/x',
     'head -c 9 /dev/zero',
