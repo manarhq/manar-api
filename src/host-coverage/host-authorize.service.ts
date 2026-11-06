@@ -1,6 +1,8 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { CEILING_ASK, policyAskKey } from './ask-keys';
+
+export { CEILING_ASK, policyAskKey };
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import {
@@ -11,6 +13,7 @@ import {
 } from '../approvals/allow-grants';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
+import { LearningService } from '../learning/learning.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
 import { resourceKindFor } from '../policy/resource-aliases';
@@ -57,27 +60,10 @@ export interface HostAuthorizeDecision {
   cacheable?: boolean;
   /** Which ask this is (`ceiling` or a policy rule); the approval and any scoped grant carry it. */
   askKey?: string;
+  /** Internal: every policy version that asks. Removed before the answer leaves the service. */
+  policyVersionIds?: string[];
   /** Internal: the device could not vouch for the path (no offer); stripped before the answer leaves. */
   pathLinked?: boolean;
-}
-
-/** The ask that comes from the risk ceiling: no rule matched. */
-export const CEILING_ASK = 'ceiling';
-
-/**
- * A policy ask is identified by the policy version and the exact rule that asked, so a grant made
- * for one rule never answers another, and republishing a policy ends the grants made for it.
- */
-export function policyAskKey(policy: {
-  policyVersionId?: string;
-  matchedRule?: unknown;
-}): string {
-  return `p:${createHash('sha256')
-    .update(
-      `${policy.policyVersionId ?? ''}|${JSON.stringify(policy.matchedRule ?? null)}`,
-    )
-    .digest('hex')
-    .slice(0, 24)}`;
 }
 
 const EFFECT_RANK = { ALLOW: 0, APPROVAL_REQUIRED: 1, DENY: 2 } as const;
@@ -118,6 +104,7 @@ export class HostAuthorizeService {
     @Optional()
     @Inject(HOST_APPROVAL_OPENER)
     private readonly approvals?: HostApprovalOpener,
+    @Optional() private readonly learning?: LearningService,
   ) {}
 
   /** The one place the explicit `cacheable` boolean is set: every answer leaves through here. */
@@ -161,6 +148,35 @@ export class HostAuthorizeService {
         `host authorize failed closed: ${error instanceof Error ? error.message : String(error)}`,
       );
       return { decision: 'DENY', reason: 'enforcement_dependency_unavailable' };
+    }
+    // Learning mode (decision 36): a new device is watched, not asked. The action runs, the audit
+    // record below keeps the real outcome with `learning: true`, and nothing is opened. Only
+    // asks that are not high risk, secret or destructive qualify (`learningMayAllow`); any
+    // failure here means the normal prompt.
+    let learned: HostAuthorizeDecision | null = null;
+    if (result.decision === 'APPROVAL_REQUIRED' && this.learning) {
+      try {
+        if (
+          await this.learning.serve(client, host.tenantId, host, request, {
+            riskScore: result.riskScore ?? 100,
+            askKey: result.askKey ?? '',
+            policyVersionIds: result.policyVersionIds,
+          })
+        ) {
+          learned = result;
+          result = {
+            decision: 'ALLOW',
+            reason: 'learning_would_ask',
+            riskScore: result.riskScore,
+            // Served only because the device is learning: the offline snapshot must not keep it.
+            cacheable: false,
+          };
+        }
+      } catch (error) {
+        this.logger.warn(
+          `learning mode skipped: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
     if (result.decision === 'APPROVAL_REQUIRED' && this.approvals) {
       try {
@@ -207,13 +223,15 @@ export class HostAuthorizeService {
         toolId: request.toolId,
         actionId: request.actionId,
         resource: redactForStorage(request.resource),
+        // The real outcome stays in the record; `served` is what the device was told.
+        decision: (learned ?? result).decision,
+        reason: (learned ?? result).reason ?? null,
         ...(request.resolvedPath
           ? { resolvedPath: redactForStorage(request.resolvedPath) }
           : {}),
-        decision: result.decision,
-        reason: result.reason ?? null,
         riskScore: result.riskScore ?? null,
         approvalId: result.approvalId ?? null,
+        ...(learned ? { learning: true, served: result.decision } : {}),
         caller,
         sessionId,
       },
@@ -221,6 +239,9 @@ export class HostAuthorizeService {
     if (!recorded && result.decision === 'ALLOW') {
       return { decision: 'DENY', reason: 'enforcement_dependency_unavailable' };
     }
+    // Internal bookkeeping stays inside the service.
+    delete result.askKey;
+    delete result.policyVersionIds;
     delete result.pathLinked;
     return result;
   }
@@ -365,6 +386,7 @@ export class HostAuthorizeService {
         reason: 'policy_requires_approval',
         riskScore: base,
         askKey,
+        policyVersionIds: (policy.asks ?? []).map((a) => a.policyVersionId),
         pathLinked: linked,
       };
     }

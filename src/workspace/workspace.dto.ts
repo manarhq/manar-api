@@ -1,14 +1,32 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { START_MODES } from './start-mode.presets';
 
+export class LearningSettingDto {
+  @ApiProperty({
+    description: 'New devices are watched, not asked, for `days`',
+  })
+  enabled!: boolean;
+  @ApiProperty() days!: number;
+  @ApiProperty({
+    enum: ['default', 'workspace'],
+    description:
+      'default: on, except Government and sample workspaces; workspace: an admin chose',
+  })
+  source!: string;
+}
+
 export class StartModeResponseDto {
   @ApiProperty({ enum: [...START_MODES, 'custom'] })
   mode!: string;
+  @ApiProperty({ type: LearningSettingDto })
+  learning!: LearningSettingDto;
 }
 
 export class SetStartModeRequestDto {
-  @ApiProperty({ enum: START_MODES })
-  mode!: string;
+  @ApiProperty({ enum: START_MODES, required: false })
+  mode?: string;
+  @ApiProperty({ enum: ['on', 'off', 'default'], required: false })
+  learning?: string;
 }
 
 export class ReportCardDto {

@@ -63,6 +63,10 @@ export const AUDIT_EVENT_TYPES = {
   POLICY_PUBLISHED: 'policy.published',
   /** Features track: the workspace's start mode (policy preset) was switched; data holds from, to and the new version. */
   START_MODE_CHANGED: 'start_mode.changed',
+  /** Friction track: learning mode was switched for a workspace or a device; data holds the scope and the new value. */
+  LEARNING_CHANGED: 'learning.changed',
+  /** Friction track: a "what Manar saw" suggestion was accepted (a grant was made) or dismissed. */
+  LEARNING_SUGGESTION_DECIDED: 'learning.suggestion_decided',
 
   /** Phase 9b (Retention, Section 48) — written by `AuditRetentionWorkflow`'s Activity; see `src/audit/retention/`. */
   AUDIT_RETENTION_EXECUTED: 'audit.retention_executed',

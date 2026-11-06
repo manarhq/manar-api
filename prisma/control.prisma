@@ -146,6 +146,9 @@ model Tenant {
   allowCloudStorage      Boolean         @default(false)
   /// COMPANY: only approver roles decide approvals; a device owner can no longer decide their own.
   approvalsAdminsOnly    Boolean         @default(false)
+  /// Learning mode for new devices (decision 36): null = the default for this kind of workspace
+  /// (on; off for Government and sample), `on` or `off` = an admin's choice.
+  learningMode           String?
 
   /// Product improvement data, workspace switches (COMPANY only; default on). Org off overrides every member.
   dataImproveManar Boolean @default(true)

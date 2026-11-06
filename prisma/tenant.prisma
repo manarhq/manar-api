@@ -2273,6 +2273,14 @@ model Host {
   /// The person this company device was assigned to left (deleted their account): it stays
   /// protected and its approvals go to approvers. Cleared when someone is assigned again.
   unassignedAt          DateTime?
+  /// An admin restarted learning mode on this device (decision 36); null: it started at approval.
+  /// The first time this device was ever approved; set by a trigger and never moved, so a
+  /// re-approval cannot restart learning mode.
+  firstApprovedAt       DateTime?
+  learningStartedAt     DateTime?
+  /// An admin turned learning mode off for this device.
+  learningOff           Boolean              @default(false)
+  learningObservations  LearningObservation[]
   certificates          HostCertificate[]
   fileChanges           HostFileChange[]
   tools                 HostTool[]
@@ -2524,6 +2532,29 @@ model ApprovalAllowGrant {
   @@index([sourceId])
   @@index([agentId, toolId, actionId, expiresAt])
   @@map("approval_allow_grants")
+}
+
+/// What a learning device did that would have asked (decision 36): one row per device, tool, action and
+/// scope. Counts only; no prompt, file content or command text.
+model LearningObservation {
+  id          String    @id @default(uuid())
+  hostId      String
+  host        Host      @relation(fields: [hostId], references: [id])
+  toolId      String
+  actionId    String
+  scope       String
+  /// The ask this was seen under (`ceiling` or a policy rule); an accepted grant answers only it.
+  askKey      String    @default("")
+  count       Int       @default(1)
+  firstSeenAt DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
+  /// NEW, ACCEPTED (a grant was made) or DISMISSED ("not now").
+  state       String    @default("NEW")
+  decidedAt   DateTime?
+
+  @@unique([hostId, toolId, actionId, scope, askKey])
+  @@index([state, count])
+  @@map("learning_observations")
 }
 
 /// "Always allow this here" was offered once for this device, tool, action and scope (decision 37).
