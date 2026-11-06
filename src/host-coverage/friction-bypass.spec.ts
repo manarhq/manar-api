@@ -182,6 +182,8 @@ const cursor = (
   toolId: 'host.cursor',
   actionId,
   resource,
+  // The device vouches for a file path by sending where it really points.
+  resolvedPath: resource,
 });
 
 describe('learning mode never quiets what the reviewer showed it could', () => {
