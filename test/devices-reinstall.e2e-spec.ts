@@ -535,7 +535,11 @@ describe('Add device re-install (e2e)', () => {
     );
     await t.client.host.update({
       where: { id: result.hostId },
-      data: { removedAt: new Date(Date.now() - 31 * 24 * 3_600_000) },
+      data: {
+        removedAt: new Date(Date.now() - 31 * 24 * 3_600_000),
+        // First approved 40 days ago (the trigger keeps it as firstApprovedAt).
+        approvedAt: new Date(Date.now() - 40 * 24 * 3_600_000),
+      },
     });
     const again = await newCode(t, u.id);
     const { result: fresh } = await install(t, again.code, 'm-old');
@@ -552,6 +556,9 @@ describe('Add device re-install (e2e)', () => {
       where: { id: fresh.hostId },
     });
     expect(again2.firstApprovedAt).toEqual(old.firstApprovedAt);
+    expect(again2.firstApprovedAt!.getTime()).toBeLessThan(
+      Date.now() - 39 * 24 * 3_600_000,
+    );
   }, 60_000);
 
   it('the device cap is checked before the code is used', async () => {
