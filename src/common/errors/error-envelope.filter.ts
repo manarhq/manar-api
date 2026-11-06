@@ -94,6 +94,7 @@ const PRISMA_CLIENT_ERRORS: Record<
 const DB_SATURATED_CODES = new Set(['53300', '57014', '55P03']);
 const DB_SATURATED_MESSAGES = new Set([
   'timeout exceeded when trying to connect',
+  'Connection terminated due to connection timeout',
   'Query read timeout',
 ]);
 function isDatabaseSaturated(exception: unknown): boolean {
@@ -103,7 +104,11 @@ function isDatabaseSaturated(exception: unknown): boolean {
     code?: unknown;
     meta?: { driverAdapterError?: { cause?: { originalCode?: string } } };
   };
-  if (e.code === 'P2028') return true;
+  // Only "could not START a transaction in time" is saturation; an expired or closed
+  // transaction ("Transaction already closed", "expired transaction") is a real error.
+  if (e.code === 'P2028') {
+    return exception.message.includes('Unable to start a transaction');
+  }
   if (typeof e.code === 'string' && DB_SATURATED_CODES.has(e.code)) return true;
   const code = e.meta?.driverAdapterError?.cause?.originalCode;
   return code !== undefined && DB_SATURATED_CODES.has(code);

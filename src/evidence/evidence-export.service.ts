@@ -184,10 +184,15 @@ export interface EvidenceBundleContent {
 
 /** Rows per statement when reading the audit events of an export. */
 export const EVIDENCE_PAGE_SIZE = 2000;
+/** Upper bound for the whole paged read (many pages, each under statement_timeout). */
+const EVIDENCE_TRANSACTION_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * Reads the matching audit events in sequence order, one bounded page per statement, so a large
- * export never runs into the database statement timeout.
+ * export never runs into the database statement timeout. All pages run in ONE read-only
+ * REPEATABLE READ transaction: pages read at different snapshots could silently miss an event
+ * that committed out of sequence order between two pages (sequence 10 committing after 11 was
+ * already read). The export is one consistent point-in-time view; a later export has the rest.
  */
 export async function readAuditEventsPaged(
   tenantClient: TenantPrismaClient,
@@ -197,18 +202,32 @@ export async function readAuditEventsPaged(
   type Row = Awaited<
     ReturnType<typeof tenantClient.auditEvent.findMany>
   >[number];
-  const all: Row[] = [];
-  for (let after: number | null = null; ;) {
-    const page: Row[] = await tenantClient.auditEvent.findMany({
-      where:
-        after === null ? where : { AND: [where, { sequence: { gt: after } }] },
-      orderBy: { sequence: 'asc' },
-      take: pageSize,
-    });
-    all.push(...page);
-    if (page.length < pageSize) return all;
-    after = page[page.length - 1]!.sequence;
-  }
+  return tenantClient.$transaction(
+    async (tx) => {
+      // Transaction-scoped (not a session SET); the tenant pool is a direct connection.
+      await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+      const all: Row[] = [];
+      for (let after: number | null = null; ;) {
+        const page: Row[] = await tx.auditEvent.findMany({
+          where:
+            after === null
+              ? where
+              : { AND: [where, { sequence: { gt: after } }] },
+          orderBy: { sequence: 'asc' },
+          take: pageSize,
+        });
+        all.push(...page);
+        if (page.length < pageSize) return all;
+        after = page[page.length - 1]!.sequence;
+      }
+    },
+    {
+      isolationLevel: 'RepeatableRead',
+      // The whole export, not one statement: each page is still bounded by statement_timeout.
+      timeout: EVIDENCE_TRANSACTION_TIMEOUT_MS,
+      maxWait: 5_000,
+    },
+  );
 }
 
 /**

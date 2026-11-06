@@ -109,6 +109,13 @@ export class TenantDatabaseManager implements OnModuleDestroy {
    * to the end) — never an unbounded per-request client (Section 10).
    */
   private readonly cache = new Map<string, CachedClient>();
+  /** In-flight client builds, one per tenant (single-flight). */
+  private readonly building = new Map<string, Promise<TenantPrismaClient>>();
+  /** Clients dropped from the cache and waiting out their in-flight queries before $disconnect. */
+  private readonly retiring = new Map<
+    ReturnType<typeof setTimeout>,
+    TenantPrismaClient
+  >();
   private readonly maxCacheSize: number;
   private readonly idleTtlMs: number;
   private readonly revalidateMs: number;
@@ -196,6 +203,18 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       return cached.client;
     }
 
+    // Concurrent misses for one tenant share a single build: two builds would overwrite each
+    // other in the cache and leak the loser's pool.
+    const inflight = this.building.get(tenantId);
+    if (inflight) return inflight;
+    const build = this.buildClient(tenantId).finally(() =>
+      this.building.delete(tenantId),
+    );
+    this.building.set(tenantId, build);
+    return build;
+  }
+
+  private async buildClient(tenantId: string): Promise<TenantPrismaClient> {
     // The stale window starts when the status is read, not when the client is ready.
     const readAt = Date.now();
     // A control DB that cannot answer (down, or its pool exhausted past DB_POOL_CONNECT_TIMEOUT_MS)
@@ -602,8 +621,28 @@ export class TenantDatabaseManager implements OnModuleDestroy {
       if (oldestKey === undefined) break;
       const oldest = this.cache.get(oldestKey);
       this.cache.delete(oldestKey);
-      void oldest?.client.$disconnect();
+      if (oldest) this.retire(oldest.client);
     }
+  }
+
+  /**
+   * A caller may still be running a query on a client the LRU just dropped, and nothing tells us
+   * when it is done. Disconnecting at once would fail that query (a 500 or a false deny) and
+   * Prisma would quietly rebuild an untracked pool. Every query is bounded by DB_QUERY_TIMEOUT_MS,
+   * so after that plus a margin nobody can still be using it.
+   */
+  private retire(client: TenantPrismaClient): void {
+    const wait =
+      (this.configService.get('DB_QUERY_TIMEOUT_MS', { infer: true }) ??
+        35_000) + 5_000;
+    const t = setTimeout(() => {
+      this.retiring.delete(t);
+      void client.$disconnect().catch(() => undefined);
+    }, wait);
+    t.unref?.();
+    this.retiring.set(t, client);
+    // ponytail: timed, not ref-counted (callers hold clients without a release call); module
+    // destroy disconnects whatever is still waiting.
   }
 
   private evictIdleClients(): void {
@@ -611,15 +650,20 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     for (const [tenantId, cached] of this.cache) {
       if (now - cached.lastUsedAt >= this.idleTtlMs) {
         this.cache.delete(tenantId);
-        void cached.client.$disconnect();
+        this.retire(cached.client);
       }
     }
   }
 
   private async disconnectAll(): Promise<void> {
-    const clients = [...this.cache.values()];
+    const clients = [...this.cache.values()].map((c) => c.client);
     this.cache.clear();
-    await Promise.all(clients.map((c) => c.client.$disconnect()));
+    for (const [t, c] of this.retiring) {
+      clearTimeout(t);
+      clients.push(c);
+    }
+    this.retiring.clear();
+    await Promise.all(clients.map((c) => c.$disconnect()));
   }
 
   private async resolveTenantConnectionString(

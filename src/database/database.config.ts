@@ -45,7 +45,7 @@ export const DatabaseConfigSchema = z.object({
    * 2 x (CONTROL + CACHE_MAX x TENANT) connections: size them against the server's max_connections.
    */
   DB_POOL_MAX_CONTROL: z.coerce.number().int().positive().default(5),
-  DB_POOL_MAX_TENANT: z.coerce.number().int().positive().default(3),
+  DB_POOL_MAX_TENANT: z.coerce.number().int().positive().default(2),
 
   /**
    * How long a request waits for a free pooled connection (and for the TCP connect) before it
@@ -61,9 +61,11 @@ export const DatabaseConfigSchema = z.object({
   DB_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().default(35_000),
 
   /**
-   * Server-side `statement_timeout` for the control and tenant pools (0 = off), sent as a
-   * connection startup parameter. Both URLs must be direct Postgres connections (a PgBouncer in
-   * front rejects unknown startup parameters; `CONTROL_DATABASE_URL` also carries the edge LISTEN).
+   * Server-side `statement_timeout` for the TENANT pools (0 = off), sent as a connection startup
+   * parameter, so tenant URLs must be direct Postgres connections. The control pool sends no
+   * startup parameters (production reaches the control DB through PgBouncer, which rejects them
+   * with 08P01): set its timeout on the role, `ALTER ROLE ... IN DATABASE manar_control SET
+   * statement_timeout`, and rely on DB_QUERY_TIMEOUT_MS on the client.
    */
   DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(30_000),
 });

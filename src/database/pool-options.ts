@@ -53,8 +53,14 @@ export function poolSettings(
         : num(get('DB_POOL_MAX_TENANT'), 3),
     connectTimeoutMs: num(get('DB_POOL_CONNECT_TIMEOUT_MS'), 3000),
     queryTimeoutMs: num(get('DB_QUERY_TIMEOUT_MS'), 35_000),
-    // CONTROL_DATABASE_URL is a direct connection (the edge LISTEN needs it), so the control
-    // pool sends the startup parameter too and the server stops long queries.
-    statementTimeoutMs: num(get('DB_STATEMENT_TIMEOUT_MS'), 30_000),
+    // The control pool sends NO startup parameters: in production it reaches the control DB
+    // through PgBouncer, which rejects an unknown startup parameter (08P01) for every
+    // connection. Its server-side statement_timeout is set on the role instead
+    // (ALTER ROLE ... IN DATABASE manar_control SET statement_timeout), and the client
+    // query_timeout above still bounds each query. Tenant pools connect directly.
+    statementTimeoutMs:
+      kind === 'tenant'
+        ? num(get('DB_STATEMENT_TIMEOUT_MS'), 30_000)
+        : undefined,
   };
 }

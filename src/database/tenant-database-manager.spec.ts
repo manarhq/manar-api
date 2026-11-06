@@ -323,6 +323,43 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     }
   }, 60_000);
 
+  it('3b. an LRU eviction does not cut a query still running on the evicted client', async () => {
+    const small = new TenantDatabaseManager(
+      control,
+      fakeConfigService({ TENANT_DB_CLIENT_CACHE_MAX: 1 }),
+      new EnvSecretProvider(),
+    );
+    try {
+      const a = await small.getClient(tenantA.id);
+      const running = a.$queryRawUnsafe<{ ok: number }[]>(
+        'SELECT pg_sleep(1.5), 1 AS ok',
+      );
+      await small.getClient(tenantB.id); // evicts A while its query runs
+      await expect(running).resolves.toMatchObject([{ ok: 1 }]);
+    } finally {
+      await small.onModuleDestroy();
+    }
+  }, 60_000);
+
+  it('3c. concurrent cache misses for one tenant share one client', async () => {
+    const fresh = new TenantDatabaseManager(
+      control,
+      fakeConfigService(),
+      new EnvSecretProvider(),
+    );
+    try {
+      const clients = await Promise.all(
+        Array.from({ length: 6 }, () => fresh.getClient(tenantA.id)),
+      );
+      expect(new Set(clients).size).toBe(1);
+      expect(
+        (fresh as unknown as { cache: Map<string, unknown> }).cache.size,
+      ).toBe(1);
+    } finally {
+      await fresh.onModuleDestroy();
+    }
+  }, 60_000);
+
   it('4. resolving an unknown or deprovisioned tenant ID fails closed', async () => {
     await expect(manager.getClient(randomUUID())).rejects.toThrow();
     await expect(manager.resolveTenant(randomUUID())).rejects.toThrow();

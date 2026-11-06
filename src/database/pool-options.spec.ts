@@ -21,15 +21,25 @@ describe('pool options', () => {
     });
   });
 
-  it('the control pool is bounded and sends the statement timeout too (its URL is direct)', () => {
+  it('the control pool is bounded and sends no startup parameters (PgBouncer rejects them with 08P01)', () => {
     const o = pgPoolOptions('postgres://x', poolSettings(get, 'control'));
     expect(o.max).toBe(7);
-    expect(o.statement_timeout).toBe(4321);
+    expect(o).not.toHaveProperty('statement_timeout');
+    expect(o).not.toHaveProperty('options');
+    expect(o.query_timeout).toBe(9999); // the client-side bound stays
+    expect(Object.keys(o).sort()).toEqual(
+      [
+        'connectionString',
+        'connectionTimeoutMillis',
+        'max',
+        'query_timeout',
+      ].sort(),
+    );
   });
 
   it('falls back to the schema defaults for a partial config', () => {
     expect(poolSettings(() => undefined, 'tenant')).toMatchObject({
-      max: 3,
+      max: 2,
       connectTimeoutMs: 3000,
       statementTimeoutMs: 30_000,
     });
