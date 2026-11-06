@@ -360,6 +360,27 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     }
   }, 60_000);
 
+  it('3d. a long read on a dedicated client leaves the shared tenant pool free for the decision path', async () => {
+    const m = new TenantDatabaseManager(
+      control,
+      fakeConfigService({ DB_POOL_MAX_TENANT: 1 }),
+      new EnvSecretProvider(),
+    );
+    try {
+      const shared = await m.getClient(tenantA.id);
+      const long = m.withDedicatedClient(tenantA.id, (c) =>
+        c.$queryRawUnsafe('SELECT pg_sleep(2), 1 AS ok'),
+      );
+      await new Promise((r) => setTimeout(r, 300));
+      const started = Date.now();
+      await shared.$queryRaw`SELECT 1`; // the only shared connection is not held by the export
+      expect(Date.now() - started).toBeLessThan(1000);
+      await expect(long).resolves.toMatchObject([{ ok: 1 }]);
+    } finally {
+      await m.onModuleDestroy();
+    }
+  }, 60_000);
+
   it('4. resolving an unknown or deprovisioned tenant ID fails closed', async () => {
     await expect(manager.getClient(randomUUID())).rejects.toThrow();
     await expect(manager.resolveTenant(randomUUID())).rejects.toThrow();

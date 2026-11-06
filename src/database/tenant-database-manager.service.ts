@@ -214,6 +214,48 @@ export class TenantDatabaseManager implements OnModuleDestroy {
     return build;
   }
 
+  /**
+   * Runs `fn` on a client of its own with a single connection, closed afterwards. For long
+   * read-only work (the evidence export) that must not hold connections of the shared tenant
+   * pool the decision path uses. Fails closed for a tenant that is not ACTIVE.
+   */
+  async withDedicatedClient<T>(
+    tenantId: string,
+    fn: (client: TenantPrismaClient) => Promise<T>,
+  ): Promise<T> {
+    const tenant = await this.resolveTenant(tenantId).catch(
+      (error: unknown) => {
+        if (error instanceof TenantNotFoundError) throw error;
+        return throwFailClosed('control-db', error);
+      },
+    );
+    if (
+      tenant.status !== 'ACTIVE' ||
+      tenant.databaseBinding.provisioningStatus !== 'ACTIVE'
+    ) {
+      throw new TenantNotFoundError(tenantId);
+    }
+    const connectionString = await this.resolveTenantConnectionString(
+      tenant.databaseBinding.secretReference,
+      tenant.databaseBinding.databaseName,
+    );
+    const settings = poolSettings(
+      (k) => this.configService.get(k as never),
+      'tenant',
+    );
+    const client = new TenantPrismaClient({
+      adapter: new PrismaPg(
+        pgPoolOptions(connectionString, { ...settings, max: 1 }),
+      ),
+    });
+    try {
+      await client.$connect();
+      return await fn(client);
+    } finally {
+      await client.$disconnect().catch(() => undefined);
+    }
+  }
+
   private async buildClient(tenantId: string): Promise<TenantPrismaClient> {
     // The stale window starts when the status is read, not when the client is ready.
     const readAt = Date.now();
