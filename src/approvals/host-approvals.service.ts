@@ -25,9 +25,8 @@ import {
   ALLOW_GRANT_TTL_MS,
   ALWAYS_GRANT_TTL_MS,
   createAllowGrant,
-  findLivePatternGrant,
 } from './allow-grants';
-import { scopeFor } from './rule-scope';
+import { scopeFor, scopeMatches } from './rule-scope';
 import { buildRuleDraft } from './rule-draft';
 import { ApproverDirectory } from './approver-directory';
 import {
@@ -270,72 +269,110 @@ export class HostApprovalsService {
   ): Promise<Map<string, RuleOffer>> {
     const out = new Map<string, RuleOffer>();
     const now = at ?? new Date();
+    // Cheap checks first, then three queries for the whole page instead of three per row.
+    const cands: Array<{
+      r: (typeof rows)[number];
+      scope: string;
+      askKey: string;
+    }> = [];
     for (const r of rows) {
-      const o = await this.offerFor(client, r, now);
-      if (o) out.set(r.id, o);
+      if (r.highRisk || r.actionId === SITE_CONNECT_ACTION) continue;
+      // An offer answers one ask; a request without one (older) is never offered.
+      if (!r.askKey || sensitiveReason(r)) continue;
+      const scope = scopeFor(r.toolId, r.actionId, r.resource);
+      if (scope) cands.push({ r, scope, askKey: r.askKey });
+    }
+    if (cands.length === 0) return out;
+    const hostIds = [...new Set(cands.map((c) => c.r.hostId))];
+    const toolIds = [...new Set(cands.map((c) => c.r.toolId))];
+    const actionIds = [...new Set(cands.map((c) => c.r.actionId))];
+    const askKeys = [...new Set(cands.map((c) => c.askKey))];
+    const [spentRows, priorRows, grantRows] = await Promise.all([
+      client.hostRuleOffer.findMany({
+        where: {
+          hostId: { in: hostIds },
+          toolId: { in: toolIds },
+          actionId: { in: actionIds },
+          scope: { in: cands.map((c) => c.scope) },
+        },
+        select: { hostId: true, toolId: true, actionId: true, scope: true },
+      }),
+      client.hostApproval.findMany({
+        where: {
+          hostId: { in: hostIds },
+          toolId: { in: toolIds },
+          actionId: { in: actionIds },
+          status: 'APPROVED',
+          decision: { in: ['approve_once', 'approve_8h'] },
+          decidedBy: { not: null },
+          highRisk: false,
+          askKey: { in: askKeys },
+          decidedAt: { gte: new Date(now.getTime() - OFFER_WINDOW_MS) },
+        },
+        select: {
+          hostId: true,
+          toolId: true,
+          actionId: true,
+          askKey: true,
+          resource: true,
+        },
+        orderBy: { decidedAt: 'desc' },
+        take: Math.min(200 * cands.length, 2000),
+      }),
+      client.approvalAllowGrant.findMany({
+        where: {
+          hostId: { in: hostIds },
+          toolId: { in: toolIds },
+          actionId: { in: actionIds },
+          effect: 'ALLOW',
+          revokedAt: null,
+          expiresAt: { gt: now },
+          resourcePattern: { not: null },
+          askKey: { in: askKeys },
+        },
+        select: {
+          hostId: true,
+          toolId: true,
+          actionId: true,
+          askKey: true,
+          resourcePattern: true,
+        },
+        take: 500,
+      }),
+    ]);
+    const k = (...p: Array<string | null>) => p.join('\u0000');
+    const spent = new Set(
+      spentRows.map((x) => k(x.hostId, x.toolId, x.actionId, x.scope)),
+    );
+    for (const { r, scope, askKey } of cands) {
+      if (spent.has(k(r.hostId, r.toolId, r.actionId, scope))) continue;
+      const approvals = priorRows.filter(
+        (p) =>
+          p.hostId === r.hostId &&
+          p.toolId === r.toolId &&
+          p.actionId === r.actionId &&
+          p.askKey === askKey &&
+          scopeFor(r.toolId, r.actionId, p.resource) === scope,
+      ).length;
+      if (approvals < OFFER_AFTER_APPROVALS) continue;
+      // Already covered by an always-allow scope: nothing to offer.
+      const covered = grantRows.some(
+        (g) =>
+          g.hostId === r.hostId &&
+          g.toolId === r.toolId &&
+          g.actionId === r.actionId &&
+          g.askKey === askKey &&
+          scopeMatches(g.resourcePattern!, r.toolId, r.actionId, r.resource),
+      );
+      if (covered) continue;
+      out.set(r.id, {
+        scope,
+        approvals,
+        lastsDays: Math.round(ALWAYS_GRANT_TTL_MS / 86_400_000),
+        askKey,
+      });
     }
     return out;
-  }
-
-  private async offerFor(
-    client: TenantPrismaClient,
-    r: {
-      hostId: string;
-      toolId: string;
-      actionId: string;
-      resource: string;
-      highRisk: boolean;
-      askKey?: string | null;
-    },
-    now: Date,
-  ): Promise<RuleOffer | null> {
-    if (r.highRisk || r.actionId === SITE_CONNECT_ACTION) return null;
-    // An offer answers one ask; a request without one (older) is never offered.
-    if (!r.askKey) return null;
-    if (sensitiveReason(r)) return null;
-    const scope = scopeFor(r.toolId, r.actionId, r.resource);
-    if (!scope) return null;
-    const spent = await client.hostRuleOffer.findUnique({
-      where: {
-        hostId_toolId_actionId_scope: {
-          hostId: r.hostId,
-          toolId: r.toolId,
-          actionId: r.actionId,
-          scope,
-        },
-      },
-      select: { id: true },
-    });
-    if (spent) return null;
-    const prior = await client.hostApproval.findMany({
-      where: {
-        hostId: r.hostId,
-        toolId: r.toolId,
-        actionId: r.actionId,
-        status: 'APPROVED',
-        decision: { in: ['approve_once', 'approve_8h'] },
-        decidedBy: { not: null },
-        highRisk: false,
-        askKey: r.askKey,
-        decidedAt: { gte: new Date(now.getTime() - OFFER_WINDOW_MS) },
-      },
-      select: { resource: true },
-      orderBy: { decidedAt: 'desc' },
-      take: 200,
-    });
-    const approvals = prior.filter(
-      (p) => scopeFor(r.toolId, r.actionId, p.resource) === scope,
-    ).length;
-    if (approvals < OFFER_AFTER_APPROVALS) return null;
-    // Already covered by an always-allow scope: nothing to offer.
-    if (await findLivePatternGrant(client, r.hostId, r, r.askKey, now))
-      return null;
-    return {
-      scope,
-      approvals,
-      lastsDays: Math.round(ALWAYS_GRANT_TTL_MS / 86_400_000),
-      askKey: r.askKey,
-    };
   }
 
   /**
@@ -574,7 +611,9 @@ export class HostApprovalsService {
     if (takesOffer && !rights.choices.includes('approve_8h'))
       throw new ForbiddenException(refusalMessage(rights));
     // Recomputed here, never trusted from the client.
-    const offer = await this.offerFor(client, row, at ?? new Date());
+    const offer =
+      (await this.offersFor(client, [row], at ?? new Date())).get(row.id) ??
+      null;
     if (takesOffer && !offer)
       throw new BadRequestException('no_rule_offer_for_this_request');
     const wantsRemember =

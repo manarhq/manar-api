@@ -66,6 +66,7 @@ function world(
     roleBinding: { findFirst: () => Promise.resolve({ id: 'rb' }) },
     hostRuleOffer: {
       findUnique: () => Promise.resolve(offers[0] ?? null),
+      findMany: () => Promise.resolve(offers),
       upsert: ({ create }: { create: Record<string, unknown> }) => {
         offers.push(create);
         return Promise.resolve(create);
@@ -81,12 +82,17 @@ function world(
     hostApproval: {
       findUnique: ({ where }: { where: { id: string } }) =>
         Promise.resolve(rows.find((r) => r.id === where.id) ?? null),
-      findMany: ({ where }: { where: { status: string; askKey?: string } }) =>
+      findMany: ({
+        where,
+      }: {
+        where: { status: string; askKey?: { in: string[] } };
+      }) =>
         Promise.resolve(
           rows.filter(
             (r) =>
               r.status === where.status &&
-              (where.askKey === undefined || r.askKey === where.askKey),
+              (where.askKey === undefined ||
+                where.askKey.in.includes(r.askKey ?? '')),
           ),
         ),
       updateMany: ({
@@ -140,6 +146,27 @@ describe('rule offer after the 3rd identical approval (decision 37)', () => {
     expect((await few.service.offersFor(few.client, [few.pending])).size).toBe(
       0,
     );
+  });
+
+  it('answers a whole page with one query per table, not three per row', async () => {
+    const w = world();
+    const c = w.client as unknown as Record<
+      string,
+      Record<string, (...a: unknown[]) => unknown>
+    >;
+    const spies = [
+      vi.spyOn(c.hostRuleOffer!, 'findMany'),
+      vi.spyOn(c.hostRuleOffer!, 'findUnique'),
+      vi.spyOn(c.hostApproval!, 'findMany'),
+      vi.spyOn(c.approvalAllowGrant!, 'findMany'),
+    ];
+    const page = Array.from({ length: 20 }, (_, i) => ({
+      ...w.pending,
+      id: `p${i}`,
+    }));
+    const m = await w.service.offersFor(w.client, page);
+    expect(m.size).toBe(20);
+    expect(spies.map((x) => x.mock.calls.length)).toEqual([1, 0, 1, 1]);
   });
 
   it('counts person approvals of the last 30 days only', async () => {
