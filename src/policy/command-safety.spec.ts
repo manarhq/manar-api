@@ -251,3 +251,49 @@ describe('command safety classifier', () => {
     expect(classifyCommand('ls ' + 'a'.repeat(400))).toBeNull();
   });
 });
+
+describe('every secret-looking name keeps its suffixes', () => {
+  const bases = [
+    'x.pem',
+    'x.key',
+    'x.pfx',
+    'x.p12',
+    'x.kdbx',
+    'terraform.tfstate',
+    'prod.tfvars',
+    'x.ppk',
+    'x.jks',
+    'x.keystore',
+    'prod.env',
+    'id_rsa',
+    'database.yml',
+    'secrets.yml',
+    'credentials.yml',
+    'auth.json',
+    'hosts.yml',
+    '.netrc',
+    '.npmrc',
+    '.pgpass',
+    '.pypirc',
+    '.vault-token',
+  ];
+  const suffixes = ['', '.bak', '.old', '.orig', '.local', '.json', '.backup'];
+  it.each(bases.flatMap((b) => suffixes.map((x) => `cat src/${b}${x}`)))(
+    '%s asks',
+    (c) => expect(classifyCommand(c)).toBeNull(),
+  );
+  it.each([
+    'cat prod.env.local',
+    'cat .env.production',
+    'cat terraform.tfstate.backup',
+    'cat server.pem.bak',
+    'cat id_rsa.old',
+    'cat credentials.yml.orig',
+    'cat prod.tfvars.json',
+  ])('%s asks', (c) => expect(classifyCommand(c)).toBeNull());
+  it('an ordinary file is still read-only', () => {
+    expect(classifyCommand('cat src/a.ts')).toBe('read-only');
+    expect(classifyCommand('cat src/keyboard.ts')).toBe('read-only');
+    expect(classifyCommand('cat src/environment.ts')).toBe('read-only');
+  });
+});
