@@ -22,6 +22,7 @@ import {
   RevokeApprovalSchema,
 } from './approvals.validation';
 import { explainRisk } from './risk-explain';
+import { pathDiffers } from './rule-scope';
 import { HostApprovalsService, publicOffer } from './host-approvals.service';
 import { ApprovalRevokeService } from './approval-revoke.service';
 import {
@@ -127,7 +128,8 @@ export class HostApprovalsConsoleController {
         resource: r.resource,
         // Where the file really points, when that is somewhere else: "points to ..." on the card.
         pointsTo:
-          r.resolvedPath && r.resolvedPath !== r.resource
+          r.resolvedPath &&
+          pathDiffers(r.toolId, r.actionId, r.resource, r.resolvedPath)
             ? r.resolvedPath
             : null,
         summary: r.summary,
