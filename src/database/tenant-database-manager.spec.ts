@@ -332,7 +332,7 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     try {
       const a = await small.getClient(tenantA.id);
       const running = a.$queryRawUnsafe<{ ok: number }[]>(
-        'SELECT pg_sleep(1.5), 1 AS ok',
+        'SELECT 1 AS ok FROM pg_sleep(1.5)',
       );
       await small.getClient(tenantB.id); // evicts A while its query runs
       await expect(running).resolves.toMatchObject([{ ok: 1 }]);
@@ -369,7 +369,7 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     try {
       const shared = await m.getClient(tenantA.id);
       const long = m.withDedicatedClient(tenantA.id, (c) =>
-        c.$queryRawUnsafe('SELECT pg_sleep(2), 1 AS ok'),
+        c.$queryRawUnsafe('SELECT 1 AS ok FROM pg_sleep(2)'),
       );
       await new Promise((r) => setTimeout(r, 300));
       const started = Date.now();

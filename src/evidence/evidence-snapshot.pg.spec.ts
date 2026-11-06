@@ -66,8 +66,11 @@ describe.skipIf(!url)('readAuditEventsPaged snapshot (postgres)', () => {
     await admin.query(
       `INSERT INTO ${table} VALUES (1),(2),(4),(5),(6)`, // 3 is still uncommitted elsewhere
     );
+    let inserted = false;
     const got = await readAuditEventsPaged(
       client(async () => {
+        if (inserted) return;
+        inserted = true;
         await admin.query(`INSERT INTO ${table} VALUES (3)`); // commits after page 1 was read
       }) as never,
       {},

@@ -50,7 +50,7 @@ export function poolSettings(
     max:
       kind === 'control'
         ? num(get('DB_POOL_MAX_CONTROL'), 5)
-        : num(get('DB_POOL_MAX_TENANT'), 3),
+        : num(get('DB_POOL_MAX_TENANT'), 2),
     connectTimeoutMs: num(get('DB_POOL_CONNECT_TIMEOUT_MS'), 3000),
     queryTimeoutMs: num(get('DB_QUERY_TIMEOUT_MS'), 35_000),
     // The control pool sends NO startup parameters: in production it reaches the control DB
