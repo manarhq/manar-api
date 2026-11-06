@@ -11,7 +11,7 @@ import {
   ALWAYS_GRANT_TTL_MS,
   createAllowGrant,
 } from '../approvals/allow-grants';
-import { scopeMatches } from '../approvals/rule-scope';
+import { pathLinked, scopeMatches } from '../approvals/rule-scope';
 import { ControlPrismaService } from '../database/control-prisma.service';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import {
@@ -25,6 +25,9 @@ import {
   learningCandidate,
   learningWindow,
 } from './learning';
+
+/** The 403 code for turning learning on in a Government workspace. */
+export const LEARNING_GOVERNMENT_CODE = 'learning_not_available_government';
 
 export type LearningSwitch = 'on' | 'off';
 export interface LearningConfig {
@@ -72,6 +75,11 @@ export class LearningService {
     };
   }
 
+  /**
+   * The sector lives on the EnterpriseProfile (`sector`, on main since 5 Nov); api#62 adds no
+   * separate column, and a tenant has no other Government marker. A workspace without a profile
+   * is not an Enterprise or Government workspace, so it is not Government.
+   */
   private async isGovernment(tenantId: string): Promise<boolean> {
     const gov = await this.control.enterpriseProfile.findUnique({
       where: { tenantId },
@@ -88,9 +96,14 @@ export class LearningService {
     client: TenantPrismaClient,
   ): Promise<LearningConfig> {
     if (value === 'on' && (await this.isGovernment(tenantId)))
-      throw new ForbiddenException(
-        'Learning mode is not available in a Government workspace. Nothing was changed.',
-      );
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        // Stable, so the console can translate it (EN and AR).
+        code: LEARNING_GOVERNMENT_CODE,
+        message:
+          'Learning mode is not available in a Government workspace. Nothing was changed.',
+      });
     await this.control.tenant.update({
       where: { id: tenantId },
       data: { learningMode: value === 'default' ? null : value },
@@ -112,11 +125,27 @@ export class LearningService {
     client: TenantPrismaClient,
     tenantId: string,
     host: { hostId: string },
-    request: { toolId: string; actionId: string; resource: string },
+    request: {
+      toolId: string;
+      actionId: string;
+      resource: string;
+      /** Where the device says a file path really points (symlinks followed). */
+      resolvedPath?: string;
+    },
     ask: { riskScore: number; askKey: string; policyVersionIds?: string[] },
     now: Date = new Date(),
   ): Promise<boolean> {
     const actionId = request.actionId.toLowerCase();
+    // A path that is a link to somewhere else may lead out of the project: ask.
+    if (
+      pathLinked(
+        request.toolId,
+        actionId,
+        request.resource,
+        request.resolvedPath,
+      )
+    )
+      return false;
     const candidate = learningCandidate({
       ...request,
       actionId,

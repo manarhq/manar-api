@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { scopeFor, scopeMatches } from './rule-scope';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  MCP_READ_ONLY,
+  pathLinked,
+  scopeFor,
+  scopeMatches,
+} from './rule-scope';
 
 const T = 'host.cursor';
 const file = (r: string) => scopeFor(T, 'edit', r);
@@ -252,17 +257,51 @@ describe('web scopes need an already-canonical https URL', () => {
 });
 
 describe('mcp and commands', () => {
-  it('mcp exactly, never a wildcard; commands have no scope', () => {
-    expect(scopeFor(T, 'mcp', 'github/create_issue')).toBe(
-      'github/create_issue',
-    );
-    expect(scopeFor(T, 'mcp', 'github/*')).toBeNull();
+  afterEach(() => MCP_READ_ONLY.clear());
+
+  it('mcp has no scope unless the tool is on the read-only list', () => {
+    expect(scopeFor(T, 'mcp', 'github/create_issue')).toBeNull();
+    expect(scopeFor(T, 'mcp', 'github/delete_repository')).toBeNull();
+    expect(scopeFor(T, 'mcp', 'postgres/execute_sql')).toBeNull();
     expect(
       scopeMatches('github/create_issue', T, 'mcp', 'github/create_issue'),
-    ).toBe(true);
-    expect(
-      scopeMatches('github/create_issue', T, 'mcp', 'github/delete_repo'),
     ).toBe(false);
+  });
+
+  it('a listed read-only tool is exact, never a wildcard; commands have no scope', () => {
+    MCP_READ_ONLY.add('github/get_issue');
+    expect(scopeFor(T, 'mcp', 'github/get_issue')).toBe('github/get_issue');
+    expect(scopeFor(T, 'mcp', 'github/*')).toBeNull();
+    expect(scopeMatches('github/get_issue', T, 'mcp', 'github/get_issue')).toBe(
+      true,
+    );
+    expect(scopeMatches('github/get_issue', T, 'mcp', 'github/get_repo')).toBe(
+      false,
+    );
     expect(scopeFor(T, 'shell', 'ls -la')).toBeNull();
+  });
+});
+
+describe('pathLinked: a symlink inside a project', () => {
+  const p = '/home/sara/proj/docs/authorized_keys';
+  it('is not linked without resolvedPath (older devices) or when it matches', () => {
+    expect(pathLinked(T, 'write', p, undefined)).toBe(false);
+    expect(pathLinked(T, 'write', p, p)).toBe(false);
+    expect(
+      pathLinked(T, 'write', p, '/home/sara/proj//docs/./authorized_keys'),
+    ).toBe(false);
+  });
+  it('is linked when the real path differs, leaves the project or is not a clean path', () => {
+    expect(pathLinked(T, 'write', p, '/home/sara/.ssh/authorized_keys')).toBe(
+      true,
+    );
+    expect(pathLinked(T, 'write', p, '/home/sara/proj/other/x')).toBe(true);
+    expect(pathLinked(T, 'write', p, 'docs/authorized_keys')).toBe(true);
+    expect(pathLinked(T, 'write', p, '/home/sara/proj/../.ssh/x')).toBe(true);
+  });
+  it('does not apply to commands, MCP or web fetches', () => {
+    expect(pathLinked(T, 'shell', 'ls', '/etc')).toBe(false);
+    expect(pathLinked(T, 'mcp', 'a/b', '/etc')).toBe(false);
+    expect(pathLinked(T, 'webfetch', 'https://a.io/x', '/etc')).toBe(false);
   });
 });

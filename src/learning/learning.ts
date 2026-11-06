@@ -47,7 +47,7 @@ export interface LearningCandidate {
  * Whether an action that would have asked MAY be quiet while the device learns, and under which
  * scope; null means it keeps asking. Never: high risk, a secret, a secret handover, a climb out,
  * a command the shell expands, a risky git command, a new site, a file action outside a home
- * project folder (no scope: that is also every dot-folder at any depth), a command that is not
+ * project folder (no scope: that is also every dot-folder at any depth), an MCP tool, a command that is not
  * clearly read-only. Run builds and tests are not read-only. The caller has already applied DENY,
  * kill switches and revoked-after-use blocks, and checked which ask it is (`LearningService`).
  */
@@ -60,10 +60,10 @@ export function learningCandidate(input: {
   const a = input.actionId.toLowerCase();
   if (input.riskScore >= HIGH_RISK_FROM) return null;
   if (a === SITE_CONNECT_ACTION || HANDOVER_ACTIONS.includes(a)) return null;
-  const kind =
-    a === 'mcp' || a === 'webfetch'
-      ? 'other'
-      : resourceKindFor(input.toolId, a);
+  // MCP tools do anything (delete a repository, run SQL, send a message): learning covers the
+  // project's own files and read-only commands, never an MCP call.
+  if (a === 'mcp') return null;
+  const kind = a === 'webfetch' ? 'other' : resourceKindFor(input.toolId, a);
   if (resourceAliases(input.resource, kind).some((x) => BLOCKED_ALIAS.test(x)))
     return null;
   if (kind === 'command')

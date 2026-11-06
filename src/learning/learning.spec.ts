@@ -35,15 +35,14 @@ describe('what learning may quiet', () => {
   const c = (actionId: string, resource: string, riskScore = 35) =>
     learningCandidate({ toolId: T, actionId, resource, riskScore });
 
-  it('a file in a home project folder, an mcp call, a read-only command', () => {
+  it('a file in a home project folder, a read-only command; never an mcp call', () => {
     expect(c('edit', '/home/sara/proj/src/a.ts')).toEqual({
       scope: '/home/sara/proj/src/*',
       needsSeenSite: false,
     });
-    expect(c('mcp', 'github/create_issue')).toEqual({
-      scope: 'github/create_issue',
-      needsSeenSite: false,
-    });
+    // An MCP call can do anything: never quiet, whatever the server and tool are called.
+    for (const t of ['github/create_issue', 'github/delete_repository'])
+      expect(c('mcp', t)).toBeNull();
     expect(c('shell', 'ls -la src', 30)).toEqual({
       scope: null,
       needsSeenSite: false,
