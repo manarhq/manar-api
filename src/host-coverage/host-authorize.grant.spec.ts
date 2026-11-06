@@ -205,6 +205,7 @@ describe('8-hour grants on /host/v1/authorize', () => {
       toolId: 'host.cursor',
       actionId: 'edit',
       resource: '/home/sara/proj/src/a.ts',
+      resolvedPath: '/home/sara/proj/src/a.ts',
     };
     const rule = {
       effect: 'APPROVAL_REQUIRED',
