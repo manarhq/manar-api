@@ -19,6 +19,7 @@ import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
 import { resourceKindFor } from '../policy/resource-aliases';
 import { HIGH_RISK_SCORE } from '../approvals/host-approval-opener.service';
 import {
+  canonicalAbsolute,
   pathDiffers,
   pathLinked,
   resolvedIsSecret as secretPath,
@@ -283,11 +284,27 @@ export class HostAuthorizeService {
       actionId,
       resource: request.resource,
     };
-    const exact = await findLiveAllowGrant(
-      client,
-      { hostId: host.hostId },
-      target,
+    // A link: an exact grant answers it only if it was made for the same real target, and a
+    // plain grant (made for the file itself) never does.
+    const differs = pathDiffers(
+      request.toolId,
+      actionId,
+      request.resource,
+      request.resolvedPath,
     );
+    const resolvedKey = differs
+      ? canonicalAbsolute(request.resolvedPath!)
+      : null;
+    const exact =
+      differs && resolvedKey === null
+        ? null
+        : await findLiveAllowGrant(
+            client,
+            { hostId: host.hostId },
+            target,
+            undefined,
+            resolvedKey,
+          );
     // A narrow "always allow here" scope is looked up only if something asks (below).
     // A grant made for one ask never answers another (a grant without a key is an older one).
     // A path that is a link to somewhere else gets no scope, offered or applied: only the exact one.
@@ -316,21 +333,23 @@ export class HostAuthorizeService {
     // answer (DENY, then APPROVAL_REQUIRED, then ALLOW). Rules and presets are written for the
     // path a tool names, and a "run everything else" rule would otherwise let `docs -> ~/.ssh`
     // through. Restriction only: the answer for the requested path is never loosened.
-    if (
-      request.resolvedPath !== undefined &&
-      pathDiffers(
-        request.toolId,
-        actionId,
-        request.resource,
-        request.resolvedPath,
-      )
-    ) {
+    let targetUnmatched = false;
+    // A secret target asks whatever rule matched (the raise to the console-only line is in `base`).
+    const secretTarget = resolvedIsSecret(request, actionId);
+    if (differs) {
       const real = await this.policy.evaluate(client, host.tenantId, {
         toolId: request.toolId,
         actionId,
-        resource: request.resolvedPath,
+        resource: request.resolvedPath!,
       });
-      if (EFFECT_RANK[real.effect] > EFFECT_RANK[policy.effect]) policy = real;
+      targetUnmatched = !real.matchedRule;
+      // On a tie that asks, the target's rule (and so its ask key) is the one that counts.
+      if (
+        EFFECT_RANK[real.effect] > EFFECT_RANK[policy.effect] ||
+        (real.effect === 'APPROVAL_REQUIRED' &&
+          policy.effect === 'APPROVAL_REQUIRED')
+      )
+        policy = real;
     }
     if (policy.effect === 'DENY') {
       return {
@@ -358,7 +377,12 @@ export class HostAuthorizeService {
         pathLinked: linked,
       };
     }
-    if (!policy.matchedRule && base > HOST_RISK_CEILING) {
+    // The risk ceiling applies when nothing matched, and also when the link's name matched a rule
+    // but its real target matched none.
+    if (
+      (!policy.matchedRule || targetUnmatched || secretTarget) &&
+      base > HOST_RISK_CEILING
+    ) {
       if (await scoped(CEILING_ASK))
         return {
           decision: 'ALLOW',
