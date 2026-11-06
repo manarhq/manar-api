@@ -33,6 +33,12 @@ export interface HostAuthorizeDecision {
   expiresAt?: Date;
   /** Set when a live "Approve for 8 hours" grant turned an approval requirement into ALLOW. */
   grantId?: string;
+  /**
+   * Always false when the answer exists only because of a grant or learning mode: the device's
+   * offline snapshot must never store it, or a withdrawn permission would keep working offline.
+   * True only for a plain deterministic policy ALLOW. `authorize()` always sends a boolean.
+   */
+  cacheable?: boolean;
 }
 
 /** Same as the default task ceiling for Claude Code: reads and fetches run, edits and shell ask. */
@@ -68,7 +74,19 @@ export class HostAuthorizeService {
     private readonly approvals?: HostApprovalOpener,
   ) {}
 
+  /** The one place the explicit `cacheable` boolean is set: every answer leaves through here. */
   async authorize(
+    host: HostContext,
+    request: HostAuthorizeRequest,
+  ): Promise<HostAuthorizeDecision> {
+    const r = await this.authorizeInner(host, request);
+    return {
+      ...r,
+      cacheable: r.decision === 'ALLOW' && !r.grantId && r.cacheable === true,
+    };
+  }
+
+  private async authorizeInner(
     host: HostContext,
     request: HostAuthorizeRequest,
   ): Promise<HostAuthorizeDecision> {
@@ -213,6 +231,6 @@ export class HostAuthorizeService {
         riskScore: base,
       };
     }
-    return { decision: 'ALLOW', riskScore: base };
+    return { decision: 'ALLOW', riskScore: base, cacheable: true };
   }
 }
