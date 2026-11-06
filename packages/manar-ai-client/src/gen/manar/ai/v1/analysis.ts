@@ -11,13 +11,51 @@ import {
   type ChannelCredentials,
   Client,
   type ClientOptions,
+  type ClientReadableStream,
   type ClientUnaryCall,
+  type handleServerStreamingCall,
   type handleUnaryCall,
   makeGenericClientConstructor,
   type Metadata,
   type ServiceError,
   type UntypedServiceImplementation,
 } from '@grpc/grpc-js';
+
+/**
+ * Token counts of one model call. Counts only: never any prompt or answer
+ * content. All zero when the provider did not report usage.
+ */
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Model or deployment name as the provider reports it. */
+  model: string;
+}
+
+/**
+ * Text written by the model so far: the decoded text of the answer field,
+ * passed through the same redaction as the final result (summaries and
+ * investigations). Policy suggestions never stream text; they send Progress.
+ */
+export interface TextDelta {
+  text: string;
+}
+
+/**
+ * How much structured output the model has written so far, in characters.
+ * Counts only: unvalidated model output is never streamed for policy drafts.
+ */
+export interface StreamProgress {
+  characters: number;
+}
+
+export interface AnalysisEvent {
+  delta?: TextDelta | undefined;
+  incidentSummary?: IncidentSummaryResult | undefined;
+  policyDraft?: PolicyDraftResult | undefined;
+  auditInvestigation?: AuditInvestigationResult | undefined;
+  progress?: StreamProgress | undefined;
+}
 
 export interface RiskAnalysisRequest {
   /** Natural-language description of the proposed agent action. */
@@ -299,6 +337,7 @@ export interface IncidentSummaryResult {
    */
   confidence: number;
   explanation: string;
+  usage?: Usage | undefined;
 }
 
 export interface PolicyDraftRequest {
@@ -398,6 +437,7 @@ export interface PolicyDraftResult {
    * fabricated-looking draft.
    */
   confidence: number;
+  usage?: Usage | undefined;
 }
 
 export interface AuditInvestigationRequest {
@@ -424,7 +464,436 @@ export interface AuditInvestigationResult {
    */
   confidence: number;
   explanation: string;
+  usage?: Usage | undefined;
 }
+
+function createBaseUsage(): Usage {
+  return { inputTokens: 0, outputTokens: 0, model: '' };
+}
+
+export const Usage: MessageFns<Usage> = {
+  encode(
+    message: Usage,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.inputTokens !== 0) {
+      writer.uint32(8).int64(message.inputTokens);
+    }
+    if (message.outputTokens !== 0) {
+      writer.uint32(16).int64(message.outputTokens);
+    }
+    if (message.model !== '') {
+      writer.uint32(26).string(message.model);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Usage {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseUsage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.inputTokens = longToNumber(reader.int64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.outputTokens = longToNumber(reader.int64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.model = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Usage {
+    return {
+      inputTokens: isSet(object.inputTokens)
+        ? globalThis.Number(object.inputTokens)
+        : isSet(object.input_tokens)
+          ? globalThis.Number(object.input_tokens)
+          : 0,
+      outputTokens: isSet(object.outputTokens)
+        ? globalThis.Number(object.outputTokens)
+        : isSet(object.output_tokens)
+          ? globalThis.Number(object.output_tokens)
+          : 0,
+      model: isSet(object.model) ? globalThis.String(object.model) : '',
+    };
+  },
+
+  toJSON(message: Usage): unknown {
+    const obj: any = {};
+    if (message.inputTokens !== 0) {
+      obj.inputTokens = Math.round(message.inputTokens);
+    }
+    if (message.outputTokens !== 0) {
+      obj.outputTokens = Math.round(message.outputTokens);
+    }
+    if (message.model !== '') {
+      obj.model = message.model;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<Usage>, I>>(base?: I): Usage {
+    return Usage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<Usage>, I>>(object: I): Usage {
+    const message = createBaseUsage();
+    message.inputTokens = object.inputTokens ?? 0;
+    message.outputTokens = object.outputTokens ?? 0;
+    message.model = object.model ?? '';
+    return message;
+  },
+};
+
+function createBaseTextDelta(): TextDelta {
+  return { text: '' };
+}
+
+export const TextDelta: MessageFns<TextDelta> = {
+  encode(
+    message: TextDelta,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.text !== '') {
+      writer.uint32(10).string(message.text);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TextDelta {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTextDelta();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.text = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): TextDelta {
+    return { text: isSet(object.text) ? globalThis.String(object.text) : '' };
+  },
+
+  toJSON(message: TextDelta): unknown {
+    const obj: any = {};
+    if (message.text !== '') {
+      obj.text = message.text;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<TextDelta>, I>>(base?: I): TextDelta {
+    return TextDelta.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<TextDelta>, I>>(
+    object: I,
+  ): TextDelta {
+    const message = createBaseTextDelta();
+    message.text = object.text ?? '';
+    return message;
+  },
+};
+
+function createBaseStreamProgress(): StreamProgress {
+  return { characters: 0 };
+}
+
+export const StreamProgress: MessageFns<StreamProgress> = {
+  encode(
+    message: StreamProgress,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.characters !== 0) {
+      writer.uint32(8).int64(message.characters);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): StreamProgress {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStreamProgress();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.characters = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): StreamProgress {
+    return {
+      characters: isSet(object.characters)
+        ? globalThis.Number(object.characters)
+        : 0,
+    };
+  },
+
+  toJSON(message: StreamProgress): unknown {
+    const obj: any = {};
+    if (message.characters !== 0) {
+      obj.characters = Math.round(message.characters);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<StreamProgress>, I>>(
+    base?: I,
+  ): StreamProgress {
+    return StreamProgress.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<StreamProgress>, I>>(
+    object: I,
+  ): StreamProgress {
+    const message = createBaseStreamProgress();
+    message.characters = object.characters ?? 0;
+    return message;
+  },
+};
+
+function createBaseAnalysisEvent(): AnalysisEvent {
+  return {
+    delta: undefined,
+    incidentSummary: undefined,
+    policyDraft: undefined,
+    auditInvestigation: undefined,
+    progress: undefined,
+  };
+}
+
+export const AnalysisEvent: MessageFns<AnalysisEvent> = {
+  encode(
+    message: AnalysisEvent,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.delta !== undefined) {
+      TextDelta.encode(message.delta, writer.uint32(10).fork()).join();
+    }
+    if (message.incidentSummary !== undefined) {
+      IncidentSummaryResult.encode(
+        message.incidentSummary,
+        writer.uint32(18).fork(),
+      ).join();
+    }
+    if (message.policyDraft !== undefined) {
+      PolicyDraftResult.encode(
+        message.policyDraft,
+        writer.uint32(26).fork(),
+      ).join();
+    }
+    if (message.auditInvestigation !== undefined) {
+      AuditInvestigationResult.encode(
+        message.auditInvestigation,
+        writer.uint32(34).fork(),
+      ).join();
+    }
+    if (message.progress !== undefined) {
+      StreamProgress.encode(message.progress, writer.uint32(42).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AnalysisEvent {
+    const reader =
+      input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAnalysisEvent();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.delta = TextDelta.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.incidentSummary = IncidentSummaryResult.decode(
+            reader,
+            reader.uint32(),
+          );
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.policyDraft = PolicyDraftResult.decode(
+            reader,
+            reader.uint32(),
+          );
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.auditInvestigation = AuditInvestigationResult.decode(
+            reader,
+            reader.uint32(),
+          );
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.progress = StreamProgress.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AnalysisEvent {
+    return {
+      delta: isSet(object.delta) ? TextDelta.fromJSON(object.delta) : undefined,
+      incidentSummary: isSet(object.incidentSummary)
+        ? IncidentSummaryResult.fromJSON(object.incidentSummary)
+        : isSet(object.incident_summary)
+          ? IncidentSummaryResult.fromJSON(object.incident_summary)
+          : undefined,
+      policyDraft: isSet(object.policyDraft)
+        ? PolicyDraftResult.fromJSON(object.policyDraft)
+        : isSet(object.policy_draft)
+          ? PolicyDraftResult.fromJSON(object.policy_draft)
+          : undefined,
+      auditInvestigation: isSet(object.auditInvestigation)
+        ? AuditInvestigationResult.fromJSON(object.auditInvestigation)
+        : isSet(object.audit_investigation)
+          ? AuditInvestigationResult.fromJSON(object.audit_investigation)
+          : undefined,
+      progress: isSet(object.progress)
+        ? StreamProgress.fromJSON(object.progress)
+        : undefined,
+    };
+  },
+
+  toJSON(message: AnalysisEvent): unknown {
+    const obj: any = {};
+    if (message.delta !== undefined) {
+      obj.delta = TextDelta.toJSON(message.delta);
+    }
+    if (message.incidentSummary !== undefined) {
+      obj.incidentSummary = IncidentSummaryResult.toJSON(
+        message.incidentSummary,
+      );
+    }
+    if (message.policyDraft !== undefined) {
+      obj.policyDraft = PolicyDraftResult.toJSON(message.policyDraft);
+    }
+    if (message.auditInvestigation !== undefined) {
+      obj.auditInvestigation = AuditInvestigationResult.toJSON(
+        message.auditInvestigation,
+      );
+    }
+    if (message.progress !== undefined) {
+      obj.progress = StreamProgress.toJSON(message.progress);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AnalysisEvent>, I>>(
+    base?: I,
+  ): AnalysisEvent {
+    return AnalysisEvent.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AnalysisEvent>, I>>(
+    object: I,
+  ): AnalysisEvent {
+    const message = createBaseAnalysisEvent();
+    message.delta =
+      object.delta !== undefined && object.delta !== null
+        ? TextDelta.fromPartial(object.delta)
+        : undefined;
+    message.incidentSummary =
+      object.incidentSummary !== undefined && object.incidentSummary !== null
+        ? IncidentSummaryResult.fromPartial(object.incidentSummary)
+        : undefined;
+    message.policyDraft =
+      object.policyDraft !== undefined && object.policyDraft !== null
+        ? PolicyDraftResult.fromPartial(object.policyDraft)
+        : undefined;
+    message.auditInvestigation =
+      object.auditInvestigation !== undefined &&
+      object.auditInvestigation !== null
+        ? AuditInvestigationResult.fromPartial(object.auditInvestigation)
+        : undefined;
+    message.progress =
+      object.progress !== undefined && object.progress !== null
+        ? StreamProgress.fromPartial(object.progress)
+        : undefined;
+    return message;
+  },
+};
 
 function createBaseRiskAnalysisRequest(): RiskAnalysisRequest {
   return { actionDescription: '', context: '', correlationId: '' };
@@ -1352,6 +1821,7 @@ function createBaseIncidentSummaryResult(): IncidentSummaryResult {
     recommendedNextSteps: [],
     confidence: 0,
     explanation: '',
+    usage: undefined,
   };
 }
 
@@ -1377,6 +1847,9 @@ export const IncidentSummaryResult: MessageFns<IncidentSummaryResult> = {
     }
     if (message.explanation !== '') {
       writer.uint32(50).string(message.explanation);
+    }
+    if (message.usage !== undefined) {
+      Usage.encode(message.usage, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -1440,6 +1913,14 @@ export const IncidentSummaryResult: MessageFns<IncidentSummaryResult> = {
           message.explanation = reader.string();
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.usage = Usage.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1475,6 +1956,7 @@ export const IncidentSummaryResult: MessageFns<IncidentSummaryResult> = {
       explanation: isSet(object.explanation)
         ? globalThis.String(object.explanation)
         : '',
+      usage: isSet(object.usage) ? Usage.fromJSON(object.usage) : undefined,
     };
   },
 
@@ -1498,6 +1980,9 @@ export const IncidentSummaryResult: MessageFns<IncidentSummaryResult> = {
     if (message.explanation !== '') {
       obj.explanation = message.explanation;
     }
+    if (message.usage !== undefined) {
+      obj.usage = Usage.toJSON(message.usage);
+    }
     return obj;
   },
 
@@ -1517,6 +2002,10 @@ export const IncidentSummaryResult: MessageFns<IncidentSummaryResult> = {
       object.recommendedNextSteps?.map((e) => e) || [];
     message.confidence = object.confidence ?? 0;
     message.explanation = object.explanation ?? '';
+    message.usage =
+      object.usage !== undefined && object.usage !== null
+        ? Usage.fromPartial(object.usage)
+        : undefined;
     return message;
   },
 };
@@ -1831,7 +2320,7 @@ export const PolicyRuleDraft: MessageFns<PolicyRuleDraft> = {
 };
 
 function createBasePolicyDraftResult(): PolicyDraftResult {
-  return { rules: [], explanation: '', confidence: 0 };
+  return { rules: [], explanation: '', confidence: 0, usage: undefined };
 }
 
 export const PolicyDraftResult: MessageFns<PolicyDraftResult> = {
@@ -1847,6 +2336,9 @@ export const PolicyDraftResult: MessageFns<PolicyDraftResult> = {
     }
     if (message.confidence !== 0) {
       writer.uint32(25).double(message.confidence);
+    }
+    if (message.usage !== undefined) {
+      Usage.encode(message.usage, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -1883,6 +2375,14 @@ export const PolicyDraftResult: MessageFns<PolicyDraftResult> = {
           message.confidence = reader.double();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.usage = Usage.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1903,6 +2403,7 @@ export const PolicyDraftResult: MessageFns<PolicyDraftResult> = {
       confidence: isSet(object.confidence)
         ? globalThis.Number(object.confidence)
         : 0,
+      usage: isSet(object.usage) ? Usage.fromJSON(object.usage) : undefined,
     };
   },
 
@@ -1916,6 +2417,9 @@ export const PolicyDraftResult: MessageFns<PolicyDraftResult> = {
     }
     if (message.confidence !== 0) {
       obj.confidence = message.confidence;
+    }
+    if (message.usage !== undefined) {
+      obj.usage = Usage.toJSON(message.usage);
     }
     return obj;
   },
@@ -1933,6 +2437,10 @@ export const PolicyDraftResult: MessageFns<PolicyDraftResult> = {
       object.rules?.map((e) => PolicyRuleDraft.fromPartial(e)) || [];
     message.explanation = object.explanation ?? '';
     message.confidence = object.confidence ?? 0;
+    message.usage =
+      object.usage !== undefined && object.usage !== null
+        ? Usage.fromPartial(object.usage)
+        : undefined;
     return message;
   },
 };
@@ -2052,7 +2560,13 @@ export const AuditInvestigationRequest: MessageFns<AuditInvestigationRequest> =
   };
 
 function createBaseAuditInvestigationResult(): AuditInvestigationResult {
-  return { answer: '', citations: [], confidence: 0, explanation: '' };
+  return {
+    answer: '',
+    citations: [],
+    confidence: 0,
+    explanation: '',
+    usage: undefined,
+  };
 }
 
 export const AuditInvestigationResult: MessageFns<AuditInvestigationResult> = {
@@ -2071,6 +2585,9 @@ export const AuditInvestigationResult: MessageFns<AuditInvestigationResult> = {
     }
     if (message.explanation !== '') {
       writer.uint32(34).string(message.explanation);
+    }
+    if (message.usage !== undefined) {
+      Usage.encode(message.usage, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -2118,6 +2635,14 @@ export const AuditInvestigationResult: MessageFns<AuditInvestigationResult> = {
           message.explanation = reader.string();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.usage = Usage.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2139,6 +2664,7 @@ export const AuditInvestigationResult: MessageFns<AuditInvestigationResult> = {
       explanation: isSet(object.explanation)
         ? globalThis.String(object.explanation)
         : '',
+      usage: isSet(object.usage) ? Usage.fromJSON(object.usage) : undefined,
     };
   },
 
@@ -2156,6 +2682,9 @@ export const AuditInvestigationResult: MessageFns<AuditInvestigationResult> = {
     if (message.explanation !== '') {
       obj.explanation = message.explanation;
     }
+    if (message.usage !== undefined) {
+      obj.usage = Usage.toJSON(message.usage);
+    }
     return obj;
   },
 
@@ -2172,6 +2701,10 @@ export const AuditInvestigationResult: MessageFns<AuditInvestigationResult> = {
     message.citations = object.citations?.map((e) => e) || [];
     message.confidence = object.confidence ?? 0;
     message.explanation = object.explanation ?? '';
+    message.usage =
+      object.usage !== undefined && object.usage !== null
+        ? Usage.fromPartial(object.usage)
+        : undefined;
     return message;
   },
 };
@@ -2296,6 +2829,53 @@ export const AnalysisServiceService = {
     responseDeserialize: (value: Buffer): AuditInvestigationResult =>
       AuditInvestigationResult.decode(value),
   },
+  /**
+   * Server-streaming variants of the three long-form RPCs (performance
+   * program, decision 5). Same request and same final result as the unary
+   * RPC; before it, zero or more `delta` events carry the answer text as the
+   * model writes it. The last event is always the result (a failure is the
+   * same zero-confidence result as the unary RPC returns, never a gRPC
+   * error). The unary RPCs stay for compatibility.
+   */
+  streamSummarizeIncident: {
+    path: '/manar.ai.v1.AnalysisService/StreamSummarizeIncident' as const,
+    requestStream: false as const,
+    responseStream: true as const,
+    requestSerialize: (value: IncidentSummaryRequest): Buffer =>
+      Buffer.from(IncidentSummaryRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): IncidentSummaryRequest =>
+      IncidentSummaryRequest.decode(value),
+    responseSerialize: (value: AnalysisEvent): Buffer =>
+      Buffer.from(AnalysisEvent.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AnalysisEvent =>
+      AnalysisEvent.decode(value),
+  },
+  streamSuggestPolicy: {
+    path: '/manar.ai.v1.AnalysisService/StreamSuggestPolicy' as const,
+    requestStream: false as const,
+    responseStream: true as const,
+    requestSerialize: (value: PolicyDraftRequest): Buffer =>
+      Buffer.from(PolicyDraftRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): PolicyDraftRequest =>
+      PolicyDraftRequest.decode(value),
+    responseSerialize: (value: AnalysisEvent): Buffer =>
+      Buffer.from(AnalysisEvent.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AnalysisEvent =>
+      AnalysisEvent.decode(value),
+  },
+  streamInvestigateAudit: {
+    path: '/manar.ai.v1.AnalysisService/StreamInvestigateAudit' as const,
+    requestStream: false as const,
+    responseStream: true as const,
+    requestSerialize: (value: AuditInvestigationRequest): Buffer =>
+      Buffer.from(AuditInvestigationRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AuditInvestigationRequest =>
+      AuditInvestigationRequest.decode(value),
+    responseSerialize: (value: AnalysisEvent): Buffer =>
+      Buffer.from(AnalysisEvent.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AnalysisEvent =>
+      AnalysisEvent.decode(value),
+  },
 } as const;
 
 export interface AnalysisServiceServer extends UntypedServiceImplementation {
@@ -2341,6 +2921,26 @@ export interface AnalysisServiceServer extends UntypedServiceImplementation {
   investigateAudit: handleUnaryCall<
     AuditInvestigationRequest,
     AuditInvestigationResult
+  >;
+  /**
+   * Server-streaming variants of the three long-form RPCs (performance
+   * program, decision 5). Same request and same final result as the unary
+   * RPC; before it, zero or more `delta` events carry the answer text as the
+   * model writes it. The last event is always the result (a failure is the
+   * same zero-confidence result as the unary RPC returns, never a gRPC
+   * error). The unary RPCs stay for compatibility.
+   */
+  streamSummarizeIncident: handleServerStreamingCall<
+    IncidentSummaryRequest,
+    AnalysisEvent
+  >;
+  streamSuggestPolicy: handleServerStreamingCall<
+    PolicyDraftRequest,
+    AnalysisEvent
+  >;
+  streamInvestigateAudit: handleServerStreamingCall<
+    AuditInvestigationRequest,
+    AnalysisEvent
   >;
 }
 
@@ -2499,6 +3099,41 @@ export interface AnalysisServiceClient extends Client {
       response: AuditInvestigationResult,
     ) => void,
   ): ClientUnaryCall;
+  /**
+   * Server-streaming variants of the three long-form RPCs (performance
+   * program, decision 5). Same request and same final result as the unary
+   * RPC; before it, zero or more `delta` events carry the answer text as the
+   * model writes it. The last event is always the result (a failure is the
+   * same zero-confidence result as the unary RPC returns, never a gRPC
+   * error). The unary RPCs stay for compatibility.
+   */
+  streamSummarizeIncident(
+    request: IncidentSummaryRequest,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<AnalysisEvent>;
+  streamSummarizeIncident(
+    request: IncidentSummaryRequest,
+    metadata?: Metadata,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<AnalysisEvent>;
+  streamSuggestPolicy(
+    request: PolicyDraftRequest,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<AnalysisEvent>;
+  streamSuggestPolicy(
+    request: PolicyDraftRequest,
+    metadata?: Metadata,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<AnalysisEvent>;
+  streamInvestigateAudit(
+    request: AuditInvestigationRequest,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<AnalysisEvent>;
+  streamInvestigateAudit(
+    request: AuditInvestigationRequest,
+    metadata?: Metadata,
+    options?: Partial<CallOptions>,
+  ): ClientReadableStream<AnalysisEvent>;
 }
 
 export const AnalysisServiceClient = makeGenericClientConstructor(
@@ -2533,6 +3168,17 @@ type Exact<P, I extends P> = P extends Builtin
   : P & { [K in keyof P]: Exact<P[K], I[K]> } & {
       [K in Exclude<keyof I, KeysOfUnion<P>>]: never;
     };
+
+function longToNumber(int64: { toString(): string }): number {
+  const num = globalThis.Number(int64.toString());
+  if (num > globalThis.Number.MAX_SAFE_INTEGER) {
+    throw new globalThis.Error('Value is larger than Number.MAX_SAFE_INTEGER');
+  }
+  if (num < globalThis.Number.MIN_SAFE_INTEGER) {
+    throw new globalThis.Error('Value is smaller than Number.MIN_SAFE_INTEGER');
+  }
+  return num;
+}
 
 function isSet(value: any): boolean {
   return value !== null && value !== undefined;

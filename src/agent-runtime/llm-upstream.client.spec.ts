@@ -105,3 +105,195 @@ describe('LlmUpstreamClient.chat (azure_openai)', () => {
     });
   });
 });
+
+describe('LlmUpstreamClient.chatStream', () => {
+  const cfg = {
+    get: (key: string) =>
+      (
+        ({
+          LLM_PROVIDER: 'ollama',
+          LLM_OLLAMA_BASE_URL: 'http://ollama.test/v1',
+          LLM_MODEL: 'qwen3',
+        }) as Record<string, unknown>
+      )[key],
+  } as unknown as ConfigService<AppConfig, true>;
+  const limits = { firstTokenMs: 1000, idleMs: 1000, totalMs: 5000 };
+
+  function sse(events: unknown[], pace?: () => Promise<void>): Response {
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const e of events) {
+          await pace?.();
+          const text =
+            e === '[DONE]'
+              ? 'data: [DONE]\n\n'
+              : `data: ${JSON.stringify(e)}\n\n`;
+          // Split mid-line to prove the reader reassembles lines across chunks.
+          controller.enqueue(enc.encode(text.slice(0, 7)));
+          controller.enqueue(enc.encode(text.slice(7)));
+        }
+        controller.close();
+      },
+    });
+    return new Response(body, { status: 200 });
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('hands over text as it arrives and assembles content, tool calls and usage', async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        sse([
+          { model: 'qwen3', choices: [{ delta: { content: 'Hel' } }] },
+          { choices: [{ delta: { content: 'lo' } }] },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'c1',
+                      function: { name: 'list_', arguments: '{"a"' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      function: { name: 'agents', arguments: ':1}' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            choices: [],
+            usage: { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 },
+          },
+          '[DONE]',
+        ]),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const seen: string[] = [];
+
+    const res = await new LlmUpstreamClient(cfg).chatStream(
+      { messages },
+      null,
+      (t) => seen.push(t),
+      limits,
+    );
+
+    expect(seen).toEqual(['Hel', 'lo']);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+    const choice = (
+      res.body.choices as { message: Record<string, unknown> }[]
+    )[0]!;
+    expect(choice.message).toMatchObject({
+      content: 'Hello',
+      tool_calls: [
+        { id: 'c1', function: { name: 'list_agents', arguments: '{"a":1}' } },
+      ],
+    });
+    expect(res.body.usage).toEqual({
+      prompt_tokens: 5,
+      completion_tokens: 7,
+      total_tokens: 12,
+    });
+  });
+
+  it('fails with LlmUpstreamError on a non-2xx and never carries the body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(new Response('secret prompt echo', { status: 500 })),
+      ),
+    );
+    await expect(
+      new LlmUpstreamClient(cfg).chatStream(
+        { messages },
+        null,
+        () => undefined,
+        limits,
+      ),
+    ).rejects.toThrow('HTTP 500');
+  });
+
+  it('gives up when the stream goes silent for longer than the idle limit', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"choices":[{"delta":{"content":"a"}}]}\n\n',
+              ),
+            );
+            init.signal?.addEventListener('abort', () =>
+              controller.error(new DOMException('x', 'AbortError')),
+            );
+          },
+        });
+        return Promise.resolve(new Response(body, { status: 200 }));
+      }),
+    );
+    await expect(
+      new LlmUpstreamClient(cfg).chatStream(
+        { messages },
+        null,
+        () => undefined,
+        {
+          firstTokenMs: 1000,
+          idleMs: 50,
+          totalMs: 5000,
+        },
+      ),
+    ).rejects.toThrow('LLM upstream failed');
+  });
+
+  it('stops when the client goes away', async () => {
+    const ctl = new AbortController();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init.signal?.addEventListener('abort', () =>
+              controller.error(new DOMException('x', 'AbortError')),
+            );
+          },
+        });
+        return Promise.resolve(new Response(body, { status: 200 }));
+      }),
+    );
+    const run = new LlmUpstreamClient(cfg).chatStream(
+      { messages },
+      null,
+      () => undefined,
+      {
+        ...limits,
+        signal: ctl.signal,
+      },
+    );
+    setTimeout(() => ctl.abort(), 20);
+    await expect(run).rejects.toThrow('LLM upstream failed');
+  });
+});

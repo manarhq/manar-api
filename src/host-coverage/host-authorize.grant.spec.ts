@@ -260,7 +260,7 @@ describe('8-hour grants on /host/v1/authorize', () => {
           resolvedPath: real,
         });
         expect(r.decision).toBe(want === 'ALLOW' ? r.decision : want);
-        if (want !== 'ALLOW') expect(r.cacheable).toBe(false);
+        expect(r.cacheable).toBe(false);
         expect(w.evaluate).toHaveBeenCalledTimes(2);
       });
       it('the link name matches an ALLOW rule, the target matches none: the risk ceiling asks', async () => {
