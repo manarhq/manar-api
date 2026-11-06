@@ -1,4 +1,13 @@
-import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpException,
+  Post,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -56,18 +65,41 @@ export class EvidenceController {
   })
   @ApiResponse({ status: 401, type: ErrorResponseDto })
   @ApiResponse({ status: 403, type: ErrorResponseDto })
-  async export(@CurrentAuth() auth: AuthContext, @Body() body: unknown) {
+  @ApiResponse({
+    status: 409,
+    type: ErrorResponseDto,
+    description:
+      'An export is already running for this workspace (export_already_running).',
+  })
+  @ApiResponse({
+    status: 429,
+    type: ErrorResponseDto,
+    description:
+      'Too many exports running; retry after the Retry-After seconds (export_capacity).',
+  })
+  async export(
+    @CurrentAuth() auth: AuthContext,
+    @Body() body: unknown,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
     const filter = parseBodyOrThrow(EvidenceExportRequestSchema, body);
     const tenantClient = await this.tenantDatabaseManager.getClient(
       auth.tenant.id,
     );
 
-    return this.evidenceExportService.export(
-      tenantClient,
-      auth.tenant.id,
-      auth.user.id,
-      filter,
-    );
+    try {
+      return await this.evidenceExportService.export(
+        tenantClient,
+        auth.tenant.id,
+        auth.user.id,
+        filter,
+      );
+    } catch (error) {
+      // No queue: the caller is told when to try again.
+      if (error instanceof HttpException && error.getStatus() === 429)
+        reply.header('Retry-After', '30');
+      throw error;
+    }
   }
 
   @Post('verify')

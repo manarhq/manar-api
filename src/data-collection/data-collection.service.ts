@@ -167,9 +167,19 @@ export class DataCollectionService {
 
   async purgeOld(now = new Date()): Promise<{ deleted: number }> {
     const cutoff = new Date(now.getTime() - SAMPLE_RETENTION_DAYS * 86_400_000);
-    const { count } = await this.control.productSample.deleteMany({
-      where: { createdAt: { lt: cutoff } },
-    });
+    // The hourly purge can meet a large backlog. The control role's statement_timeout is 30 s
+    // (set on the role because the pool goes through PgBouncer), so this one transaction raises
+    // it for itself: SET LOCAL lasts to the end of the transaction and is safe in transaction
+    // pooling, unlike a session SET.
+    const { count } = await this.control.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SET LOCAL statement_timeout = '120s'`;
+        return tx.productSample.deleteMany({
+          where: { createdAt: { lt: cutoff } },
+        });
+      },
+      { timeout: 130_000 },
+    );
     return { deleted: count };
   }
 

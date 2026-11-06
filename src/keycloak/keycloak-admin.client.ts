@@ -62,6 +62,9 @@ function isNotFound(error: unknown): boolean {
  */
 @Injectable()
 export class KeycloakAdminClient {
+  /** Every admin call (token and request) is bounded; a hung Keycloak fails provisioning instead of holding it. */
+  static REQUEST_TIMEOUT_MS = 15_000;
+
   private readonly logger = new Logger(KeycloakAdminClient.name);
   private readonly baseUrl: string;
 
@@ -901,6 +904,7 @@ export class KeycloakAdminClient {
           username,
           password,
         }),
+        signal: AbortSignal.timeout(KeycloakAdminClient.REQUEST_TIMEOUT_MS),
       },
     );
 
@@ -934,6 +938,7 @@ export class KeycloakAdminClient {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(KeycloakAdminClient.REQUEST_TIMEOUT_MS),
     });
 
     if (!response.ok) {

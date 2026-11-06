@@ -27,6 +27,13 @@ export type MeterName = (typeof METER)[keyof typeof METER];
 
 const PRICE_TTL_MS = 10 * 60_000;
 
+/**
+ * The SDK default is an 80 s timeout. 20 s bounds a request, and 2 network retries are safe for
+ * writes: with retries on, the SDK sends an Idempotency-Key on every POST, so a retried create
+ * cannot happen twice.
+ */
+export const STRIPE_HTTP = { timeout: 20_000, maxNetworkRetries: 2 } as const;
+
 /** Business name on statements is a Dashboard setting (Fixio); nothing per-request carries it. */
 @Injectable()
 export class StripeGateway {
@@ -47,7 +54,10 @@ export class StripeGateway {
         statusCode: 503,
         code: 'billing_not_configured',
       });
-    this.stripe ??= new Stripe(key, { apiVersion: '2026-09-30.endive' });
+    this.stripe ??= new Stripe(key, {
+      apiVersion: '2026-09-30.endive',
+      ...STRIPE_HTTP,
+    });
     return this.stripe;
   }
 

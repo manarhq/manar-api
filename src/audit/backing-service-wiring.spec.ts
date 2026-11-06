@@ -150,6 +150,8 @@ describe('OpenSearch client uses openSearchClientOptions', () => {
     expect(calls.opensearch[0]).toMatchObject({
       node: 'https://opensearch:9200',
       auth: { username: 'manar-api', password: 'os-pw' },
+      requestTimeout: 15_000,
+      maxRetries: 1,
     });
   });
 });

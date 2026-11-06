@@ -178,6 +178,14 @@ config:
   AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'
   TENANT_DB_CLIENT_CACHE_MAX: '50'
   TENANT_DB_CLIENT_IDLE_TTL_MS: '600000'
+  # Postgres connection budget: docs/tenant-isolation.md ("Connection budget") and
+  # src/database/connection-budget.spec.ts count every consumer against max_connections 859.
+  # Change a number here only together with that table.
+  DB_POOL_MAX_CONTROL: '5'
+  DB_POOL_MAX_TENANT: '2'
+  DB_POOL_CONNECT_TIMEOUT_MS: '3000'
+  DB_QUERY_TIMEOUT_MS: '125000'
+  DB_STATEMENT_TIMEOUT_MS: '120000'
 
 secrets:
   create: true

@@ -1,3 +1,4 @@
+import { pgPoolOptions, poolSettings } from './pool-options';
 import {
   Injectable,
   Logger,
@@ -27,11 +28,12 @@ export class ControlPrismaService
 
   constructor(configService: ConfigService<AppConfig, true>) {
     super({
-      adapter: new PrismaPg({
-        connectionString: configService.get('CONTROL_DATABASE_URL', {
-          infer: true,
-        }),
-      }),
+      adapter: new PrismaPg(
+        pgPoolOptions(
+          configService.get('CONTROL_DATABASE_URL', { infer: true }),
+          poolSettings((k) => configService.get(k as never), 'control'),
+        ),
+      ),
     });
   }
 

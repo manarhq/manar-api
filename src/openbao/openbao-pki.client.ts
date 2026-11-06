@@ -30,6 +30,9 @@ export interface SignVerbatimResult {
  */
 @Injectable()
 export class OpenBaoPkiClient {
+  /** A hung OpenBao fails the call (certificate issue/revoke: fail closed) instead of holding it. */
+  static REQUEST_TIMEOUT_MS = 10_000;
+
   private readonly logger = new Logger(OpenBaoPkiClient.name);
   private readonly baseUrl: string;
   private readonly token: string;
@@ -100,6 +103,7 @@ export class OpenBaoPkiClient {
   async getCaChainPem(): Promise<string> {
     const response = await fetch(
       `${this.baseUrl}/v1/${this.intermediatePath}/ca_chain`,
+      { signal: AbortSignal.timeout(OpenBaoPkiClient.REQUEST_TIMEOUT_MS) },
     );
     if (!response.ok) {
       throw new Error(
@@ -121,6 +125,7 @@ export class OpenBaoPkiClient {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(OpenBaoPkiClient.REQUEST_TIMEOUT_MS),
     });
 
     if (!response.ok) {

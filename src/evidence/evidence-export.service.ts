@@ -1,11 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  HttpException,
+  HttpStatus,
+  Inject,
+  Injectable,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type {
   Prisma,
   PrismaClient as TenantPrismaClient,
 } from '../generated/tenant-client/client';
 import type { AppConfig } from '../config/env.validation';
+import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import {
   AuditCheckpointIndexError,
   AuditEventNotCheckpointedError,
@@ -182,6 +189,54 @@ export interface EvidenceBundleContent {
   };
 }
 
+/** Rows per statement when reading the audit events of an export. */
+export const EVIDENCE_PAGE_SIZE = 2000;
+/** Upper bound for the whole paged read (many pages, each under statement_timeout). */
+const EVIDENCE_TRANSACTION_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Reads the matching audit events in sequence order, one bounded page per statement, so a large
+ * export never runs into the database statement timeout. All pages run in ONE read-only
+ * REPEATABLE READ transaction: pages read at different snapshots could silently miss an event
+ * that committed out of sequence order between two pages (sequence 10 committing after 11 was
+ * already read). The export is one consistent point-in-time view; a later export has the rest.
+ */
+export async function readAuditEventsPaged(
+  tenantClient: TenantPrismaClient,
+  where: Prisma.AuditEventWhereInput,
+  pageSize = EVIDENCE_PAGE_SIZE,
+) {
+  type Row = Awaited<
+    ReturnType<typeof tenantClient.auditEvent.findMany>
+  >[number];
+  return tenantClient.$transaction(
+    async (tx) => {
+      // Transaction-scoped (not a session SET); the tenant pool is a direct connection.
+      await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+      const all: Row[] = [];
+      for (let after: number | null = null; ;) {
+        const page: Row[] = await tx.auditEvent.findMany({
+          where:
+            after === null
+              ? where
+              : { AND: [where, { sequence: { gt: after } }] },
+          orderBy: { sequence: 'asc' },
+          take: pageSize,
+        });
+        all.push(...page);
+        if (page.length < pageSize) return all;
+        after = page[page.length - 1]!.sequence;
+      }
+    },
+    {
+      isolationLevel: 'RepeatableRead',
+      // The whole export, not one statement: each page is still bounded by statement_timeout.
+      timeout: EVIDENCE_TRANSACTION_TIMEOUT_MS,
+      maxWait: 5_000,
+    },
+  );
+}
+
 /**
  * Phase 9b (Evidence export, Section 49). Gathers the `AuditEvent`s
  * matching a filter plus directly-relevant operational context, and
@@ -209,9 +264,48 @@ export class EvidenceExportService {
     private readonly proofs: AuditProofService,
     @Inject(CHECKPOINT_PUBLIC_KEYS)
     private readonly checkpointKeys: CheckpointKeyLookup,
+    private readonly tenants: TenantDatabaseManager,
   ) {}
 
+  /** Tenants with an export running in this process. */
+  private readonly running = new Set<string>();
+  /**
+   * At most this many exports run at once per process. An export holds one snapshot
+   * connection for its whole read, so the caps keep it from crowding out the decision path.
+   * ponytail: per process (an api pod), not cluster-wide; add a Redis lease if replicas multiply.
+   */
+  static readonly MAX_CONCURRENT_EXPORTS = 3;
+
   async export(
+    tenantClient: TenantPrismaClient,
+    tenantId: string,
+    exportedBy: string,
+    filter: EvidenceExportRequest,
+  ): Promise<EvidenceExportResult> {
+    if (this.running.has(tenantId)) {
+      throw new ConflictException({
+        message: 'An export is already running for this workspace.',
+        reason: 'export_already_running',
+      });
+    }
+    if (this.running.size >= EvidenceExportService.MAX_CONCURRENT_EXPORTS) {
+      throw new HttpException(
+        {
+          message: 'Too many exports are running. Try again in a minute.',
+          reason: 'export_capacity',
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    this.running.add(tenantId);
+    try {
+      return await this.runExport(tenantClient, tenantId, exportedBy, filter);
+    } finally {
+      this.running.delete(tenantId);
+    }
+  }
+
+  private async runExport(
     tenantClient: TenantPrismaClient,
     tenantId: string,
     exportedBy: string,
@@ -226,10 +320,12 @@ export class EvidenceExportService {
     }
     if (filter.correlationId) where.correlationId = filter.correlationId;
 
-    const candidateEvents = await tenantClient.auditEvent.findMany({
-      where,
-      orderBy: { sequence: 'asc' },
-    });
+    // The long snapshot read runs on its own one-connection client, never on the shared tenant
+    // pool the decision path uses; the short context queries below use the shared client.
+    const candidateEvents = await this.tenants.withDedicatedClient(
+      tenantId,
+      (dedicated) => readAuditEventsPaged(dedicated, where),
+    );
 
     const events = candidateEvents.filter((event) =>
       matchesAgentOrTask(event, filter.agentId, filter.taskId),

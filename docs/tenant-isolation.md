@@ -164,6 +164,92 @@ every flag at its safe default (`false`). This avoids a destructive schema
 migration later, when a real policy engine starts reading these fields to
 gate behavior per tenant.
 
+## Pools and timeouts (5 Nov 2026)
+
+Every Prisma client (control and each cached tenant client) has an explicit `pg` pool
+(`src/database/pool-options.ts`):
+
+| Variable                     | Default | Meaning                                                                                      |
+| ---------------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `DB_POOL_MAX_CONTROL`        | 5       | Connections of the control pool                                                              |
+| `DB_POOL_MAX_TENANT`         | 2       | Connections of each tenant client (up to `TENANT_DB_CLIENT_CACHE_MAX` of them)               |
+| `DB_POOL_CONNECT_TIMEOUT_MS` | 3000    | Wait for a free connection / TCP connect; then the request fails (503, see below)            |
+| `DB_QUERY_TIMEOUT_MS`        | 35000   | Client-side bound on one query, all pools (PgBouncer-safe)                                   |
+| `DB_STATEMENT_TIMEOUT_MS`    | 30000   | Server-side `statement_timeout` for the TENANT pools only (0 = off); worker chart uses 120 s |
+
+An exhausted pool, a client query timeout, "too many clients" (53300), a cancelled statement (57014,
+55P03) or a Prisma transaction start timeout (P2028) answers **503** `enforcement_dependency_unavailable`
+(`getClient` via `failClosed`; any other handler via `ErrorEnvelopeFilter`), never a hang.
+A Prisma P2028 answers 503 only when it says the transaction could not be **started**; an expired or
+closed transaction stays a 500. A TCP connect timeout ("Connection terminated due to connection
+timeout") is a 503 like the pool-wait timeout.
+
+**The control pool sends no startup parameters.** Production reaches the control DB through Azure
+PgBouncer (`POOLED_CONTROL_DATABASE_URL`, port 6432, `?pgbouncer=true`) whose `ignore_startup_parameters`
+is empty, so a `statement_timeout` startup parameter fails every connection with `08P01`. The control
+timeout is set on the role instead (`ALTER ROLE manar_api IN DATABASE manar_control SET
+statement_timeout = '30s'`, manar-infra#192) and the client `DB_QUERY_TIMEOUT_MS` still bounds each
+query. Tenant pools connect directly and do send it.
+
+The role-level 30 s limit also covers the worker's control-DB queries. Reviewed (6 Nov): the billing
+tick, usage alerts, digests, trial reminders, checkpoint scheduler, AI telemetry and job queues, and
+account deletion run short per-row or indexed statements and stay far under 30 s. The audit retention,
+webhook and approval activities and the evidence export read tenant databases (tenant pools, 120 s in
+the worker). The one bulk control statement, the hourly product-sample purge, runs in a transaction
+with `SET LOCAL statement_timeout = '120s'` (safe through PgBouncer transaction mode; a session
+`SET` is not). Control migrations (`prisma migrate deploy`) connect as the same role, so a
+long DDL on a large control table needs `SET LOCAL statement_timeout = 0` in its migration.
+
+Evicting a tenant client from the LRU cache does not cut queries still running on it: the pool is
+disconnected `DB_QUERY_TIMEOUT_MS` + 5 s later (every query is bounded by that), and concurrent cache
+misses for one tenant share a single client build.
+
+The evidence export reads its audit events in one read-only REPEATABLE READ transaction on a
+**dedicated one-connection client** (`withDedicatedClient`, closed afterwards), so a long export never
+holds connections of the shared tenant pool that the decision path uses. A second export for the same
+workspace answers 409 `export_already_running`, and more than 3 at once per api process answer 429
+`export_capacity` with a `Retry-After` header (no queue). The cap is 3 because each export is one
+extra server connection, counted in the budget table above; a slot is always released in a `finally`,
+so a timed-out or failed export frees it, and the hold is bounded by the 5 minute transaction timeout.
+
+### Connection budget
+
+Postgres `max_connections` is 859. Every consumer counts (replicas from the production overlay,
+manar-infra `clusters/azure-uaenorth`; there is no HPA today). Enforced by
+`src/database/connection-budget.spec.ts`.
+
+| Consumer                                                          | Formula                                  | Ceiling  |
+| ----------------------------------------------------------------- | ---------------------------------------- | -------- |
+| manar-api tenant pools (2 Nest apps x 2 pods)                     | 4 x `CACHE_MAX` 50 x `POOL_MAX_TENANT` 2 | 400      |
+| manar-api-worker tenant pools (1 app x 1 pod)                     | 1 x 50 x 2                               | 100      |
+| Control DB through PgBouncer (`default_pool_size`)                | capped by the pooler, not by pod x pool  | 50       |
+| Keycloak (2 replicas x Agroal 100)                                | 2 x 100                                  | 200      |
+| Temporal (4 services x 2 stores x `maxConns` 20)                  | 4 x 2 x 20                               | 160      |
+| OpenFGA (2 replicas x `maxOpenConns` 30)                          | 2 x 30                                   | 60       |
+| manar-site, manar-fleet, fleet service (1 replica, pg default 10) | 3 x 10                                   | 30       |
+| **Sum of every ceiling at once**                                  |                                          | **1000** |
+
+The 1000 is not reachable: a tenant client only holds server connections while it has queries in
+flight (idle connections close after 10 s), and Keycloak, Temporal and OpenFGA sit far below their
+maxima. The spec therefore **assumes that at most half of the tenant pool ceiling is busy at once** (250 of 500;
+an assumption, to be checked against `pg_stat_activity` and k6 numbers), which gives
+**756 of 859 (88%), headroom 103**, and fails above 90%. If k6 numbers or `pg_stat_activity` show tenant
+use closer to the ceiling, lower `TENANT_DB_CLIENT_CACHE_MAX` (each step of 5 frees 40 connections at
+today's replicas) before raising any other number. Changing a replica count in the overlay changes
+this table.
+
+### PgBouncer for tenant databases: not switched
+
+Checked every session-level feature. Tenant request paths use none (all advisory locks are
+`pg_advisory_xact_lock`, no `LISTEN`, `SET`, temp tables or cursors), so transaction pooling would
+work for them. We still keep tenant DBs on the direct port because: provisioning and migrations
+(`CREATE DATABASE`, `prisma migrate deploy` with its session advisory lock) need a direct
+connection, which would mean two URLs per tenant; PgBouncer can reject the `statement_timeout`
+startup parameter; and one pooler pool per tenant database multiplies server connections anyway.
+`CONTROL_DATABASE_URL` in production already points at PgBouncer (transaction pooling, 6432). Anything
+that needs a session on the control DB (`LISTEN`, session advisory locks) must use a direct URL;
+`EdgePeerService` opens its `LISTEN` on `CONTROL_DATABASE_URL`; behind transaction pooling it receives no notifications, and only its 5 s fallback poll keeps long-poll waiters current (follow-up: give it a direct URL).
+
 ## Known limitations (this phase)
 
 - No automatic rollback if `provisionTenant` fails after the control-DB

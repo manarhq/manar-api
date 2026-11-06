@@ -86,6 +86,34 @@ const PRISMA_CLIENT_ERRORS: Record<
   P2025: { status: 404, message: NOT_FOUND },
 };
 
+/**
+ * The database could not take the request: pool wait expired, a client-side query timeout, the
+ * server is out of connections (SQLSTATE 53300), a statement or lock timeout (57014, 55P03), or
+ * Prisma could not start a transaction in time (P2028).
+ */
+const DB_SATURATED_CODES = new Set(['53300', '57014', '55P03']);
+const DB_SATURATED_MESSAGES = new Set([
+  'timeout exceeded when trying to connect',
+  'Connection terminated due to connection timeout',
+  'Query read timeout',
+]);
+function isDatabaseSaturated(exception: unknown): boolean {
+  if (!(exception instanceof Error)) return false;
+  if (DB_SATURATED_MESSAGES.has(exception.message)) return true;
+  const e = exception as {
+    code?: unknown;
+    meta?: { driverAdapterError?: { cause?: { originalCode?: string } } };
+  };
+  // Only "could not START a transaction in time" is saturation; an expired or closed
+  // transaction ("Transaction already closed", "expired transaction") is a real error.
+  if (e.code === 'P2028') {
+    return exception.message.includes('Unable to start a transaction');
+  }
+  if (typeof e.code === 'string' && DB_SATURATED_CODES.has(e.code)) return true;
+  const code = e.meta?.driverAdapterError?.cause?.originalCode;
+  return code !== undefined && DB_SATURATED_CODES.has(code);
+}
+
 interface Classified {
   status: number;
   body: Record<string, unknown>;
@@ -114,6 +142,21 @@ function classify(exception: unknown, method: string): Classified {
   if (typeof code === 'string' && PRISMA_CLIENT_ERRORS[code]) {
     const { status, message } = PRISMA_CLIENT_ERRORS[code];
     return { status, body: { message }, unexpected: false };
+  }
+
+  // The database could not take the request in time: the pool had no free connection within
+  // DB_POOL_CONNECT_TIMEOUT_MS, or a statement hit its timeout. Answer 503 now (the caller may
+  // retry) instead of a 500, with the stable fail-closed reason.
+  if (isDatabaseSaturated(exception)) {
+    return {
+      status: 503,
+      body: {
+        message: HUMAN_DEFAULTS[503],
+        reason: 'enforcement_dependency_unavailable',
+        dependency: 'database',
+      },
+      unexpected: false,
+    };
   }
 
   // Fastify's own errors (body parser, media type, payload size) carry a 4xx statusCode.

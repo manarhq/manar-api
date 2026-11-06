@@ -53,6 +53,11 @@ function fakeConfigService(
     TENANT_DB_CLIENT_CACHE_MAX: 50,
     TENANT_DB_CLIENT_IDLE_TTL_MS: 10 * 60 * 1000,
     TENANT_DB_CLIENT_REVALIDATE_MS: 5000,
+    DB_POOL_MAX_CONTROL: 10,
+    DB_POOL_MAX_TENANT: 5,
+    DB_POOL_CONNECT_TIMEOUT_MS: 3000,
+    DB_QUERY_TIMEOUT_MS: 35000,
+    DB_STATEMENT_TIMEOUT_MS: 30000,
     KEYCLOAK_BASE_URL: process.env.KEYCLOAK_BASE_URL ?? '',
     KEYCLOAK_ADMIN_USERNAME: process.env.KEYCLOAK_ADMIN_USERNAME ?? '',
     KEYCLOAK_ADMIN_PASSWORD: process.env.KEYCLOAK_ADMIN_PASSWORD ?? '',
@@ -318,6 +323,64 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     }
   }, 60_000);
 
+  it('3b. an LRU eviction does not cut a query still running on the evicted client', async () => {
+    const small = new TenantDatabaseManager(
+      control,
+      fakeConfigService({ TENANT_DB_CLIENT_CACHE_MAX: 1 }),
+      new EnvSecretProvider(),
+    );
+    try {
+      const a = await small.getClient(tenantA.id);
+      const running = a.$queryRawUnsafe<{ ok: number }[]>(
+        'SELECT 1 AS ok FROM pg_sleep(1.5)',
+      );
+      await small.getClient(tenantB.id); // evicts A while its query runs
+      await expect(running).resolves.toMatchObject([{ ok: 1 }]);
+    } finally {
+      await small.onModuleDestroy();
+    }
+  }, 60_000);
+
+  it('3c. concurrent cache misses for one tenant share one client', async () => {
+    const fresh = new TenantDatabaseManager(
+      control,
+      fakeConfigService(),
+      new EnvSecretProvider(),
+    );
+    try {
+      const clients = await Promise.all(
+        Array.from({ length: 6 }, () => fresh.getClient(tenantA.id)),
+      );
+      expect(new Set(clients).size).toBe(1);
+      expect(
+        (fresh as unknown as { cache: Map<string, unknown> }).cache.size,
+      ).toBe(1);
+    } finally {
+      await fresh.onModuleDestroy();
+    }
+  }, 60_000);
+
+  it('3d. a long read on a dedicated client leaves the shared tenant pool free for the decision path', async () => {
+    const m = new TenantDatabaseManager(
+      control,
+      fakeConfigService({ DB_POOL_MAX_TENANT: 1 }),
+      new EnvSecretProvider(),
+    );
+    try {
+      const shared = await m.getClient(tenantA.id);
+      const long = m.withDedicatedClient(tenantA.id, (c) =>
+        c.$queryRawUnsafe('SELECT 1 AS ok FROM pg_sleep(2)'),
+      );
+      await new Promise((r) => setTimeout(r, 300));
+      const started = Date.now();
+      await shared.$queryRaw`SELECT 1`; // the only shared connection is not held by the export
+      expect(Date.now() - started).toBeLessThan(1000);
+      await expect(long).resolves.toMatchObject([{ ok: 1 }]);
+    } finally {
+      await m.onModuleDestroy();
+    }
+  }, 60_000);
+
   it('4. resolving an unknown or deprovisioned tenant ID fails closed', async () => {
     await expect(manager.getClient(randomUUID())).rejects.toThrow();
     await expect(manager.resolveTenant(randomUUID())).rejects.toThrow();
@@ -378,6 +441,84 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
       await expect(m.getClient(tenantA.id)).rejects.toBeInstanceOf(
         EnforcementDependencyUnavailableException,
       );
+    } finally {
+      await m.onModuleDestroy();
+    }
+  }, 30_000);
+
+  it('9. an exhausted control pool fails fast with enforcement_dependency_unavailable instead of hanging', async () => {
+    const config = fakeConfigService({
+      DB_POOL_MAX_CONTROL: 1,
+      DB_POOL_CONNECT_TIMEOUT_MS: 300,
+      TENANT_DB_CLIENT_REVALIDATE_MS: 0,
+    });
+    const tinyControl = new ControlPrismaService(config);
+    const m = new TenantDatabaseManager(
+      tinyControl,
+      config,
+      new EnvSecretProvider(),
+    );
+    try {
+      await m.getClient(tenantA.id); // cached; every later call revalidates on the control DB
+      // Hold the pool's only connection for longer than the wait bound.
+      const held = tinyControl.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1`;
+          await new Promise((r) => setTimeout(r, 2500));
+        },
+        { timeout: 10_000 },
+      );
+      await new Promise((r) => setTimeout(r, 100));
+
+      const started = Date.now();
+      await expect(m.getClient(tenantA.id)).rejects.toBeInstanceOf(
+        EnforcementDependencyUnavailableException,
+      );
+      expect(Date.now() - started).toBeLessThan(1500);
+
+      // A cache miss (another tenant) fails the same way.
+      const missStarted = Date.now();
+      await expect(m.getClient(tenantB.id)).rejects.toBeInstanceOf(
+        EnforcementDependencyUnavailableException,
+      );
+      expect(Date.now() - missStarted).toBeLessThan(1500);
+      await held;
+    } finally {
+      await m.onModuleDestroy();
+      await tinyControl.$disconnect();
+    }
+  }, 30_000);
+
+  it('10. a tenant client enforces the statement timeout and a bounded pool wait', async () => {
+    const m = new TenantDatabaseManager(
+      control,
+      fakeConfigService({
+        DB_STATEMENT_TIMEOUT_MS: 300,
+        DB_POOL_MAX_TENANT: 1,
+        DB_POOL_CONNECT_TIMEOUT_MS: 200,
+      }),
+      new EnvSecretProvider(),
+    );
+    try {
+      const client = await m.getClient(tenantA.id);
+      const started = Date.now();
+      await expect(client.$queryRaw`SELECT pg_sleep(5)`).rejects.toMatchObject({
+        meta: { driverAdapterError: { cause: { originalCode: '57014' } } },
+      });
+      expect(Date.now() - started).toBeLessThan(2000);
+
+      // The one pooled connection is busy: the next query gives up after the wait bound.
+      // Prisma queries are lazy: start it now.
+      const busy = Promise.resolve(
+        client.$queryRaw`SELECT pg_sleep(0.28)::text`,
+      );
+      const waitStarted = Date.now();
+      await new Promise((r) => setTimeout(r, 20));
+      await expect(client.$queryRaw`SELECT 1`).rejects.toThrow(
+        'timeout exceeded when trying to connect',
+      );
+      expect(Date.now() - waitStarted).toBeLessThan(1000);
+      await busy;
     } finally {
       await m.onModuleDestroy();
     }

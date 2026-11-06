@@ -38,6 +38,36 @@ export const DatabaseConfigSchema = z.object({
    * control DB (ADR-0010: a suspend in one process must reach every process). 5 s by default.
    */
   TENANT_DB_CLIENT_REVALIDATE_MS: z.coerce.number().int().min(0).default(5000),
+
+  /**
+   * Postgres connection pools. Each Nest app in a pod (human HTTP, agent mTLS) has its own control
+   * pool and up to TENANT_DB_CLIENT_CACHE_MAX tenant pools, so worst case per pod is
+   * 2 x (CONTROL + CACHE_MAX x TENANT) connections: size them against the server's max_connections.
+   */
+  DB_POOL_MAX_CONTROL: z.coerce.number().int().positive().default(5),
+  DB_POOL_MAX_TENANT: z.coerce.number().int().positive().default(2),
+
+  /**
+   * How long a request waits for a free pooled connection (and for the TCP connect) before it
+   * fails. An exhausted pool answers with 503 `enforcement_dependency_unavailable` after this long
+   * instead of queueing without bound.
+   */
+  DB_POOL_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),
+
+  /**
+   * Client-side bound on one query (all pools). Pooler-safe: it needs no startup parameter.
+   * Must stay above DB_STATEMENT_TIMEOUT_MS so the server cancels the query first.
+   */
+  DB_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().default(35_000),
+
+  /**
+   * Server-side `statement_timeout` for the TENANT pools (0 = off), sent as a connection startup
+   * parameter, so tenant URLs must be direct Postgres connections. The control pool sends no
+   * startup parameters (production reaches the control DB through PgBouncer, which rejects them
+   * with 08P01): set its timeout on the role, `ALTER ROLE ... IN DATABASE manar_control SET
+   * statement_timeout`, and rely on DB_QUERY_TIMEOUT_MS on the client.
+   */
+  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(30_000),
 });
 
 export type DatabaseConfig = z.infer<typeof DatabaseConfigSchema>;
