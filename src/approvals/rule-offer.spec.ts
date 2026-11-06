@@ -169,6 +169,13 @@ describe('rule offer after the 3rd identical approval (decision 37)', () => {
     expect(spies.map((x) => x.mock.calls.length)).toEqual([1, 0, 1, 1]);
   });
 
+  it('no offer for a request the device could not vouch for the path of', async () => {
+    const w = world();
+    expect((await w.service.offersFor(w.client, [w.pending])).size).toBe(1);
+    const linked = { ...w.pending, pathLinked: true };
+    expect((await w.service.offersFor(w.client, [linked])).size).toBe(0);
+  });
+
   it('counts person approvals of the last 30 days only', async () => {
     const w = world();
     const ha = (

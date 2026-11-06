@@ -8,6 +8,7 @@ import {
 } from '../workspace/start-mode.presets';
 import type { HostContext } from '../host-mtls/host-context';
 import {
+  HostAuthorizeSchema,
   HostAuthorizeService,
   type HostAuthorizeRequest,
 } from './host-authorize.service';
@@ -39,6 +40,8 @@ interface Scenario {
   learningOff?: boolean;
   /** Scoped grants that exist: pattern and the ask they answer. */
   grants?: Array<{ pattern: string; askKey: string }>;
+  /** An exact 8-hour grant for the resource (askKey null: an older grant that answers any ask). */
+  exact?: { id: string; expiresAt: Date; askKey: string | null };
 }
 
 const EDITS_ASK = {
@@ -116,7 +119,8 @@ async function run(
       },
     },
     approvalAllowGrant: {
-      findFirst: () => Promise.resolve(null),
+      findFirst: ({ where }: { where: { effect?: string } }) =>
+        Promise.resolve(where.effect === 'ALLOW' ? (s.exact ?? null) : null),
       findMany: ({ where }: { where: { askKey: string } }) =>
         Promise.resolve(
           grants
@@ -287,5 +291,98 @@ describe('REVIEW: symlinked folders inside a project', () => {
   it('present but outside the home project: asks', async () => {
     const r = await run(link('/etc/hosts', '/home/sara/proj/src/a.ts'));
     expect(r.result.decision).toBe('APPROVAL_REQUIRED');
+  });
+});
+
+describe('rg prints contents, so it asks while learning', () => {
+  it.each(['rg -v zzzz .', 'rg -n password .', 'rg -v zzzz deploy'])(
+    '%s',
+    async (c) => {
+      const r = await run(cursor('shell', c));
+      expect(r.result.decision).toBe('APPROVAL_REQUIRED');
+      expect(r.result.reason).not.toBe('learning_would_ask');
+    },
+  );
+  it.each([
+    'cat deploy/prod.tfvars',
+    'cat secrets.yml',
+    'cat config/database.yml',
+  ])('a committed secret file: %s', async (c) => {
+    const r = await run(cursor('shell', c));
+    expect(r.result.reason).not.toBe('learning_would_ask');
+  });
+});
+
+describe('resolvedPath: only a path the device resolved to itself is quiet', () => {
+  const P = '/home/sara/proj/src/a.ts';
+  const edit = (resolvedPath?: string) => ({
+    toolId: 'host.cursor',
+    actionId: 'edit',
+    resource: P,
+    ...(resolvedPath === undefined ? {} : { resolvedPath }),
+  });
+  it.each([
+    ['same', P, true],
+    ['same, non-canonical (// and ./)', '/home/sara//proj/./src/a.ts', true],
+    ['absent', undefined, false],
+    ['a link into ~/.ssh', '/home/sara/.ssh/authorized_keys', false],
+    ['relative', 'src/a.ts', false],
+    ['with ..', '/home/sara/proj/src/../src/a.ts', false],
+    ['NUL', P + '\u0000', false],
+    ['bidi override', '/home/sara/proj/src/\u202ea.ts', false],
+    ['trailing space', P + ' ', false],
+    ['backslash', '/home/sara/proj\\src/a.ts', false],
+    ['case differs on Linux', '/home/sara/Proj/src/a.ts', false],
+  ] as Array<[string, string | undefined, boolean]>)(
+    '%s',
+    async (_n, rp, quiet) => {
+      const r = await run(edit(rp));
+      expect(r.result.reason === 'learning_would_ask').toBe(quiet);
+      if (!quiet) expect(r.result.decision).toBe('APPROVAL_REQUIRED');
+    },
+  );
+  it('a scoped grant does not apply to a linked path', async () => {
+    const r = await run(edit('/home/sara/.ssh/x'), {
+      firstApproved: 30,
+      grants: [{ pattern: '/home/sara/proj/*', askKey: 'ceiling' }],
+    });
+    expect(r.result.decision).toBe('APPROVAL_REQUIRED');
+  });
+  it('the schema rejects an empty or over-long resolvedPath', () => {
+    for (const rp of ['', 'x'.repeat(2049)])
+      expect(
+        HostAuthorizeSchema.safeParse({
+          toolId: 't',
+          actionId: 'a',
+          resource: 'r',
+          resolvedPath: rp,
+        }).success,
+      ).toBe(false);
+  });
+});
+
+describe('an 8-hour grant answers only the ask it was made for', () => {
+  const P = '/home/sara/proj/src/a.ts';
+  const req = { ...cursor('edit', P), resolvedPath: '/home/sara/.ssh/x' };
+  it('keyed for the ceiling: an admin rule that asks is still an ask', async () => {
+    const r = await run(req, {
+      mode: 'custom',
+      firstApproved: 30,
+      exact: {
+        id: 'g8',
+        expiresAt: new Date(NOW + 3_600_000),
+        askKey: 'ceiling',
+      },
+    });
+    expect(r.result.decision).toBe('APPROVAL_REQUIRED');
+    expect(r.result.grantId).toBeUndefined();
+  });
+  it('control: an unkeyed (older) grant answers it, which is why linked asks keep their key', async () => {
+    const r = await run(req, {
+      mode: 'custom',
+      firstApproved: 30,
+      exact: { id: 'g8', expiresAt: new Date(NOW + 3_600_000), askKey: null },
+    });
+    expect(r.result.grantId).toBe('g8');
   });
 });

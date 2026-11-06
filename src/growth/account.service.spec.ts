@@ -3,12 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { AccountService, realmOf } from './account.service';
 
 function setup(
-  opts: { soleOwner?: boolean; deployment?: 'hosted' | 'customer' } = {},
+  opts: {
+    soleOwner?: boolean;
+    ownerLeaving?: 'ok' | 'raceLost' | 'secondLost';
+    deployment?: 'hosted' | 'customer';
+  } = {},
 ) {
   const calls: string[] = [];
   const hostUpdates: { where: unknown; data: Record<string, unknown> }[] = [];
   const mails: string[] = [];
   const audits: string[] = [];
+  let locks = 0;
   const row = {
     id: 'd1',
     issuer: 'https://kc/realms/manar',
@@ -16,7 +21,16 @@ function setup(
     status: 'SCHEDULED',
     executeAfter: new Date(0),
   };
+  let counts = 0;
   const control = {
+    $transaction: async (fn: (tx: unknown) => unknown) => {
+      locks++;
+      return fn(control);
+    },
+    $executeRaw: async (_s: unknown, key: string) => (
+      calls.push(`lock:${key}`),
+      1
+    ),
     deletedWorkspace: {
       upsert: async (a: { where: { slug: string } }) =>
         void calls.push(`tombstone:${a.where.slug}`),
@@ -25,19 +39,41 @@ function setup(
       findMany: async (a: { where: Record<string, unknown> }) =>
         opts.soleOwner
           ? [{ tenantId: 'co', role: 'TENANT_OWNER', extraRoles: [] }]
-          : 'subject' in a.where
-            ? // the deleted person's company memberships
-              [
-                {
-                  tenantId: 'co',
-                  role: 'DEVELOPER',
-                  extraRoles: [],
-                  tenant: { id: 'co', kind: 'COMPANY', status: 'ACTIVE' },
-                },
-              ]
-            : // that company's owners and admins
-              [{ issuer: 'https://kc/realms/manar', subject: 'boss' }],
-      count: async () => 0,
+          : opts.ownerLeaving && 'subject' in a.where
+            ? [
+                ...(opts.ownerLeaving === 'secondLost' ? ['zz-co2'] : []),
+                'co',
+              ].map((tenantId) => ({
+                tenantId,
+                role: 'TENANT_OWNER',
+                extraRoles: [],
+                tenant: { id: tenantId, kind: 'COMPANY', status: 'ACTIVE' },
+              }))
+            : 'subject' in a.where
+              ? // the deleted person's company memberships
+                [
+                  {
+                    tenantId: 'co',
+                    role: 'DEVELOPER',
+                    extraRoles: [],
+                    tenant: { id: 'co', kind: 'COMPANY', status: 'ACTIVE' },
+                  },
+                ]
+              : // that company's owners and admins
+                [{ issuer: 'https://kc/realms/manar', subject: 'boss' }],
+      // another owner exists when asked first; a racing deletion may take them before the lock
+      count: async (a: { where: { tenantId?: string } }) =>
+        opts.ownerLeaving === 'secondLost'
+          ? a.where.tenantId === 'zz-co2' && ++counts > 1 // the pre-check saw both; the race is lost later
+            ? 0
+            : 1
+          : opts.ownerLeaving === 'ok' || (opts.ownerLeaving && ++counts === 1)
+            ? 1
+            : 0,
+      updateMany: async (a: { where: { tenantId: unknown } }) => (
+        calls.push(`owner-removed:${JSON.stringify(a.where.tenantId)}`),
+        { count: 1 }
+      ),
       deleteMany: async () => (calls.push('memberships'), { count: 1 }),
     },
     tenant: {
@@ -114,7 +150,7 @@ function setup(
         void audits.push(`${tenantId}:${type}`),
     } as never,
   );
-  return { svc, calls, row, hostUpdates, mails, audits };
+  return { svc, calls, row, hostUpdates, mails, audits, getLocks: () => locks };
 }
 
 describe('account deletion', () => {
@@ -166,6 +202,36 @@ describe('account deletion', () => {
       refused: 'sole_owner',
     });
     expect(await svc.executeDue()).toEqual({ done: 0, failed: 0 });
+  });
+  it('an owner leaving a company with another owner is removed under the owner lock, before anything is destroyed', async () => {
+    const { svc, calls, getLocks } = setup({ ownerLeaving: 'ok' });
+    expect(await svc.executeDue()).toEqual({ done: 1, failed: 0 });
+    expect(getLocks()).toBe(1);
+    expect(calls.findIndex((c) => c.startsWith('owner-removed'))).toBe(1); // after its lock
+    expect(calls.findIndex((c) => c.startsWith('owner-removed'))).toBeLessThan(
+      calls.indexOf('stripe:cancel'),
+    );
+    expect(calls).toContain('memberships');
+  });
+  it('a lost last-owner race refuses cleanly: nothing is cancelled, deleted or unassigned', async () => {
+    const { svc, calls, row, hostUpdates, getLocks } = setup({
+      ownerLeaving: 'raceLost',
+    });
+    expect(await svc.executeDue()).toEqual({ done: 0, failed: 1 });
+    expect(getLocks()).toBe(1);
+    expect(row.status).toBe('REFUSED');
+    expect(calls).toEqual(['lock:owners:co']); // the lock only; no Stripe, tombstone, workspace, device, membership or Keycloak step
+    expect(hostUpdates).toEqual([]);
+  });
+  it('an owner of two companies is removed from both or from neither: losing the second keeps the first', async () => {
+    const { svc, calls, row, hostUpdates } = setup({
+      ownerLeaving: 'secondLost',
+    });
+    expect(await svc.executeDue()).toEqual({ done: 0, failed: 1 });
+    expect(row.status).toBe('REFUSED');
+    // locks in sorted tenant order, then the refusal: no membership was changed, nothing destroyed
+    expect(calls).toEqual(['lock:owners:co', 'lock:owners:zz-co2']);
+    expect(hostUpdates).toEqual([]);
   });
   it('never deletes the sign-in account from a customer-hosted realm', async () => {
     const { svc, calls } = setup({ deployment: 'customer' });

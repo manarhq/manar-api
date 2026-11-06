@@ -12,7 +12,12 @@ import {
   cursorWhereClause,
   toCursorPage,
 } from '../common/pagination/cursor-pagination';
-import { PrivilegeEscalationError, UserNotFoundError } from './users.errors';
+import { withOwnerLock } from './last-owner';
+import {
+  LastOwnerError,
+  PrivilegeEscalationError,
+  UserNotFoundError,
+} from './users.errors';
 
 export interface ListUsersInput {
   limit: number;
@@ -242,22 +247,51 @@ export class UsersService {
       const split = splitRoles(
         rolesOf(existing).filter((r) => r !== input.role),
       );
-      await this.control.membership.update({
-        where: {
-          issuer_subject_tenantId: {
-            issuer: input.issuer,
-            subject: target.keycloakSubject,
-            tenantId: input.tenantId,
-          },
-        },
-        data: split
-          ? { ...split, grantedBy: input.revokedByUserId }
-          : {
-              status: 'REMOVED',
-              extraRoles: [],
-              grantedBy: input.revokedByUserId,
+      const write = (db: Pick<ControlPrismaService, 'membership'>) =>
+        db.membership.update({
+          where: {
+            issuer_subject_tenantId: {
+              issuer: input.issuer,
+              subject: target.keycloakSubject,
+              tenantId: input.tenantId,
             },
-      });
+          },
+          data: split
+            ? { ...split, grantedBy: input.revokedByUserId }
+            : {
+                status: 'REMOVED',
+                extraRoles: [],
+                grantedBy: input.revokedByUserId,
+              },
+        });
+      if (
+        input.role === 'TENANT_OWNER' &&
+        rolesOf(existing).includes(input.role)
+      ) {
+        try {
+          await withOwnerLock(
+            this.control,
+            input.tenantId,
+            { issuer: input.issuer, subject: target.keycloakSubject },
+            write,
+          );
+        } catch (error) {
+          if (error instanceof LastOwnerError) {
+            await this.auditService.recordSafely(tenantClient, input.tenantId, {
+              eventType: AUDIT_EVENT_TYPES.USER_ROLE_REVOKE_REFUSED,
+              actor: { type: 'human', id: input.revokedByUserId },
+              data: {
+                targetUserId: input.targetUserId,
+                role: input.role,
+                reason: 'last_owner',
+              },
+            });
+          }
+          throw error;
+        }
+      } else {
+        await write(this.control);
+      }
     }
 
     await this.auditService.recordSafely(tenantClient, input.tenantId, {

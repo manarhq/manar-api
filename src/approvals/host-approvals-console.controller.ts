@@ -125,6 +125,11 @@ export class HostApprovalsConsoleController {
         toolId: r.toolId,
         actionId: r.actionId,
         resource: r.resource,
+        // Where the file really points, when that is somewhere else: "points to ..." on the card.
+        pointsTo:
+          r.resolvedPath && r.resolvedPath !== r.resource
+            ? r.resolvedPath
+            : null,
         summary: r.summary,
         matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,

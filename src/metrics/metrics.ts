@@ -184,6 +184,26 @@ export function setFrictionOverBudget(count: number): void {
   frictionOverBudget.set(count);
 }
 
+const hostVersionSeen = new Counter({
+  name: 'manar_host_version_seen_total',
+  help: 'Devices that started reporting a WARDEN version (counted once per device and change of version), by version and OS. No tenant labels.',
+  labelNames: ['version', 'os'],
+  registers: [registry],
+});
+
+/** Versions are release numbers, but a device reports its own string: cap how many distinct label values exist. */
+const MAX_VERSION_LABELS = 50;
+const versionLabels = new Set<string>();
+
+export function recordHostVersionSeen(version: string, os: string): void {
+  let v = version;
+  if (!versionLabels.has(v)) {
+    if (versionLabels.size >= MAX_VERSION_LABELS) v = 'other';
+    else versionLabels.add(v);
+  }
+  hostVersionSeen.inc({ version: v, os });
+}
+
 const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /** Bounded label: a reason code passes through, anything else is "other". */

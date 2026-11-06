@@ -93,7 +93,16 @@ describe('over-budget alert', () => {
       kind: 'COMPANY',
     }));
     const control = {
-      $executeRaw: (_s: unknown, now: Date, _n: Date, due: Date) => {
+      $executeRaw: (
+        sql: TemplateStringsArray,
+        now: Date,
+        _n: Date,
+        due: Date,
+      ) => {
+        if (sql.join('').includes('DELETE')) {
+          if (stamp.at?.getTime() === now.getTime()) stamp.at = null;
+          return Promise.resolve(1);
+        }
         if (stamp.at && stamp.at > due) return Promise.resolve(0);
         stamp.at = now;
         return Promise.resolve(1);
@@ -171,6 +180,19 @@ describe('over-budget alert', () => {
     expect(await a.scan(now)).toBe(1);
     expect(await b.scan(new Date(now.getTime() + 60_000))).toBe(0);
     expect(await b.scan(new Date(now.getTime() + 7 * 3_600_000))).toBe(1);
+  });
+  it('a failed check clears the stamp, so the next tick tries again', async () => {
+    const stamp = newStamp();
+    const s = svc([20, 70], undefined, stamp);
+    const now = new Date('2026-11-05T10:00:00Z');
+    vi.spyOn(s, 'staff').mockRejectedValueOnce(new Error('control db down'));
+    await expect(s.scan(now)).rejects.toThrow('control db down');
+    expect(stamp.at).toBeNull();
+    vi.spyOn(
+      (s as unknown as { logger: { warn: (m: string) => void } }).logger,
+      'warn',
+    ).mockImplementation(() => undefined);
+    expect(await s.scan(new Date(now.getTime() + 60_000))).toBe(1);
   });
   it('scan warns once per workspace over budget, sets the gauge, and waits 6 hours', async () => {
     const s = svc([20, 70]);

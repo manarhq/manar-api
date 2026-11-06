@@ -93,74 +93,77 @@ export class FrictionService {
       Date.now() - ran.at < freshForMs
     )
       return;
-    const have = new Set(
-      (
-        await client.frictionDaily.findMany({
-          where: { day: { gte: range[0]! } },
-          select: { day: true },
-          distinct: ['day'],
-        })
-      ).map((r) => dayKey(r.day)),
+    // One writer at a time per workspace database, and the lock is taken BEFORE the rollup is
+    // computed: two readers refreshing the same day would otherwise both insert it (unique key)
+    // and one request would fail with a 500, or the second would write a stale result over a
+    // newer one. The timeout bounds a slow rollup; the lock is released with the transaction.
+    await client.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('friction_daily'))`;
+        const have = new Set(
+          (
+            await tx.frictionDaily.findMany({
+              where: { day: { gte: range[0]! } },
+              select: { day: true },
+              distinct: ['day'],
+            })
+          ).map((r) => dayKey(r.day)),
+        );
+        const recent = new Set(range.slice(-2).map(dayKey));
+        const need = range.filter(
+          (d) => recent.has(dayKey(d)) || !have.has(dayKey(d)),
+        );
+        if (need.length === 0) return;
+        const from = need[0]!;
+        const to = new Date(range[range.length - 1]!.getTime() + DAY);
+        const rows = await tx.$queryRaw<RolledRow[]>`
+          SELECT a."createdAt"::date AS day,
+                 COALESCE(h."ownerSubject", ${UNASSIGNED}) AS subject,
+                 COUNT(*)::int AS prompts,
+                 (COUNT(*) FILTER (WHERE a.status IN ('APPROVED', 'REVOKED')))::int AS approvals,
+                 (COUNT(*) FILTER (WHERE a.status = 'DENIED'))::int AS denies,
+                 (COUNT(*) FILTER (WHERE a.status = 'EXPIRED'))::int AS expired,
+                 (COUNT(*) FILTER (WHERE a.status = 'DENIED' AND EXISTS (
+                    SELECT 1 FROM host_approvals b
+                    WHERE b."hostId" = a."hostId" AND b."toolId" = a."toolId"
+                      AND b."actionId" = a."actionId" AND b.resource = a.resource
+                      AND b.status IN ('APPROVED', 'REVOKED')
+                      AND b."createdAt" > a."decidedAt"
+                      AND b."createdAt" <= a."decidedAt" + interval '24 hours')))::int
+                   AS denied_later_approved,
+                 (COUNT(*) FILTER (WHERE a."decidedAt" IS NOT NULL))::int AS answered,
+                 COALESCE(SUM(EXTRACT(EPOCH FROM (a."decidedAt" - a."createdAt")) * 1000)
+                   FILTER (WHERE a."decidedAt" IS NOT NULL), 0)::float8 AS answer_ms,
+                 COALESCE(SUM(EXTRACT(EPOCH FROM (CASE
+                     WHEN a."decidedAt" IS NOT NULL THEN a."decidedAt" - a."createdAt"
+                     WHEN a.status = 'EXPIRED'
+                       THEN LEAST(a."expiresAt" - a."createdAt", interval '2 minutes')
+                     ELSE interval '0' END)) * 1000), 0)::float8 AS blocked_ms
+          FROM host_approvals a
+          JOIN hosts h ON h.id = a."hostId"
+          WHERE a."createdAt" >= ${from} AND a."createdAt" < ${to}
+          GROUP BY 1, 2`;
+        const needKeys = new Set(need.map(dayKey));
+        const fresh = rows.filter((r) => needKeys.has(dayKey(r.day)));
+
+        await tx.frictionDaily.deleteMany({ where: { day: { in: need } } });
+        await tx.frictionDaily.createMany({
+          data: fresh.map((r) => ({
+            day: r.day,
+            subject: r.subject,
+            prompts: r.prompts,
+            approvals: r.approvals,
+            denies: r.denies,
+            expired: r.expired,
+            deniedLaterApproved: r.denied_later_approved,
+            answered: r.answered,
+            answerMs: Math.round(r.answer_ms),
+            blockedMs: Math.round(r.blocked_ms),
+          })),
+        });
+      },
+      { maxWait: 5_000, timeout: 30_000 },
     );
-    const recent = new Set(range.slice(-2).map(dayKey));
-    const need = range.filter(
-      (d) => recent.has(dayKey(d)) || !have.has(dayKey(d)),
-    );
-    if (need.length === 0) {
-      this.refreshed.set(client, { at: Date.now(), days });
-      return;
-    }
-    const from = need[0]!;
-    const to = new Date(range[range.length - 1]!.getTime() + DAY);
-    const rows = await client.$queryRaw<RolledRow[]>`
-      SELECT a."createdAt"::date AS day,
-             COALESCE(h."ownerSubject", ${UNASSIGNED}) AS subject,
-             COUNT(*)::int AS prompts,
-             (COUNT(*) FILTER (WHERE a.status IN ('APPROVED', 'REVOKED')))::int AS approvals,
-             (COUNT(*) FILTER (WHERE a.status = 'DENIED'))::int AS denies,
-             (COUNT(*) FILTER (WHERE a.status = 'EXPIRED'))::int AS expired,
-             (COUNT(*) FILTER (WHERE a.status = 'DENIED' AND EXISTS (
-                SELECT 1 FROM host_approvals b
-                WHERE b."hostId" = a."hostId" AND b."toolId" = a."toolId"
-                  AND b."actionId" = a."actionId" AND b.resource = a.resource
-                  AND b.status IN ('APPROVED', 'REVOKED')
-                  AND b."createdAt" > a."decidedAt"
-                  AND b."createdAt" <= a."decidedAt" + interval '24 hours')))::int
-               AS denied_later_approved,
-             (COUNT(*) FILTER (WHERE a."decidedAt" IS NOT NULL))::int AS answered,
-             COALESCE(SUM(EXTRACT(EPOCH FROM (a."decidedAt" - a."createdAt")) * 1000)
-               FILTER (WHERE a."decidedAt" IS NOT NULL), 0)::float8 AS answer_ms,
-             COALESCE(SUM(EXTRACT(EPOCH FROM (CASE
-                 WHEN a."decidedAt" IS NOT NULL THEN a."decidedAt" - a."createdAt"
-                 WHEN a.status = 'EXPIRED'
-                   THEN LEAST(a."expiresAt" - a."createdAt", interval '2 minutes')
-                 ELSE interval '0' END)) * 1000), 0)::float8 AS blocked_ms
-      FROM host_approvals a
-      JOIN hosts h ON h.id = a."hostId"
-      WHERE a."createdAt" >= ${from} AND a."createdAt" < ${to}
-      GROUP BY 1, 2`;
-    const needKeys = new Set(need.map(dayKey));
-    const fresh = rows.filter((r) => needKeys.has(dayKey(r.day)));
-    // One writer at a time per workspace database: two readers refreshing the same day would
-    // otherwise both insert it (unique key) and one request would fail with a 500.
-    await client.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('friction_daily'))`;
-      await tx.frictionDaily.deleteMany({ where: { day: { in: need } } });
-      await tx.frictionDaily.createMany({
-        data: fresh.map((r) => ({
-          day: r.day,
-          subject: r.subject,
-          prompts: r.prompts,
-          approvals: r.approvals,
-          denies: r.denies,
-          expired: r.expired,
-          deniedLaterApproved: r.denied_later_approved,
-          answered: r.answered,
-          answerMs: Math.round(r.answer_ms),
-          blockedMs: Math.round(r.blocked_ms),
-        })),
-      });
-    });
     this.refreshed.set(client, { at: Date.now(), days });
   }
 
@@ -316,15 +319,25 @@ export class FrictionService {
     // This process asked recently: no database round trip.
     if (now.getTime() - this.lastScan < SCAN_EVERY_MS) return 0;
     this.lastScan = now.getTime();
-    // One replica per interval wins the stamp; the others return at once.
+    // One replica per interval wins the stamp; the others return at once. If the check then
+    // fails, the stamp is cleared, so the next tick tries again instead of waiting 6 hours.
     if (!(await this.claimScan(now))) return 0;
-    const over = (await this.staff(7, now)).filter((w) => w.overBudget);
-    for (const w of over)
-      this.logger.warn(
-        `friction over budget: ${w.slug} averages ${w.avgPromptsPerDeveloperPerDay} prompts per developer per day (budget ${FRICTION_BUDGET}) over 7 days`,
+    try {
+      const over = (await this.staff(7, now)).filter((w) => w.overBudget);
+      for (const w of over)
+        this.logger.warn(
+          `friction over budget: ${w.slug} averages ${w.avgPromptsPerDeveloperPerDay} prompts per developer per day (budget ${FRICTION_BUDGET}) over 7 days`,
+        );
+      setFrictionOverBudget(over.length);
+      return over.length;
+    } catch (error) {
+      this.lastScan = 0;
+      await this.control.$executeRaw`
+        DELETE FROM job_runs WHERE name = 'friction-scan' AND "ranAt" = ${now}`.catch(
+        () => undefined,
       );
-    setFrictionOverBudget(over.length);
-    return over.length;
+      throw error;
+    }
   }
 
   /** Conditional upsert: true only for the caller that moved `ranAt` (or created the row). */

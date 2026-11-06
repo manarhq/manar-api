@@ -17,7 +17,11 @@ import { LearningService } from '../learning/learning.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
 import { resourceKindFor } from '../policy/resource-aliases';
-import { pathLinked } from '../approvals/rule-scope';
+import { HIGH_RISK_SCORE } from '../approvals/host-approval-opener.service';
+import {
+  pathLinked,
+  resolvedIsSecret as secretPath,
+} from '../approvals/rule-scope';
 import { KNOWN_HOST_TOOL_IDS, hostActionRisk } from '../tools/host-actions';
 import { redactForStorage } from '../contract/redact';
 import type { HostContext } from '../host-mtls/host-context';
@@ -55,6 +59,8 @@ export interface HostAuthorizeDecision {
   askKey?: string;
   /** Internal: every policy version that asks. Removed before the answer leaves the service. */
   policyVersionIds?: string[];
+  /** Internal: the device could not vouch for the path (no offer); stripped before the answer leaves. */
+  pathLinked?: boolean;
 }
 
 /** Same as the default task ceiling for Claude Code: reads and fetches run, edits and shell ask. */
@@ -66,7 +72,12 @@ export interface HostApprovalOpener {
   open(
     host: HostContext,
     request: HostAuthorizeRequest,
-    decision: { reason: string; riskScore: number; askKey?: string },
+    decision: {
+      reason: string;
+      riskScore: number;
+      askKey?: string;
+      pathLinked?: boolean;
+    },
   ): Promise<{ id: string; expiresAt: Date } | null>;
 }
 
@@ -146,6 +157,7 @@ export class HostAuthorizeService {
           reason: result.reason ?? 'policy_requires_approval',
           riskScore: result.riskScore ?? 0,
           askKey: result.askKey,
+          pathLinked: result.pathLinked,
         });
         if (a) result = { ...result, approvalId: a.id, expiresAt: a.expiresAt };
       } catch (error) {
@@ -187,6 +199,9 @@ export class HostAuthorizeService {
         // The real outcome stays in the record; `served` is what the device was told.
         decision: (learned ?? result).decision,
         reason: (learned ?? result).reason ?? null,
+        ...(request.resolvedPath
+          ? { resolvedPath: redactForStorage(request.resolvedPath) }
+          : {}),
         riskScore: result.riskScore ?? null,
         approvalId: result.approvalId ?? null,
         ...(learned ? { learning: true, served: result.decision } : {}),
@@ -200,6 +215,7 @@ export class HostAuthorizeService {
     // Internal bookkeeping stays inside the service.
     delete result.askKey;
     delete result.policyVersionIds;
+    delete result.pathLinked;
     return result;
   }
 
@@ -222,7 +238,12 @@ export class HostAuthorizeService {
       resourceKindFor(request.toolId, actionId) === 'command'
         ? classifyCommand(request.resource)
         : null;
-    const base = safe ? Math.min(catalogue, COMMAND_RISK[safe]) : catalogue;
+    const scored = safe ? Math.min(catalogue, COMMAND_RISK[safe]) : catalogue;
+    // The real target of a link is a secret (`docs -> ~/.ssh`): high risk, console only. This only
+    // ever restricts; the policy still sees the path that was asked for.
+    const base = resolvedIsSecret(request, actionId)
+      ? Math.max(scored, HIGH_RISK_SCORE)
+      : scored;
 
     const kill = await this.killSwitches.checkAll(client, host.tenantId, {
       agentId: host.hostId,
@@ -299,9 +320,9 @@ export class HostAuthorizeService {
         decision: 'APPROVAL_REQUIRED',
         reason: 'policy_requires_approval',
         riskScore: base,
-        // No key, no "always allow" offer for it.
-        askKey: linked ? undefined : askKey,
+        askKey,
         policyVersionIds: (policy.asks ?? []).map((a) => a.policyVersionId),
+        pathLinked: linked,
       };
     }
     if (!policy.matchedRule && base > HOST_RISK_CEILING) {
@@ -316,9 +337,20 @@ export class HostAuthorizeService {
         decision: 'APPROVAL_REQUIRED',
         reason: 'risk_ceiling_exceeded',
         riskScore: base,
-        askKey: linked ? undefined : CEILING_ASK,
+        askKey: CEILING_ASK,
+        pathLinked: linked,
       };
     }
     return { decision: 'ALLOW', riskScore: base };
   }
+}
+
+function resolvedIsSecret(
+  request: { toolId: string; resolvedPath?: string },
+  actionId: string,
+): boolean {
+  return (
+    request.resolvedPath !== undefined &&
+    secretPath(request.toolId, actionId, request.resolvedPath)
+  );
 }
