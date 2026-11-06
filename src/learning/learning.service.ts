@@ -55,12 +55,12 @@ export class LearningService {
   async config(tenantId: string): Promise<LearningConfig> {
     const t = await this.control.tenant.findUnique({
       where: { id: tenantId },
-      select: { kind: true, learningMode: true },
+      select: { kind: true, learningMode: true, sector: true },
     });
     // Fail closed: an unknown workspace does not learn.
     if (!t) return { enabled: false, days: 0, source: 'default' };
     // Government never learns, whatever is stored: it cannot be switched on.
-    if (await this.isGovernment(tenantId))
+    if (await this.isGovernment(tenantId, t.sector))
       return { enabled: false, days: LEARNING_DAYS, source: 'default' };
     if (t.learningMode === 'on' || t.learningMode === 'off')
       return {
@@ -76,11 +76,22 @@ export class LearningService {
   }
 
   /**
-   * The sector lives on the EnterpriseProfile (`sector`, on main since 5 Nov); api#62 adds no
-   * separate column, and a tenant has no other Government marker. A workspace without a profile
-   * is not an Enterprise or Government workspace, so it is not Government.
+   * Government is read from the workspace's own `sector` (set by Manar staff; the authority) and
+   * from the Enterprise profile's sector. Either one says Government and learning never runs. A
+   * workspace whose sector is not recorded yet (an older one) is not treated as Government.
    */
-  private async isGovernment(tenantId: string): Promise<boolean> {
+  private async isGovernment(
+    tenantId: string,
+    sector?: string | null,
+  ): Promise<boolean> {
+    if (sector === undefined) {
+      const t = await this.control.tenant.findUnique({
+        where: { id: tenantId },
+        select: { sector: true },
+      });
+      sector = t?.sector ?? null;
+    }
+    if (sector === 'GOVERNMENT') return true;
     const gov = await this.control.enterpriseProfile.findUnique({
       where: { tenantId },
       select: { sector: true },

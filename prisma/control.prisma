@@ -38,6 +38,13 @@ enum TenantStatus {
 /// from day one even though only UAE is exercised in this phase, so later
 /// phases never need a destructive schema change to add residency
 /// awareness.
+/// Whether the workspace belongs to a Government customer. Null means not known: `ai:default-on` never
+/// switches AI on for an unknown sector.
+enum TenantSector {
+  COMMERCIAL
+  GOVERNMENT
+}
+
 enum TenantKind {
   PERSONAL
   COMPANY
@@ -107,6 +114,7 @@ model Tenant {
 
   /// Existing (pre-launch) tenants are organisations, so COMPANY is the default.
   kind              TenantKind @default(COMPANY)
+  sector            TenantSector?
   /// PERSONAL: the Keycloak `sub` that owns it (one per subject, partial unique index in the migration).
   ownerSubject      String?
   /// The issuer of `ownerSubject`: a `sub` is only unique within one issuer.
@@ -126,7 +134,14 @@ model Tenant {
   autoJoinSeatCap Int @default(25)
 
   residency              TenantResidency @default(UAE)
+  /// Provisioning sets it: true only for a COMMERCIAL, non-air-gapped workspace (`defaultAllowExternalAi`). A raw insert defaults closed.
   allowExternalAi        Boolean         @default(false)
+  /// True once an owner has set `allowExternalAi` by hand: a data migration or default change never overrides it.
+  allowExternalAiChosen  Boolean         @default(false)
+  /// Set by `ai:default-on` when it switched AI on for an existing workspace; cleared when an owner or admin dismisses the console notice.
+  aiDefaultNoticePending Boolean         @default(false)
+  /// Set by `ai:default-on` where the audit history cannot prove no choice was made: AI stays off and the console asks the owner ("Turn on AI features?").
+  aiOptInNoticePending   Boolean         @default(false)
   allowOutboundTelemetry Boolean         @default(false)
   allowCloudStorage      Boolean         @default(false)
   /// COMPANY: only approver roles decide approvals; a device owner can no longer decide their own.

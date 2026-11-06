@@ -14,7 +14,11 @@ const hash = (m: 'ask' | 'strict' | 'watch') =>
 
 function world(
   over: {
-    tenant?: { kind?: string; learningMode?: string | null } | null;
+    tenant?: {
+      kind?: string;
+      learningMode?: string | null;
+      sector?: string | null;
+    } | null;
     sector?: string | null;
     host?: Record<string, unknown> | null;
     /** What the policy version that asked is. */
@@ -152,6 +156,26 @@ describe('who learns (decision 36)', () => {
     ['sample workspace', { tenant: { kind: 'SAMPLE' } }, false, 'default'],
     ['government, default', { sector: 'GOVERNMENT' }, false, 'default'],
     ['enterprise sector', { sector: 'ENTERPRISE' }, true, 'default'],
+    // The workspace's own sector (staff-set) is the authority.
+    [
+      'workspace sector GOVERNMENT, no profile',
+      { tenant: { sector: 'GOVERNMENT' } },
+      false,
+      'default',
+    ],
+    [
+      'workspace sector GOVERNMENT with a stored "on"',
+      { tenant: { sector: 'GOVERNMENT', learningMode: 'on' } },
+      false,
+      'default',
+    ],
+    [
+      'workspace sector COMMERCIAL',
+      { tenant: { sector: 'COMMERCIAL' } },
+      true,
+      'default',
+    ],
+    ['sector not recorded yet', { tenant: { sector: null } }, true, 'default'],
     [
       'admin turned off',
       { tenant: { learningMode: 'off' } },
@@ -169,6 +193,14 @@ describe('who learns (decision 36)', () => {
   ])('%s', async (_n, over, enabled, source) => {
     const c = await world(over).svc.config('t1');
     expect(c).toMatchObject({ enabled, source });
+  });
+
+  it('a workspace whose own sector is GOVERNMENT cannot turn learning on either', async () => {
+    const w = world({ tenant: { sector: 'GOVERNMENT' } });
+    await expect(
+      w.svc.setWorkspace('t1', 'on', { id: 'u' }, w.client),
+    ).rejects.toThrow(ForbiddenException);
+    expect(w.control.tenant.update).not.toHaveBeenCalled();
   });
 
   it('a Government workspace cannot turn learning on: 403 with a clear message', async () => {

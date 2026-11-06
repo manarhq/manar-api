@@ -438,6 +438,59 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     expect(tenantCount).toBe(1);
   }, 30_000);
 
+  it('10. AI defaults on only for a recorded commercial sector; an explicit value is kept and recorded as chosen', async () => {
+    const mk = (extra: object) =>
+      manager.provisionTenant({
+        slug: uniqueSlug('ai'),
+        name: 'AI default',
+        queued: true,
+        ...extra,
+      });
+    const made = {
+      personal: await mk({
+        kind: 'PERSONAL',
+        sector: 'COMMERCIAL',
+        ownerSubject: 'p',
+        ownerIssuer: 'i',
+      }),
+      company: await mk({ kind: 'COMPANY' }),
+      legacyCli: await mk({}),
+      government: await mk({ kind: 'COMPANY', sector: 'GOVERNMENT' }),
+      commercial: await mk({ kind: 'COMPANY', sector: 'COMMERCIAL' }),
+      airGapped: await mk({ residency: 'AIR_GAPPED' }),
+      explicitOff: await mk({ allowExternalAi: false }),
+    };
+    try {
+      expect(made.personal.allowExternalAi).toBe(true);
+      // No sector sent (staff provisioning that does not say): off, and not a recorded choice.
+      expect(made.company.allowExternalAi).toBe(false);
+      expect(made.legacyCli.allowExternalAi).toBe(false);
+      expect(made.government.allowExternalAi).toBe(false);
+      // Government is an explicit, recorded decision; the sector is stored.
+      expect(made.government.allowExternalAiChosen).toBe(true);
+      expect(made.government.sector).toBe('GOVERNMENT');
+      expect(made.commercial.sector).toBe('COMMERCIAL');
+      expect(made.commercial.allowExternalAi).toBe(true);
+      expect(made.company.sector).toBeNull();
+      expect(made.airGapped.allowExternalAi).toBe(false);
+      expect(made.explicitOff.allowExternalAi).toBe(false);
+      expect(made.company.allowExternalAiChosen).toBe(false);
+      expect(made.explicitOff.allowExternalAiChosen).toBe(true);
+    } finally {
+      const ids = Object.values(made).map((t) => t.id);
+      await control.$transaction([
+        control.tenantDatabaseBinding.deleteMany({
+          where: { tenantId: { in: ids } },
+        }),
+        control.secretReference.deleteMany({
+          where: { tenantId: { in: ids } },
+        }),
+        control.membership.deleteMany({ where: { tenantId: { in: ids } } }),
+        control.tenant.deleteMany({ where: { id: { in: ids } } }),
+      ]);
+    }
+  });
+
   it('9. the per-creator cap holds under parallel requests and counts tenants whatever happened to them since', async () => {
     const subject = `creator-${randomUUID()}`;
     const creator = {

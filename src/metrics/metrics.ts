@@ -204,6 +204,18 @@ export function recordHostVersionSeen(version: string, os: string): void {
   hostVersionSeen.inc({ version: v, os });
 }
 
+const liveStreamClosed = new Counter({
+  name: 'manar_live_stream_closed_total',
+  help: 'Live-feed (SSE) connections the server closed, by reason.',
+  labelNames: ['reason'],
+  registers: [registry],
+});
+
+/** `reason` is a fixed code (for example `backpressure`), never tenant data. */
+export function recordLiveStreamClosed(reason: string): void {
+  liveStreamClosed.inc({ reason });
+}
+
 const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /** Bounded label: a reason code passes through, anything else is "other". */

@@ -23,6 +23,7 @@ import { CurrentAuth } from '../auth/auth-context';
 import type { AuthContext } from '../auth/auth-context';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import { CatalogService } from '../platform/catalog.service';
 import { openSse, type SseStream } from '../common/sse/sse';
 import { AssistantChatSchema, AssistantService } from './assistant.service';
 import type { AssistantChatResponse } from './assistant.service';
@@ -45,6 +46,7 @@ export class AssistantController {
   constructor(
     private readonly assistant: AssistantService,
     private readonly meter: UsageMeterService,
+    private readonly catalog: CatalogService,
   ) {}
 
   @Post('chat')
@@ -77,8 +79,14 @@ export class AssistantController {
     // JwtAuthGuard already verified this exact header.
     if (!authorization) throw new UnauthorizedException();
     // One AI action (paid extra), given back when no model answered or the request failed.
-    return this.meter.ai(auth.tenant.id, () =>
-      this.assistant.chat(auth, authorization, body),
+    return this.meter.ai(
+      auth.tenant.id,
+      () => this.assistant.chat(auth, authorization, body),
+      // "Allow external AI" off: answered politely before anything is metered.
+      async () =>
+        (await this.catalog.externalAiSwitchedOff(auth.tenant.id, 'assistant'))
+          ? ({ available: false, reason: 'ai_switched_off' } as const)
+          : null,
     );
   }
 
@@ -106,28 +114,39 @@ export class AssistantController {
     let sse: SseStream | undefined;
     let streamed = 0;
     try {
-      const result = await this.meter.ai(auth.tenant.id, async () => {
-        const answer = await this.assistant.chat(auth, authorization, body, {
-          // Open only after the checks that answer with a normal status have passed.
-          onReady: () => {
-            sse = openSse(reply);
-          },
-          onToken: (t) => {
-            streamed += t.length;
-            sse?.send('token', { t });
-          },
-          onTools: (names) => sse?.send('tool', { names }),
-          get signal() {
-            return sse?.signal;
-          },
-        });
-        // Stopping after words were written is still an answered question: no refund for it.
-        return !answer.available && streamed > 0 && sse?.signal.aborted
-          ? ({ stopped: true } as const)
-          : answer;
-      });
+      const result = await this.meter.ai(
+        auth.tenant.id,
+        async () => {
+          const answer = await this.assistant.chat(auth, authorization, body, {
+            // Open only after the checks that answer with a normal status have passed.
+            onReady: () => {
+              sse = openSse(reply);
+            },
+            onToken: (t) => {
+              streamed += t.length;
+              sse?.send('token', { t });
+            },
+            onTools: (names) => sse?.send('tool', { names }),
+            get signal() {
+              return sse?.signal;
+            },
+          });
+          // Stopping after words were written is still an answered question: no refund for it.
+          return !answer.available && streamed > 0 && sse?.signal.aborted
+            ? ({ stopped: true } as const)
+            : answer;
+        },
+        // "Allow external AI" off: the same polite answer as the plain endpoint, nothing metered.
+        async () =>
+          (await this.catalog.externalAiSwitchedOff(
+            auth.tenant.id,
+            'assistant',
+          ))
+            ? ({ available: false, reason: 'ai_switched_off' } as const)
+            : null,
+      );
       if ('stopped' in result) return;
-      sse?.send('done', result);
+      (sse ??= openSse(reply)).send('done', result);
     } catch (error) {
       if (!sse) throw error; // still a normal HTTP error (400, 402, 403, 429, ...)
       const status =

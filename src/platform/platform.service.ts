@@ -19,7 +19,11 @@ import {
 } from '../database/tenant-database.errors';
 import { TenantProvisioningService } from '../keycloak/tenant-provisioning.service';
 import { PlatformSuspension } from './platform-suspension';
-import type { CreatePlatformTenant } from './platform.validation';
+import { TenantSectorService } from '../tenant-settings/tenant-sector.service';
+import type {
+  CreatePlatformTenant,
+  UpdatePlatformTenant,
+} from './platform.validation';
 
 const USAGE_WINDOW_DAYS = 30;
 const ADMIN_ROLES = ['TENANT_OWNER', 'SECURITY_ADMIN'] as const;
@@ -56,6 +60,7 @@ export class PlatformService {
     private readonly tenants: TenantDatabaseManager,
     private readonly provisioning: TenantProvisioningService,
     private readonly suspension: PlatformSuspension,
+    private readonly sectors: TenantSectorService,
     // forwardRef: edge-peer.service imports the kill-switch services (an import cycle).
     @Optional()
     @Inject(forwardRef(() => EdgePeerService))
@@ -81,6 +86,15 @@ export class PlatformService {
         throw new InternalServerErrorException('Tenant provisioning failed');
       throw error;
     }
+  }
+
+  async update(id: string, input: UpdatePlatformTenant, caller: string) {
+    const t = await this.tenantOr404(id);
+    if (t.status !== 'ACTIVE')
+      throw new ConflictException('Tenant is not ACTIVE');
+    await this.sectors.set(id, input.sector, `platform:${caller}`);
+    this.logger.log(`platform: tenant ${id} sector set by ${caller}`);
+    return view(await this.tenantOr404(id));
   }
 
   private async tenantOr404(id: string) {

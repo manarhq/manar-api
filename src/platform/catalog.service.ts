@@ -231,6 +231,9 @@ export class CatalogService {
     });
     if (external && !tenant.allowExternalAi)
       throw new CatalogDenied('llm_external_not_allowed');
+    // An air-gapped workspace admits no external model, whatever its flag says (as `aiGate`).
+    if (external && tenant.residency === 'AIR_GAPPED')
+      throw new CatalogDenied('llm_air_gapped');
     if (tenant.residency === 'UAE' && !uaeResident)
       throw new CatalogDenied('llm_residency_mismatch');
     let quota: number | null = null;
@@ -243,6 +246,26 @@ export class CatalogService {
       route: s.model ? { provider, model: s.model.model } : null,
       quota,
     };
+  }
+
+  /**
+   * True when the only thing stopping the model call is the workspace's "Allow external AI" being
+   * off. Callers answer politely and spend nothing; any other refusal is left to the real gate.
+   */
+  async externalAiSwitchedOff(
+    tenantId: string,
+    surface: 'llm_proxy' | 'assistant',
+  ): Promise<boolean> {
+    try {
+      await this.llmGate(tenantId, surface);
+      return false;
+    } catch (error) {
+      return (
+        error instanceof CatalogDenied &&
+        (error.reason === 'llm_external_not_allowed' ||
+          error.reason === 'llm_air_gapped')
+      );
+    }
   }
 
   recordTokens(tenantId: string, tokens: number): Promise<number> {

@@ -382,6 +382,64 @@ describe('Platform API for manar-fleet (e2e)', () => {
     expect(row?.active ?? false).toBe(false);
   });
 
+  it('PATCH sets the sector: staff only, audited, and GOVERNMENT forces AI off and chosen', async () => {
+    const url = `/platform/v1/tenants/${tenantId}`;
+    // Staff only: no token and a tenant owner's token are refused (401: not a platform token).
+    await http().patch(url).send({ sector: 'GOVERNMENT' }).expect(401);
+    await http()
+      .patch(url)
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ sector: 'GOVERNMENT' })
+      .expect(401);
+    await http()
+      .patch(url)
+      .set('Authorization', `Bearer ${platformToken}`)
+      .send({ sector: 'MILITARY' })
+      .expect(400);
+    expect(
+      (await control.tenant.findUniqueOrThrow({ where: { id: tenantId } }))
+        .sector,
+    ).toBeNull();
+
+    // COMMERCIAL records the sector only; the AI flag is not touched.
+    await control.tenant.update({
+      where: { id: tenantId },
+      data: { allowExternalAi: true, allowExternalAiChosen: false },
+    });
+    await http()
+      .patch(url)
+      .set('Authorization', `Bearer ${platformToken}`)
+      .send({ sector: 'COMMERCIAL' })
+      .expect(200);
+    expect(
+      await control.tenant.findUniqueOrThrow({ where: { id: tenantId } }),
+    ).toMatchObject({
+      sector: 'COMMERCIAL',
+      allowExternalAi: true,
+      allowExternalAiChosen: false,
+    });
+
+    const res = await http()
+      .patch(url)
+      .set('Authorization', `Bearer ${platformToken}`)
+      .send({ sector: 'GOVERNMENT' })
+      .expect(200);
+    expect(body(res).id).toBe(tenantId);
+    expect(
+      await control.tenant.findUniqueOrThrow({ where: { id: tenantId } }),
+    ).toMatchObject({
+      sector: 'GOVERNMENT',
+      allowExternalAi: false,
+      allowExternalAiChosen: true,
+    });
+    const events = await withTenantClient((t) =>
+      t.auditEvent.findMany({ where: { eventType: 'tenant.sector_set' } }),
+    );
+    expect(events.map((e) => (e.data as { sector: string }).sector)).toEqual(
+      expect.arrayContaining(['COMMERCIAL', 'GOVERNMENT']),
+    );
+  }, 30_000);
+
   it('delete marks the tenant DELETED and its users are refused', async () => {
     const d = await http()
       .delete(`/platform/v1/tenants/${tenantId}`)

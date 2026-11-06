@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Patch, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -74,6 +82,25 @@ export class TenantSettingsController {
       auth.tenant.id,
       auth.user.id,
       input,
+    );
+  }
+
+  @Post('ai-default-notice/dismiss')
+  @HttpCode(204)
+  @ApiOperation({
+    summary: 'Dismiss the one-time "AI is now on" notice',
+    description:
+      'Clears `aiDefaultNoticePending` for the workspace. Requires TENANT_OWNER or SECURITY_ADMIN. Idempotent.',
+  })
+  @ApiResponse({ status: 204 })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 403, type: ErrorResponseDto })
+  async dismissAiDefaultNotice(
+    @CurrentAuth() auth: AuthContext,
+  ): Promise<void> {
+    await this.tenantSettingsService.dismissAiDefaultNotice(
+      auth.tenant.id,
+      auth.user.id,
     );
   }
 }
