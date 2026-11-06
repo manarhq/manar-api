@@ -51,6 +51,9 @@ function make(opts: {
     getClient: () => Promise.resolve({ approvalAllowGrant: grants }),
   };
   const audit = { recordSafely: vi.fn(() => Promise.resolve({ id: 'e' })) };
+  const open = vi.fn(() =>
+    Promise.resolve({ id: 'a1', expiresAt: new Date() }),
+  );
   const svc = new HostAuthorizeService(
     tenants as never,
     { checkAll: () => Promise.resolve({ killed: false }) } as never,
@@ -58,8 +61,9 @@ function make(opts: {
       evaluate: () => Promise.resolve(opts.policy ?? { effect: 'ALLOW' }),
     } as never,
     audit as never,
+    { open },
   );
-  return { svc, grants, audit };
+  return { svc, grants, audit, open };
 }
 const shell = {
   toolId: 'host.cursor',
@@ -153,14 +157,15 @@ describe('8-hour grants on /host/v1/authorize', () => {
           'APPROVAL_REQUIRED',
         );
     });
-    it('a link inside the project (resolvedPath differs) gets no scope and no offer key', async () => {
+    it('a link inside the project (resolvedPath differs) gets no scope and no offer, but keeps its ask key', async () => {
+      const key = policyAskKey({
+        policyVersionId: undefined,
+        matchedRule: undefined,
+      });
       const w = make({
         patterns: ['/home/sara/proj/docs/*'],
         policy: ask,
-        grantAsk: policyAskKey({
-          policyVersionId: undefined,
-          matchedRule: undefined,
-        }),
+        grantAsk: key,
       });
       const link = '/home/sara/proj/docs/authorized_keys';
       const r = await w.svc.authorize(host, {
@@ -168,7 +173,14 @@ describe('8-hour grants on /host/v1/authorize', () => {
         resolvedPath: '/home/sara/.ssh/authorized_keys',
       });
       expect(r.decision).toBe('APPROVAL_REQUIRED');
-      expect(r.askKey).toBeUndefined();
+      // The approval keeps the ask key (an 8-hour grant made from it answers only this ask) and
+      // is flagged, so no offer or scope is made for it.
+      expect(w.open).toHaveBeenLastCalledWith(
+        host,
+        expect.anything(),
+        expect.objectContaining({ askKey: key, pathLinked: true }),
+      );
+      expect(r).not.toHaveProperty('pathLinked');
       expect(w.grants.findMany).not.toHaveBeenCalled();
       // The device reports it unchanged: the scope applies.
       expect((await w.svc.authorize(host, edit(link))).decision).toBe('ALLOW');
@@ -179,7 +191,11 @@ describe('8-hour grants on /host/v1/authorize', () => {
         resource: link,
       });
       expect(none.decision).toBe('APPROVAL_REQUIRED');
-      expect(none.askKey).toBeUndefined();
+      expect(w.open).toHaveBeenLastCalledWith(
+        host,
+        expect.anything(),
+        expect.objectContaining({ askKey: key, pathLinked: true }),
+      );
       // Resolves outside the home project.
       expect(
         (
@@ -189,6 +205,34 @@ describe('8-hour grants on /host/v1/authorize', () => {
           })
         ).decision,
       ).toBe('APPROVAL_REQUIRED');
+    });
+    it('an 8-hour grant made from a linked ask is keyed: it does not answer an admin rule', async () => {
+      // The grant a linked ask creates carries the ceiling key; a later ask from a rule is another key.
+      const rule = {
+        effect: 'APPROVAL_REQUIRED',
+        matchedRule: { name: 'admin rule' },
+        policyVersionId: 'pv1',
+      };
+      const keyed = make({ grant: true, grantKey: 'ceiling', policy: rule });
+      const link = '/home/sara/proj/docs/authorized_keys';
+      const r = await keyed.svc.authorize(host, {
+        ...edit(link),
+        resolvedPath: '/home/sara/.ssh/authorized_keys',
+      });
+      expect(r.decision).toBe('APPROVAL_REQUIRED');
+      // The old behaviour (no key) would have allowed it.
+      const unkeyed = make({ grant: true, grantKey: null, policy: rule });
+      expect((await unkeyed.svc.authorize(host, edit(link))).decision).toBe(
+        'ALLOW',
+      );
+    });
+    it('a link to a secret is high risk, so it is decided in the console only', async () => {
+      const w = make({ policy: ask });
+      const r = await w.svc.authorize(host, {
+        ...edit('/home/sara/proj/docs/x'),
+        resolvedPath: '/home/sara/.ssh/id_rsa',
+      });
+      expect(r.riskScore).toBeGreaterThanOrEqual(50);
     });
     it('is not looked up when nothing asks', async () => {
       const w = make({

@@ -31,6 +31,7 @@ import {
   blockFeatures,
   DEFAULT_BLOCK_MODE,
   maskHome,
+  SERVICE_EVENT_TYPES,
   type BlockMode,
   type HostEvent,
 } from './secrets.validation';
@@ -94,7 +95,11 @@ export class SecretsConflictError extends Error {}
 
 const WATCH_TYPES = ['secret.watch.available', 'secret.watch.unavailable'];
 /** Not secrets: shown on the device (tampered), not in the secrets timeline. */
-const NOT_IN_TIMELINE = [...WATCH_TYPES, ...TAMPER_EVENT_TYPES];
+const NOT_IN_TIMELINE = [
+  ...WATCH_TYPES,
+  ...SERVICE_EVENT_TYPES,
+  ...TAMPER_EVENT_TYPES,
+];
 const FUTURE_SLACK_MS = 5 * 60_000;
 const ACCESS_TTL_MS = 10 * 60_000;
 const MAX_PENDING_ACCESS_PER_HOST = 50;
@@ -165,7 +170,8 @@ export class SecretsService {
       at: new Date(Math.min(e.at.getTime(), now + FUTURE_SLACK_MS)),
     }));
     await client.secretEvent.createMany({ data: rows });
-    for (const r of rows) {
+    for (const [i, r] of rows.entries()) {
+      const downtimeSeconds = events[i]!.downtimeSeconds;
       if (WATCH_TYPES.includes(r.type)) continue;
       await this.audit.recordSafely(client, tenantId, {
         eventType:
@@ -179,6 +185,7 @@ export class SecretsService {
           maskedPath: r.maskedPath,
           blocked: r.blocked,
           at: r.at.toISOString(),
+          ...(downtimeSeconds !== undefined ? { downtimeSeconds } : {}),
         },
       });
       if (r.type === 'secret.touched' && r.toolId) {

@@ -14,7 +14,11 @@ import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
 import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
 import { resourceKindFor } from '../policy/resource-aliases';
-import { pathLinked } from '../approvals/rule-scope';
+import { HIGH_RISK_SCORE } from '../approvals/host-approval-opener.service';
+import {
+  pathLinked,
+  resolvedIsSecret as secretPath,
+} from '../approvals/rule-scope';
 import { KNOWN_HOST_TOOL_IDS, hostActionRisk } from '../tools/host-actions';
 import { redactForStorage } from '../contract/redact';
 import type { HostContext } from '../host-mtls/host-context';
@@ -50,6 +54,8 @@ export interface HostAuthorizeDecision {
   cacheable?: boolean;
   /** Which ask this is (`ceiling` or a policy rule); the approval and any scoped grant carry it. */
   askKey?: string;
+  /** Internal: the device could not vouch for the path (no offer); stripped before the answer leaves. */
+  pathLinked?: boolean;
 }
 
 /** The ask that comes from the risk ceiling: no rule matched. */
@@ -80,7 +86,12 @@ export interface HostApprovalOpener {
   open(
     host: HostContext,
     request: HostAuthorizeRequest,
-    decision: { reason: string; riskScore: number; askKey?: string },
+    decision: {
+      reason: string;
+      riskScore: number;
+      askKey?: string;
+      pathLinked?: boolean;
+    },
   ): Promise<{ id: string; expiresAt: Date } | null>;
 }
 
@@ -130,6 +141,7 @@ export class HostAuthorizeService {
           reason: result.reason ?? 'policy_requires_approval',
           riskScore: result.riskScore ?? 0,
           askKey: result.askKey,
+          pathLinked: result.pathLinked,
         });
         if (a) result = { ...result, approvalId: a.id, expiresAt: a.expiresAt };
       } catch (error) {
@@ -168,6 +180,9 @@ export class HostAuthorizeService {
         toolId: request.toolId,
         actionId: request.actionId,
         resource: redactForStorage(request.resource),
+        ...(request.resolvedPath
+          ? { resolvedPath: redactForStorage(request.resolvedPath) }
+          : {}),
         decision: result.decision,
         reason: result.reason ?? null,
         riskScore: result.riskScore ?? null,
@@ -179,6 +194,7 @@ export class HostAuthorizeService {
     if (!recorded && result.decision === 'ALLOW') {
       return { decision: 'DENY', reason: 'enforcement_dependency_unavailable' };
     }
+    delete result.pathLinked;
     return result;
   }
 
@@ -201,7 +217,12 @@ export class HostAuthorizeService {
       resourceKindFor(request.toolId, actionId) === 'command'
         ? classifyCommand(request.resource)
         : null;
-    const base = safe ? Math.min(catalogue, COMMAND_RISK[safe]) : catalogue;
+    const scored = safe ? Math.min(catalogue, COMMAND_RISK[safe]) : catalogue;
+    // The real target of a link is a secret (`docs -> ~/.ssh`): high risk, console only. This only
+    // ever restricts; the policy still sees the path that was asked for.
+    const base = resolvedIsSecret(request, actionId)
+      ? Math.max(scored, HIGH_RISK_SCORE)
+      : scored;
 
     const kill = await this.killSwitches.checkAll(client, host.tenantId, {
       agentId: host.hostId,
@@ -278,8 +299,8 @@ export class HostAuthorizeService {
         decision: 'APPROVAL_REQUIRED',
         reason: 'policy_requires_approval',
         riskScore: base,
-        // No key, no "always allow" offer for it.
-        askKey: linked ? undefined : askKey,
+        askKey,
+        pathLinked: linked,
       };
     }
     if (!policy.matchedRule && base > HOST_RISK_CEILING) {
@@ -294,9 +315,20 @@ export class HostAuthorizeService {
         decision: 'APPROVAL_REQUIRED',
         reason: 'risk_ceiling_exceeded',
         riskScore: base,
-        askKey: linked ? undefined : CEILING_ASK,
+        askKey: CEILING_ASK,
+        pathLinked: linked,
       };
     }
     return { decision: 'ALLOW', riskScore: base };
   }
+}
+
+function resolvedIsSecret(
+  request: { toolId: string; resolvedPath?: string },
+  actionId: string,
+): boolean {
+  return (
+    request.resolvedPath !== undefined &&
+    secretPath(request.toolId, actionId, request.resolvedPath)
+  );
 }

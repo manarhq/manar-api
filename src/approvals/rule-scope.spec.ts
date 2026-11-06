@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   MCP_READ_ONLY,
   pathLinked,
+  resolvedIsSecret,
   scopeFor,
   scopeMatches,
 } from './rule-scope';
@@ -304,5 +305,20 @@ describe('pathLinked: only a path the device resolved to itself is vouched for',
     expect(pathLinked(T, 'shell', 'ls', '/etc')).toBe(false);
     expect(pathLinked(T, 'mcp', 'a/b', '/etc')).toBe(false);
     expect(pathLinked(T, 'webfetch', 'https://a.io/x', '/etc')).toBe(false);
+  });
+});
+
+describe('resolvedIsSecret: the real target of a link', () => {
+  it('names secrets, not ordinary files; never for commands', () => {
+    for (const p of [
+      '/home/sara/.ssh/id_rsa',
+      '/home/sara/proj/.env',
+      '/home/sara/.aws/credentials',
+    ])
+      expect(resolvedIsSecret(T, 'write', p), p).toBe(true);
+    expect(resolvedIsSecret(T, 'write', '/home/sara/proj/src/a.ts')).toBe(
+      false,
+    );
+    expect(resolvedIsSecret(T, 'shell', '/home/sara/.ssh/id_rsa')).toBe(false);
   });
 });

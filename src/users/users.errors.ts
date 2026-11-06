@@ -41,3 +41,11 @@ export class TenantRealmNotProvisionedError extends Error {
     this.name = 'TenantRealmNotProvisionedError';
   }
 }
+
+/** Revoking `TENANT_OWNER` from the last ACTIVE owner would leave the workspace with nobody who can run it. */
+export class LastOwnerError extends Error {
+  constructor() {
+    super('A workspace needs at least one active owner');
+    this.name = 'LastOwnerError';
+  }
+}
