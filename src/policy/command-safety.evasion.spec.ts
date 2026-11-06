@@ -38,6 +38,8 @@ describe('classifier evasion attempts and secret-bearing names stay unclassified
     'rg -n password .',
     'rg -v zzzz deploy',
     'cat deploy/prod.tfvars',
+    'cat prod.tfvars.json',
+    'cat prod.tfvars.bak',
     'cat secrets.yml',
     'head -n 99 config/database.yml',
     'grep -v zzzz deploy/prod.tfvars',
