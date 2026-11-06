@@ -397,7 +397,9 @@ describe('8-hour grants on /host/v1/authorize', () => {
         expect(r.decision).toBe('DENY');
       });
       it('a path that only reads differently is not a link: one evaluation, cacheable', async () => {
-        const w = make({});
+        const w = make({
+          policy: { effect: 'ALLOW', matchedRule: { name: 'project runs' } },
+        });
         const r = await w.svc.authorize(host, {
           ...edit('/home/sara/proj/src/a.ts'),
           resolvedPath: '/home/sara//proj/./src/a.ts',
