@@ -282,16 +282,17 @@ describe('mcp and commands', () => {
   });
 });
 
-describe('pathLinked: a symlink inside a project', () => {
+describe('pathLinked: only a path the device resolved to itself is vouched for', () => {
   const p = '/home/sara/proj/docs/authorized_keys';
-  it('is not linked without resolvedPath (older devices) or when it matches', () => {
-    expect(pathLinked(T, 'write', p, undefined)).toBe(false);
+  it('is not linked when resolvedPath is the same path', () => {
     expect(pathLinked(T, 'write', p, p)).toBe(false);
     expect(
       pathLinked(T, 'write', p, '/home/sara/proj//docs/./authorized_keys'),
     ).toBe(false);
   });
-  it('is linked when the real path differs, leaves the project or is not a clean path', () => {
+  it('cannot be vouched for when resolvedPath is missing, differs, leaves the project or is not clean', () => {
+    expect(pathLinked(T, 'write', p, undefined)).toBe(true);
+    expect(pathLinked(T, 'write', p, null)).toBe(true);
     expect(pathLinked(T, 'write', p, '/home/sara/.ssh/authorized_keys')).toBe(
       true,
     );
