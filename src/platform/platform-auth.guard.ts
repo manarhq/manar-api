@@ -17,6 +17,8 @@ import { JwksCacheService } from '../auth/jwks-cache.service';
 export interface PlatformCaller {
   clientId: string;
   subject: string;
+  /** The token's realm roles, for routes that need more than `PLATFORM_API_ROLE` (staff Owners). */
+  roles?: string[];
 }
 
 export type RequestWithPlatformCaller = FastifyRequest & {
@@ -84,7 +86,11 @@ export class PlatformAuthGuard implements CanActivate {
     if (!Array.isArray(roles) || !roles.includes(role)) {
       throw new ForbiddenException('Missing the platform role');
     }
-    request.platformCaller = { clientId, subject: String(payload.sub) };
+    request.platformCaller = {
+      clientId,
+      subject: String(payload.sub),
+      roles: roles.filter((r): r is string => typeof r === 'string'),
+    };
     return true;
   }
 }

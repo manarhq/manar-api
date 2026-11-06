@@ -5,6 +5,7 @@ import {
   Headers,
   HttpCode,
   Post,
+  Res,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
@@ -12,14 +13,17 @@ import {
   ApiBearerAuth,
   ApiBody,
   ApiOperation,
+  ApiProduces,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { CurrentAuth } from '../auth/auth-context';
 import type { AuthContext } from '../auth/auth-context';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto';
+import { openSse, type SseStream } from '../common/sse/sse';
 import { AssistantChatSchema, AssistantService } from './assistant.service';
 import type { AssistantChatResponse } from './assistant.service';
 
@@ -76,5 +80,63 @@ export class AssistantController {
     return this.meter.ai(auth.tenant.id, () =>
       this.assistant.chat(auth, authorization, body),
     );
+  }
+
+  @Post('chat/stream')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Ask the assistant and watch the answer being written (SSE)',
+    description:
+      'Same request, limits, metering and permissions as `POST /assistant/chat`, answered as a `text/event-stream`. Events: `token` `{t}` (answer text so far, append it), `tool` `{names}` (the model is reading these records: clear the text shown so far), `done` (the final `AssistantChatResponse`; its `answer` replaces the streamed text because it is cleaned and its citations are checked), `error` `{code}`. A `: heartbeat` comment goes out every 10 seconds. Closing the connection stops the model call. Errors before the stream starts (400, 402, 403, 429) are ordinary JSON responses.',
+  })
+  @ApiBody({ schema: chatBodySchema })
+  @ApiProduces('text/event-stream')
+  @ApiResponse({ status: 200, description: 'text/event-stream' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto })
+  @ApiResponse({ status: 402, type: ErrorResponseDto })
+  @ApiResponse({ status: 429, type: ErrorResponseDto })
+  async chatStream(
+    @CurrentAuth() auth: AuthContext,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: unknown,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    if (!authorization) throw new UnauthorizedException();
+    let sse: SseStream | undefined;
+    let streamed = 0;
+    try {
+      const result = await this.meter.ai(auth.tenant.id, async () => {
+        const answer = await this.assistant.chat(auth, authorization, body, {
+          // Open only after the checks that answer with a normal status have passed.
+          onReady: () => {
+            sse = openSse(reply);
+          },
+          onToken: (t) => {
+            streamed += t.length;
+            sse?.send('token', { t });
+          },
+          onTools: (names) => sse?.send('tool', { names }),
+          get signal() {
+            return sse?.signal;
+          },
+        });
+        // Stopping after words were written is still an answered question: no refund for it.
+        return !answer.available && streamed > 0 && sse?.signal.aborted
+          ? ({ stopped: true } as const)
+          : answer;
+      });
+      if ('stopped' in result) return;
+      sse?.send('done', result);
+    } catch (error) {
+      if (!sse) throw error; // still a normal HTTP error (400, 402, 403, 429, ...)
+      const status =
+        typeof (error as { getStatus?: () => number }).getStatus === 'function'
+          ? (error as { getStatus: () => number }).getStatus()
+          : 500;
+      sse.send('error', { code: status === 500 ? 'internal' : status });
+    } finally {
+      sse?.end();
+    }
   }
 }

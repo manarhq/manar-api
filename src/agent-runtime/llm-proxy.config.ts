@@ -100,6 +100,19 @@ export const LlmProxyConfigSchema = z.object({
   LLM_TASK_TOKEN_BUDGET: z.coerce.number().int().positive().default(200_000),
   /** A 9B model on a consumer GPU can take a minute or more for a long prompt. */
   LLM_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().positive().default(180_000),
+  /**
+   * One model round of the console assistant (a question can take up to five). For a streamed
+   * round it bounds the wait for the first token; once tokens flow, `LLM_STREAM_IDLE_MS` bounds
+   * each silence. The 180 s proxy timeout above stays for agents, whose long generations are legitimate.
+   */
+  ASSISTANT_LLM_ROUND_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(45_000),
+  /** Longest a background AI job (Suggest Policy) may run before it gives up. */
+  AI_JOB_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
+  LLM_STREAM_IDLE_MS: z.coerce.number().int().positive().default(20_000),
 });
 
 export type LlmProxyConfig = z.infer<typeof LlmProxyConfigSchema>;
