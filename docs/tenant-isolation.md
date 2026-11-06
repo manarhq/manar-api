@@ -199,7 +199,9 @@ The evidence export reads its audit events in one read-only REPEATABLE READ tran
 **dedicated one-connection client** (`withDedicatedClient`, closed afterwards), so a long export never
 holds connections of the shared tenant pool that the decision path uses. A second export for the same
 workspace answers 409 `export_already_running`, and more than 3 at once per api process answer 429
-`export_capacity`.
+`export_capacity` with a `Retry-After` header (no queue). The cap is 3 because each export is one
+extra server connection, counted in the budget table above; a slot is always released in a `finally`,
+so a timed-out or failed export frees it, and the hold is bounded by the 5 minute transaction timeout.
 
 ### Connection budget
 
@@ -221,7 +223,7 @@ manar-infra `clusters/azure-uaenorth`; there is no HPA today). Enforced by
 The 1000 is not reachable: a tenant client only holds server connections while it has queries in
 flight (idle connections close after 10 s), and Keycloak, Temporal and OpenFGA sit far below their
 maxima. The spec therefore counts the tenant pools at 50% simultaneous use (250), which gives
-**750 of 859 (87%), headroom 109**, and fails above 90%. If k6 numbers or `pg_stat_activity` show tenant
+**756 of 859 (88%), headroom 103**, and fails above 90%. If k6 numbers or `pg_stat_activity` show tenant
 use closer to the ceiling, lower `TENANT_DB_CLIENT_CACHE_MAX` (each step of 5 frees 40 connections at
 today's replicas) before raising any other number. Changing a replica count in the overlay changes
 this table.

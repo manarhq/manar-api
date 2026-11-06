@@ -49,4 +49,42 @@ describe('export concurrency', () => {
     gates.forEach((g) => g());
     await Promise.all(running);
   });
+
+  it('a timed-out export frees its slot (bounded hold time)', async () => {
+    let calls = 0;
+    const svc = new EvidenceExportService(
+      {} as never,
+      {} as never,
+      {} as never,
+      {
+        withDedicatedClient: () =>
+          ++calls === 1
+            ? Promise.reject(
+                Object.assign(new Error('Transaction timeout'), {
+                  code: 'P2028',
+                }),
+              )
+            : new Promise(() => undefined),
+      } as never,
+    );
+    const go = () => svc.export({} as never, 't1', 'u', { since: new Date() });
+    await expect(go()).rejects.toThrow('Transaction timeout');
+    void go(); // the slot was released, so this one starts instead of getting a 409
+    await Promise.resolve();
+    await expect(go()).rejects.toBeInstanceOf(ConflictException); // and now it is held again
+  });
+
+  it('one workspace cannot hold two global slots: its second try is a 409, not a slot', async () => {
+    const { run, gates } = setup();
+    const a = run('A').catch(() => undefined);
+    await expect(run('A')).rejects.toBeInstanceOf(ConflictException);
+    // The global cap still has room for the other workspaces.
+    const others = Array.from(
+      { length: EvidenceExportService.MAX_CONCURRENT_EXPORTS - 1 },
+      (_, i) => run(`o${i}`).catch(() => undefined),
+    );
+    await expect(run('late')).rejects.toMatchObject({ status: 429 });
+    gates.forEach((g) => g());
+    await Promise.all([a, ...others]);
+  });
 });

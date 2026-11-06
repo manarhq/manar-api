@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
+import { EvidenceExportService } from '../evidence/evidence-export.service';
 
 /** Postgres max_connections on the production server (docs/tenant-isolation.md, "Connection budget"). */
 const SERVER_MAX_CONNECTIONS = 859;
@@ -46,8 +47,14 @@ describe('Postgres connection budget', () => {
       WORKER_REPLICAS *
         WORKER_APPS_PER_POD *
         tenantCeiling(values('manar-api-worker').config);
+    const exports = API_REPLICAS * EvidenceExportService.MAX_CONCURRENT_EXPORTS; // 1 connection each
     const fixed =
-      PGBOUNCER_DEFAULT_POOL_SIZE + KEYCLOAK + TEMPORAL + OPENFGA + SITE_FLEET;
+      exports +
+      PGBOUNCER_DEFAULT_POOL_SIZE +
+      KEYCLOAK +
+      TEMPORAL +
+      OPENFGA +
+      SITE_FLEET;
     const total = tenant * TENANT_SIMULTANEOUS_SHARE + fixed;
     expect(total).toBeLessThanOrEqual(SERVER_MAX_CONNECTIONS * LIMIT_SHARE);
   });
