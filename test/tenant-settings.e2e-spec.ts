@@ -255,8 +255,8 @@ describe('Tenant Settings (e2e)', () => {
     };
     expect(patchBody.allowCloudStorage).toBe(true);
     expect(patchBody.residency).toBe('CUSTOM_REGION');
-    // Untouched field is unchanged.
-    expect(patchBody.allowExternalAi).toBe(false);
+    // Untouched field is unchanged (a new workspace starts with AI on).
+    expect(patchBody.allowExternalAi).toBe(true);
 
     // Persists across a fresh GET, not just echoed back in the PATCH response.
     const getResponse = await request(app.getHttpServer() as App)
@@ -350,7 +350,13 @@ describe('Tenant Settings (e2e)', () => {
       control,
       tenantDatabaseManager,
       app.get(AuditService),
-      app.get(ConfigService),
+      // The command only flips on hosted deployments; the e2e app runs as a customer one.
+      {
+        get: (key: string, opts?: object): unknown =>
+          key === 'MANAR_DEPLOYMENT'
+            ? 'hosted'
+            : app.get(ConfigService).get(key, opts as never),
+      } as unknown as ConfigService<AppConfig, true>,
     );
     const dry = await service.run({ dryRun: true });
     expect(dry.keptExplicit).toBeGreaterThanOrEqual(1);

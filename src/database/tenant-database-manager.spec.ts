@@ -471,9 +471,17 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
       expect(made.company.allowExternalAiChosen).toBe(false);
       expect(made.explicitOff.allowExternalAiChosen).toBe(true);
     } finally {
-      await control.tenant.deleteMany({
-        where: { id: { in: Object.values(made).map((t) => t.id) } },
-      });
+      const ids = Object.values(made).map((t) => t.id);
+      await control.$transaction([
+        control.tenantDatabaseBinding.deleteMany({
+          where: { tenantId: { in: ids } },
+        }),
+        control.secretReference.deleteMany({
+          where: { tenantId: { in: ids } },
+        }),
+        control.membership.deleteMany({ where: { tenantId: { in: ids } } }),
+        control.tenant.deleteMany({ where: { id: { in: ids } } }),
+      ]);
     }
   });
 
