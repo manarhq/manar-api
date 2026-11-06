@@ -182,6 +182,10 @@ const cursor = (
   toolId: 'host.cursor',
   actionId,
   resource,
+  // A device vouches for a file path by sending where it really points.
+  ...(['read', 'edit', 'write'].includes(actionId)
+    ? { resolvedPath: resource }
+    : {}),
 });
 
 import { classifyCommand } from '../policy/command-safety';
@@ -257,8 +261,10 @@ describe('REVIEW: MCP tools are never quiet while learning', () => {
 
 describe('REVIEW: symlinked folders inside a project', () => {
   const link = (resolvedPath: string | undefined, p: string) => ({
-    ...cursor('write', p),
-    ...(resolvedPath ? { resolvedPath } : {}),
+    toolId: 'host.cursor',
+    actionId: 'write',
+    resource: p,
+    resolvedPath,
   });
   it.each([
     ['/home/sara/proj/docs/authorized_keys', '/home/sara/.ssh/authorized_keys'],
@@ -272,9 +278,16 @@ describe('REVIEW: symlinked folders inside a project', () => {
     expect(r.result.reason).not.toBe('learning_would_ask');
   });
 
-  it('the same path with a matching resolvedPath, or from an older device, is unchanged', async () => {
+  it('present and the same: quiet. Absent: cannot tell, so it asks', async () => {
     const p = '/home/sara/proj/src/a.ts';
-    for (const q of [p, undefined])
-      expect((await run(link(q, p))).result.reason).toBe('learning_would_ask');
+    expect((await run(link(p, p))).result.reason).toBe('learning_would_ask');
+    const absent = await run(link(undefined, p));
+    expect(absent.result.decision).toBe('APPROVAL_REQUIRED');
+    expect(absent.result.reason).not.toBe('learning_would_ask');
+  });
+
+  it('present but outside the home project: asks', async () => {
+    const r = await run(link('/etc/hosts', '/home/sara/proj/src/a.ts'));
+    expect(r.result.decision).toBe('APPROVAL_REQUIRED');
   });
 });
