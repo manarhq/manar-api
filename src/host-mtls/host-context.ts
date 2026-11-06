@@ -10,6 +10,10 @@ export interface HostContext {
   ownerSubject: string | null;
   /** PENDING until the owner approves it; REJECTED and REVOKED never reach a handler. */
   status: 'PENDING' | 'APPROVED';
+  /** Last version, OS and architecture the device reported (null until it reports one). */
+  agentVersion?: string | null;
+  agentOs?: string | null;
+  agentArch?: string | null;
 }
 
 /** `hostContext`, not `host`: Fastify already owns `request.host` (the Host header). */

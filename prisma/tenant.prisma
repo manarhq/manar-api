@@ -2232,6 +2232,12 @@ model Host {
   approvedBy            String?
   approvedAt            DateTime?
   lastSeenAt            DateTime?
+  /// What the device's User-Agent said on its last config poll (manar-edge/<version> (<os>; <arch>)).
+  /// Null for devices that have not polled since this column exists, and for old agents that send none.
+  agentVersion          String?
+  agentOs               String?
+  agentArch             String?
+  agentVersionSeenAt    DateTime?
   registeredFromIp      String
   /// SHA-256 of the SubjectPublicKeyInfo the machine is bound to.
   keyFingerprint        String

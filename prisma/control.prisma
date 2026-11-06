@@ -874,3 +874,35 @@ model EnterpriseProfile {
 
   @@map("enterprise_profiles")
 }
+
+/// One day of model calls for one workspace, feature and model (performance program, decision 9).
+/// Counts and sums only: never a prompt, an answer or a person. Cost is our price table times the
+/// tokens (`priceVersion` says which table), reconciled monthly against the Azure bill.
+model AiUsageDaily {
+  day            DateTime @db.Date
+  tenantId       String
+  /// `assistant`, `incident_summary`, `audit_investigate`, `policy_suggest`.
+  feature        String
+  /// `azure_openai`, `ollama`, ...
+  provider       String
+  /// The model or deployment name the provider reported.
+  model          String
+  calls          Int      @default(0)
+  /// Calls that ended in an error or with no answer.
+  errors         Int      @default(0)
+  inputTokens    BigInt   @default(0)
+  outputTokens   BigInt   @default(0)
+  /// Millionths of a US dollar.
+  costMicros     BigInt   @default(0)
+  /// Calls whose model is not in the price table (cost counted as 0).
+  unpricedCalls  Int      @default(0)
+  latencyMsSum   BigInt   @default(0)
+  /// Call counts per latency bucket (`AI_LATENCY_BUCKETS_MS` in code, plus one overflow bucket).
+  latencyBuckets Int[]
+  priceVersion   String
+  updatedAt      DateTime @updatedAt
+
+  @@id([day, tenantId, feature, provider, model])
+  @@index([tenantId, day])
+  @@map("ai_usage_daily")
+}

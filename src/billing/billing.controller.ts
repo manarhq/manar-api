@@ -7,6 +7,7 @@ import {
   HttpCode,
   Post,
   Put,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -33,6 +34,9 @@ const CheckoutSchema = z.object({
   plan: z.enum(CHECKOUT_PLANS),
   /** Company yearly: seats to commit for the year (at least 3). */
   seats: z.number().int().min(3).max(10_000).optional(),
+});
+const DailyQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(90).default(30),
 });
 const CreditsSchema = z.object({ packs: z.number().int().min(1).max(20) });
 const WalletSchema = z
@@ -101,6 +105,20 @@ export class BillingController {
   })
   usage(@CurrentAuth() auth: AuthContext) {
     return this.wallet.usage(auth.tenant.id);
+  }
+
+  @Get('usage/daily')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequireRole('TENANT_OWNER', 'SECURITY_ADMIN')
+  @ApiOperation({
+    summary:
+      "The workspace's AI actions per day (allowance and credits), plus the month figures",
+    description:
+      'For the AI usage page. `days` 1 to 90 (default 30), UTC days, oldest first, empty days included. Each day splits into `fromAllowance` and `fromCredits` (1 credit = 1 AI action); the sum over a month equals `allowance.ai.used` on `GET /billing/usage`.',
+  })
+  dailyUsage(@CurrentAuth() auth: AuthContext, @Query() query: unknown) {
+    const { days } = parseBodyOrThrow(DailyQuerySchema, query);
+    return this.wallet.dailyAiUsage(auth.tenant.id, days);
   }
 
   @Put('wallet')

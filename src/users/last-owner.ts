@@ -36,22 +36,40 @@ export async function hasAnotherOwner(
 }
 
 /**
- * Takes `owner` out of the workspace's owners (a role revoke, or removing the member) only if
- * another active owner remains. Lock, count and write are one transaction under the per-workspace
- * advisory lock `owners:<tenantId>`, so two owners removing each other at the same moment cannot
- * both pass: the second one waits, then sees one owner left and gets {@link LastOwnerError}.
+ * Takes `owner` out of the owners of every workspace in `tenantIds` (a role revoke, removing the
+ * member, an account deletion), only if each of them keeps another active owner. Lock, count and
+ * write are one transaction under the per-workspace advisory locks `owners:<tenantId>`, taken in
+ * sorted order so two callers over overlapping sets cannot deadlock. All checks come before the
+ * write: the call either changes every workspace or refuses with {@link LastOwnerError} and
+ * changes none. Two owners removing each other at the same moment cannot both pass: the second one
+ * waits, then sees one owner left.
  */
-export async function withOwnerLock<T>(
+export async function withOwnerLocks<T>(
+  control: ControlPrismaService,
+  tenantIds: string[],
+  owner: OwnerRef,
+  write: (tx: Db) => Promise<T>,
+): Promise<T> {
+  const sorted = [...new Set(tenantIds)].sort();
+  return control.$transaction(async (tx) => {
+    for (const tenantId of sorted) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owners:${tenantId}`}))`;
+    }
+    for (const tenantId of sorted) {
+      if (!(await hasAnotherOwner(tx, tenantId, owner))) {
+        throw new LastOwnerError();
+      }
+    }
+    return write(tx);
+  });
+}
+
+/** One workspace: {@link withOwnerLocks} for a single tenant. */
+export function withOwnerLock<T>(
   control: ControlPrismaService,
   tenantId: string,
   owner: OwnerRef,
   write: (tx: Db) => Promise<T>,
 ): Promise<T> {
-  return control.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owners:${tenantId}`}))`;
-    if (!(await hasAnotherOwner(tx, tenantId, owner))) {
-      throw new LastOwnerError();
-    }
-    return write(tx);
-  });
+  return withOwnerLocks(control, [tenantId], owner, write);
 }

@@ -4,6 +4,7 @@ import { HostAuthorizeSchema } from '../host-coverage/host-authorize.service';
 import { HostEventsBatchSchema } from '../secrets/secrets.validation';
 import { KNOWN_HOST_TOOL_IDS, hostActionRisk } from '../tools/host-actions';
 import { redactForStorage } from './redact';
+import { parseAgentUserAgent } from '../host-mtls/agent-version';
 
 /**
  * host-contract.json is shared with manar-edge (testdata/contract/host-contract.json): what the
@@ -61,5 +62,41 @@ describe('host contract (shared with manar-edge)', () => {
     for (const c of fx.redact.cases) {
       expect(redactForStorage(c.in), c.in).toBe(c.out);
     }
+  });
+});
+
+describe('host contract: version telemetry (User-Agent)', () => {
+  const ua = (
+    fx as unknown as {
+      userAgent: {
+        parse: Array<{
+          header: string;
+          version: string | null;
+          os: string | null;
+          arch: string | null;
+        }>;
+      };
+    }
+  ).userAgent;
+
+  it('reads every header the device (and old devices) send as the contract says', () => {
+    expect(ua.parse.length).toBeGreaterThan(0);
+    for (const c of ua.parse) {
+      expect(parseAgentUserAgent(c.header), c.header).toEqual(
+        c.version === null
+          ? null
+          : { version: c.version, os: c.os, arch: c.arch },
+      );
+    }
+  });
+});
+
+describe('host contract: lifecycle events', () => {
+  it('accepts the service.restarted batch the device sends', () => {
+    const { events } = (
+      fx as unknown as { serviceEvents: { events: unknown[] } }
+    ).serviceEvents;
+    const r = HostEventsBatchSchema.safeParse({ events });
+    expect(r.success, JSON.stringify(r.error?.issues)).toBe(true);
   });
 });

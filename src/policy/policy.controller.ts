@@ -4,14 +4,20 @@ import {
   AiAdvisoryClient,
 } from '../ai-advisory/ai-advisory-client.service';
 import { UsageMeterService } from '../billing/usage-meter.service';
+import { openSse } from '../common/sse/sse';
+import { pumpJobEvents, publicView } from '../ai-jobs/job-events';
+import { PolicySuggestJobsService } from './policy-suggest-jobs.service';
 import {
   BadRequestException,
   Body,
   ConflictException,
   Controller,
+  Delete,
   Get,
+  HttpCode,
   NotFoundException,
   Param,
+  ParseUUIDPipe,
   Post,
   Query,
   Res,
@@ -25,6 +31,7 @@ import {
   ApiBody,
   ApiOperation,
   ApiParam,
+  ApiProduces,
   ApiQuery,
   ApiResponse,
   ApiTags,
@@ -131,6 +138,7 @@ export class PolicyController {
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly meter: UsageMeterService,
     private readonly aiAdvisory: AiAdvisoryClient,
+    private readonly suggestJobs: PolicySuggestJobsService,
   ) {}
 
   @Post()
@@ -286,6 +294,86 @@ export class PolicyController {
       explanation: result.explanation,
       confidence: result.confidence,
     };
+  }
+
+  @Post('suggest/jobs')
+  @HttpCode(202)
+  @ApiOperation({
+    summary: 'Start an AI-assisted policy draft as a background job',
+    description:
+      'Same body as `POST /policies/suggest`, but answers at once with `{ job }` (202) and drafts in the background, so a slow model never meets a proxy time limit. Watch it with `GET /policies/suggest/jobs/:jobId/events` (SSE) or poll `GET /policies/suggest/jobs/:jobId`. When `status` is `ready` with `result.available`, the DRAFT version exists (never published). One AI action is spent now and given back if nothing is produced.',
+  })
+  @ApiBody({ type: SuggestPolicyRequestDto })
+  @ApiResponse({ status: 202, description: '`{ job }`' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 402, type: ErrorResponseDto })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async startSuggestJob(
+    @CurrentAuth() auth: AuthContext,
+    @Body() body: unknown,
+  ) {
+    // "Allow external AI" off: the same polite answer as `POST /policies/suggest`, no job started.
+    if (aiSwitchedOff(await this.aiAdvisory.aiGate(auth.tenant.id)))
+      return {
+        available: false as const,
+        reason: AI_SWITCHED_OFF_REASON,
+        job: null,
+      };
+    return { job: publicView(await this.suggestJobs.start(auth, body)) };
+  }
+
+  @Get('suggest/jobs/:jobId')
+  @ApiOperation({ summary: 'State of one of your policy draft jobs' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async suggestJob(
+    @CurrentAuth() auth: AuthContext,
+    @Param('jobId', new ParseUUIDPipe()) jobId: string,
+  ) {
+    return { job: publicView(await this.suggestJobs.read(auth, jobId)) };
+  }
+
+  @Delete('suggest/jobs/:jobId')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Stop a policy draft job',
+    description:
+      'Asks the worker to stop. Stopped before the model wrote anything, the AI action is given back.',
+  })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async cancelSuggestJob(
+    @CurrentAuth() auth: AuthContext,
+    @Param('jobId', new ParseUUIDPipe()) jobId: string,
+  ) {
+    return { job: publicView(await this.suggestJobs.cancel(auth, jobId)) };
+  }
+
+  @Get('suggest/jobs/:jobId/events')
+  @ApiOperation({
+    summary: 'Progress of a policy draft job (SSE)',
+    description:
+      '`text/event-stream`: `progress` (status, phase, estimated output tokens) whenever it changes, then `done` with the final state, or `reconnect` after about 55 seconds: open the stream again, it starts with the current state. A `: heartbeat` comment goes out every 10 seconds. Nothing is lost if a connection is cut.',
+  })
+  @ApiProduces('text/event-stream')
+  @ApiResponse({ status: 200, description: 'text/event-stream' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async suggestJobEvents(
+    @CurrentAuth() auth: AuthContext,
+    @Param('jobId', new ParseUUIDPipe()) jobId: string,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    await this.suggestJobs.read(auth, jobId); // 404 before the stream starts
+    const sse = openSse(reply);
+    try {
+      await pumpJobEvents({
+        read: () => this.suggestJobs.read(auth, jobId).catch(() => undefined),
+        send: (event, data) => sse.send(event, data),
+        isClosed: () => sse.closed,
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        now: () => Date.now(),
+      });
+    } finally {
+      sse.end();
+    }
   }
 
   @Post(':id/versions/:versionId/publish')
