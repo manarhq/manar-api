@@ -434,7 +434,7 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     expect(tenantCount).toBe(1);
   }, 30_000);
 
-  it('10. AI defaults on, except Government and air-gapped; an explicit value is kept and recorded as chosen', async () => {
+  it('10. AI defaults on only for a recorded commercial sector; an explicit value is kept and recorded as chosen', async () => {
     const mk = (extra: object) =>
       manager.provisionTenant({
         slug: uniqueSlug('ai'),
@@ -445,6 +445,7 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     const made = {
       personal: await mk({
         kind: 'PERSONAL',
+        sector: 'COMMERCIAL',
         ownerSubject: 'p',
         ownerIssuer: 'i',
       }),
@@ -457,8 +458,9 @@ describe('TenantDatabaseManager (tenant isolation invariants)', () => {
     };
     try {
       expect(made.personal.allowExternalAi).toBe(true);
-      expect(made.company.allowExternalAi).toBe(true);
-      expect(made.legacyCli.allowExternalAi).toBe(true);
+      // No sector sent (staff provisioning that does not say): off, and not a recorded choice.
+      expect(made.company.allowExternalAi).toBe(false);
+      expect(made.legacyCli.allowExternalAi).toBe(false);
       expect(made.government.allowExternalAi).toBe(false);
       // Government is an explicit, recorded decision; the sector is stored.
       expect(made.government.allowExternalAiChosen).toBe(true);

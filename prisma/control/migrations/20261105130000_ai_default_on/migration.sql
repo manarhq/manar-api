@@ -5,7 +5,7 @@
 ALTER TABLE "tenants" ADD COLUMN "allowExternalAiChosen" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "tenants" ADD COLUMN "aiDefaultNoticePending" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "tenants" ADD COLUMN "aiOptInNoticePending" BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE "tenants" ALTER COLUMN "allowExternalAi" SET DEFAULT true;
+-- The column default stays false: a raw insert defaults closed. Provisioning sets it explicitly.
 
 -- The sector is recorded on the tenant at every provisioning path. Backfill from what is known;
 -- everything else stays NULL (unknown) and `ai:default-on` leaves it alone.

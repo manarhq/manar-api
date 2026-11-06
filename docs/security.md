@@ -363,28 +363,36 @@ that the function happened to return `null` for some unspecified reason.
 ### Every AI feature and the "Allow external AI" switch
 
 With Azure OpenAI Global (prompts may be processed outside the UAE after DLP redaction), the
-switch is the customer's control. Off means nothing is sent to any model for that workspace,
+switch is the customer's control. Off means nothing is sent to an external model for that workspace,
 and the feature answers `available: false, reason: "ai_switched_off"` (EN/AR notice in the
 console), never an error and never a metered action.
 
-**Default.** `allowExternalAi` is on for new Free, Pro and Company workspaces (opt-out; disclosed in
-the DPA and shown in Settings) and off for Government (`sector: GOVERNMENT`, recorded as an explicit
-choice) and `AIR_GAPPED` ones (`defaultAllowExternalAi`). `Tenant.sector` (null = unknown) is set at
-provisioning and backfilled from enterprise profiles and personal kind. `allowExternalAiChosen`
-records an owner's own choice; a settings change writes its audit event first and is refused (503) if
-that write fails.
+**Default.** `allowExternalAi` is on for new workspaces whose sector is recorded as COMMERCIAL (self-serve
+sign-up records it; opt-out, disclosed in the DPA and shown in Settings). It is off, and not recorded as a
+choice, when the sector is missing (staff provisioning that does not send `sector`; manar-fleet should),
+off and chosen for Government, and off for `AIR_GAPPED`. The column default stays false so a raw insert
+defaults closed. `Tenant.sector` (null = unknown) is backfilled from enterprise profiles and personal
+kind; staff set it later with `tenant:set-sector <slug> COMMERCIAL|GOVERNMENT` or `PATCH
+/platform/v1/tenants/:id` (audited). `allowExternalAiChosen` records an owner's own choice; a settings
+change writes its audit event first, is refused (503) if that write fails, and clears both notices.
 
-Existing workspaces are switched on only by `node dist/cli.js ai:default-on [--dry-run]`, never by a
-migration. It flips a workspace only on a hosted deployment, with sector COMMERCIAL, no recorded
-choice, and an audit history that provably covers its life (no retention anchor, oldest event at
-creation). Unknown sector is counted as `needsReview`; incomplete history as `historyIncomplete`
-(AI stays off and the owner sees "Turn on AI features?"). The dry run is read-only and prints counts
-only; `deploy/ops/ai-default-on-dry-run.job.yaml` runs it as a one-off Job in `manar-prod`.
+Existing workspaces are switched on only by `node dist/cli.js ai:default-on [--dry-run]
+[--include-enterprise]`, never by a migration. It flips a workspace only on a hosted deployment, with
+sector COMMERCIAL, no recorded choice, and an audit history that provably covers its life (no retention
+anchor, oldest event at creation). Per workspace: an INTENT event is written first (if that fails the
+workspace is counted failed and unchanged), then one guarded UPDATE that re-checks sector COMMERCIAL, not
+air-gapped, ACTIVE, no Government profile and no owner choice, then a COMPLETION event
+`{intentId, applied}`. If the completion cannot be written the run exits 1 (`completionFailed`) and the
+next run's reconcile pass writes it from the row's real state. Company (enterprise) workspaces are only
+counted (`flipEnterprise`, `enterpriseHeld`) unless `--include-enterprise` is given; `flipPersonal` and
+`flipEnterprise` are counts only. Unknown sector (`needsReview`) and incomplete history
+(`historyIncomplete`) leave AI off and the owner sees "Turn on AI features?". The dry run is read-only and
+prints counts only; `deploy/ops/ai-default-on-dry-run.job.yaml` runs it as a one-off Job in `manar-prod`.
 
 Known limits: audit-write failures from before this release left no record, so they cannot be
-excluded; and `aiGate` / `llmGate` read `allowExternalAi`, not `sector`, so a Government workspace
-with no recorded sector, no profile and the flag on is not blocked by the gate itself (provisioning
-a Government workspace sets the flag off).
+excluded; `aiGate` / `llmGate` read `allowExternalAi`, not `sector`, so a Government workspace with no
+recorded sector, no profile and the flag on is not blocked by the gate itself; and with the switch off
+and a local LLM route, the proxy still returns 503 `dlp-advisory` (DLP unavailable fails closed).
 
 | Feature                                 | Path                                                                    | Gate                                                                                                                                                                                                                                                                       |
 | --------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

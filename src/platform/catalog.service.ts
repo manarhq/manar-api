@@ -262,7 +262,8 @@ export class CatalogService {
     } catch (error) {
       return (
         error instanceof CatalogDenied &&
-        error.reason === 'llm_external_not_allowed'
+        (error.reason === 'llm_external_not_allowed' ||
+          error.reason === 'llm_air_gapped')
       );
     }
   }

@@ -142,6 +142,9 @@ export class TenantSettingsService {
           ? {
               allowExternalAi: input.allowExternalAi,
               allowExternalAiChosen: true,
+              // The owner has now decided: neither notice applies any more.
+              aiDefaultNoticePending: false,
+              aiOptInNoticePending: false,
             }
           : {}),
         ...(input.allowOutboundTelemetry !== undefined
@@ -160,7 +163,18 @@ export class TenantSettingsService {
   }
 
   /** Clears the one-time "AI is now on" notice for the workspace. Idempotent. */
-  async dismissAiDefaultNotice(tenantId: string): Promise<void> {
+  async dismissAiDefaultNotice(
+    tenantId: string,
+    userId: string,
+  ): Promise<void> {
+    const client = await this.tenantDatabaseManager.getClient(tenantId);
+    await failClosed('audit-store', () =>
+      this.auditService.record(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.TENANT_AI_NOTICE_DISMISSED,
+        actor: { type: 'human', id: userId },
+        data: {},
+      }),
+    );
     await this.control.tenant.update({
       where: { id: tenantId },
       data: { aiDefaultNoticePending: false, aiOptInNoticePending: false },

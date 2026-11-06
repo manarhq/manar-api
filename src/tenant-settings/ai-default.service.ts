@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '../generated/tenant-client/client';
 import { ConfigService } from '@nestjs/config';
@@ -8,14 +9,26 @@ import { ControlPrismaService } from '../database/control-prisma.service';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 
 export interface AiDefaultCounts {
-  /** Would be (dry run) or were switched on. */
+  /** Would be (dry run) or were switched on. `flipPersonal + flipEnterprise`. */
   flip: number;
+  /** Of `flip`: personal workspaces. */
+  flipPersonal: number;
+  /** Of `flip`: company (enterprise) workspaces. A live run flips these only with `--include-enterprise`. */
+  flipEnterprise: number;
+  /** Live run without `--include-enterprise`: company workspaces that would flip and were left for staff to confirm. */
+  enterpriseHeld: number;
+  /** The guarded flip matched nothing: sector, residency, status or the owner's choice changed after it was read. */
+  changedMidRun: number;
+  /** Flipped, but the completion event could not be written; the next run reconciles it. */
+  completionFailed: number;
+  /** A flip whose completion event was missing and has now been written from the row's real state. */
+  reconciled: number;
   /** Still at false with an owner's own choice on record: left alone. */
   keptExplicit: number;
   skippedGovernment: number;
   /** Customer-hosted deployments are never flipped. */
   skippedCustomerDeployment: number;
-  /** Sector not known (or not confirmed commercial): left alone, needs a person to decide. */
+  /** Sector not known (or not confirmed commercial): left off; the owner is shown the opt-in notice. */
   needsReview: number;
   skippedAirGapped: number;
   /** Not ACTIVE yet (queued, provisioning, suspended...): no audit log to read; run again later. */
@@ -57,9 +70,18 @@ export class AiDefaultService {
     private readonly config: ConfigService<AppConfig, true>,
   ) {}
 
-  async run(options: { dryRun: boolean }): Promise<AiDefaultCounts> {
+  async run(options: {
+    dryRun: boolean;
+    includeEnterprise?: boolean;
+  }): Promise<AiDefaultCounts> {
     const counts: AiDefaultCounts = {
       flip: 0,
+      flipPersonal: 0,
+      flipEnterprise: 0,
+      enterpriseHeld: 0,
+      changedMidRun: 0,
+      completionFailed: 0,
+      reconciled: 0,
       keptExplicit: 0,
       skippedGovernment: 0,
       skippedCustomerDeployment: 0,
@@ -69,56 +91,110 @@ export class AiDefaultService {
       skippedNotActive: 0,
       failed: 0,
     };
-    const rows = await this.control.$transaction(async (tx) => {
-      await tx.$executeRaw`SET TRANSACTION READ ONLY`;
-      const government = new Set(
-        (
-          await tx.enterpriseProfile.findMany({
-            where: { sector: 'GOVERNMENT' },
-            select: { tenantId: true },
-          })
-        ).map((p) => p.tenantId),
-      );
-      const found = await tx.tenant.findMany({
-        where: { allowExternalAi: false, status: { not: 'DELETED' } },
-        select: {
+    const hosted =
+      this.config.get('MANAR_DEPLOYMENT', { infer: true }) === 'hosted';
+    const { rows, onByDefault } = await this.control.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        const government = new Set(
+          (
+            await tx.enterpriseProfile.findMany({
+              where: { sector: 'GOVERNMENT' },
+              select: { tenantId: true },
+            })
+          ).map((p) => p.tenantId),
+        );
+        const select = {
           id: true,
           status: true,
           residency: true,
           sector: true,
+          kind: true,
           createdAt: true,
           allowExternalAiChosen: true,
-        },
-        orderBy: { createdAt: 'asc' },
-      });
-      return found.map((t) => ({
-        ...t,
-        government: t.sector === 'GOVERNMENT' || government.has(t.id),
-      }));
-    });
+        } as const;
+        const found = await tx.tenant.findMany({
+          where: { allowExternalAi: false, status: { not: 'DELETED' } },
+          select,
+          orderBy: { createdAt: 'asc' },
+        });
+        // Switched on and not an owner's choice: a flip by an earlier run may lack its completion.
+        const on = hosted
+          ? await tx.tenant.findMany({
+              where: {
+                allowExternalAi: true,
+                allowExternalAiChosen: false,
+                status: 'ACTIVE',
+              },
+              select: { id: true },
+            })
+          : [];
+        return {
+          rows: found.map((t) => ({
+            ...t,
+            government: t.sector === 'GOVERNMENT' || government.has(t.id),
+          })),
+          onByDefault: on.map((t) => t.id),
+        };
+      },
+    );
 
     for (const t of rows) {
       if (t.residency === 'AIR_GAPPED') counts.skippedAirGapped++;
       else if (t.government) counts.skippedGovernment++;
       else if (t.allowExternalAiChosen) counts.keptExplicit++;
-      else if (
-        this.config.get('MANAR_DEPLOYMENT', { infer: true }) !== 'hosted'
-      )
-        counts.skippedCustomerDeployment++;
-      // Only a positively known commercial sector is flipped; unknown waits for a person.
-      else if (t.sector !== 'COMMERCIAL') counts.needsReview++;
-      else if (t.status !== 'ACTIVE') counts.skippedNotActive++;
-      else await this.one(t.id, t.createdAt, options.dryRun, counts);
+      else if (!hosted) counts.skippedCustomerDeployment++;
+      // Only a positively known commercial sector is flipped; unknown stays off and the owner is asked.
+      else if (t.sector !== 'COMMERCIAL') {
+        counts.needsReview++;
+        if (!options.dryRun && t.status === 'ACTIVE') await this.askOwner(t.id);
+      } else if (t.status !== 'ACTIVE') counts.skippedNotActive++;
+      else await this.one(t, options, counts);
     }
+    for (const id of onByDefault) await this.reconcile(id, options, counts);
     return counts;
   }
 
+  /** needsReview: AI stays off and the owner sees the "Turn on AI features?" notice. */
+  private async askOwner(tenantId: string): Promise<void> {
+    await this.control.tenant.updateMany({
+      where: {
+        id: tenantId,
+        allowExternalAi: false,
+        allowExternalAiChosen: false,
+        aiOptInNoticePending: false,
+      },
+      data: { aiOptInNoticePending: true },
+    });
+  }
+
+  /**
+   * One guarded UPDATE: the flip happens only if, at this instant, the workspace is still a
+   * commercial, non-air-gapped, ACTIVE, non-Government one with no choice of its own. Returns the
+   * number of rows changed (0 or 1).
+   */
+  async guardedFlip(tenantId: string): Promise<number> {
+    return this.control.$executeRaw`
+      UPDATE "tenants" t
+         SET "allowExternalAi" = true, "aiDefaultNoticePending" = true, "updatedAt" = now()
+       WHERE t."id" = ${tenantId}
+         AND t."allowExternalAi" = false
+         AND t."allowExternalAiChosen" = false
+         AND t."sector" = 'COMMERCIAL'
+         AND t."residency" <> 'AIR_GAPPED'
+         AND t."status" = 'ACTIVE'
+         AND NOT EXISTS (
+           SELECT 1 FROM "enterprise_profiles" p
+            WHERE p."tenantId" = t."id" AND p."sector" = 'GOVERNMENT')`;
+  }
+
   private async one(
-    tenantId: string,
-    createdAt: Date,
-    dryRun: boolean,
+    t: { id: string; createdAt: Date; kind: string },
+    options: { dryRun: boolean; includeEnterprise?: boolean },
     counts: AiDefaultCounts,
   ): Promise<void> {
+    const tenantId = t.id;
+    const dryRun = options.dryRun;
     try {
       const client = await this.tenants.getClient(tenantId);
       const log = await client.$transaction(async (tx) => {
@@ -138,8 +214,7 @@ export class AiDefaultService {
         const anchors = await tx.auditChainAnchor.count();
         return { explicit: hit !== null, oldest: oldest?.timestamp, anchors };
       });
-      const explicit = log.explicit;
-      if (explicit) {
+      if (log.explicit) {
         counts.keptExplicit++;
         if (!dryRun) {
           await this.control.tenant.updateMany({
@@ -153,7 +228,7 @@ export class AiDefaultService {
       // life: a retention prune leaves an anchor, and the oldest surviving event must reach back to
       // creation. Write failures leave no record before this release (see PR), so they cannot be
       // excluded here; the settings change now fails if its audit write does.
-      if (!historyCoversLife(log, createdAt)) {
+      if (!historyCoversLife(log, t.createdAt)) {
         counts.historyIncomplete++;
         if (!dryRun) {
           await this.control.tenant.updateMany({
@@ -163,30 +238,114 @@ export class AiDefaultService {
         }
         return;
       }
+      const enterprise = t.kind !== 'PERSONAL';
+      if (enterprise) counts.flipEnterprise++;
+      else counts.flipPersonal++;
       if (dryRun) {
         counts.flip++;
         return;
       }
-      // Guarded write: a concurrent owner choice or an earlier run makes this a no-op.
-      const { count } = await this.control.tenant.updateMany({
-        where: {
-          id: tenantId,
-          allowExternalAi: false,
-          allowExternalAiChosen: false,
-        },
-        data: { allowExternalAi: true, aiDefaultNoticePending: true },
+      if (enterprise && !options.includeEnterprise) {
+        counts.flipEnterprise--;
+        counts.enterpriseHeld++;
+        return;
+      }
+      // 1. Intent first. `record` throws: if the intent cannot be written, nothing is changed.
+      const intentId = randomUUID();
+      const actor = { type: 'system', id: 'ai:default-on' } as const;
+      await this.audit.record(client, tenantId, {
+        eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_INTENT,
+        actor,
+        data: { intentId, from: false, to: true },
       });
-      if (count === 0) return;
-      counts.flip++;
-      await this.audit.recordSafely(client, tenantId, {
-        eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_APPLIED,
-        actor: { type: 'system', id: 'ai:default-on' },
-        data: { allowExternalAi: true, from: false },
-      });
+      // 2. The guarded flip.
+      const count = await this.guardedFlip(tenantId);
+      if (count === 1) counts.flip++;
+      else {
+        counts.changedMidRun++;
+        if (enterprise) counts.flipEnterprise--;
+        else counts.flipPersonal--;
+      }
+      // 3. Completion: what really happened. If this fails the run exits 1 and the next run
+      // writes it from the row's state (reconcile).
+      try {
+        await this.audit.record(client, tenantId, {
+          eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_APPLIED,
+          actor,
+          data: {
+            intentId,
+            applied: count === 1,
+            allowExternalAi: count === 1,
+          },
+        });
+      } catch (error) {
+        counts.completionFailed++;
+        this.logger.error(
+          `ai:default-on wrote a change without its completion event for one workspace: ${error instanceof Error ? error.constructor.name : 'error'}`,
+        );
+      }
     } catch (error) {
       counts.failed++;
       this.logger.error(
         `ai:default-on could not process one workspace: ${error instanceof Error ? error.constructor.name : 'error'}`,
+      );
+    }
+  }
+
+  /**
+   * An intent without a completion in a workspace that is now on (and not an owner's choice):
+   * the flip happened and its completion write failed. Writes it from the row's actual state.
+   * ponytail: reads the last 200 events of each type; a fleet-wide backlog would need paging.
+   */
+  private async reconcile(
+    tenantId: string,
+    options: { dryRun: boolean },
+    counts: AiDefaultCounts,
+  ): Promise<void> {
+    try {
+      const client = await this.tenants.getClient(tenantId);
+      const [intents, done] = await client.$transaction(async (tx) => {
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        return [
+          await tx.auditEvent.findMany({
+            where: { eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_INTENT },
+            select: { data: true },
+            orderBy: { timestamp: 'desc' },
+            take: 200,
+          }),
+          await tx.auditEvent.findMany({
+            where: { eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_APPLIED },
+            select: { data: true },
+            orderBy: { timestamp: 'desc' },
+            take: 200,
+          }),
+        ] as const;
+      });
+      const idOf = (e: { data: unknown }) =>
+        (e.data as { intentId?: unknown } | null)?.intentId;
+      const completed = new Set(done.map(idOf));
+      const missing = intents
+        .map(idOf)
+        .filter((id): id is string => typeof id === 'string')
+        .filter((id) => !completed.has(id));
+      for (const intentId of missing) {
+        counts.reconciled++;
+        if (options.dryRun) continue;
+        await this.audit.record(client, tenantId, {
+          eventType: AUDIT_EVENT_TYPES.TENANT_AI_DEFAULT_APPLIED,
+          actor: { type: 'system', id: 'ai:default-on' },
+          data: {
+            intentId,
+            applied: true,
+            allowExternalAi: true,
+            reconciled: true,
+          },
+        });
+      }
+    } catch (error) {
+      counts.failed++;
+      this.logger.error(
+        `ai:default-on could not reconcile one workspace: ${error instanceof Error ? error.constructor.name : 'error'}`,
       );
     }
   }

@@ -134,8 +134,8 @@ model Tenant {
   autoJoinSeatCap Int @default(25)
 
   residency              TenantResidency @default(UAE)
-  /// New workspaces get true unless Government or air-gapped (`defaultAllowExternalAi`).
-  allowExternalAi        Boolean         @default(true)
+  /// Provisioning sets it: true only for a COMMERCIAL, non-air-gapped workspace (`defaultAllowExternalAi`). A raw insert defaults closed.
+  allowExternalAi        Boolean         @default(false)
   /// True once an owner has set `allowExternalAi` by hand: a data migration or default change never overrides it.
   allowExternalAiChosen  Boolean         @default(false)
   /// Set by `ai:default-on` when it switched AI on for an existing workspace; cleared when an owner or admin dismisses the console notice.

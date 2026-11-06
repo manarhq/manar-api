@@ -113,7 +113,7 @@ export class TenantCreateCommand extends CommandRunner {
   @Option({
     flags: '--allow-external-ai [boolean]',
     description:
-      'Allow this tenant to use external AI providers (default: true, false for --sector GOVERNMENT or AIR_GAPPED)',
+      'Allow this tenant to use external AI providers (default: true only with --sector COMMERCIAL; otherwise false)',
   })
   parseAllowExternalAi(value: string): boolean {
     return parseBoolean(value);

@@ -109,7 +109,13 @@ export const AUDIT_EVENT_TYPES = {
   USER_ROLE_REVOKE_REFUSED: 'user.role_revoke_refused',
   /** `PATCH /tenant/settings` updated one or more residency/AI-governance flags — see `TenantSettingsService.updateSettings`. */
   TENANT_SETTINGS_UPDATED: 'tenant.settings_updated',
-  /** `ai:default-on` switched AI on for this existing workspace (founder default of 5 Nov 2026); data carries no identifiers beyond the tenant's own log. */
+  /** `ai:default-on` is about to switch AI on here (written first; if it cannot be written nothing changes). Pairs with `TENANT_AI_DEFAULT_APPLIED` by `intentId`. */
+  TENANT_AI_DEFAULT_INTENT: 'tenant.settings.ai_default_intent',
+  /** Manar staff set this workspace's sector (`tenant:set-sector` or the platform API); the AI default depends on it. */
+  TENANT_SECTOR_SET: 'tenant.sector_set',
+  /** An owner or admin dismissed the console notice about the AI default. */
+  TENANT_AI_NOTICE_DISMISSED: 'tenant.settings.ai_notice_dismissed',
+  /** `ai:default-on` completed the flip announced by an intent event (`applied` says whether it changed the row); a later run writes it from the row's state if the first write failed. Founder default of 5 Nov 2026. */
   TENANT_AI_DEFAULT_APPLIED: 'tenant.settings.ai_default_applied',
   /** Manar staff changed this tenant's feature flags, packs or LLM route through manar-fleet (src/platform/catalog.*). */
   CATALOG_UPDATED: 'catalog.updated',

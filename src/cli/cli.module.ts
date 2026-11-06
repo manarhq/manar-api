@@ -32,6 +32,8 @@ import { LicenseVerifyCommand } from './commands/license-verify.command';
 import { BillingRetireLaunchOfferCommand } from './commands/billing-retire-launch-offer.command';
 import { AiDefaultOnCommand } from './commands/ai-default-on.command';
 import { AiDefaultService } from '../tenant-settings/ai-default.service';
+import { TenantSetSectorCommand } from './commands/tenant-set-sector.command';
+import { TenantSectorService } from '../tenant-settings/tenant-sector.service';
 import { StripeGateway } from '../billing/stripe.gateway';
 
 /**
@@ -97,6 +99,8 @@ import { StripeGateway } from '../billing/stripe.gateway';
     StripeGateway,
     AiDefaultOnCommand,
     AiDefaultService,
+    TenantSetSectorCommand,
+    TenantSectorService,
   ],
 })
 export class CliModule {}

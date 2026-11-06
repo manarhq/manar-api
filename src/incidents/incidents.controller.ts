@@ -1,5 +1,6 @@
 import {
   AI_SWITCHED_OFF_REASON,
+  aiSwitchedOff,
   AiAdvisoryClient,
 } from '../ai-advisory/ai-advisory-client.service';
 import { UsageMeterService } from '../billing/usage-meter.service';
@@ -213,7 +214,7 @@ export class IncidentsController {
           }),
         ),
       async () =>
-        (await this.aiAdvisory.aiGate(auth.tenant.id)) === 'switched_off'
+        aiSwitchedOff(await this.aiAdvisory.aiGate(auth.tenant.id))
           ? {
               available: false,
               reason: AI_SWITCHED_OFF_REASON,

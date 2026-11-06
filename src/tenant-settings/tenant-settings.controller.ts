@@ -98,6 +98,9 @@ export class TenantSettingsController {
   async dismissAiDefaultNotice(
     @CurrentAuth() auth: AuthContext,
   ): Promise<void> {
-    await this.tenantSettingsService.dismissAiDefaultNotice(auth.tenant.id);
+    await this.tenantSettingsService.dismissAiDefaultNotice(
+      auth.tenant.id,
+      auth.user.id,
+    );
   }
 }

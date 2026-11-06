@@ -28,12 +28,27 @@ export class AiDefaultOnCommand extends CommandRunner {
     return true;
   }
 
-  async run(_params: string[], options?: { dryRun?: boolean }): Promise<void> {
+  @Option({
+    flags: '--include-enterprise',
+    description:
+      'Live run: also flip company (enterprise) workspaces. Without it they are only counted',
+  })
+  parseIncludeEnterprise(): boolean {
+    return true;
+  }
+
+  async run(
+    _params: string[],
+    options?: { dryRun?: boolean; includeEnterprise?: boolean },
+  ): Promise<void> {
     const dryRun = options?.dryRun === true;
-    const counts = await this.service.run({ dryRun });
+    const counts = await this.service.run({
+      dryRun,
+      includeEnterprise: options?.includeEnterprise === true,
+    });
     this.logger.log(
       `${dryRun ? 'DRY RUN, nothing changed' : 'Applied'}: ${JSON.stringify(counts)}`,
     );
-    process.exitCode = counts.failed > 0 ? 1 : 0;
+    process.exitCode = counts.failed > 0 || counts.completionFailed > 0 ? 1 : 0;
   }
 }

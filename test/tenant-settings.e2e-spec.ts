@@ -201,9 +201,9 @@ describe('Tenant Settings (e2e)', () => {
 
     expect(body.tenantId).toBe(tenant.id);
     expect(body.slug).toBe(tenant.slug);
-    // Defaults: AI on for a new (non-Government, non-air-gapped) workspace, the rest off.
+    // Defaults: provisioned with no sector, so AI is off (it is on only for a recorded commercial sector); the rest off.
     expect(body.residency).toBe('UAE');
-    expect(body.allowExternalAi).toBe(true);
+    expect(body.allowExternalAi).toBe(false);
     expect(body.allowOutboundTelemetry).toBe(false);
     expect(body.allowCloudStorage).toBe(false);
 
@@ -255,8 +255,8 @@ describe('Tenant Settings (e2e)', () => {
     };
     expect(patchBody.allowCloudStorage).toBe(true);
     expect(patchBody.residency).toBe('CUSTOM_REGION');
-    // Untouched field is unchanged (a new workspace starts with AI on).
-    expect(patchBody.allowExternalAi).toBe(true);
+    // Untouched field is unchanged (provisioned without a sector: AI off).
+    expect(patchBody.allowExternalAi).toBe(false);
 
     // Persists across a fresh GET, not just echoed back in the PATCH response.
     const getResponse = await request(app.getHttpServer() as App)
@@ -394,5 +394,44 @@ describe('Tenant Settings (e2e)', () => {
       (after.body as { aiDefaultNoticePending: boolean })
         .aiDefaultNoticePending,
     ).toBe(false);
+  }, 30_000);
+
+  it('7. the dismiss is admin-only and audited; any change to allowExternalAi clears both notices', async () => {
+    await request(app.getHttpServer() as App)
+      .post('/tenant/settings/ai-default-notice/dismiss')
+      .set('Authorization', `Bearer ${plainToken}`)
+      .expect(403);
+
+    await control.tenant.update({
+      where: { id: tenant.id },
+      data: { aiDefaultNoticePending: true, aiOptInNoticePending: true },
+    });
+    await request(app.getHttpServer() as App)
+      .post('/tenant/settings/ai-default-notice/dismiss')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(204);
+    const tenantClient = await tenantDatabaseManager.getClient(tenant.id);
+    expect(
+      await tenantClient.auditEvent.count({
+        where: { eventType: 'tenant.settings.ai_notice_dismissed' },
+      }),
+    ).toBeGreaterThanOrEqual(1);
+
+    await control.tenant.update({
+      where: { id: tenant.id },
+      data: { aiDefaultNoticePending: true, aiOptInNoticePending: true },
+    });
+    await request(app.getHttpServer() as App)
+      .patch('/tenant/settings')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ allowExternalAi: true })
+      .expect(200);
+    const row = await control.tenant.findUniqueOrThrow({
+      where: { id: tenant.id },
+    });
+    expect(row).toMatchObject({
+      aiDefaultNoticePending: false,
+      aiOptInNoticePending: false,
+    });
   }, 30_000);
 });

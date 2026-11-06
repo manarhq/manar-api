@@ -4,6 +4,7 @@ import { PlatformOpsController } from './platform-ops.controller';
 import { PlatformOpsService } from './platform-ops.service';
 import { PlatformController } from './platform.controller';
 import { PlatformService } from './platform.service';
+import { TenantSectorService } from '../tenant-settings/tenant-sector.service';
 import { PlatformSuspension } from './platform-suspension';
 
 /** Imported only into AppModule (the human HTTP app), never the agent mTLS listener. */
@@ -14,6 +15,7 @@ import { PlatformSuspension } from './platform-suspension';
     PlatformAuthGuard,
     PlatformSuspension,
     PlatformOpsService,
+    TenantSectorService,
   ],
 })
 export class PlatformModule {}

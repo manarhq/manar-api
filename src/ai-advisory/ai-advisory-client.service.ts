@@ -31,6 +31,10 @@ import {
 /** What an AI endpoint answers (`reason`) when the workspace has "Allow external AI" off. The console shows a polite EN/AR notice for it. */
 export const AI_SWITCHED_OFF_REASON = 'ai_switched_off' as const;
 
+/** True for the two gate states that get the polite "AI features are switched off" answer. */
+export const aiSwitchedOff = (gate: string): boolean =>
+  gate === 'switched_off' || gate === 'air_gapped';
+
 export interface RiskAdvisory {
   score: number;
   confidence: number;
@@ -704,9 +708,10 @@ export class AiAdvisoryClient implements OnModuleDestroy {
    * `AI_SWITCHED_OFF_REASON` when the state is `switched_off`. Fails closed: a failed tenant
    * lookup is `unknown`, never `allowed`.
    *
-   * - `switched_off`: the provider is external and the workspace has "Allow external AI" off (or
-   *   is air-gapped). The polite "AI features are switched off" case.
+   * - `switched_off`: the provider is external and the workspace has "Allow external AI" off.
+   *   The polite "AI features are switched off" case.
    * - `air_gapped`: the workspace is air-gapped; no external provider, whatever the flag says.
+   *   Callers show the same polite answer for both (`aiSwitchedOff`).
    * - `restricted`: the tool action's data is RESTRICTED; never sent externally, whatever the flag.
    * - `unknown`: the tenant row could not be read.
    */

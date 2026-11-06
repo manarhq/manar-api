@@ -10,3 +10,10 @@ export const CreatePlatformTenantSchema = z.object({
 });
 
 export type CreatePlatformTenant = z.infer<typeof CreatePlatformTenantSchema>;
+
+/** Staff records the sector of a legacy workspace (api#62); more fields can join later. */
+export const UpdatePlatformTenantSchema = z.object({
+  sector: z.enum(['COMMERCIAL', 'GOVERNMENT']),
+});
+
+export type UpdatePlatformTenant = z.infer<typeof UpdatePlatformTenantSchema>;

@@ -28,14 +28,15 @@ import {
 const execFileAsync = promisify(execFile);
 
 /**
- * AI is on by default (opt-out, disclosed in the DPA and shown in Settings) for Free, Pro and
- * Company workspaces; off for Government and for air-gapped ones, which no external model may reach.
+ * AI is on by default (opt-out, disclosed in the DPA and shown in Settings) only where the
+ * workspace is positively recorded as COMMERCIAL and not air-gapped. An unknown sector (staff
+ * provisioning that does not say) stays off and is not a recorded choice; Government is off.
  */
 export function defaultAllowExternalAi(input: {
   residency?: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
   sector?: 'COMMERCIAL' | 'GOVERNMENT';
 }): boolean {
-  return input.residency !== 'AIR_GAPPED' && input.sector !== 'GOVERNMENT';
+  return input.residency !== 'AIR_GAPPED' && input.sector === 'COMMERCIAL';
 }
 
 export interface ProvisionTenantInput {
