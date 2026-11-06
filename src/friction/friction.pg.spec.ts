@@ -135,7 +135,10 @@ describe.skipIf(!url)('friction rollup on PostgreSQL', () => {
       await db.frictionDaily.count({ where: { day: new Date('2026-11-05') } }),
     ).toBe(3);
     await ap('fA', at(11, 30), 'APPROVED', 4);
-    const after = await svc.report(
+    // The same process reuses a rollup written less than 30 seconds ago (friction-race.pg.spec.ts);
+    // another process, or the same one later, sees the late answer.
+    const other = new FrictionService({} as never, {} as never);
+    const after = await other.report(
       db,
       { subject: 'alice', admin: true },
       7,
