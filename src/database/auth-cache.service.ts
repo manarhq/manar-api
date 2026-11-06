@@ -8,8 +8,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import { createClient, type RedisClientType } from 'redis';
-import type { AppConfig } from '../config/env.validation';
 import { redisClientOptions } from '../audit/live/redis.config';
+import type { AppConfig } from '../config/env.validation';
 
 const CHANNEL = 'manar:auth-cache-invalidate';
 
@@ -19,7 +19,12 @@ const CHANNEL = 'manar:auth-cache-invalidate';
  * every writer of a membership role or status, or of a tenant status, calls `invalidate()` AFTER
  * its transaction committed; that clears this replica at once and tells the other replicas over
  * Redis pub/sub. Only positive lookups are cached, so a new grant is visible immediately.
- * If Redis is down the other replicas fall back to the TTL (30 s) for that change.
+ *
+ * The cache is only used while this replica can hear those messages. Without a ready pub/sub
+ * subscriber (Redis down, restarting, not yet connected) every lookup goes to the database, and the
+ * whole cache is cleared each time the subscriber (re)connects, because invalidations sent during
+ * the outage were missed. `AUTH_CACHE_PUBSUB=false` turns the cache off entirely. Connecting never
+ * blocks start-up: the replica just runs without the cache until it is connected.
  * A whole-cache clear is deliberate: those writes are rare, reads are every request.
  */
 @Injectable()
@@ -34,36 +39,78 @@ export class AuthCache implements OnModuleInit, OnModuleDestroy {
   private generation = 0;
   private publisher?: RedisClientType;
   private subscriber?: RedisClientType;
+  private publisherConnecting?: Promise<unknown>;
+  private connectTimeoutMs = 1000;
+  /**
+   * May entries be served? True in local mode (no Redis configured: tests and the CLI), otherwise
+   * only while the subscriber is connected and subscribed.
+   */
+  private active: boolean;
+  private readonly enabled: boolean;
 
   constructor(
     @Optional() private readonly config?: ConfigService<AppConfig, true>,
-  ) {}
-
-  async onModuleInit(): Promise<void> {
-    if (!this.config || process.env.AUTH_CACHE_PUBSUB === 'false') return;
-    try {
-      const options = redisClientOptions((k) =>
-        this.config!.get(k, { infer: true }),
-      );
-      this.publisher = createClient(options);
-      this.publisher.on('error', () => undefined);
-      await this.publisher.connect();
-      this.subscriber = this.publisher.duplicate();
-      this.subscriber.on('error', () => undefined);
-      await this.subscriber.connect();
-      await this.subscriber.subscribe(CHANNEL, (origin: string) => {
-        if (origin !== this.origin) this.clear();
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Auth cache invalidation over Redis unavailable, other replicas rely on the ${AuthCache.TTL_MS / 1000} s TTL: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  ) {
+    this.enabled = process.env.AUTH_CACHE_PUBSUB !== 'false';
+    this.active = !config && this.enabled;
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.subscriber?.quit().catch(() => undefined);
-    await this.publisher?.quit().catch(() => undefined);
+  onModuleInit(): void {
+    if (!this.config || !this.enabled) return;
+    const timeout =
+      this.config.get('REDIS_TIMEOUT_MS', { infer: true }) ?? 1000;
+    const options = redisClientOptions(
+      (k) => this.config!.get(k, { infer: true }),
+      {
+        connectTimeout: timeout,
+        // Keep trying in the background; start-up never waits for it.
+        reconnectStrategy: (retries: number) =>
+          Math.min(2000, 100 * 2 ** Math.min(retries, 5)),
+      },
+    );
+    this.publisher = createClient(options);
+    this.publisher.on('error', () => undefined);
+    this.publisherConnecting = this.publisher.connect().catch(() => undefined);
+
+    const sub = this.publisher.duplicate() as RedisClientType;
+    this.subscriber = sub;
+    const down = (why: string) => {
+      if (this.active) this.logger.warn(`Auth cache bypassed: ${why}`);
+      this.active = false;
+      this.clear();
+    };
+    sub.on('error', (e: unknown) =>
+      down(
+        `Redis subscriber error: ${e instanceof Error ? e.message : String(e)}`,
+      ),
+    );
+    sub.on('end', () => down('Redis subscriber disconnected'));
+    sub.on('reconnecting', () => down('Redis subscriber reconnecting'));
+    sub.on('ready', () => {
+      // Messages sent while we were away were missed: start from an empty cache, (re)subscribe
+      // (idempotent for the same listener), clear again, and only then serve entries.
+      this.active = false;
+      this.clear();
+      sub
+        .subscribe(CHANNEL, this.onMessage)
+        .then(() => {
+          this.clear();
+          this.active = true;
+          this.logger.log('Auth cache active (pub/sub subscribed)');
+        })
+        .catch((e: unknown) => down(`subscribe failed: ${String(e)}`));
+    });
+    void sub.connect().catch(() => undefined);
+  }
+
+  private readonly onMessage = (origin: string): void => {
+    if (origin !== this.origin) this.clear();
+  };
+
+  onModuleDestroy(): void {
+    this.active = false;
+    this.subscriber?.destroy();
+    this.publisher?.destroy();
   }
 
   /** Cached `load()` result for `key` (null results are never stored). */
@@ -71,25 +118,37 @@ export class AuthCache implements OnModuleInit, OnModuleDestroy {
     key: string,
     load: () => Promise<T | null>,
   ): Promise<T | null> {
+    if (!this.enabled || !this.active) return load();
     const hit = this.entries.get(key);
     if (hit && Date.now() - hit.at < AuthCache.TTL_MS) return hit.value as T;
     const generation = this.generation;
     const value = await load();
-    if (value !== null && generation === this.generation) {
+    if (value !== null && generation === this.generation && this.active) {
       if (this.entries.size >= AuthCache.MAX_ENTRIES) this.entries.clear();
       this.entries.set(key, { at: Date.now(), value });
     }
     return value;
   }
 
-  /** Call after the change committed. Clears this replica now; tells the others. */
-  invalidate(): void {
+  /**
+   * Call after the change committed. Clears this replica now and tells the others; resolves when
+   * the message was handed to Redis (a CLI waits for it, the API ignores the promise).
+   */
+  async invalidate(): Promise<void> {
     this.clear();
-    void this.publisher
-      ?.publish(CHANNEL, this.origin)
-      .catch((e: unknown) =>
-        this.logger.warn(`Auth cache invalidation not published: ${String(e)}`),
-      );
+    const publisher = this.publisher;
+    if (!publisher) return;
+    if (!publisher.isReady && this.publisherConnecting) {
+      // Just started (a CLI): give the connection a moment instead of dropping the message.
+      await Promise.race([
+        this.publisherConnecting,
+        new Promise((r) => setTimeout(r, this.connectTimeoutMs)),
+      ]);
+    }
+    if (!publisher.isReady) return;
+    await publisher.publish(CHANNEL, this.origin).catch((e: unknown) => {
+      this.logger.warn(`Auth cache invalidation not published: ${String(e)}`);
+    });
   }
 
   private clear(): void {

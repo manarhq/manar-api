@@ -1,7 +1,8 @@
-import { Logger } from '@nestjs/common';
+import { Logger, Optional } from '@nestjs/common';
 import { Command, CommandRunner, Option } from 'nest-commander';
 import { rolesOf, splitRoles } from '../../auth/membership.service';
 import { isRoleName, ROLES, type RoleName } from '../../auth/roles';
+import { AuthCache } from '../../database/auth-cache.service';
 import { ControlPrismaService } from '../../database/control-prisma.service';
 import { KeycloakAdminClient } from '../../keycloak/keycloak-admin.client';
 
@@ -130,7 +131,10 @@ interface GrantOptions {
 export class MembershipsGrantCommand extends CommandRunner {
   private readonly logger = new Logger(MembershipsGrantCommand.name);
 
-  constructor(private readonly control: ControlPrismaService) {
+  constructor(
+    private readonly control: ControlPrismaService,
+    @Optional() private readonly authCache?: AuthCache,
+  ) {
     super();
   }
 
@@ -178,6 +182,8 @@ export class MembershipsGrantCommand extends CommandRunner {
       },
       update: { ...split, status: 'ACTIVE', grantedBy: 'system:cli' },
     });
+    // The API replicas may hold the old roles: clear them now (waits for the publish).
+    await this.authCache?.invalidate();
     this.logger.log(
       `Granted ${rolesOf({ ...split }).join(', ')} in "${tenant.slug}"`,
     );

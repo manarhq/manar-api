@@ -1,7 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument -- fakes */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { KeycloakAdminClient } from '../../keycloak/keycloak-admin.client';
-import { MembershipsMigrateCommand } from './memberships.command';
+import {
+  MembershipsGrantCommand,
+  MembershipsMigrateCommand,
+} from './memberships.command';
 
 const ISSUER = 'https://auth.test/realms/acme';
 
@@ -133,5 +136,39 @@ describe('KeycloakAdminClient.listRealmRoleMemberIds', () => {
     await expect(c.listRealmRoleMemberIds('r', 'AUDITOR')).rejects.toThrow(
       'HTTP 500',
     );
+  });
+});
+
+describe('memberships:grant', () => {
+  it('clears the API replicas auth cache after the roles are written, and waits for it', async () => {
+    const order: string[] = [];
+    const control = {
+      tenant: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 't1',
+          slug: 'acme',
+          keycloakIssuerUrl: ISSUER,
+        }),
+      },
+      membership: {
+        upsert: vi.fn(() => {
+          order.push('upsert');
+          return Promise.resolve({});
+        }),
+      },
+    };
+    const cache = {
+      invalidate: vi.fn(async () => {
+        await Promise.resolve();
+        order.push('invalidate');
+      }),
+    };
+    const cmd = new MembershipsGrantCommand(control as never, cache as never);
+    await cmd.run([], {
+      tenant: 'acme',
+      subject: 's1',
+      roles: ['TENANT_OWNER'],
+    });
+    expect(order).toEqual(['upsert', 'invalidate']);
   });
 });

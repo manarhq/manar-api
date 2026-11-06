@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { EnvSecretProvider } from '../src/database/env-secret-provider';
 import { TenantDatabaseManager } from '../src/database/tenant-database-manager.service';
+import { withOwnerLocks } from '../src/users/last-owner';
 import { LastOwnerError } from '../src/users/users.errors';
 import { UsersService } from '../src/users/users.service';
 import { fakeConfigService } from './support/audit-test-config';
@@ -164,5 +165,48 @@ describe('last owner (e2e)', () => {
       w.revoke(w.people[0]!.id, w.people[0]!.id),
     ).rejects.toBeInstanceOf(LastOwnerError);
     expect(await w.activeOwners()).toBe(1);
+  }, 30_000);
+
+  it('withOwnerLocks is all or nothing: refused on the second company, the first stays ACTIVE', async () => {
+    const a = await workspace(2); // the person plus another owner
+    const b = await workspace(1); // the person is the only owner
+    const person = {
+      issuer: ISSUER,
+      subject: `both-${randomUUID().slice(0, 6)}`,
+    };
+    const tenantA = (
+      await control.membership.findFirstOrThrow({
+        where: { subject: a.people[0]!.subject },
+      })
+    ).tenantId;
+    const tenantB = (
+      await control.membership.findFirstOrThrow({
+        where: { subject: b.people[0]!.subject },
+      })
+    ).tenantId;
+    for (const t of [tenantA, tenantB]) {
+      await control.membership.create({
+        data: {
+          ...person,
+          tenantId: t,
+          role: 'TENANT_OWNER',
+          status: 'ACTIVE',
+        },
+      });
+    }
+    // A has two other owners' worth (the pair plus the person); B only its own owner plus the person
+    await control.membership.deleteMany({
+      where: { tenantId: tenantB, subject: b.people[0]!.subject },
+    });
+    await expect(
+      withOwnerLocks(control, [tenantB, tenantA], person, (tx) =>
+        tx.membership.updateMany({
+          where: { ...person, tenantId: { in: [tenantA, tenantB] } },
+          data: { status: 'REMOVED' },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(LastOwnerError);
+    const rows = await control.membership.findMany({ where: person });
+    expect(rows.map((r) => r.status)).toEqual(['ACTIVE', 'ACTIVE']);
   }, 30_000);
 });

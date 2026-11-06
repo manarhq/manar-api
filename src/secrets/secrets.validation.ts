@@ -11,6 +11,9 @@ export const SECRET_EVENT_TYPES = [
   'secret.watch.unavailable',
 ] as const;
 
+/** Device lifecycle events (not secrets, not tampering). */
+export const SERVICE_EVENT_TYPES = ['service.restarted'] as const;
+
 export const PATH_CLASSES = [
   'aws',
   'ssh',
@@ -41,7 +44,11 @@ const absentIfEmpty = <T extends z.ZodType>(t: T) =>
 
 export const HostEventSchema = z
   .object({
-    type: z.enum([...SECRET_EVENT_TYPES, ...TAMPER_EVENT_TYPES]),
+    type: z.enum([
+      ...SECRET_EVENT_TYPES,
+      ...SERVICE_EVENT_TYPES,
+      ...TAMPER_EVENT_TYPES,
+    ]),
     toolId: absentIfEmpty(z.string().regex(/^(host\.[a-z0-9-]{1,40}|other)$/)),
     process: absentIfEmpty(text(128)),
     // 0.1.1 also sends the vault's request kind: an SSH key restore is about SSH keys; a refused
@@ -53,6 +60,8 @@ export const HostEventSchema = z
     ),
     maskedPath: absentIfEmpty(text(1024)),
     blocked: z.boolean().optional(),
+    /** service.restarted: seconds the device service was away (at most a day). */
+    downtimeSeconds: z.number().int().min(0).max(86_400).optional(),
     at: z.coerce.date(),
   })
   .strict();
