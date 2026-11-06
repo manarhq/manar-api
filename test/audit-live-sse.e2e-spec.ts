@@ -10,6 +10,7 @@ import {
 } from '@nestjs/platform-fastify';
 import request from 'supertest';
 import { App } from 'supertest/types';
+import { RedisPubSubService } from '../src/audit/live/redis-pubsub.service';
 import { AppModule } from '../src/app.module';
 import { ControlPrismaService } from '../src/database/control-prisma.service';
 import { KeycloakModule } from '../src/keycloak/keycloak.module';
@@ -101,7 +102,10 @@ describe('Live audit-event SSE feed (e2e)', () => {
   }
 
   /** Opens a live SSE connection and incrementally parses `audit-event` frames into `received`. */
-  function openLiveConnection(token: string): {
+  function openLiveConnection(
+    token: string,
+    query = '',
+  ): {
     received: DomainEventEnvelope[];
     close: () => void;
   } {
@@ -111,7 +115,7 @@ describe('Live audit-event SSE feed (e2e)', () => {
     void (async () => {
       let response: Response;
       try {
-        response = await fetch(`${endpoint}/events/live`, {
+        response = await fetch(`${endpoint}/events/live${query}`, {
           headers: { Authorization: `Bearer ${token}` },
           signal: controller.signal,
         });
@@ -277,6 +281,59 @@ describe('Live audit-event SSE feed (e2e)', () => {
     connectionA.close();
     connectionB.close();
   }, 30_000);
+
+  it('?prefix= filters on the server, connections of one tenant share one subscriber, and a bad prefix is a 400', async () => {
+    const pubsub = app.get(RedisPubSubService);
+    const all = openLiveConnection(tokenA);
+    const approvalsOnly = openLiveConnection(tokenA, '?prefix=approval.');
+    const tasksOnly = openLiveConnection(tokenA, '?prefix=task.');
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    // Three open streams, one shared Redis subscriber for tenant A (tenant B has none open).
+    expect(pubsub.sharedSubscriberCount()).toBe(1);
+
+    const agentResponse = await request(app.getHttpServer() as App)
+      .post('/agents')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({
+        slug: `sse-agt-${randomUUID().slice(0, 8)}`,
+        displayName: 'SSE Prefix Agent',
+      })
+      .expect(201);
+    await request(app.getHttpServer() as App)
+      .post('/tasks')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({
+        name: 'SSE prefix task',
+        assignedAgentId: (agentResponse.body as { id: string }).id,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      })
+      .expect(201);
+
+    await waitUntil(
+      () =>
+        tasksOnly.received.some((e) => e.eventType === 'task.created') &&
+        all.received.some((e) => e.eventType === 'task.created'),
+      20_000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(tasksOnly.received.length).toBeGreaterThan(0);
+    expect(
+      tasksOnly.received.every((e) => e.eventType.startsWith('task.')),
+    ).toBe(true);
+    expect(approvalsOnly.received).toEqual([]);
+
+    const bad = await fetch(`${endpoint}/events/live?prefix=bogus.`, {
+      headers: { Authorization: `Bearer ${tokenA}` },
+    });
+    expect(bad.status).toBe(400);
+    await bad.body?.cancel();
+
+    all.close();
+    approvalsOnly.close();
+    tasksOnly.close();
+    await waitUntil(() => pubsub.sharedSubscriberCount() === 0, 5_000);
+    expect(pubsub.sharedSubscriberCount()).toBe(0);
+  }, 40_000);
 
   it('refuses a tenant user without an audit read role (S24)', async () => {
     const readOnlyToken = await provisionAdminUser(

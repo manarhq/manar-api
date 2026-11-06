@@ -31,15 +31,16 @@ export interface LiveSubscription {
  * Two separate Redis client connections, per `node-redis`'s own documented
  * pub/sub contract: RESP2 pub/sub takes over a connection entirely once
  * `SUBSCRIBE` is issued (no other commands can share it), so a dedicated
- * "publisher" connection is kept here (`onModuleInit`) and every *subscriber*
- * gets its own fresh `duplicate()`d connection (`subscribeTenant`) — never
- * the shared publisher connection itself.
+ * "publisher" connection is kept here (`onModuleInit`) and subscribers use a
+ * `duplicate()`d connection (`subscribeTenant`, one per tenant per process,
+ * shared by that tenant's open streams) — never the publisher itself.
  */
 @Injectable()
 export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisPubSubService.name);
   private readonly redisOptions: ReturnType<typeof redisClientOptions>;
   private publisher: RedisClientType | undefined;
+  private readonly shared = new Map<string, SharedSubscriber>();
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.redisOptions = redisClientOptions((key) =>
@@ -70,6 +71,14 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    for (const entry of this.shared.values()) {
+      try {
+        (await entry.ready).destroy();
+      } catch {
+        // never opened
+      }
+    }
+    this.shared.clear();
     try {
       await this.publisher?.quit();
     } catch (error) {
@@ -106,47 +115,146 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Subscribes to one tenant's live channel for the duration of a single
-   * `GET /events/live` connection — a fresh, dedicated `duplicate()`d
-   * connection per call (see class doc comment). `onMessage` is invoked
-   * with each envelope's already-`JSON.parse`d payload. Returns an
-   * `unsubscribe` the caller must call exactly once (on connection close)
-   * to disconnect this dedicated connection — never left open past the
-   * SSE connection's own lifetime.
+   * Subscribes to one tenant's live channel. All `GET /events/live` connections of one tenant in
+   * this process share ONE dedicated Redis subscriber (a `duplicate()`d connection, never the
+   * publisher), ref-counted: it is opened by the first listener and unsubscribed and closed when
+   * the last one leaves. The cost is one Redis connection per active tenant per process, not one
+   * per open console tab. A tenant's listeners only ever see that tenant's channel.
+   *
+   * Rejects when the subscriber cannot be opened within `SUBSCRIBE_TIMEOUT_MS`; the caller must
+   * answer 503 and not start a stream. `onMessage` receives the already-parsed envelope; a
+   * listener that throws does not stop the others. Call the returned `unsubscribe` once, when
+   * the connection closes (further calls do nothing).
    */
   async subscribeTenant(
     tenantId: string,
     onMessage: (envelope: DomainEventEnvelope) => void,
   ): Promise<LiveSubscription> {
-    const base = this.publisher ?? createClient(this.redisOptions);
-    const subscriber = base.duplicate() as RedisClientType;
-    subscriber.on('error', (error: unknown) => {
-      this.logger.warn(
-        `Redis subscriber connection error (tenant "${tenantId}"): ${errorMessage(error)}`,
-      );
-    });
-    await subscriber.connect();
-
-    const channel = tenantLiveChannel(tenantId);
-    await subscriber.subscribe(channel, (message: string) => {
-      try {
-        onMessage(JSON.parse(message) as DomainEventEnvelope);
-      } catch (error) {
-        this.logger.warn(
-          `Failed to parse a live-feed message on channel "${channel}": ${errorMessage(error)}`,
-        );
-      }
-    });
-
+    let entry = this.shared.get(tenantId);
+    if (!entry) {
+      entry = this.openShared(tenantId);
+      this.shared.set(tenantId, entry);
+    }
+    const joined = entry;
+    joined.listeners.add(onMessage);
+    try {
+      await joined.ready;
+    } catch (error) {
+      // The open failed and cleaned itself up: forget it so the next caller tries afresh.
+      joined.listeners.delete(onMessage);
+      if (this.shared.get(tenantId) === joined) this.shared.delete(tenantId);
+      throw error;
+    }
+    let left = false;
     return {
       unsubscribe: async () => {
-        try {
-          await subscriber.unsubscribe(channel);
-        } finally {
-          await subscriber.quit();
-        }
+        if (left) return;
+        left = true;
+        await this.leave(tenantId, joined, onMessage);
       },
     };
+  }
+
+  /** Number of tenants with an open shared subscriber (tests and diagnostics). */
+  sharedSubscriberCount(): number {
+    return this.shared.size;
+  }
+
+  private openShared(tenantId: string): SharedSubscriber {
+    const listeners = new Set<(envelope: DomainEventEnvelope) => void>();
+    const channel = tenantLiveChannel(tenantId);
+    const ready = (async () => {
+      const base = this.publisher ?? createClient(this.redisOptions);
+      const subscriber = base.duplicate() as RedisClientType;
+      subscriber.on('error', (error: unknown) => {
+        this.logger.warn(
+          `Redis subscriber connection error (tenant "${tenantId}"): ${errorMessage(error)}`,
+        );
+      });
+      try {
+        await withTimeout(async () => {
+          await subscriber.connect();
+          await subscriber.subscribe(channel, (message: string) => {
+            let envelope: DomainEventEnvelope;
+            try {
+              envelope = JSON.parse(message) as DomainEventEnvelope;
+            } catch (error) {
+              this.logger.warn(
+                `Failed to parse a live-feed message on channel "${channel}": ${errorMessage(error)}`,
+              );
+              return;
+            }
+            for (const listener of [...listeners]) {
+              try {
+                listener(envelope);
+              } catch (error) {
+                this.logger.warn(
+                  `A live-feed listener failed (tenant "${tenantId}"): ${errorMessage(error)}`,
+                );
+              }
+            }
+          });
+        }, SUBSCRIBE_TIMEOUT_MS);
+      } catch (error) {
+        subscriber.destroy();
+        throw error;
+      }
+      return subscriber;
+    })();
+    // A failed open is reported to every waiter below; this keeps the rejection from being unhandled.
+    ready.catch(() => undefined);
+    return { listeners, ready };
+  }
+
+  private async leave(
+    tenantId: string,
+    entry: SharedSubscriber,
+    onMessage: (envelope: DomainEventEnvelope) => void,
+  ): Promise<void> {
+    entry.listeners.delete(onMessage);
+    if (entry.listeners.size > 0) return;
+    if (this.shared.get(tenantId) === entry) this.shared.delete(tenantId);
+    try {
+      const subscriber = await entry.ready;
+      try {
+        await subscriber.unsubscribe(tenantLiveChannel(tenantId));
+      } finally {
+        await subscriber.quit();
+      }
+    } catch (error) {
+      // An open that failed already cleaned itself up; anything else is only worth a warning.
+      this.logger.warn(
+        `Error closing the live-feed subscriber for tenant "${tenantId}": ${errorMessage(error)}`,
+      );
+    }
+  }
+}
+
+/** Bound on opening a shared subscriber, so a Redis outage answers 503 instead of hanging. */
+export const SUBSCRIBE_TIMEOUT_MS = 3_000;
+
+interface SharedSubscriber {
+  listeners: Set<(envelope: DomainEventEnvelope) => void>;
+  ready: Promise<RedisClientType>;
+}
+
+async function withTimeout(
+  work: () => Promise<void>,
+  ms: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Redis subscribe timed out')),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
