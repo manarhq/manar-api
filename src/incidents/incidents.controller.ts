@@ -1,4 +1,6 @@
+import type { FastifyReply } from 'fastify';
 import { UsageMeterService } from '../billing/usage-meter.service';
+import { runAiStream } from '../ai-advisory/ai-stream';
 import {
   Body,
   Controller,
@@ -6,8 +8,10 @@ import {
   NotFoundException,
   Param,
   Patch,
+  HttpCode,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -15,6 +19,7 @@ import {
   ApiBody,
   ApiOperation,
   ApiParam,
+  ApiProduces,
   ApiQuery,
   ApiResponse,
   ApiTags,
@@ -204,6 +209,38 @@ export class IncidentsController {
           ...input,
           tenantId: auth.tenant.id,
         }),
+      ),
+    );
+  }
+
+  @Post('summarize/stream')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'AI-advisory incident summary, streamed (SSE)',
+    description:
+      'Same request, metering and result as `POST /incidents/summarize`, as a `text/event-stream`: `delta` `{t}` events carry the summary text as the model writes it (append them), then `done` with the response body of the plain endpoint (its `result.summary` replaces the streamed text), or `error` `{code}`. A `: heartbeat` comment goes out every 10 seconds. Closing the connection stops the model call. 400, 402 and 404 are ordinary JSON responses sent before the stream starts.',
+  })
+  @ApiBody({ type: SummarizeIncidentRequestDto })
+  @ApiProduces('text/event-stream')
+  @ApiResponse({ status: 200, description: 'text/event-stream' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto })
+  @ApiResponse({ status: 404, type: ErrorResponseDto })
+  async summarizeStream(
+    @CurrentAuth() auth: AuthContext,
+    @Body() body: unknown,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const input = parseBodyOrThrow(SummarizeIncidentSchema, body);
+    const tenantClient = await this.tenantDatabaseManager.getClient(
+      auth.tenant.id,
+    );
+    await runAiStream(reply, this.meter, auth.tenant.id, (hooks) =>
+      mapIncidentErrors(() =>
+        this.incidentsService.summarizeIncident(
+          tenantClient,
+          { ...input, tenantId: auth.tenant.id },
+          hooks,
+        ),
       ),
     );
   }

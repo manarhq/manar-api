@@ -52,6 +52,9 @@ FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b533
 ENV NODE_ENV=production
 WORKDIR /app
 
+# Pull fixed Alpine packages newer than the pinned base digest (e.g. zlib CVE-2026-85091).
+RUN apk upgrade --no-cache
+
 RUN addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 --ingroup nodejs demosoc
 

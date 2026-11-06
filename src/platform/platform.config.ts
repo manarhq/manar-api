@@ -13,6 +13,8 @@ export const PlatformConfigSchema = z.object({
   ),
   PLATFORM_API_CLIENT_ID: z.string().min(1).default('manar-fleet'),
   PLATFORM_API_ROLE: z.string().min(1).default('manar-platform-admin'),
+  /** Staff Owner role: also required on the AI cost routes (decision 8, Owners only). */
+  PLATFORM_OWNER_ROLE: z.string().min(1).default('manar-platform-owner'),
 });
 
 export type PlatformConfig = z.infer<typeof PlatformConfigSchema>;

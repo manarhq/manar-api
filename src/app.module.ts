@@ -60,11 +60,17 @@ import { CloudMcpModule } from './cloud-mcp/cloud-mcp.module';
 import { EdgeModule } from './edge/edge.module';
 import { EdgeHttpModule } from './edge/edge-http.module';
 import { EnterpriseModule } from './enterprise/enterprise.module';
+import {
+  AiTelemetryModule,
+  PlatformAiUsageModule,
+} from './ai-telemetry/ai-telemetry.module';
 
 @Module({
   imports: [
     AppConfigModule,
     LoggingModule,
+    AiTelemetryModule,
+    PlatformAiUsageModule,
     HealthModule,
     DatabaseModule,
     AuthModule,
