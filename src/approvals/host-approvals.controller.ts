@@ -22,6 +22,7 @@ import {
 import { dbNow } from '../common/db-clock';
 import { isWorkspacePaused } from '../pause/pause-state';
 import { explainRisk } from './risk-explain';
+import { pathDiffers } from './rule-scope';
 import { HostApprovalsService, publicOffer } from './host-approvals.service';
 
 /**
@@ -62,7 +63,8 @@ export class HostApprovalsController {
         resource: r.resource,
         // Where the file really points, when that is somewhere else: "points to ..." on the card.
         pointsTo:
-          r.resolvedPath && r.resolvedPath !== r.resource
+          r.resolvedPath &&
+          pathDiffers(r.toolId, r.actionId, r.resource, r.resolvedPath)
             ? r.resolvedPath
             : null,
         summary: r.summary,

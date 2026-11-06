@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   MCP_READ_ONLY,
+  pathDiffers,
   pathLinked,
   resolvedIsSecret,
   scopeFor,
@@ -320,5 +321,22 @@ describe('resolvedIsSecret: the real target of a link', () => {
       false,
     );
     expect(resolvedIsSecret(T, 'shell', '/home/sara/.ssh/id_rsa')).toBe(false);
+  });
+});
+
+describe('pathDiffers: only a real difference counts', () => {
+  const p = '/home/sara/proj/src/a.ts';
+  it('same after normalising, absent, or not a file action: no difference', () => {
+    expect(pathDiffers(T, 'edit', p, undefined)).toBe(false);
+    expect(pathDiffers(T, 'edit', p, '/home/sara//proj/./src/a.ts')).toBe(
+      false,
+    );
+    expect(pathDiffers(T, 'shell', 'ls', '/etc')).toBe(false);
+  });
+  it('a different or unclean target differs', () => {
+    expect(pathDiffers(T, 'edit', p, '/home/sara/.ssh/authorized_keys')).toBe(
+      true,
+    );
+    expect(pathDiffers(T, 'edit', p, '/home/sara/proj/../x')).toBe(true);
   });
 });

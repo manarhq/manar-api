@@ -14,7 +14,8 @@ const host: HostContext = {
 function make(opts: {
   grant?: boolean;
   block?: boolean;
-  policy?: unknown;
+  /** One answer for every path, or an answer per resource. */
+  policy?: object | ((req: { resource: string }) => object);
   patterns?: string[];
   /** The ask the scoped grants were made for. */
   grantAsk?: string;
@@ -54,16 +55,24 @@ function make(opts: {
   const open = vi.fn(() =>
     Promise.resolve({ id: 'a1', expiresAt: new Date() }),
   );
+  const evaluate = vi.fn(
+    (_c: unknown, _t: unknown, req: { resource: string }) =>
+      Promise.resolve(
+        typeof opts.policy === 'function'
+          ? opts.policy(req)
+          : (opts.policy ?? { effect: 'ALLOW' }),
+      ),
+  );
   const svc = new HostAuthorizeService(
     tenants as never,
     { checkAll: () => Promise.resolve({ killed: false }) } as never,
     {
-      evaluate: () => Promise.resolve(opts.policy ?? { effect: 'ALLOW' }),
+      evaluate: evaluate,
     } as never,
     audit as never,
     { open },
   );
-  return { svc, grants, audit, open };
+  return { svc, grants, audit, open, evaluate };
 }
 const shell = {
   toolId: 'host.cursor',
@@ -225,6 +234,50 @@ describe('8-hour grants on /host/v1/authorize', () => {
       expect((await unkeyed.svc.authorize(host, edit(link))).decision).toBe(
         'ALLOW',
       );
+    });
+    describe('a link is judged by where it points too, and the stricter answer wins', () => {
+      const link = '/home/sara/proj/k/config';
+      const real = '/home/sara/.kube/config';
+      // A rule written for the project: everything else runs, the kube folder is asked or denied.
+      const byPath = (effect: string) => (req: { resource: string }) =>
+        req.resource.startsWith('/home/sara/.kube')
+          ? { effect, matchedRule: { name: 'outside' } }
+          : { effect: 'ALLOW' };
+      it.each([
+        ['APPROVAL_REQUIRED', 'APPROVAL_REQUIRED'],
+        ['DENY', 'DENY'],
+        ['ALLOW', 'ALLOW'],
+      ])('policy says %s for the target: %s', async (effect, want) => {
+        const w = make({ policy: byPath(effect) });
+        const r = await w.svc.authorize(host, {
+          ...edit(link),
+          actionId: 'read',
+          resolvedPath: real,
+        });
+        expect(r.decision).toBe(want === 'ALLOW' ? r.decision : want);
+        if (want !== 'ALLOW') expect(r.cacheable).toBe(false);
+        expect(w.evaluate).toHaveBeenCalledTimes(2);
+      });
+      it('never loosens: DENY for the asked path stays DENY', async () => {
+        const w = make({
+          policy: (req: { resource: string }) =>
+            req.resource === link ? { effect: 'DENY' } : { effect: 'ALLOW' },
+        });
+        const r = await w.svc.authorize(host, {
+          ...edit(link),
+          resolvedPath: real,
+        });
+        expect(r.decision).toBe('DENY');
+      });
+      it('a path that only reads differently is not a link: one evaluation, cacheable', async () => {
+        const w = make({});
+        const r = await w.svc.authorize(host, {
+          ...edit('/home/sara/proj/src/a.ts'),
+          resolvedPath: '/home/sara//proj/./src/a.ts',
+        });
+        expect(w.evaluate).toHaveBeenCalledTimes(1);
+        expect(r.cacheable).not.toBe(false);
+      });
     });
     it('a link to a secret is high risk, so it is decided in the console only', async () => {
       const w = make({ policy: ask });

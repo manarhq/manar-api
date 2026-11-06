@@ -159,6 +159,24 @@ export function canonicalOrigin(raw: string): string | null {
  */
 export const MCP_READ_ONLY: Set<string> = new Set();
 
+/**
+ * True when the device reported a real path for a file action that is not the path asked for,
+ * after the same normalisation the path validator uses (`//` collapsed, `./` removed). A path that
+ * only reads differently is not a link; an unclean `resolvedPath` counts as different.
+ */
+export function pathDiffers(
+  toolId: string,
+  actionId: string,
+  resource: string,
+  resolvedPath: string | undefined | null,
+): boolean {
+  if (resolvedPath === undefined || resolvedPath === null) return false;
+  const kind = kindOf(toolId, actionId.toLowerCase());
+  if (kind === 'command' || kind === 'other') return false;
+  const real = canonicalAbsolute(resolvedPath);
+  return real === null || real !== canonicalAbsolute(resource);
+}
+
 /** True when a file action's (resolved) path names a secret or an unsafe place. */
 export function resolvedIsSecret(
   toolId: string,

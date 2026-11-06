@@ -16,6 +16,7 @@ import { COMMAND_RISK, classifyCommand } from '../policy/command-safety';
 import { resourceKindFor } from '../policy/resource-aliases';
 import { HIGH_RISK_SCORE } from '../approvals/host-approval-opener.service';
 import {
+  pathDiffers,
   pathLinked,
   resolvedIsSecret as secretPath,
 } from '../approvals/rule-scope';
@@ -77,6 +78,8 @@ export function policyAskKey(policy: {
     .slice(0, 24)}`;
 }
 
+const EFFECT_RANK = { ALLOW: 0, APPROVAL_REQUIRED: 1, DENY: 2 } as const;
+
 /** Same as the default task ceiling for Claude Code: reads and fetches run, edits and shell ask. */
 export const HOST_RISK_CEILING = 20;
 
@@ -129,6 +132,16 @@ export class HostAuthorizeService {
     try {
       client = await this.tenants.getClient(host.tenantId);
       result = await this.decide(client, host, request);
+      // What depends on where a link points is not stored by the device's offline snapshot.
+      if (
+        pathDiffers(
+          request.toolId,
+          request.actionId,
+          request.resource,
+          request.resolvedPath,
+        )
+      )
+        result.cacheable = false;
     } catch (error) {
       this.logger.error(
         `host authorize failed closed: ${error instanceof Error ? error.message : String(error)}`,
@@ -273,11 +286,31 @@ export class HostAuthorizeService {
             : await findLivePatternGrant(client, host.hostId, target, askKey);
       return grant;
     };
-    const policy = await this.policy.evaluate(client, host.tenantId, {
+    let policy = await this.policy.evaluate(client, host.tenantId, {
       toolId: request.toolId,
       actionId,
       resource: request.resource,
     });
+    // A link: ask the policy again about where the path really points and keep the stricter
+    // answer (DENY, then APPROVAL_REQUIRED, then ALLOW). Rules and presets are written for the
+    // path a tool names, and a "run everything else" rule would otherwise let `docs -> ~/.ssh`
+    // through. Restriction only: the answer for the requested path is never loosened.
+    if (
+      request.resolvedPath !== undefined &&
+      pathDiffers(
+        request.toolId,
+        actionId,
+        request.resource,
+        request.resolvedPath,
+      )
+    ) {
+      const real = await this.policy.evaluate(client, host.tenantId, {
+        toolId: request.toolId,
+        actionId,
+        resource: request.resolvedPath,
+      });
+      if (EFFECT_RANK[real.effect] > EFFECT_RANK[policy.effect]) policy = real;
+    }
     if (policy.effect === 'DENY') {
       return {
         decision: 'DENY',
