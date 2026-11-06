@@ -36,7 +36,12 @@ function world(
         Promise.resolve(
           over.tenant === null
             ? null
-            : { kind: 'COMPANY', learningMode: null, ...over.tenant },
+            : {
+                kind: 'COMPANY',
+                learningMode: null,
+                sector: 'COMMERCIAL',
+                ...over.tenant,
+              },
         ),
       update: vi.fn(() => Promise.resolve({})),
     },
@@ -175,7 +180,20 @@ describe('who learns (decision 36)', () => {
       true,
       'default',
     ],
-    ['sector not recorded yet', { tenant: { sector: null } }, true, 'default'],
+    // Unknown could be Government: off until staff set it, whatever is stored.
+    ['sector not recorded yet', { tenant: { sector: null } }, false, 'default'],
+    [
+      'sector not recorded, stored "on"',
+      { tenant: { sector: null, learningMode: 'on' } },
+      false,
+      'default',
+    ],
+    [
+      'no workspace sector but an Enterprise profile',
+      { tenant: { sector: null }, sector: 'ENTERPRISE' },
+      true,
+      'default',
+    ],
     [
       'admin turned off',
       { tenant: { learningMode: 'off' } },
@@ -193,6 +211,22 @@ describe('who learns (decision 36)', () => {
   ])('%s', async (_n, over, enabled, source) => {
     const c = await world(over).svc.config('t1');
     expect(c).toMatchObject({ enabled, source });
+  });
+
+  it('a workspace with no sector recorded cannot turn learning on: learning_needs_sector', async () => {
+    const w = world({ tenant: { sector: null } });
+    const err = await w.svc
+      .setWorkspace('t1', 'on', { id: 'u' }, w.client)
+      .catch((e: ForbiddenException) => e);
+    expect(err).toBeInstanceOf(ForbiddenException);
+    expect((err as ForbiddenException).getResponse()).toMatchObject({
+      reason: 'learning_needs_sector',
+    });
+    expect(w.control.tenant.update).not.toHaveBeenCalled();
+    expect((await w.svc.config('t1')).needsSector).toBe(true);
+    // off is always fine
+    await w.svc.setWorkspace('t1', 'off', { id: 'u' }, w.client);
+    expect(w.control.tenant.update).toHaveBeenCalledTimes(1);
   });
 
   it('a workspace whose own sector is GOVERNMENT cannot turn learning on either', async () => {
