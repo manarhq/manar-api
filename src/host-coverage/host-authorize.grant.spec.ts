@@ -317,7 +317,11 @@ describe('8-hour grants on /host/v1/authorize', () => {
           resolvedPath: real,
         });
         expect(r.decision).toBe('APPROVAL_REQUIRED');
-        expect(r.askKey).toBe(targetKey);
+        expect(granted.open).toHaveBeenLastCalledWith(
+          host,
+          expect.anything(),
+          expect.objectContaining({ askKey: targetKey }),
+        );
         // A grant made for the target's ask answers it, if it was recorded for the same target.
         const same = make({
           policy,
