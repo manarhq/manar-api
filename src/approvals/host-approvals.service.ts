@@ -26,7 +26,12 @@ import {
   ALWAYS_GRANT_TTL_MS,
   createAllowGrant,
 } from './allow-grants';
-import { scopeFor, scopeMatches } from './rule-scope';
+import {
+  canonicalAbsolute,
+  pathDiffers,
+  scopeFor,
+  scopeMatches,
+} from './rule-scope';
 import { buildRuleDraft } from './rule-draft';
 import { ApproverDirectory } from './approver-directory';
 import {
@@ -753,6 +758,10 @@ export class HostApprovalsService {
         sourceId: row.id,
         now,
         ...(row.askKey ? { askKey: row.askKey } : {}),
+        ...(row.resolvedPath &&
+        pathDiffers(row.toolId, row.actionId, row.resource, row.resolvedPath)
+          ? { resolvedPath: canonicalAbsolute(row.resolvedPath) ?? undefined }
+          : {}),
       });
       return { grantId: grant.id, origin: 'approval', scope: null };
     });
