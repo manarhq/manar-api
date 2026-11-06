@@ -747,6 +747,15 @@ export class HostApprovalsService {
       // A site prompt is answered by the site rule, never by an 8-hour action grant.
       if (decision !== 'approve_8h' || isSite)
         return { grantId: null as string | null };
+      // A grant for a link is bound to its canonical real target. If the target cannot be
+      // normalised there is nothing safe to bind it to, and a plain grant would answer any later
+      // ask for the name: no grant (this one request is still answered).
+      const linkedTarget =
+        row.resolvedPath &&
+        pathDiffers(row.toolId, row.actionId, row.resource, row.resolvedPath)
+          ? canonicalAbsolute(row.resolvedPath)
+          : undefined;
+      if (linkedTarget === null) return { grantId: null as string | null };
       const grant = await createAllowGrant(tx, {
         scope: { hostId: row.hostId },
         target: {
@@ -758,10 +767,7 @@ export class HostApprovalsService {
         sourceId: row.id,
         now,
         ...(row.askKey ? { askKey: row.askKey } : {}),
-        ...(row.resolvedPath &&
-        pathDiffers(row.toolId, row.actionId, row.resource, row.resolvedPath)
-          ? { resolvedPath: canonicalAbsolute(row.resolvedPath) ?? undefined }
-          : {}),
+        ...(linkedTarget ? { resolvedPath: linkedTarget } : {}),
       });
       return { grantId: grant.id, origin: 'approval', scope: null };
     });
