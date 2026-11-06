@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { HostContext } from '../host-mtls/host-context';
-import { effectivePolicyVersion } from '../policy/effective-policy-version';
+import {
+  HOST_RULES_VERSION,
+  hostPolicyState,
+} from '../policy/effective-policy-version';
 import { HostConfigController } from '../host-mtls/host-config.controller';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { HostAuthorizeService } from './host-authorize.service';
@@ -98,56 +101,78 @@ describe('host authorize always sets an explicit boolean cacheable', () => {
   });
 });
 
+type Sw = { id: string; scope: string; targetId: string | null };
+const rule = (toolId: string, actionId: string, effect: string) => ({
+  rules: [{ toolId, actionId, resourcePattern: '*', effect }],
+});
 const base = () => ({
-  policies: [{ id: 'v1', policyId: 'p1' }],
-  switches: [] as Array<{ id: string }>,
+  policies: [{ id: 'v1', content: rule('*', 'shell', 'ALLOW') }] as Array<{
+    id: string;
+    content: unknown;
+  }>,
+  switches: [] as Sw[],
   pause: { paused: false } as { paused: boolean } | null,
-  quarantine: null as { id: string } | null,
-  memberships: [] as Array<{ groupId: string }>,
-  links: [] as Array<{ aiSystemId: string }>,
-  systems: [] as Array<{ id: string; lifecycleState: string }>,
   blocks: [] as Array<{ id: string }>,
   actions: [{ id: 'a1', classification: 'INTERNAL', riskBaseScore: 10 }],
 });
 type State = ReturnType<typeof base>;
+// Applies the same OR filter the real query sends, so an unrelated switch really is excluded.
+const matchSwitch = (
+  sw: Sw,
+  or: Array<{ scope: string; targetId?: string | { in: string[] } }>,
+) =>
+  or.some(
+    (c) =>
+      c.scope === sw.scope &&
+      (c.targetId === undefined ||
+        (typeof c.targetId === 'string'
+          ? c.targetId === sw.targetId
+          : c.targetId.in.includes(sw.targetId ?? ''))),
+  );
 const db = (s: State) =>
   ({
+    tool: { findMany: () => Promise.resolve([{ id: 't-cursor' }]) },
     policyVersion: { findMany: () => Promise.resolve(s.policies) },
-    killSwitch: { findMany: () => Promise.resolve(s.switches) },
+    killSwitch: {
+      findMany: (a: { where: { OR: Parameters<typeof matchSwitch>[1] } }) =>
+        Promise.resolve(s.switches.filter((x) => matchSwitch(x, a.where.OR))),
+    },
     workspacePause: { findUnique: () => Promise.resolve(s.pause) },
-    agentQuarantine: { findFirst: () => Promise.resolve(s.quarantine) },
-    agentGroupMembership: { findMany: () => Promise.resolve(s.memberships) },
-    aiSystemAgentLink: { findMany: () => Promise.resolve(s.links) },
-    aiSystem: { findMany: () => Promise.resolve(s.systems) },
     approvalAllowGrant: { findMany: () => Promise.resolve(s.blocks) },
     toolAction: { findMany: () => Promise.resolve(s.actions) },
   }) as never;
-const ver = (s: State, platform = false) =>
-  effectivePolicyVersion(db(s), 'h1', platform);
+const state = (s: State, platform = false) =>
+  hostPolicyState(db(s), 'h1', platform);
+const ver = async (s: State, platform = false) =>
+  (await state(s, platform)).version;
 
-describe('effectivePolicyVersion', () => {
+describe('hostPolicyState version', () => {
   it('is stable and opaque', async () => {
     const v = await ver(base());
     expect(v).toBe(await ver(base()));
     expect(v).toMatch(/^[0-9a-f]{16}$/);
+    expect(HOST_RULES_VERSION).toMatch(/^[0-9a-f]{8}$/);
   });
 
   const flips: Array<[string, (s: State) => void]> = [
     [
       'a newer published policy version',
-      (s) => (s.policies = [{ id: 'v2', policyId: 'p1' }]),
+      (s) =>
+        (s.policies = [{ id: 'v2', content: rule('*', 'shell', 'ALLOW') }]),
     ],
-    ['an active kill switch', (s) => s.switches.push({ id: 'k1' })],
-    ['pause', (s) => (s.pause = { paused: true })],
-    ['host quarantine', (s) => (s.quarantine = { id: 'q1' })],
-    ['a group membership', (s) => s.memberships.push({ groupId: 'g1' })],
     [
-      'an AI system suspension',
-      (s) => {
-        s.links.push({ aiSystemId: 's1' });
-        s.systems.push({ id: 's1', lifecycleState: 'SUSPENDED' });
-      },
+      'a tenant kill switch',
+      (s) => s.switches.push({ id: 'k1', scope: 'TENANT', targetId: null }),
     ],
+    [
+      'a kill switch on this host',
+      (s) => s.switches.push({ id: 'k1', scope: 'AGENT', targetId: 'h1' }),
+    ],
+    [
+      'a kill switch on a host tool',
+      (s) => s.switches.push({ id: 'k1', scope: 'TOOL', targetId: 't-cursor' }),
+    ],
+    ['pause', (s) => (s.pause = { paused: true })],
     ['a live revoked-after-use block', (s) => s.blocks.push({ id: 'b1' })],
     [
       'a tool classification',
@@ -162,38 +187,77 @@ describe('effectivePolicyVersion', () => {
     expect(await ver(s)).not.toBe(before);
   });
 
+  it('does not change for an unrelated agent, group or tool kill switch', async () => {
+    const s = base();
+    const before = await ver(s);
+    s.switches.push(
+      { id: 'k1', scope: 'AGENT', targetId: 'other-agent' },
+      { id: 'k2', scope: 'AGENT_GROUP', targetId: 'g1' },
+      { id: 'k3', scope: 'TOOL', targetId: 'some-other-tool' },
+    );
+    expect(await ver(s)).toBe(before);
+  });
+
   it('changes when the platform kill switch turns on', async () => {
     expect(await ver(base(), true)).not.toBe(await ver(base(), false));
   });
 });
 
-describe('config poll policyVersion', () => {
+describe('hostPolicyState restrictiveReadRule', () => {
+  const restrictive = async (content: unknown) => {
+    const s = base();
+    s.policies = [{ id: 'v1', content }];
+    return (await state(s)).restrictiveReadRule;
+  };
+  it('is false with no read rule', async () => {
+    expect(await restrictive(rule('*', 'shell', 'DENY'))).toBe(false);
+    expect(await restrictive(rule('host.cursor', 'read', 'ALLOW'))).toBe(false);
+    expect(await restrictive(rule('some.other', 'read', 'DENY'))).toBe(false);
+  });
+  it('is true for a DENY read rule on a host tool', async () => {
+    expect(await restrictive(rule('host.cursor', 'read', 'DENY'))).toBe(true);
+  });
+  it('is true for an APPROVAL_REQUIRED rule on every tool and action', async () => {
+    expect(await restrictive(rule('*', '*', 'APPROVAL_REQUIRED'))).toBe(true);
+  });
+  it('is true when the content cannot be read', async () => {
+    expect(await restrictive({ nope: 1 })).toBe(true);
+  });
+  it('ignores a DRAFT rule, which the query never returns', async () => {
+    const s = base();
+    s.policies = []; // only PUBLISHED versions are selected; the draft is not in the result
+    expect((await state(s)).restrictiveReadRule).toBe(false);
+  });
+});
+
+describe('config poll', () => {
   const ctrl = (getClient: () => Promise<unknown>) =>
     Object.assign(Object.create(HostConfigController.prototype), {
       tenants: { getClient },
       platformKill: { isActive: () => Promise.resolve(false) },
       logger: { warn: vi.fn(), error: vi.fn() },
-    }) as unknown as { policyVersion(h: HostContext): Promise<string> };
+    }) as unknown as {
+      policyState(h: HostContext): Promise<{
+        version: string;
+        restrictiveReadRule: boolean;
+      }>;
+    };
 
   it('is the opaque token for an approved device', async () => {
-    expect(
-      await ctrl(() => Promise.resolve(db(base()))).policyVersion(host),
-    ).toMatch(/^[0-9a-f]{16}$/);
+    const r = await ctrl(() => Promise.resolve(db(base()))).policyState(host);
+    expect(r.version).toMatch(/^[0-9a-f]{16}$/);
+    expect(r.restrictiveReadRule).toBe(false);
   });
-  it.each(['PENDING', 'REVOKED', 'SUSPENDED', 'QUARANTINED'])(
-    'is a fixed revoked sentinel for a %s device',
-    async (status) => {
-      expect(
-        await ctrl(() => Promise.resolve(db(base()))).policyVersion({
-          ...host,
-          status: status as HostContext['status'],
-        }),
-      ).toBe(`revoked:${status}`);
-    },
-  );
+  it('is a fixed revoked sentinel for a PENDING device', async () => {
+    const r = await ctrl(() => Promise.resolve(db(base()))).policyState({
+      ...host,
+      status: 'PENDING',
+    });
+    expect(r.version).toBe('revoked:PENDING');
+  });
   it('fails the poll with 503 when the read fails', async () => {
     await expect(
-      ctrl(() => Promise.reject(new Error('db'))).policyVersion(host),
+      ctrl(() => Promise.reject(new Error('db'))).policyState(host),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 });

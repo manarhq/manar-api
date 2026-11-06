@@ -20,7 +20,10 @@ import { PauseService } from '../pause/pause.service';
 import { SecretsService } from '../secrets/secrets.service';
 import { DataCollectionService } from '../data-collection/data-collection.service';
 import { JailSitesService } from '../jail/jail-sites.service';
-import { effectivePolicyVersion } from '../policy/effective-policy-version';
+import {
+  hostPolicyState,
+  type HostPolicyState,
+} from '../policy/effective-policy-version';
 import { PlatformKillSwitchService } from '../kill-switches/platform-kill-switch.service';
 import { CurrentHost, type HostContext } from './host-context';
 import { HostAuthGuard } from './host-auth.guard';
@@ -63,15 +66,17 @@ export class HostConfigController {
   }
 
   /**
-   * The effective policy version (see `effectivePolicyVersion`): the device drops its cached
-   * offline allows when it changes. A device that is not APPROVED gets a fixed `revoked:<status>`
-   * value so it drops them too. A read failure fails the poll (503), like `vaultGrants`: the
-   * device must never read "no value" as "keep the cache".
+   * The policy state token (see `hostPolicyState`): the device drops its cached offline allows
+   * when it changes. Only a PENDING device (the other statuses are refused by the auth guard
+   * before this runs) gets a fixed `revoked:<status>` value so it holds no cache. A read failure
+   * fails the poll (503), like `vaultGrants`: the device must never read "no value" as "keep the
+   * cache".
    */
-  private async policyVersion(host: HostContext): Promise<string> {
-    if (host.status !== 'APPROVED') return `revoked:${host.status}`;
+  private async policyState(host: HostContext): Promise<HostPolicyState> {
+    if (host.status !== 'APPROVED')
+      return { version: `revoked:${host.status}`, restrictiveReadRule: true };
     try {
-      return await effectivePolicyVersion(
+      return await hostPolicyState(
         await this.tenants.getClient(host.tenantId),
         host.hostId,
         await this.platformKill.isActive(),
@@ -132,6 +137,7 @@ export class HostConfigController {
     @Req() request: FastifyRequest,
   ) {
     await this.recordAgentVersion(host, request.headers['user-agent']);
+    const policy = await this.policyState(host);
     return {
       hostId: host.hostId,
       status: host.status,
@@ -149,7 +155,11 @@ export class HostConfigController {
       // While the device service restarts, reads of ordinary files (never secrets) keep working from
       // the device's last saved policy. On by default; `HOST_OFFLINE_READS_ALLOWED=false` turns it off
       // (a per-workspace admin setting for Company and Gov plans is the follow-up).
-      offlineReadsAllowed: process.env.HOST_OFFLINE_READS_ALLOWED !== 'false',
+      // Off too while a published read rule denies or asks for host tools: the device then only
+      // reuses exact cached allows offline, never the folder rule.
+      offlineReadsAllowed:
+        process.env.HOST_OFFLINE_READS_ALLOWED !== 'false' &&
+        !policy.restrictiveReadRule,
       // Path patterns (globs, or folders ending in a slash) the device never reads from its saved
       // policy while the service restarts; `HOST_OFFLINE_READ_DENY` is a comma-separated list.
       offlineReadDeny: (process.env.HOST_OFFLINE_READ_DENY ?? '')
@@ -159,7 +169,7 @@ export class HostConfigController {
         .slice(0, 100),
       // Opaque token over everything that can flip a cached ALLOW (policy, kill switches, blocks,
       // tool registry); no content. A change makes the device drop its cached offline allows.
-      policyVersion: await this.policyVersion(host),
+      policyVersion: policy.version,
       // Tools whose owner turned protection off; the device restores their backups.
       tools: await this.tools.instructions(host),
       // DOOR: secrets guard mode and tools paused by the monthly spend cap.

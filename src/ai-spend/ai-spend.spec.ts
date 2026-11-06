@@ -377,12 +377,10 @@ describe('device config', () => {
       {
         getClient: () =>
           Promise.resolve({
+            tool: { findMany: () => Promise.resolve([]) },
             policyVersion: { findMany: () => Promise.resolve([]) },
             killSwitch: { findMany: () => Promise.resolve([]) },
             workspacePause: { findUnique: () => Promise.resolve(null) },
-            agentQuarantine: { findFirst: () => Promise.resolve(null) },
-            agentGroupMembership: { findMany: () => Promise.resolve([]) },
-            aiSystemAgentLink: { findMany: () => Promise.resolve([]) },
             approvalAllowGrant: { findMany: () => Promise.resolve([]) },
             toolAction: { findMany: () => Promise.resolve([]) },
           }),
@@ -410,5 +408,6 @@ describe('device config', () => {
     expect(cfg.door).toEqual({ unavailable: true });
     expect(cfg.tools).toEqual({ unprotect: [] });
     expect(cfg.policyVersion).toMatch(/^[0-9a-f]{16}$/);
+    expect(cfg.offlineReadsAllowed).toBe(true);
   });
 });
