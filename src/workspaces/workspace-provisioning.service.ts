@@ -142,6 +142,9 @@ export class WorkspaceProvisioningService implements WorkspaceProvisioning {
         slug,
         name,
         kind: input.kind,
+        // Self-serve sign-up is commercial (a personal workspace is an individual's). Government
+        // and unknown sectors come through staff provisioning.
+        sector: 'COMMERCIAL',
         ownerSubject: input.kind === 'COMPANY' ? undefined : input.ownerSubject,
         ownerIssuer: input.kind === 'COMPANY' ? undefined : issuer,
         entraTenantId:

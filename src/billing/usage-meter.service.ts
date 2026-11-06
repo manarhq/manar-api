@@ -193,7 +193,14 @@ export class UsageMeterService {
    * answers `available: false`. The key is always made here: a client-chosen key would let a
    * repeated key read as "already counted" and get answers for free.
    */
-  async ai<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+  async ai<T>(
+    tenantId: string,
+    fn: () => Promise<T>,
+    /** Answers instead of `fn` when AI is switched off for the workspace: nothing is metered, so a switched-off workspace never meets a "credits used" pause. */
+    switchedOff?: () => Promise<T | null>,
+  ): Promise<T> {
+    const off = await switchedOff?.();
+    if (off) return off;
     const key = `ai:${randomUUID()}`;
     await this.consume(tenantId, 'ai', key);
     let result: T;

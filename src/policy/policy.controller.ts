@@ -1,3 +1,8 @@
+import {
+  AI_SWITCHED_OFF_REASON,
+  aiSwitchedOff,
+  AiAdvisoryClient,
+} from '../ai-advisory/ai-advisory-client.service';
 import { UsageMeterService } from '../billing/usage-meter.service';
 import { openSse } from '../common/sse/sse';
 import { pumpJobEvents, publicView } from '../ai-jobs/job-events';
@@ -132,6 +137,7 @@ export class PolicyController {
     private readonly policyService: PolicyService,
     private readonly tenantDatabaseManager: TenantDatabaseManager,
     private readonly meter: UsageMeterService,
+    private readonly aiAdvisory: AiAdvisoryClient,
     private readonly suggestJobs: PolicySuggestJobsService,
   ) {}
 
@@ -258,17 +264,31 @@ export class PolicyController {
     );
 
     // One AI action (paid extra), given back when no model answered.
-    const result = await this.meter.ai(auth.tenant.id, () =>
-      mapPolicyErrors(() =>
-        this.policyService.suggestPolicy(tenantClient, auth.tenant.id, {
-          ...input,
-          authorId: auth.user.id,
-        }),
-      ),
+    const result = await this.meter.ai(
+      auth.tenant.id,
+      () =>
+        mapPolicyErrors(() =>
+          this.policyService.suggestPolicy(tenantClient, auth.tenant.id, {
+            ...input,
+            authorId: auth.user.id,
+          }),
+        ),
+      async () =>
+        aiSwitchedOff(await this.aiAdvisory.aiGate(auth.tenant.id))
+          ? {
+              available: false,
+              reason: AI_SWITCHED_OFF_REASON,
+              policyId: null,
+              version: null,
+              explanation: null,
+              confidence: null,
+            }
+          : null,
     );
 
     return {
       available: result.available,
+      ...('reason' in result ? { reason: result.reason } : {}),
       policyId: result.policyId,
       version: result.version ? shapeVersion(result.version) : null,
       explanation: result.explanation,
@@ -292,6 +312,13 @@ export class PolicyController {
     @CurrentAuth() auth: AuthContext,
     @Body() body: unknown,
   ) {
+    // "Allow external AI" off: the same polite answer as `POST /policies/suggest`, no job started.
+    if (aiSwitchedOff(await this.aiAdvisory.aiGate(auth.tenant.id)))
+      return {
+        available: false as const,
+        reason: AI_SWITCHED_OFF_REASON,
+        job: null,
+      };
     return { job: publicView(await this.suggestJobs.start(auth, body)) };
   }
 

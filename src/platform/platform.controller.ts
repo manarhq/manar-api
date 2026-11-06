@@ -6,6 +6,7 @@ import {
   HttpCode,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Req,
   UseGuards,
@@ -24,13 +25,26 @@ import {
   type RequestWithPlatformCaller,
 } from './platform-auth.guard';
 import { PlatformService } from './platform.service';
-import { CreatePlatformTenantSchema } from './platform.validation';
+import {
+  CreatePlatformTenantSchema,
+  UpdatePlatformTenantSchema,
+} from './platform.validation';
 
 class CreatePlatformTenantDto {
   @ApiProperty({ example: 'acme-soc' }) slug!: string;
   @ApiProperty() name!: string;
   @ApiPropertyOptional({ enum: ['UAE', 'CUSTOM_REGION', 'AIR_GAPPED'] })
   residency?: string;
+  @ApiPropertyOptional({
+    enum: ['COMMERCIAL', 'GOVERNMENT'],
+    description:
+      'Send it. Without it the workspace is created with AI off and not marked as chosen.',
+  })
+  sector?: string;
+}
+
+class UpdatePlatformTenantDto {
+  @ApiProperty({ enum: ['COMMERCIAL', 'GOVERNMENT'] }) sector!: string;
 }
 
 class PlatformTenantDto {
@@ -106,6 +120,23 @@ export class PlatformController {
   @ApiResponse({ status: 200, type: PlatformTenantSummaryDto })
   summary(@Param('id', ParseUUIDPipe) id: string) {
     return this.service.summary(id);
+  }
+
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Record the sector of a workspace that has none (audited)',
+  })
+  @ApiResponse({ status: 200, type: PlatformTenantDto })
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: UpdatePlatformTenantDto,
+    @Req() req: RequestWithPlatformCaller,
+  ) {
+    return this.service.update(
+      id,
+      parseBodyOrThrow(UpdatePlatformTenantSchema, body),
+      caller(req),
+    );
   }
 
   @Post(':id/suspend')

@@ -27,11 +27,26 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * AI is on by default (opt-out, disclosed in the DPA and shown in Settings) only where the
+ * workspace is positively recorded as COMMERCIAL and not air-gapped. An unknown sector (staff
+ * provisioning that does not say) stays off and is not a recorded choice; Government is off.
+ */
+export function defaultAllowExternalAi(input: {
+  residency?: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
+  sector?: 'COMMERCIAL' | 'GOVERNMENT';
+}): boolean {
+  return input.residency !== 'AIR_GAPPED' && input.sector === 'COMMERCIAL';
+}
+
 export interface ProvisionTenantInput {
   slug: string;
   name: string;
   residency?: 'UAE' | 'CUSTOM_REGION' | 'AIR_GAPPED';
+  /** Absent: `defaultAllowExternalAi`. */
   allowExternalAi?: boolean;
+  /** Recorded on the tenant. Government: AI off, recorded as an explicit choice. Absent: unknown. */
+  sector?: 'COMMERCIAL' | 'GOVERNMENT';
   allowOutboundTelemetry?: boolean;
   allowCloudStorage?: boolean;
   /** Hosted workspaces (spec 4.1). Absent for the legacy `tenant:create` path (COMPANY). */
@@ -654,7 +669,12 @@ export class TenantDatabaseManager implements OnModuleDestroy {
           ownerIssuer: input.ownerIssuer ?? null,
           entraTenantId: input.entraTenantId ?? null,
           residency: input.residency ?? 'UAE',
-          allowExternalAi: input.allowExternalAi ?? false,
+          allowExternalAi:
+            input.allowExternalAi ?? defaultAllowExternalAi(input),
+          allowExternalAiChosen:
+            input.allowExternalAi !== undefined ||
+            input.sector === 'GOVERNMENT',
+          sector: input.sector ?? null,
           allowOutboundTelemetry: input.allowOutboundTelemetry ?? false,
           allowCloudStorage: input.allowCloudStorage ?? false,
         },
