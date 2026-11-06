@@ -116,6 +116,7 @@ describe('8-hour grants on /host/v1/authorize', () => {
       toolId: 'host.cursor',
       actionId: 'edit',
       resource,
+      resolvedPath: resource,
     });
     const ask = { effect: 'APPROVAL_REQUIRED' };
     it('allows inside the folder and audits the use', async () => {
@@ -165,11 +166,25 @@ describe('8-hour grants on /host/v1/authorize', () => {
       expect(r.decision).toBe('APPROVAL_REQUIRED');
       expect(r.askKey).toBeUndefined();
       expect(w.grants.findMany).not.toHaveBeenCalled();
-      // Same path, device reports it unchanged, or an older device sends nothing: as before.
-      for (const extra of [{ resolvedPath: link }, {}])
-        expect(
-          (await w.svc.authorize(host, { ...edit(link), ...extra })).decision,
-        ).toBe('ALLOW');
+      // The device reports it unchanged: the scope applies.
+      expect((await w.svc.authorize(host, edit(link))).decision).toBe('ALLOW');
+      // Absent: cannot tell, so no scope (the person is asked as usual).
+      const none = await w.svc.authorize(host, {
+        toolId: 'host.cursor',
+        actionId: 'edit',
+        resource: link,
+      });
+      expect(none.decision).toBe('APPROVAL_REQUIRED');
+      expect(none.askKey).toBeUndefined();
+      // Resolves outside the home project.
+      expect(
+        (
+          await w.svc.authorize(host, {
+            ...edit(link),
+            resolvedPath: '/etc/shadow',
+          })
+        ).decision,
+      ).toBe('APPROVAL_REQUIRED');
     });
     it('is not looked up when nothing asks', async () => {
       const w = make({
