@@ -75,6 +75,9 @@ export interface OpenHostApprovalInput {
   toolName: string;
   /** Which ask this is (`ceiling` or a policy rule): a grant made from it answers only that ask. */
   askKey?: string;
+  /** Where the device says the file really points; and whether it could not vouch for the path. */
+  resolvedPath?: string;
+  pathLinked?: boolean;
 }
 
 export interface DecideHostApprovalInput {
@@ -212,6 +215,8 @@ export class HostApprovalsService {
         summary: `${input.summary.slice(0, 280)} #${matchCode}`,
         highRisk: input.highRisk,
         askKey: input.askKey ?? null,
+        resolvedPath: input.resolvedPath ?? null,
+        pathLinked: input.pathLinked ?? false,
         expiresAt: new Date(now.getTime() + HOST_APPROVAL_TTL_MS),
       },
     });
@@ -264,6 +269,8 @@ export class HostApprovalsService {
       resource: string;
       highRisk: boolean;
       askKey?: string | null;
+      /** The device could not vouch for the path: no offer. */
+      pathLinked?: boolean;
     }>,
     at?: Date,
   ): Promise<Map<string, RuleOffer>> {
@@ -278,7 +285,7 @@ export class HostApprovalsService {
     for (const r of rows) {
       if (r.highRisk || r.actionId === SITE_CONNECT_ACTION) continue;
       // An offer answers one ask; a request without one (older) is never offered.
-      if (!r.askKey || sensitiveReason(r)) continue;
+      if (!r.askKey || r.pathLinked || sensitiveReason(r)) continue;
       const scope = scopeFor(r.toolId, r.actionId, r.resource);
       if (scope) cands.push({ r, scope, askKey: r.askKey });
     }
