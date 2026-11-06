@@ -214,7 +214,8 @@ export class HostAuthorizeService {
     )
       return { decision: 'DENY', reason: 'revoked_after_use' };
 
-    // "Approve for 8 hours" (spec 4.6): looked up before the policy runs, used only to satisfy an
+    // Grants (spec 4.6): the exact "Approve for 8 hours" grant is read here, before the policy runs;
+    // a scoped "always allow here" grant is read only when something asks. Either only satisfies an
     // approval requirement below. A policy DENY and the kill switches above are never overridden.
     const target = {
       toolId: request.toolId,

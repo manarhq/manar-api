@@ -52,6 +52,8 @@ const SENSITIVE = new RegExp(
       'auth\\.json',
       '\\.vault-token',
       '\\.pgpass',
+      '[^/]*kubeconfig[^/]*',
+      '\\.kube',
       '\\.netrc',
       '\\.npmrc',
       '\\.pypirc',
@@ -183,7 +185,6 @@ const SPECS: Record<string, Spec> = {
     flags: [
       '-i',
       '-n',
-      '-r',
       '-l',
       '-L',
       '-c',
@@ -199,13 +200,12 @@ const SPECS: Record<string, Spec> = {
       '-o',
       '--ignore-case',
       '--line-number',
-      '--recursive',
       '--files-with-matches',
       '--count',
       '--fixed-strings',
       '--word-regexp',
     ],
-    combine: 'inrlLcvwxFEHhsqo',
+    combine: 'inlLcvwxFEHhsqo',
     valued: ['-A', '-B', '-C', '-m', '-e', '--max-count'],
   },
   rg: {
@@ -290,8 +290,8 @@ export function classifyCommand(command: string): CommandClass | null {
     case 'grep': {
       const p = parse(args, SPECS.grep!);
       if (!p) return null;
-      // The pattern is the first operand unless -e gives it; a file or folder must follow, so a
-      // recursive search never defaults to the working folder.
+      // The pattern is the first operand unless -e gives it; a file must follow. Recursive grep
+      // (-r, -R, --recursive, ...) is not in the alphabet: it reads hidden files such as .env.
       const need = p.seen.has('-e') ? 1 : 2;
       return p.operands.length >= need ? 'read-only' : null;
     }
