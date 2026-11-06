@@ -75,6 +75,8 @@ import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { ApprovalRequestService } from './approval-request.service';
 import { createAllowGrant } from './allow-grants';
 import { buildRuleDraft } from './rule-draft';
+import { decodeGrantCursor, encodeGrantCursor } from './grant-cursor';
+import { redactForStorage } from '../contract/redact';
 import {
   DecideApprovalRequestSchema,
   RevokeApprovalSchema,
@@ -578,6 +580,74 @@ export class ApprovalsController {
       },
     });
     return { ...page, seesAll: admin };
+  }
+
+  @Get('allow-grants')
+  @RequireRole(...APPROVER_ROLES)
+  @ApiOperation({
+    summary: 'Live permissions that skip the prompt, with where they came from',
+    description:
+      'Every live 8-hour grant and every "always allow this here" rule (origin: approval, offer or learning), newest first. Withdraw one with POST /approvals/allow-grants/:grantId/revoke. Approvers only.',
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    description: '1 to 200, default 50',
+  })
+  @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'nextCursor of the previous page',
+  })
+  async listGrants(
+    @CurrentAuth() auth: AuthContext,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    const client = await this.tenantDatabaseManager.getClient(auth.tenant.id);
+    const take = Math.min(
+      200,
+      Math.max(1, Number.parseInt(limit ?? '', 10) || 50),
+    );
+    const at = decodeGrantCursor(cursor);
+    const rows = await client.approvalAllowGrant.findMany({
+      where: {
+        effect: 'ALLOW',
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+        ...(at
+          ? {
+              OR: [
+                { createdAt: { lt: at.createdAt } },
+                { createdAt: at.createdAt, id: { lt: at.id } },
+              ],
+            }
+          : {}),
+      },
+      include: { host: { select: { hostname: true } } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: take + 1,
+    });
+    const page = rows.slice(0, take);
+    const last = page.at(-1);
+    return {
+      nextCursor: rows.length > take && last ? encodeGrantCursor(last) : null,
+      items: page.map((g) => ({
+        id: g.id,
+        origin: g.origin,
+        hostId: g.hostId,
+        hostName: g.host?.hostname ?? null,
+        agentId: g.agentId,
+        toolId: g.toolId,
+        actionId: g.actionId,
+        // The scope an always-allow covers, or the one exact resource of an 8-hour grant.
+        scope: redactForStorage(g.resourcePattern ?? g.resource),
+        createdAt: g.createdAt,
+        expiresAt: g.expiresAt,
+        useCount: g.useCount,
+        lastUsedAt: g.lastUsedAt,
+      })),
+    };
   }
 
   @Post('allow-grants/:grantId/revoke')

@@ -1,15 +1,24 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { AUDIT_EVENT_TYPES } from '../audit/audit-event-types';
 import { AuditService } from '../audit/audit.service';
 import {
   findLiveAllowGrant,
   findLiveBlock,
+  findLivePatternGrant,
   markAllowGrantUsed,
 } from '../approvals/allow-grants';
 import { TenantDatabaseManager } from '../database/tenant-database-manager.service';
 import { KillSwitchService } from '../kill-switches/kill-switch.service';
 import { PolicyEngine } from '../policy/policy-engine.service';
+import { HIGH_RISK_SCORE } from '../approvals/host-approval-opener.service';
+import {
+  canonicalAbsolute,
+  pathDiffers,
+  pathLinked,
+  resolvedIsSecret as secretPath,
+} from '../approvals/rule-scope';
 import { KNOWN_HOST_TOOL_IDS, hostActionRisk } from '../tools/host-actions';
 import { redactForStorage } from '../contract/redact';
 import type { HostContext } from '../host-mtls/host-context';
@@ -22,6 +31,11 @@ export const HostAuthorizeSchema = z.object({
   toolId: z.string().min(1).max(128),
   actionId: z.string().min(1).max(128),
   resource: z.string().min(1).max(2048),
+  /**
+   * Where a file `resource` really points once symlinks are followed (sent by newer devices). When
+   * it differs from `resource`, no folder scope is offered or applied and learning stays out.
+   */
+  resolvedPath: z.string().min(1).max(2048).optional(),
 });
 export type HostAuthorizeRequest = z.infer<typeof HostAuthorizeSchema>;
 
@@ -39,7 +53,32 @@ export interface HostAuthorizeDecision {
    * True only for a plain deterministic policy ALLOW. `authorize()` always sends a boolean.
    */
   cacheable?: boolean;
+  /** Which ask this is (`ceiling` or a policy rule); the approval and any scoped grant carry it. */
+  askKey?: string;
+  /** Internal: the device could not vouch for the path (no offer); stripped before the answer leaves. */
+  pathLinked?: boolean;
 }
+
+/** The ask that comes from the risk ceiling: no rule matched. */
+export const CEILING_ASK = 'ceiling';
+
+/**
+ * A policy ask is identified by the policy version and the exact rule that asked, so a grant made
+ * for one rule never answers another, and republishing a policy ends the grants made for it.
+ */
+export function policyAskKey(policy: {
+  policyVersionId?: string;
+  matchedRule?: unknown;
+}): string {
+  return `p:${createHash('sha256')
+    .update(
+      `${policy.policyVersionId ?? ''}|${JSON.stringify(policy.matchedRule ?? null)}`,
+    )
+    .digest('hex')
+    .slice(0, 24)}`;
+}
+
+const EFFECT_RANK = { ALLOW: 0, APPROVAL_REQUIRED: 1, DENY: 2 } as const;
 
 /** Same as the default task ceiling for Claude Code: reads and fetches run, edits and shell ask. */
 export const HOST_RISK_CEILING = 20;
@@ -50,7 +89,12 @@ export interface HostApprovalOpener {
   open(
     host: HostContext,
     request: HostAuthorizeRequest,
-    decision: { reason: string; riskScore: number },
+    decision: {
+      reason: string;
+      riskScore: number;
+      askKey?: string;
+      pathLinked?: boolean;
+    },
   ): Promise<{ id: string; expiresAt: Date } | null>;
 }
 
@@ -100,6 +144,16 @@ export class HostAuthorizeService {
     try {
       client = await this.tenants.getClient(host.tenantId);
       result = await this.decide(client, host, request);
+      // What depends on where a link points is not stored by the device's offline snapshot.
+      if (
+        pathDiffers(
+          request.toolId,
+          request.actionId,
+          request.resource,
+          request.resolvedPath,
+        )
+      )
+        result.cacheable = false;
     } catch (error) {
       this.logger.error(
         `host authorize failed closed: ${error instanceof Error ? error.message : String(error)}`,
@@ -111,6 +165,8 @@ export class HostAuthorizeService {
         const a = await this.approvals.open(host, request, {
           reason: result.reason ?? 'policy_requires_approval',
           riskScore: result.riskScore ?? 0,
+          askKey: result.askKey,
+          pathLinked: result.pathLinked,
         });
         if (a) result = { ...result, approvalId: a.id, expiresAt: a.expiresAt };
       } catch (error) {
@@ -149,6 +205,9 @@ export class HostAuthorizeService {
         toolId: request.toolId,
         actionId: request.actionId,
         resource: redactForStorage(request.resource),
+        ...(request.resolvedPath
+          ? { resolvedPath: redactForStorage(request.resolvedPath) }
+          : {}),
         decision: result.decision,
         reason: result.reason ?? null,
         riskScore: result.riskScore ?? null,
@@ -160,6 +219,7 @@ export class HostAuthorizeService {
     if (!recorded && result.decision === 'ALLOW') {
       return { decision: 'DENY', reason: 'enforcement_dependency_unavailable' };
     }
+    delete result.pathLinked;
     return result;
   }
 
@@ -173,8 +233,14 @@ export class HostAuthorizeService {
     if (!KNOWN_HOST_TOOL_IDS.includes(request.toolId))
       return { decision: 'DENY', reason: 'unknown_tool' };
     const actionId = request.actionId.toLowerCase();
-    const base = hostActionRisk(request.toolId, actionId);
-    if (base === null) return { decision: 'DENY', reason: 'unknown_action' };
+    const catalogue = hostActionRisk(request.toolId, actionId);
+    if (catalogue === null)
+      return { decision: 'DENY', reason: 'unknown_action' };
+    // The real target of a link is a secret (`docs -> ~/.ssh`): high risk, console only. This only
+    // ever restricts; the policy still sees the path that was asked for.
+    const base = resolvedIsSecret(request, actionId)
+      ? Math.max(catalogue, HIGH_RISK_SCORE)
+      : catalogue;
 
     const kill = await this.killSwitches.checkAll(client, host.tenantId, {
       agentId: host.hostId,
@@ -195,16 +261,78 @@ export class HostAuthorizeService {
 
     // "Approve for 8 hours" (spec 4.6): looked up before the policy runs, used only to satisfy an
     // approval requirement below. A policy DENY and the kill switches above are never overridden.
-    const grant = await findLiveAllowGrant(
-      client,
-      { hostId: host.hostId },
-      { toolId: request.toolId, actionId, resource: request.resource },
+    const target = {
+      toolId: request.toolId,
+      actionId,
+      resource: request.resource,
+    };
+    // A link: an exact grant answers it only if it was made for the same real target, and a
+    // plain grant (made for the file itself) never does.
+    const differs = pathDiffers(
+      request.toolId,
+      actionId,
+      request.resource,
+      request.resolvedPath,
     );
-    const policy = await this.policy.evaluate(client, host.tenantId, {
+    const resolvedKey = differs
+      ? canonicalAbsolute(request.resolvedPath!)
+      : null;
+    const exact =
+      differs && resolvedKey === null
+        ? null
+        : await findLiveAllowGrant(
+            client,
+            { hostId: host.hostId },
+            target,
+            undefined,
+            resolvedKey,
+          );
+    // A narrow "always allow here" scope is looked up only if something asks (below).
+    // A grant made for one ask never answers another (a grant without a key is an older one).
+    // A path that is a link to somewhere else gets no scope, offered or applied: only the exact one.
+    const linked = pathLinked(
+      request.toolId,
+      actionId,
+      request.resource,
+      request.resolvedPath,
+    );
+    let grant: { id: string } | null = null;
+    const scoped = async (askKey: string) => {
+      grant =
+        exact && (!exact.askKey || exact.askKey === askKey)
+          ? exact
+          : linked
+            ? null
+            : await findLivePatternGrant(client, host.hostId, target, askKey);
+      return grant;
+    };
+    let policy = await this.policy.evaluate(client, host.tenantId, {
       toolId: request.toolId,
       actionId,
       resource: request.resource,
     });
+    // A link: ask the policy again about where the path really points and keep the stricter
+    // answer (DENY, then APPROVAL_REQUIRED, then ALLOW). Rules and presets are written for the
+    // path a tool names, and a "run everything else" rule would otherwise let `docs -> ~/.ssh`
+    // through. Restriction only: the answer for the requested path is never loosened.
+    let targetUnmatched = false;
+    // A secret target asks whatever rule matched (the raise to the console-only line is in `base`).
+    const secretTarget = resolvedIsSecret(request, actionId);
+    if (differs) {
+      const real = await this.policy.evaluate(client, host.tenantId, {
+        toolId: request.toolId,
+        actionId,
+        resource: request.resolvedPath!,
+      });
+      targetUnmatched = !real.matchedRule;
+      // On a tie that asks, the target's rule (and so its ask key) is the one that counts.
+      if (
+        EFFECT_RANK[real.effect] > EFFECT_RANK[policy.effect] ||
+        (real.effect === 'APPROVAL_REQUIRED' &&
+          policy.effect === 'APPROVAL_REQUIRED')
+      )
+        policy = real;
+    }
     if (policy.effect === 'DENY') {
       return {
         decision: 'DENY',
@@ -214,23 +342,53 @@ export class HostAuthorizeService {
       };
     }
     if (policy.effect === 'APPROVAL_REQUIRED') {
-      if (grant)
-        return { decision: 'ALLOW', riskScore: base, grantId: grant.id };
+      const askKey = policyAskKey(policy);
+      if (await scoped(askKey))
+        return {
+          decision: 'ALLOW',
+          riskScore: base,
+          grantId: grant!.id,
+          cacheable: false,
+        };
       return {
         decision: 'APPROVAL_REQUIRED',
         reason: 'policy_requires_approval',
         riskScore: base,
+        askKey,
+        pathLinked: linked,
       };
     }
-    if (!policy.matchedRule && base > HOST_RISK_CEILING) {
-      if (grant)
-        return { decision: 'ALLOW', riskScore: base, grantId: grant.id };
+    // The risk ceiling applies when nothing matched, and also when the link's name matched a rule
+    // but its real target matched none.
+    if (
+      (!policy.matchedRule || targetUnmatched || secretTarget) &&
+      base > HOST_RISK_CEILING
+    ) {
+      if (await scoped(CEILING_ASK))
+        return {
+          decision: 'ALLOW',
+          riskScore: base,
+          grantId: grant!.id,
+          cacheable: false,
+        };
       return {
         decision: 'APPROVAL_REQUIRED',
         reason: 'risk_ceiling_exceeded',
         riskScore: base,
+        askKey: CEILING_ASK,
+        pathLinked: linked,
       };
     }
     return { decision: 'ALLOW', riskScore: base, cacheable: true };
   }
+}
+
+function resolvedIsSecret(
+  request: { toolId: string; resolvedPath?: string },
+  actionId: string,
+): boolean {
+  return (
+    request.resolvedPath !== undefined &&
+    secretPath(request.toolId, actionId, request.resolvedPath)
+  );
 }

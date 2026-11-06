@@ -2508,11 +2508,36 @@ model ApprovalAllowGrant {
   /// after it was used; the next matching request is denied (`revoked_after_use`) until a person
   /// lifts the block (sets `revokedAt`).
   effect     String    @default("ALLOW")
+  /// `approval` (8 hours), `offer` (accepted after 3 identical approvals) or `learning` (accepted
+  /// from "what Manar saw this week").
+  origin     String    @default("approval")
+  /// A narrow prefix scope (`src/rule-scope.ts`) instead of the exact `resource`. Null: exact.
+  resourcePattern String?
+  /// Which ask this answers (`ceiling`, or a hash of the policy version and the rule that asked).
+  /// A scoped grant satisfies only that ask; null never satisfies a scoped lookup.
+  askKey          String?
+  /// For a grant made from a linked approval: the canonical real path it was made for. A request for
+  /// the same name that points somewhere else (or nowhere known) is not answered by it.
+  resolvedPath    String?
 
   @@index([hostId, toolId, actionId, expiresAt])
   @@index([sourceId])
   @@index([agentId, toolId, actionId, expiresAt])
   @@map("approval_allow_grants")
+}
+
+/// "Always allow this here" was offered once for this device, tool, action and scope (decision 37).
+/// Spent when the person answers the request that carried it; no content is stored.
+model HostRuleOffer {
+  id        String   @id @default(uuid())
+  hostId    String
+  toolId    String
+  actionId  String
+  scope     String
+  createdAt DateTime @default(now())
+
+  @@unique([hostId, toolId, actionId, scope])
+  @@map("host_rule_offers")
 }
 
 enum HostApprovalStatus {
@@ -2557,9 +2582,17 @@ model HostApproval {
   endReason        String?
   /// Self-approved, high risk, re-confirmed (see `ApprovalRequest.selfConfirmedAt`).
   selfConfirmedAt  DateTime?
+  /// Which ask opened this (`ceiling`, or a hash of the policy version and rule); see `ApprovalAllowGrant.askKey`.
+  askKey           String?
+  /// Where the device says a file path really points (symlinks followed); null when it did not say.
+  resolvedPath     String?
+  /// The device could not vouch for the path (missing, unclean or different from `resource`): no
+  /// "always allow" offer is made for this request.
+  pathLinked       Boolean           @default(false)
 
   @@index([hostId, status, expiresAt])
   @@index([createdAt, id])
+  @@index([hostId, toolId, actionId, status, decidedAt])
   @@map("host_approvals")
 }
 

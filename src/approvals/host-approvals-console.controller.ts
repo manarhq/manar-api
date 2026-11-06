@@ -22,7 +22,8 @@ import {
   RevokeApprovalSchema,
 } from './approvals.validation';
 import { explainRisk } from './risk-explain';
-import { HostApprovalsService } from './host-approvals.service';
+import { pathDiffers } from './rule-scope';
+import { HostApprovalsService, publicOffer } from './host-approvals.service';
 import { ApprovalRevokeService } from './approval-revoke.service';
 import {
   ApproverDirectory,
@@ -98,6 +99,7 @@ export class HostApprovalsConsoleController {
     );
     const ws = await this.approvers.workspace(auth.tenant.id);
     const rights = await Promise.all(rows.map((r) => this.rights(auth, r, ws)));
+    const offers = await this.approvals.offersFor(client, rows);
     // "Cursor on Sara's laptop wants to ...": the owner's name, never their subject.
     const owners = [
       ...new Set(
@@ -124,10 +126,18 @@ export class HostApprovalsConsoleController {
         toolId: r.toolId,
         actionId: r.actionId,
         resource: r.resource,
+        // Where the file really points, when that is somewhere else: "points to ..." on the card.
+        pointsTo:
+          r.resolvedPath &&
+          pathDiffers(r.toolId, r.actionId, r.resource, r.resolvedPath)
+            ? r.resolvedPath
+            : null,
         summary: r.summary,
         matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,
         explanation: explainRisk(r.actionId, r.resource, r.highRisk),
+        // "Always allow this here" after the 3rd identical approval; null when not offered.
+        ruleOffer: publicOffer(offers.get(r.id)),
         expiresAt: r.expiresAt,
         createdAt: r.createdAt,
         allowedDecisions: rights[i]!.choices,
@@ -159,6 +169,7 @@ export class HostApprovalsConsoleController {
       via: 'console',
       // makeRule pre-fills a policy rule: an approver's call.
       makeRule: input.makeRule && isApproverRole(auth.roles),
+      alwaysAllowHere: input.alwaysAllowHere,
       ownerMayOperate: isOperatorRole(auth.roles),
       freshSignIn: freshSignIn(auth.authTime),
       // A permanent site rule needs the role that may write site rules in the console.

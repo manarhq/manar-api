@@ -22,7 +22,8 @@ import {
 import { dbNow } from '../common/db-clock';
 import { isWorkspacePaused } from '../pause/pause-state';
 import { explainRisk } from './risk-explain';
-import { HostApprovalsService } from './host-approvals.service';
+import { pathDiffers } from './rule-scope';
+import { HostApprovalsService, publicOffer } from './host-approvals.service';
 
 /**
  * `/host/v1/approvals/*`: what WARDEN on a device reads and answers (spec 4.6). A decision from a
@@ -52,6 +53,7 @@ export class HostApprovalsController {
       this.approvers.canApprove(host.tenantId, client, host.ownerSubject),
       this.approvals.listPending(client, host.hostId),
     ]);
+    const offers = await this.approvals.offersFor(client, rows);
     return {
       ownerMayApprove,
       items: rows.map((r) => ({
@@ -59,10 +61,18 @@ export class HostApprovalsController {
         toolId: r.toolId,
         actionId: r.actionId,
         resource: r.resource,
+        // Where the file really points, when that is somewhere else: "points to ..." on the card.
+        pointsTo:
+          r.resolvedPath &&
+          pathDiffers(r.toolId, r.actionId, r.resource, r.resolvedPath)
+            ? r.resolvedPath
+            : null,
         summary: r.summary,
         matchCode: approvalMatchCode(r.id),
         highRisk: r.highRisk,
         explanation: explainRisk(r.actionId, r.resource, r.highRisk),
+        // "Always allow this here" (answered in the console; WARDEN shows it as a hint).
+        ruleOffer: publicOffer(offers.get(r.id)),
         // The prompt shows buttons only when this is true; otherwise "Open in console".
         decidableHere:
           ownerMayApprove &&

@@ -30,6 +30,8 @@ export type DecideApprovalRequest = z.output<
 export const DecideHostApprovalSchema = z.object({
   decision: z.enum(['approve_once', 'approve_8h', 'approve_always', 'deny']),
   makeRule: z.boolean().optional(),
+  /** Console only: take the offered "always allow this here" (decision 37). */
+  alwaysAllowHere: z.boolean().optional(),
   /** Device only: "I stopped waiting" (with `deny`), recorded as EXPIRED, not as a person's deny. */
   withdraw: z.boolean().optional(),
 });

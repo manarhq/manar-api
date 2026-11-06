@@ -21,7 +21,17 @@ import {
   siteRuleBlocksRemember,
   upsertSiteRule,
 } from '../jail/jail-sites.service';
-import { ALLOW_GRANT_TTL_MS, createAllowGrant } from './allow-grants';
+import {
+  ALLOW_GRANT_TTL_MS,
+  ALWAYS_GRANT_TTL_MS,
+  createAllowGrant,
+} from './allow-grants';
+import {
+  canonicalAbsolute,
+  pathDiffers,
+  scopeFor,
+  scopeMatches,
+} from './rule-scope';
 import { buildRuleDraft } from './rule-draft';
 import { ApproverDirectory } from './approver-directory';
 import {
@@ -68,6 +78,11 @@ export interface OpenHostApprovalInput {
   highRisk: boolean;
   /** Shown in the push, e.g. "Cursor". */
   toolName: string;
+  /** Which ask this is (`ceiling` or a policy rule): a grant made from it answers only that ask. */
+  askKey?: string;
+  /** Where the device says the file really points; and whether it could not vouch for the path. */
+  resolvedPath?: string;
+  pathLinked?: boolean;
 }
 
 export interface DecideHostApprovalInput {
@@ -93,6 +108,8 @@ export interface DecideHostApprovalInput {
    * do not set the flag).
    */
   withdraw?: boolean;
+  /** Console only: take the offered "always allow this here" (decision 37). */
+  alwaysAllowHere?: boolean;
   /**
    * Console only: the signed-in person currently holds a role that may operate devices
    * (`OPERATOR_ROLES`). The owner path needs it, so a demoted owner cannot decide.
@@ -103,6 +120,29 @@ export interface DecideHostApprovalInput {
    * for a personal workspace's owner approving their own sensitive request.
    */
   freshSignIn?: boolean;
+}
+
+/** The 3rd identical approval in this window earns the offer (decision 37). */
+export const OFFER_AFTER_APPROVALS = 3;
+export const OFFER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface RuleOffer {
+  /** Narrow prefix scope the rule would cover (a folder, a web origin, or one MCP tool). */
+  scope: string;
+  approvals: number;
+  /** How long accepting lasts, in days. */
+  lastsDays: number;
+  /** The ask it would answer; never sent to a client. */
+  askKey: string;
+}
+
+/** What a client may see of an offer: never the internal ask key. */
+export function publicOffer(
+  o: RuleOffer | undefined,
+): { scope: string; approvals: number; lastsDays: number } | null {
+  return o
+    ? { scope: o.scope, approvals: o.approvals, lastsDays: o.lastsDays }
+    : null;
 }
 
 @Injectable()
@@ -179,6 +219,9 @@ export class HostApprovalsService {
         resource: input.resource,
         summary: `${input.summary.slice(0, 280)} #${matchCode}`,
         highRisk: input.highRisk,
+        askKey: input.askKey ?? null,
+        resolvedPath: input.resolvedPath ?? null,
+        pathLinked: input.pathLinked ?? false,
         expiresAt: new Date(now.getTime() + HOST_APPROVAL_TTL_MS),
       },
     });
@@ -214,6 +257,134 @@ export class HostApprovalsService {
       expiresAt: row.expiresAt,
     });
     return row;
+  }
+
+  /**
+   * "Always allow this here" for each pending request that has earned it: the same device, tool,
+   * action and normalised scope approved by a person 3 times in 30 days. Never for high-risk,
+   * secret or handover requests, a new site, or a scope that is too broad; offered once.
+   */
+  async offersFor(
+    client: TenantPrismaClient,
+    rows: Array<{
+      id: string;
+      hostId: string;
+      toolId: string;
+      actionId: string;
+      resource: string;
+      highRisk: boolean;
+      askKey?: string | null;
+      /** The device could not vouch for the path: no offer. */
+      pathLinked?: boolean;
+    }>,
+    at?: Date,
+  ): Promise<Map<string, RuleOffer>> {
+    const out = new Map<string, RuleOffer>();
+    const now = at ?? new Date();
+    // Cheap checks first, then three queries for the whole page instead of three per row.
+    const cands: Array<{
+      r: (typeof rows)[number];
+      scope: string;
+      askKey: string;
+    }> = [];
+    for (const r of rows) {
+      if (r.highRisk || r.actionId === SITE_CONNECT_ACTION) continue;
+      // An offer answers one ask; a request without one (older) is never offered.
+      if (!r.askKey || r.pathLinked || sensitiveReason(r)) continue;
+      const scope = scopeFor(r.toolId, r.actionId, r.resource);
+      if (scope) cands.push({ r, scope, askKey: r.askKey });
+    }
+    if (cands.length === 0) return out;
+    const hostIds = [...new Set(cands.map((c) => c.r.hostId))];
+    const toolIds = [...new Set(cands.map((c) => c.r.toolId))];
+    const actionIds = [...new Set(cands.map((c) => c.r.actionId))];
+    const askKeys = [...new Set(cands.map((c) => c.askKey))];
+    const [spentRows, priorRows, grantRows] = await Promise.all([
+      client.hostRuleOffer.findMany({
+        where: {
+          hostId: { in: hostIds },
+          toolId: { in: toolIds },
+          actionId: { in: actionIds },
+          scope: { in: cands.map((c) => c.scope) },
+        },
+        select: { hostId: true, toolId: true, actionId: true, scope: true },
+      }),
+      client.hostApproval.findMany({
+        where: {
+          hostId: { in: hostIds },
+          toolId: { in: toolIds },
+          actionId: { in: actionIds },
+          status: 'APPROVED',
+          decision: { in: ['approve_once', 'approve_8h'] },
+          decidedBy: { not: null },
+          highRisk: false,
+          askKey: { in: askKeys },
+          decidedAt: { gte: new Date(now.getTime() - OFFER_WINDOW_MS) },
+        },
+        select: {
+          hostId: true,
+          toolId: true,
+          actionId: true,
+          askKey: true,
+          resource: true,
+        },
+        orderBy: { decidedAt: 'desc' },
+        take: Math.min(200 * cands.length, 2000),
+      }),
+      client.approvalAllowGrant.findMany({
+        where: {
+          hostId: { in: hostIds },
+          toolId: { in: toolIds },
+          actionId: { in: actionIds },
+          effect: 'ALLOW',
+          revokedAt: null,
+          expiresAt: { gt: now },
+          resourcePattern: { not: null },
+          askKey: { in: askKeys },
+        },
+        select: {
+          hostId: true,
+          toolId: true,
+          actionId: true,
+          askKey: true,
+          resourcePattern: true,
+        },
+        take: 500,
+      }),
+    ]);
+    const k = (...p: Array<string | null>) => p.join('\u0000');
+    const spent = new Set(
+      spentRows.map((x) => k(x.hostId, x.toolId, x.actionId, x.scope)),
+    );
+    for (const { r, scope, askKey } of cands) {
+      if (spent.has(k(r.hostId, r.toolId, r.actionId, scope))) continue;
+      const approvals = priorRows.filter(
+        (p) =>
+          p.hostId === r.hostId &&
+          p.toolId === r.toolId &&
+          p.actionId === r.actionId &&
+          p.askKey === askKey &&
+          scopeFor(r.toolId, r.actionId, p.resource) === scope,
+      ).length;
+      if (approvals < OFFER_AFTER_APPROVALS) continue;
+      // Already covered by an always-allow scope: nothing to offer.
+      const covered = grantRows.some(
+        (g) =>
+          g.hostId === r.hostId &&
+          g.toolId === r.toolId &&
+          g.actionId === r.actionId &&
+          g.askKey === askKey &&
+          scopeMatches(g.resourcePattern!, r.toolId, r.actionId, r.resource),
+      );
+      if (covered) continue;
+      out.set(r.id, {
+        scope,
+        approvals,
+        lastsDays: Math.round(ALWAYS_GRANT_TTL_MS / 86_400_000),
+        askKey,
+      });
+    }
+    return out;
   }
 
   /**
@@ -443,6 +614,20 @@ export class HostApprovalsService {
       decision = 'approve_once';
       note = 'needs_owner';
     }
+    const takesOffer =
+      input.alwaysAllowHere === true && input.decision !== 'deny';
+    // Standing permission: console only, and only for someone who may give 8 hours (the same
+    // rights, so a personal self-approval of something sensitive can never make a rule).
+    if (takesOffer && input.via !== 'console')
+      throw new ForbiddenException('eight_hours_in_console');
+    if (takesOffer && !rights.choices.includes('approve_8h'))
+      throw new ForbiddenException(refusalMessage(rights));
+    // Recomputed here, never trusted from the client.
+    const offer =
+      (await this.offersFor(client, [row], at ?? new Date())).get(row.id) ??
+      null;
+    if (takesOffer && !offer)
+      throw new BadRequestException('no_rule_offer_for_this_request');
     const wantsRemember =
       isSite && (decision === 'approve_8h' || decision === 'approve_always');
     let remember = false;
@@ -521,9 +706,56 @@ export class HostApprovalsService {
         });
         remember = true;
       }
+      // The offer is made once: any answer spends it.
+      if (offer)
+        await tx.hostRuleOffer.upsert({
+          where: {
+            hostId_toolId_actionId_scope: {
+              hostId: row.hostId,
+              toolId: row.toolId,
+              actionId: row.actionId,
+              scope: offer.scope,
+            },
+          },
+          create: {
+            hostId: row.hostId,
+            toolId: row.toolId,
+            actionId: row.actionId,
+            scope: offer.scope,
+          },
+          update: {},
+        });
+      if (takesOffer && offer) {
+        const g = await createAllowGrant(tx, {
+          scope: { hostId: row.hostId },
+          target: {
+            toolId: row.toolId,
+            actionId: row.actionId,
+            resource: row.resource,
+          },
+          createdBy: input.subject,
+          sourceId: row.id,
+          now,
+          always: {
+            origin: 'offer',
+            pattern: offer.scope,
+            askKey: offer.askKey,
+          },
+        });
+        return { grantId: g.id, origin: 'offer', scope: offer.scope };
+      }
       // A site prompt is answered by the site rule, never by an 8-hour action grant.
       if (decision !== 'approve_8h' || isSite)
         return { grantId: null as string | null };
+      // A grant for a link is bound to its canonical real target. If the target cannot be
+      // normalised there is nothing safe to bind it to, and a plain grant would answer any later
+      // ask for the name: no grant (this one request is still answered).
+      const linkedTarget =
+        row.resolvedPath &&
+        pathDiffers(row.toolId, row.actionId, row.resource, row.resolvedPath)
+          ? canonicalAbsolute(row.resolvedPath)
+          : undefined;
+      if (linkedTarget === null) return { grantId: null as string | null };
       const grant = await createAllowGrant(tx, {
         scope: { hostId: row.hostId },
         target: {
@@ -534,8 +766,10 @@ export class HostApprovalsService {
         createdBy: input.subject,
         sourceId: row.id,
         now,
+        ...(row.askKey ? { askKey: row.askKey } : {}),
+        ...(linkedTarget ? { resolvedPath: linkedTarget } : {}),
       });
-      return { grantId: grant.id };
+      return { grantId: grant.id, origin: 'approval', scope: null };
     });
     await this.audit.recordSafely(client, tenantId, {
       eventType:
@@ -590,6 +824,8 @@ export class HostApprovalsService {
           toolId: row.toolId,
           actionId: row.actionId,
           via: input.via,
+          origin: result.origin ?? 'approval',
+          ...(result.scope ? { scope: result.scope } : {}),
         },
       });
     }
