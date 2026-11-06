@@ -386,3 +386,45 @@ describe('an 8-hour grant answers only the ask it was made for', () => {
     expect(r.result.grantId).toBe('g8');
   });
 });
+
+describe('a link into a secret place is judged by its target (third review)', () => {
+  const links = [
+    [
+      'edit',
+      '/home/sara/proj/docs/authorized_keys',
+      '/home/sara/.ssh/authorized_keys',
+    ],
+    ['read', '/home/sara/proj/k/config', '/home/sara/.kube/config'],
+    ['read', '/home/sara/proj/a/creds', '/home/sara/.aws/credentials'],
+  ] as const;
+  const want: Record<'none' | 'ask' | 'strict', string> = {
+    none: 'APPROVAL_REQUIRED',
+    ask: 'APPROVAL_REQUIRED',
+    strict: 'DENY',
+  };
+  describe.each(['none', 'ask', 'strict'] as const)('%s preset', (mode) => {
+    it.each(links)('%s %s -> %s', async (action, res, real) => {
+      const r = await run(
+        {
+          toolId: 'host.cursor',
+          actionId: action,
+          resource: res,
+          resolvedPath: real,
+        },
+        { mode, firstApproved: 30 },
+      );
+      expect(r.result.decision).toBe(want[mode]);
+      expect(r.result.reason).not.toBe('learning_would_ask');
+      expect(r.result.cacheable).toBe(false);
+    });
+  });
+  it('a plain file with a matching resolvedPath is unchanged and cacheable', async () => {
+    const p = '/home/sara/proj/src/a.ts';
+    const r = await run(
+      { toolId: 'host.cursor', actionId: 'read', resource: p, resolvedPath: p },
+      { mode: 'ask' },
+    );
+    expect(r.result.decision).toBe('ALLOW');
+    expect(r.result.cacheable).not.toBe(false);
+  });
+});
