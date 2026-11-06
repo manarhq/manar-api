@@ -127,6 +127,9 @@ export class HostAuthGuard implements CanActivate {
       machineId: host.machineId,
       ownerSubject: host.ownerSubject,
       status: host.status,
+      agentVersion: host.agentVersion,
+      agentOs: host.agentOs,
+      agentArch: host.agentArch,
     };
     return true;
   }
