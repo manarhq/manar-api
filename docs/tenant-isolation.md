@@ -195,6 +195,12 @@ Evicting a tenant client from the LRU cache does not cut queries still running o
 disconnected `DB_QUERY_TIMEOUT_MS` + 5 s later (every query is bounded by that), and concurrent cache
 misses for one tenant share a single client build.
 
+The evidence export reads its audit events in one read-only REPEATABLE READ transaction on a
+**dedicated one-connection client** (`withDedicatedClient`, closed afterwards), so a long export never
+holds connections of the shared tenant pool that the decision path uses. A second export for the same
+workspace answers 409 `export_already_running`, and more than 3 at once per api process answer 429
+`export_capacity`.
+
 ### Connection budget
 
 Postgres `max_connections` is 859. Every consumer counts (replicas from the production overlay,
