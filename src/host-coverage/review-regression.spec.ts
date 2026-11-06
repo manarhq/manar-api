@@ -152,6 +152,7 @@ async function run(
         Promise.resolve({
           kind: 'COMPANY',
           learningMode: s.learningOff ? 'off' : null,
+          sector: 'COMMERCIAL',
         }),
     },
     enterpriseProfile: { findUnique: () => Promise.resolve(null) },

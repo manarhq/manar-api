@@ -148,6 +148,7 @@ async function run(
         Promise.resolve({
           kind: 'COMPANY',
           learningMode: s.learningOff ? 'off' : null,
+          sector: 'COMMERCIAL',
         }),
     },
     enterpriseProfile: { findUnique: () => Promise.resolve(null) },
@@ -437,7 +438,11 @@ describe('Government cannot switch learning on', () => {
     const control = {
       tenant: {
         findUnique: () =>
-          Promise.resolve({ kind: 'COMPANY', learningMode: null }),
+          Promise.resolve({
+            kind: 'COMPANY',
+            learningMode: null,
+            sector: 'COMMERCIAL',
+          }),
         update: vi.fn(),
       },
       enterpriseProfile: {

@@ -26,6 +26,9 @@ import {
   learningWindow,
 } from './learning';
 
+/** The 403 code for turning learning on before staff have recorded the workspace's sector. */
+export const LEARNING_NEEDS_SECTOR_CODE = 'learning_needs_sector';
+
 /** The 403 code for turning learning on in a Government workspace. */
 export const LEARNING_GOVERNMENT_CODE = 'learning_not_available_government';
 
@@ -35,6 +38,8 @@ export interface LearningConfig {
   days: number;
   /** `default` when nobody chose: on, except Government and sample workspaces. */
   source: 'default' | 'workspace';
+  /** No sector is recorded for this workspace yet: learning stays off until staff set it. */
+  needsSector?: boolean;
 }
 
 /** Observations without a usable folder or origin (commands) are counted, never suggested. */
@@ -60,8 +65,17 @@ export class LearningService {
     // Fail closed: an unknown workspace does not learn.
     if (!t) return { enabled: false, days: 0, source: 'default' };
     // Government never learns, whatever is stored: it cannot be switched on.
-    if (await this.isGovernment(tenantId, t.sector))
+    const sector = await this.sectorState(tenantId, t.sector);
+    if (sector === 'government')
       return { enabled: false, days: LEARNING_DAYS, source: 'default' };
+    // Unknown could be Government (the same rule as the AI switch): off until staff record it.
+    if (sector === 'unknown')
+      return {
+        enabled: false,
+        days: LEARNING_DAYS,
+        source: 'default',
+        needsSector: true,
+      };
     if (t.learningMode === 'on' || t.learningMode === 'off')
       return {
         enabled: t.learningMode === 'on',
@@ -76,14 +90,14 @@ export class LearningService {
   }
 
   /**
-   * Government is read from the workspace's own `sector` (set by Manar staff; the authority) and
-   * from the Enterprise profile's sector. Either one says Government and learning never runs. A
-   * workspace whose sector is not recorded yet (an older one) is not treated as Government.
+   * The workspace's own `sector` (set by Manar staff; the authority) and the Enterprise profile's
+   * sector decide. Either one says Government: learning never runs. With neither recorded the
+   * sector is unknown, which could be Government: learning stays off until staff set it.
    */
-  private async isGovernment(
+  private async sectorState(
     tenantId: string,
     sector?: string | null,
-  ): Promise<boolean> {
+  ): Promise<'government' | 'known' | 'unknown'> {
     if (sector === undefined) {
       const t = await this.control.tenant.findUnique({
         where: { id: tenantId },
@@ -91,12 +105,13 @@ export class LearningService {
       });
       sector = t?.sector ?? null;
     }
-    if (sector === 'GOVERNMENT') return true;
-    const gov = await this.control.enterpriseProfile.findUnique({
+    if (sector === 'GOVERNMENT') return 'government';
+    const profile = await this.control.enterpriseProfile.findUnique({
       where: { tenantId },
       select: { sector: true },
     });
-    return gov?.sector === 'GOVERNMENT';
+    if (profile?.sector === 'GOVERNMENT') return 'government';
+    return sector !== null || profile ? 'known' : 'unknown';
   }
 
   /** `default` clears the choice. A Government workspace cannot turn learning on (403). */
@@ -106,15 +121,28 @@ export class LearningService {
     actor: Actor,
     client: TenantPrismaClient,
   ): Promise<LearningConfig> {
-    if (value === 'on' && (await this.isGovernment(tenantId)))
-      throw new ForbiddenException({
-        statusCode: 403,
-        error: 'Forbidden',
-        // Stable (same field as the approvals conflicts), so the console can translate it.
-        reason: LEARNING_GOVERNMENT_CODE,
-        message:
-          'Learning mode is not available in a Government workspace. Nothing was changed.',
-      });
+    if (value === 'on') {
+      const sector = await this.sectorState(tenantId);
+      if (sector !== 'known')
+        throw new ForbiddenException(
+          sector === 'government'
+            ? {
+                statusCode: 403,
+                error: 'Forbidden',
+                // Stable (same field as the approvals conflicts), so the console can translate it.
+                reason: LEARNING_GOVERNMENT_CODE,
+                message:
+                  'Learning mode is not available in a Government workspace. Nothing was changed.',
+              }
+            : {
+                statusCode: 403,
+                error: 'Forbidden',
+                reason: LEARNING_NEEDS_SECTOR_CODE,
+                message:
+                  'Learning mode needs the workspace sector to be set first. Contact support. Nothing was changed.',
+              },
+        );
+    }
     await this.control.tenant.update({
       where: { id: tenantId },
       data: { learningMode: value === 'default' ? null : value },
