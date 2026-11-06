@@ -6,6 +6,7 @@ import {
 } from '../policy/effective-policy-version';
 import { HostConfigController } from '../host-mtls/host-config.controller';
 import { ServiceUnavailableException } from '@nestjs/common';
+import { ALL_HOST_ACTION_IDS, READ_HOST_ACTIONS } from '../tools/host-actions';
 import { HostAuthorizeService } from './host-authorize.service';
 
 const host: HostContext = {
@@ -217,6 +218,26 @@ describe('hostPolicyState restrictiveReadRule', () => {
   it('is true for a DENY read rule on a host tool', async () => {
     expect(await restrictive(rule('host.cursor', 'read', 'DENY'))).toBe(true);
   });
+  it.each(['grep', 'glob', 'ls', 'notebookread', 'READ'])(
+    'is true for a DENY on %s',
+    async (a) => {
+      expect(await restrictive(rule('host.claude-code', a, 'DENY'))).toBe(true);
+    },
+  );
+  it('is true for a rule on an action no host tool has', async () => {
+    expect(
+      await restrictive(rule('host.cursor', 'search_file_content', 'DENY')),
+    ).toBe(true);
+  });
+  it.each(['shell', 'edit', 'write', 'mcp', 'webfetch', 'bash'])(
+    'stays false for the ordinary %s ask (default preset keeps offline reads on)',
+    async (a) => {
+      expect(
+        await restrictive(rule('host.cursor', a, 'APPROVAL_REQUIRED')),
+      ).toBe(false);
+      expect(await restrictive(rule('*', a, 'DENY'))).toBe(false);
+    },
+  );
   it('is true for an APPROVAL_REQUIRED rule on every tool and action', async () => {
     expect(await restrictive(rule('*', '*', 'APPROVAL_REQUIRED'))).toBe(true);
   });
@@ -259,5 +280,41 @@ describe('config poll', () => {
     await expect(
       ctrl(() => Promise.reject(new Error('db'))).policyState(host),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+});
+
+describe('READ_HOST_ACTIONS is pinned to the device', () => {
+  // Copied from manar-edge main (54cf967) internal/protect/hook.go (readNames, classifyName) and
+  // internal/protect/offline.go (the folder rule is `action == "read" && s.ReadsAllowed`). Update
+  // this fixture together with those files.
+  const edgeFolderRuleAction = 'read';
+  const edgeReadToolNames = [
+    'read',
+    'read_file',
+    'read_many_files',
+    'view',
+    'list_directory',
+    'ls',
+    'glob',
+    'grep',
+    'search_file_content',
+    'cat',
+    'open',
+  ];
+  it('covers the folder rule action and every read-type tool name that is a host action', () => {
+    expect(READ_HOST_ACTIONS).toContain(edgeFolderRuleAction);
+    for (const n of edgeReadToolNames)
+      if (ALL_HOST_ACTION_IDS.has(n)) expect(READ_HOST_ACTIONS).toContain(n);
+  });
+  it('lists exactly the read-only host actions', () => {
+    expect([...READ_HOST_ACTIONS].sort()).toEqual([
+      'glob',
+      'grep',
+      'ls',
+      'notebookread',
+      'read',
+    ]);
+    for (const a of READ_HOST_ACTIONS)
+      expect(ALL_HOST_ACTION_IDS.has(a)).toBe(true);
   });
 });

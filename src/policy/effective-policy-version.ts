@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import type { PrismaClient as TenantPrismaClient } from '../generated/tenant-client/client';
 import { HOST_RISK_CEILING } from '../host-coverage/host-authorize.service';
 import {
+  ALL_HOST_ACTION_IDS,
+  READ_HOST_ACTIONS,
   HOST_CLAUDE_CODE_ACTIONS,
   HOST_GENERIC_ACTIONS,
   KNOWN_HOST_TOOL_IDS,
@@ -36,6 +38,19 @@ export interface HostPolicyState {
   /** A published rule for host tools and `read` that denies or asks: no folder rule offline. */
   restrictiveReadRule: boolean;
 }
+
+/**
+ * A non-ALLOW rule may cover a read the offline folder rule would serve when it names `*`, a read
+ * action, or an action no host tool has (unknown: cannot tell what the device maps to it). Rules
+ * for other known actions (shell, edit, mcp, ...) are ordinary asks and do not count: the default
+ * preset must not switch offline reads off.
+ */
+const readRuleAction = (actionId: string) => {
+  const a = actionId.toLowerCase();
+  return (
+    a === '*' || READ_HOST_ACTIONS.includes(a) || !ALL_HOST_ACTION_IDS.has(a)
+  );
+};
 
 const isHostTool = (t: string) => t === '*' || KNOWN_HOST_TOOL_IDS.includes(t);
 
@@ -116,8 +131,8 @@ export async function hostPolicyState(
     return parsed.data.rules.some(
       (r) =>
         isHostTool(r.toolId) &&
-        (r.actionId === '*' || r.actionId.toLowerCase() === 'read') &&
-        r.effect !== 'ALLOW',
+        r.effect !== 'ALLOW' &&
+        readRuleAction(r.actionId),
     );
   });
   return {
