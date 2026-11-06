@@ -99,8 +99,8 @@ export class LearningService {
       throw new ForbiddenException({
         statusCode: 403,
         error: 'Forbidden',
-        // Stable, so the console can translate it (EN and AR).
-        code: LEARNING_GOVERNMENT_CODE,
+        // Stable (same field as the approvals conflicts), so the console can translate it.
+        reason: LEARNING_GOVERNMENT_CODE,
         message:
           'Learning mode is not available in a Government workspace. Nothing was changed.',
       });
