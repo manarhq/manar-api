@@ -73,7 +73,7 @@ export type AssistantChatResponse =
       suggestions: AssistantSuggestion[];
       toolsUsed: string[];
     }
-  | { available: false; reason: 'model_unavailable' };
+  | { available: false; reason: 'model_unavailable' | 'ai_switched_off' };
 
 /** ponytail: fixed per-user limit; make it config if pilots ask for a different one. */
 export const ASSISTANT_RATE_LIMIT = { limit: 12, ttlMs: 60_000 };
@@ -149,6 +149,9 @@ export class AssistantService {
   ): Promise<AssistantChatResponse> {
     const body = parseBodyOrThrow(AssistantChatSchema, rawBody);
     await this.enforceRateLimit(auth);
+    // "Allow external AI" off: a polite notice, nothing read, nothing sent to a model.
+    if (await this.catalog.externalAiSwitchedOff(auth.tenant.id, 'assistant'))
+      return { available: false, reason: 'ai_switched_off' };
     const { route, quota } = await catalogGate(() =>
       this.catalog.llmGate(auth.tenant.id, 'assistant'),
     );

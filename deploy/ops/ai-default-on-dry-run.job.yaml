@@ -1,0 +1,90 @@
+# One-off, read-only dry run of `ai:default-on` against production (manar-prod, AKS).
+# It changes nothing: the command reads the control DB and each active workspace's audit log in
+# READ ONLY transactions and prints counts, never identifiers. No separate read-only DB role exists
+# today, so those transactions are the guard.
+#
+# Before applying:
+#   1. Replace IMAGE_DIGEST with the manar-api digest that contains `ai:default-on` (the image built
+#      from the merge of manar-api#62; the digest the Deployment runs today predates it).
+#   2. `kubectl apply -f ai-default-on-dry-run.job.yaml -n manar-prod`
+#   3. `kubectl logs -n manar-prod job/ai-default-on-dry-run`   (one "DRY RUN, nothing changed: {...}" line)
+#
+# Same env and secret refs as the manar-api migration Job: CONTROL_DATABASE_URL comes from
+# manar-api-secrets (the direct URL, not POOLED_CONTROL_DATABASE_URL, so it never goes through
+# pgbouncer). The pod carries the labels the existing NetworkPolicies select (DNS + PostgreSQL).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ai-default-on-dry-run
+  namespace: manar-prod
+  labels:
+    app.kubernetes.io/name: manar-api-members
+    app.kubernetes.io/instance: manar-api
+    app.kubernetes.io/component: membership-migration
+    app.kubernetes.io/part-of: manar
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: manar-api-members
+        app.kubernetes.io/instance: manar-api
+        app.kubernetes.io/component: membership-migration
+        app.kubernetes.io/part-of: manar
+        manar.vax.sh/migration: 'true'
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull
+      serviceAccountName: manar-api
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1001
+        runAsGroup: 1001
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ai-default-on
+          image: ghcr.io/manarhq/manar-api/manar-api@sha256:IMAGE_DIGEST
+          imagePullPolicy: IfNotPresent
+          command: ['node', 'dist/cli.js', 'ai:default-on', '--dry-run']
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsGroup: 1001
+            runAsNonRoot: true
+            runAsUser: 1001
+          envFrom:
+            - configMapRef:
+                name: manar-api-config
+            - secretRef:
+                name: manar-api-secrets
+          env:
+            - name: HOME
+              value: /tmp
+            - name: CHECKPOINT_DISABLE
+              value: '1'
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/manar/backing-service-ca/ca.crt
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: backing-service-ca
+              mountPath: /etc/manar/backing-service-ca
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: backing-service-ca
+          secret:
+            secretName: manar-internal-ca-bundle

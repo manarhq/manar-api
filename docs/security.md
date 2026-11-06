@@ -332,8 +332,11 @@ any call that could reach an external provider:
   side's own declaration of which provider `manar-ai` is _currently
   configured_ to use (there is no "describe yourself" RPC on the
   `AnalysisService` contract for `manar-api` to introspect this over the
-  wire) — only `'anthropic'` counts as external; `'ollama'`/`'vllm'` are
-  self-hosted and never gated by this check regardless of the flag.
+  wire). Everything except the self-hosted `'ollama'`/`'vllm'` counts as
+  external (`'anthropic'`, `'azure_openai'`); unset in production resolves to
+  `'undeclared'`, also external. Self-hosted providers are never gated by
+  this check. An `AIR_GAPPED` tenant never reaches an external provider,
+  even with `allowExternalAi = true`.
 - `residencyAllows(tenantId, rpcName)` — the gate every one of
   `analyzeRisk`/`analyzePromptInjection`/`analyzeDlp` calls **before**
   the circuit-breaker check and before any RPC is attempted. For an
@@ -356,6 +359,56 @@ must never trip an unrelated resilience mechanism.
 server's own received-call counters (`fakeServer.callCounts.analyzeRisk`
 etc. staying at `0`) — proving the RPC was never attempted, not merely
 that the function happened to return `null` for some unspecified reason.
+
+### Every AI feature and the "Allow external AI" switch
+
+With Azure OpenAI Global (prompts may be processed outside the UAE after DLP redaction), the
+switch is the customer's control. Off means nothing is sent to an external model for that workspace,
+and the feature answers `available: false, reason: "ai_switched_off"` (EN/AR notice in the
+console), never an error and never a metered action.
+
+**Default.** `allowExternalAi` is on for new workspaces whose sector is recorded as COMMERCIAL (self-serve
+sign-up records it; opt-out, disclosed in the DPA and shown in Settings). It is off, and not recorded as a
+choice, when the sector is missing (staff provisioning that does not send `sector`; manar-fleet should),
+off and chosen for Government, and off for `AIR_GAPPED`. The column default stays false so a raw insert
+defaults closed. `Tenant.sector` (null = unknown) is backfilled from enterprise profiles and personal
+kind; staff set it later with `tenant:set-sector <slug> COMMERCIAL|GOVERNMENT` or `PATCH
+/platform/v1/tenants/:id` (audited). `allowExternalAiChosen` records an owner's own choice; a settings
+change writes its audit event first, is refused (503) if that write fails, and clears both notices.
+
+Existing workspaces are switched on only by `node dist/cli.js ai:default-on [--dry-run]
+[--include-enterprise]`, never by a migration. It flips a workspace only on a hosted deployment, with
+sector COMMERCIAL, no recorded choice, and an audit history that provably covers its life (no retention
+anchor, oldest event at creation). Per workspace: an INTENT event is written first (if that fails the
+workspace is counted failed and unchanged), then one guarded UPDATE that re-checks sector COMMERCIAL, not
+air-gapped, ACTIVE, no Government profile and no owner choice, then a COMPLETION event
+`{intentId, applied}`. If the completion cannot be written the run exits 1 (`completionFailed`) and the
+next run's reconcile pass writes it from the row's real state. Company (enterprise) workspaces are only
+counted (`flipEnterprise`, `enterpriseHeld`) unless `--include-enterprise` is given; `flipPersonal` and
+`flipEnterprise` are counts only. Unknown sector (`needsReview`) and incomplete history
+(`historyIncomplete`) leave AI off and the owner sees "Turn on AI features?". The dry run is read-only and
+prints counts only; `deploy/ops/ai-default-on-dry-run.job.yaml` runs it as a one-off Job in `manar-prod`.
+
+Known limits: audit-write failures from before this release left no record, so they cannot be
+excluded; `aiGate` / `llmGate` read `allowExternalAi`, not `sector`, so a Government workspace with no
+recorded sector, no profile and the flag on is not blocked by the gate itself; and with the switch off
+and a local LLM route, the proxy still returns 503 `dlp-advisory` (DLP unavailable fails closed).
+
+| Feature                                 | Path                                                                    | Gate                                                                                                                                                                                                                                                                       |
+| --------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Risk advisory on approvals              | `approval.activities` -> `RiskEngine` -> `AiAdvisoryClient.analyzeRisk` | `aiGate` (null: deterministic score only)                                                                                                                                                                                                                                  |
+| DLP advisory, tool params/results       | `CredentialBrokerService` -> `analyzeDlp`                               | `aiGate`; the pattern floor in `dlp-classification.ts` always runs                                                                                                                                                                                                         |
+| Prompt-injection advisory               | `CredentialBrokerService` -> `analyzePromptInjection`                   | `aiGate`                                                                                                                                                                                                                                                                   |
+| Incident Summarize                      | `POST /incidents/summarize`                                             | controller pre-check (`aiGate`) + `summarizeIncident`                                                                                                                                                                                                                      |
+| AI Investigate                          | `POST /audit/investigate`                                               | controller pre-check + `investigateAudit`                                                                                                                                                                                                                                  |
+| Suggest Policy                          | `POST /policies/suggest`                                                | controller pre-check + `suggestPolicy`                                                                                                                                                                                                                                     |
+| Assistant chat                          | `POST /assistant/chat` -> `LlmUpstreamClient`                           | `CatalogService.externalAiSwitchedOff` pre-check + `llmGate`                                                                                                                                                                                                               |
+| Agent LLM proxy (customer's own agents) | `LlmProxyService` -> `LlmUpstreamClient`                                | `llmGate`: an external model is refused with `llm_external_not_allowed` while the switch is off, and with `llm_air_gapped` for an air-gapped workspace. DLP stays required on every route: manar-ai unavailable is 503 `enforcement_dependency_unavailable`, never skipped |
+
+New AI endpoints (streaming included) must call `AiAdvisoryClient.aiGate(tenantId)` (manar-ai
+RPCs) or `CatalogService.llmGate` / `externalAiSwitchedOff` (direct model calls) before reading
+or sending anything, and answer with `AI_SWITCHED_OFF_REASON` on `switched_off`. Pass the answer
+to `UsageMeterService.ai(..., switchedOff)` so a switched-off workspace is never metered or paused.
 
 ## Known limitations
 
