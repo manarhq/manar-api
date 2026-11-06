@@ -86,15 +86,27 @@ const PRISMA_CLIENT_ERRORS: Record<
   P2025: { status: 404, message: NOT_FOUND },
 };
 
-/** pg pool wait expired, or Postgres cancelled a statement (SQLSTATE 57014, 55P03 lock timeout). */
+/**
+ * The database could not take the request: pool wait expired, a client-side query timeout, the
+ * server is out of connections (SQLSTATE 53300), a statement or lock timeout (57014, 55P03), or
+ * Prisma could not start a transaction in time (P2028).
+ */
+const DB_SATURATED_CODES = new Set(['53300', '57014', '55P03']);
+const DB_SATURATED_MESSAGES = new Set([
+  'timeout exceeded when trying to connect',
+  'Query read timeout',
+]);
 function isDatabaseSaturated(exception: unknown): boolean {
   if (!(exception instanceof Error)) return false;
-  if (exception.message === 'timeout exceeded when trying to connect')
-    return true;
-  const meta = (exception as { meta?: unknown }).meta as
-    { driverAdapterError?: { cause?: { originalCode?: string } } } | undefined;
-  const code = meta?.driverAdapterError?.cause?.originalCode;
-  return code === '57014' || code === '55P03';
+  if (DB_SATURATED_MESSAGES.has(exception.message)) return true;
+  const e = exception as {
+    code?: unknown;
+    meta?: { driverAdapterError?: { cause?: { originalCode?: string } } };
+  };
+  if (e.code === 'P2028') return true;
+  if (typeof e.code === 'string' && DB_SATURATED_CODES.has(e.code)) return true;
+  const code = e.meta?.driverAdapterError?.cause?.originalCode;
+  return code !== undefined && DB_SATURATED_CODES.has(code);
 }
 
 interface Classified {

@@ -182,6 +182,35 @@ export interface EvidenceBundleContent {
   };
 }
 
+/** Rows per statement when reading the audit events of an export. */
+export const EVIDENCE_PAGE_SIZE = 2000;
+
+/**
+ * Reads the matching audit events in sequence order, one bounded page per statement, so a large
+ * export never runs into the database statement timeout.
+ */
+export async function readAuditEventsPaged(
+  tenantClient: TenantPrismaClient,
+  where: Prisma.AuditEventWhereInput,
+  pageSize = EVIDENCE_PAGE_SIZE,
+) {
+  type Row = Awaited<
+    ReturnType<typeof tenantClient.auditEvent.findMany>
+  >[number];
+  const all: Row[] = [];
+  for (let after: number | null = null; ;) {
+    const page: Row[] = await tenantClient.auditEvent.findMany({
+      where:
+        after === null ? where : { AND: [where, { sequence: { gt: after } }] },
+      orderBy: { sequence: 'asc' },
+      take: pageSize,
+    });
+    all.push(...page);
+    if (page.length < pageSize) return all;
+    after = page[page.length - 1]!.sequence;
+  }
+}
+
 /**
  * Phase 9b (Evidence export, Section 49). Gathers the `AuditEvent`s
  * matching a filter plus directly-relevant operational context, and
@@ -226,10 +255,7 @@ export class EvidenceExportService {
     }
     if (filter.correlationId) where.correlationId = filter.correlationId;
 
-    const candidateEvents = await tenantClient.auditEvent.findMany({
-      where,
-      orderBy: { sequence: 'asc' },
-    });
+    const candidateEvents = await readAuditEventsPaged(tenantClient, where);
 
     const events = candidateEvents.filter((event) =>
       matchesAgentOrTask(event, filter.agentId, filter.taskId),

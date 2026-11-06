@@ -44,8 +44,8 @@ export const DatabaseConfigSchema = z.object({
    * pool and up to TENANT_DB_CLIENT_CACHE_MAX tenant pools, so worst case per pod is
    * 2 x (CONTROL + CACHE_MAX x TENANT) connections: size them against the server's max_connections.
    */
-  DB_POOL_MAX_CONTROL: z.coerce.number().int().positive().default(10),
-  DB_POOL_MAX_TENANT: z.coerce.number().int().positive().default(5),
+  DB_POOL_MAX_CONTROL: z.coerce.number().int().positive().default(5),
+  DB_POOL_MAX_TENANT: z.coerce.number().int().positive().default(3),
 
   /**
    * How long a request waits for a free pooled connection (and for the TCP connect) before it
@@ -61,10 +61,9 @@ export const DatabaseConfigSchema = z.object({
   DB_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().default(35_000),
 
   /**
-   * Server-side `statement_timeout` for tenant databases (0 = off). Sent as a connection startup
-   * parameter, so it is applied only to tenant clients, which connect straight to Postgres. The
-   * control pool does not send it: a PgBouncer in front rejects unknown startup parameters. Set it
-   * there as a role default instead (`ALTER ROLE ... SET statement_timeout`).
+   * Server-side `statement_timeout` for the control and tenant pools (0 = off), sent as a
+   * connection startup parameter. Both URLs must be direct Postgres connections (a PgBouncer in
+   * front rejects unknown startup parameters; `CONTROL_DATABASE_URL` also carries the edge LISTEN).
    */
   DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(30_000),
 });

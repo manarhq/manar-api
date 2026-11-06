@@ -176,12 +176,16 @@ config:
   AI_ADVISORY_TIMEOUT_MS: '2000'
   AI_ADVISORY_CIRCUIT_BREAKER_THRESHOLD: '5'
   AI_ADVISORY_CIRCUIT_BREAKER_COOLDOWN_MS: '30000'
-  TENANT_DB_CLIENT_CACHE_MAX: '50'
+  TENANT_DB_CLIENT_CACHE_MAX: '15'
   TENANT_DB_CLIENT_IDLE_TTL_MS: '600000'
-  # Postgres pools (docs/tenant-isolation.md, "Pools and timeouts"). Worst case per pod is
-  # 2 apps x (control + CACHE_MAX x tenant) connections; idle ones close after 10 s.
-  DB_POOL_MAX_CONTROL: '10'
-  DB_POOL_MAX_TENANT: '5'
+  # Postgres connection budget (docs/tenant-isolation.md, "Connection budget"). Server
+  # max_connections is 859; keep the worst case at or under 60% (515):
+  #   connections = apps x replicas x (DB_POOL_MAX_CONTROL + TENANT_DB_CLIENT_CACHE_MAX x DB_POOL_MAX_TENANT)
+  #   api: 2 apps x 4 replicas (HPA max) x (5 + 15 x 3) = 400; worker: 1 app x 2 replicas x 50 = 100; total 500 = 58%.
+  # Idle connections close after 10 s, so real use is far lower. Change one number here only
+  # together with the others in both charts.
+  DB_POOL_MAX_CONTROL: '5'
+  DB_POOL_MAX_TENANT: '3'
   DB_POOL_CONNECT_TIMEOUT_MS: '3000'
   DB_QUERY_TIMEOUT_MS: '125000'
   DB_STATEMENT_TIMEOUT_MS: '120000'

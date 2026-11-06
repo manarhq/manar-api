@@ -169,19 +169,27 @@ gate behavior per tenant.
 Every Prisma client (control and each cached tenant client) has an explicit `pg` pool
 (`src/database/pool-options.ts`):
 
-| Variable                     | Default | Meaning                                                                                    |
-| ---------------------------- | ------- | ------------------------------------------------------------------------------------------ |
-| `DB_POOL_MAX_CONTROL`        | 10      | Connections of the control pool                                                            |
-| `DB_POOL_MAX_TENANT`         | 5       | Connections of each tenant client (up to `TENANT_DB_CLIENT_CACHE_MAX` of them)             |
-| `DB_POOL_CONNECT_TIMEOUT_MS` | 3000    | Wait for a free connection / TCP connect; then the request fails (503, see below)          |
-| `DB_QUERY_TIMEOUT_MS`        | 35000   | Client-side bound on one query, all pools (PgBouncer-safe)                                 |
-| `DB_STATEMENT_TIMEOUT_MS`    | 30000   | Server-side `statement_timeout` for tenant clients only (0 = off); worker chart uses 120 s |
+| Variable                     | Default | Meaning                                                                                             |
+| ---------------------------- | ------- | --------------------------------------------------------------------------------------------------- |
+| `DB_POOL_MAX_CONTROL`        | 5       | Connections of the control pool                                                                     |
+| `DB_POOL_MAX_TENANT`         | 3       | Connections of each tenant client (up to `TENANT_DB_CLIENT_CACHE_MAX` of them)                      |
+| `DB_POOL_CONNECT_TIMEOUT_MS` | 3000    | Wait for a free connection / TCP connect; then the request fails (503, see below)                   |
+| `DB_QUERY_TIMEOUT_MS`        | 35000   | Client-side bound on one query, all pools (PgBouncer-safe)                                          |
+| `DB_STATEMENT_TIMEOUT_MS`    | 30000   | Server-side `statement_timeout` for the control and tenant pools (0 = off); worker chart uses 120 s |
 
-An exhausted pool or a cancelled statement answers **503** `enforcement_dependency_unavailable`
-(`getClient` via `failClosed`; any other handler via `ErrorEnvelopeFilter`), never a hang. Worst case
-per pod is 2 apps x (control + cache max x tenant max) connections; size against `max_connections`.
-`TENANT_DB_CLIENT_CACHE_MAX` stays 50 (no evidence yet that it is too high; lower it only with
-connection counts from production).
+An exhausted pool, a client query timeout, "too many clients" (53300), a cancelled statement (57014,
+55P03) or a Prisma transaction start timeout (P2028) answers **503** `enforcement_dependency_unavailable`
+(`getClient` via `failClosed`; any other handler via `ErrorEnvelopeFilter`), never a hang.
+
+### Connection budget
+
+Postgres `max_connections` is 859. The worst case is
+`apps x replicas x (DB_POOL_MAX_CONTROL + TENANT_DB_CLIENT_CACHE_MAX x DB_POOL_MAX_TENANT)`.
+Production values: api 2 apps x 4 replicas (HPA max) x (5 + 15 x 3) = 400, worker 2 replicas x 50 = 100,
+total 500, 58% of 859. Idle connections close after 10 s, so real use is far lower. Lowering the cache
+from 50 to 15 clients means a request for a 16th recently used tenant reconnects (about one round trip);
+there are no lab k6 numbers for the tenant mix yet, so raise `TENANT_DB_CLIENT_CACHE_MAX` only together
+with a smaller `DB_POOL_MAX_TENANT` and with connection counts from production.
 
 ### PgBouncer for tenant databases: not switched
 

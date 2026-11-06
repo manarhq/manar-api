@@ -40,7 +40,7 @@ const num = (v: unknown, fallback: number): number =>
 
 /**
  * Pool settings from the validated config (defaults mirror `DatabaseConfigSchema`, for callers
- * whose config object is a partial test double). The control pool never sends statement_timeout.
+ * whose config object is a partial test double).
  */
 export function poolSettings(
   get: Get,
@@ -49,11 +49,12 @@ export function poolSettings(
   return {
     max:
       kind === 'control'
-        ? num(get('DB_POOL_MAX_CONTROL'), 10)
-        : num(get('DB_POOL_MAX_TENANT'), 5),
+        ? num(get('DB_POOL_MAX_CONTROL'), 5)
+        : num(get('DB_POOL_MAX_TENANT'), 3),
     connectTimeoutMs: num(get('DB_POOL_CONNECT_TIMEOUT_MS'), 3000),
     queryTimeoutMs: num(get('DB_QUERY_TIMEOUT_MS'), 35_000),
-    statementTimeoutMs:
-      kind === 'tenant' ? num(get('DB_STATEMENT_TIMEOUT_MS'), 30_000) : 0,
+    // CONTROL_DATABASE_URL is a direct connection (the edge LISTEN needs it), so the control
+    // pool sends the startup parameter too and the server stops long queries.
+    statementTimeoutMs: num(get('DB_STATEMENT_TIMEOUT_MS'), 30_000),
   };
 }

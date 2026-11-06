@@ -125,23 +125,50 @@ describe('ErrorEnvelopeFilter', () => {
     );
   });
 
-  it('answers 503 enforcement_dependency_unavailable when the DB pool wait or a statement times out', () => {
-    for (const e of [
-      new Error('timeout exceeded when trying to connect'),
+  it.each([
+    ['pool wait expired', new Error('timeout exceeded when trying to connect')],
+    ['client query timeout', new Error('Query read timeout')],
+    [
+      'too many clients (53300)',
+      Object.assign(new Error('sorry, too many clients already'), {
+        code: '53300',
+      }),
+    ],
+    [
+      'too many clients behind Prisma',
+      Object.assign(new Error('Raw query failed'), {
+        code: 'P2010',
+        meta: { driverAdapterError: { cause: { originalCode: '53300' } } },
+      }),
+    ],
+    [
+      'statement timeout (57014)',
       Object.assign(new Error('Raw query failed'), {
         code: 'P2010',
         meta: { driverAdapterError: { cause: { originalCode: '57014' } } },
       }),
-    ]) {
-      const r = run(e, 'GET');
+    ],
+    [
+      'transaction start timeout (P2028)',
+      Object.assign(
+        new Error('Unable to start a transaction in the given time'),
+        {
+          code: 'P2028',
+        },
+      ),
+    ],
+  ])(
+    'answers 503 enforcement_dependency_unavailable for %s',
+    (_name, error) => {
+      const r = run(error, 'GET');
       expect(r.status).toBe(503);
       expect(r.body).toMatchObject({
         reason: 'enforcement_dependency_unavailable',
         dependency: 'database',
       });
-      expect(JSON.stringify(r.body)).not.toContain('57014');
-    }
-  });
+      expect(JSON.stringify(r.body)).not.toMatch(/5\d{4}|P20/);
+    },
+  );
 
   it('maps a duplicate and a missing row to 409 and 404', () => {
     expect(run(Object.assign(new Error('x'), { code: 'P2002' })).status).toBe(

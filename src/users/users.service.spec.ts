@@ -1,8 +1,10 @@
 import { UsersService } from './users.service';
-import { PrivilegeEscalationError } from './users.errors';
+import { LastOwnerError, PrivilegeEscalationError } from './users.errors';
 
 function make(
   initial: { role: string; extraRoles: string[]; status: string } | null,
+  /** Other ACTIVE owners of the workspace (the owner query returns them with the target). */
+  otherOwners: { issuer: string; subject: string }[] = [],
 ) {
   let m = initial && {
     subject: 'sub-t',
@@ -11,9 +13,14 @@ function make(
     grantedBy: null,
     ...initial,
   };
+  const self: { control: object } = { control: {} };
   const control = {
+    $transaction: vi.fn((fn: (tx: object) => unknown) => fn(self.control)),
+    $executeRaw: vi.fn(() => Promise.resolve(1)),
     membership: {
       findMany: vi.fn(() => Promise.resolve(m ? [m] : [])),
+      // the other-owners count (the target itself is excluded by the query)
+      count: vi.fn(() => Promise.resolve(otherOwners.length)),
       upsert: vi.fn(({ create, update }: any) => {
         m = {
           ...(m ?? { createdAt: new Date() }),
@@ -41,11 +48,13 @@ function make(
         }),
     },
   };
+  self.control = control;
   const audit = { recordSafely: vi.fn() };
   return {
     svc: new UsersService(audit as never, control as never),
     client: client as never,
     control,
+    audit,
   };
 }
 const base = {
@@ -97,5 +106,86 @@ describe('UsersService roles live in Membership', () => {
     expect(
       (await svc.getUserOrThrow(client, 't1', base.issuer, 'u1')).roles,
     ).toEqual([]);
+  });
+
+  it('the only owner cannot lose TENANT_OWNER, themselves or by another admin: last_owner, nothing written', async () => {
+    const { svc, client, control, audit } = make({
+      role: 'TENANT_OWNER',
+      extraRoles: [],
+      status: 'ACTIVE',
+    });
+    await expect(
+      svc.revokeRole(client, {
+        ...base,
+        role: 'TENANT_OWNER',
+        revokedByRoles: ['TENANT_OWNER'] as never,
+      }),
+    ).rejects.toThrow(LastOwnerError);
+    expect(control.membership.update).not.toHaveBeenCalled();
+    // the refusal is a security event of its own
+    expect(audit.recordSafely).toHaveBeenCalledWith(
+      client,
+      't1',
+      expect.objectContaining({
+        eventType: 'user.role_revoke_refused',
+        data: {
+          targetUserId: 'u1',
+          role: 'TENANT_OWNER',
+          reason: 'last_owner',
+        },
+      }),
+    );
+  });
+
+  it('a revoke above the caller is 403 before any owner check or lock', async () => {
+    const { svc, client, control } = make({
+      role: 'TENANT_OWNER',
+      extraRoles: [],
+      status: 'ACTIVE',
+    });
+    await expect(
+      svc.revokeRole(client, { ...base, role: 'TENANT_OWNER' }), // caller is only SECURITY_ADMIN
+    ).rejects.toThrow(PrivilegeEscalationError);
+    expect(control.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('the same holds when TENANT_OWNER is an extra role of the only owner', async () => {
+    const { svc, client, control } = make({
+      role: 'SECURITY_ADMIN',
+      extraRoles: ['TENANT_OWNER'],
+      status: 'ACTIVE',
+    });
+    await expect(
+      svc.revokeRole(client, {
+        ...base,
+        role: 'TENANT_OWNER',
+        revokedByRoles: ['TENANT_OWNER'] as never,
+      }),
+    ).rejects.toThrow(LastOwnerError);
+    expect(control.membership.update).not.toHaveBeenCalled();
+  });
+
+  it('an owner can be revoked while another active owner remains, under the per-workspace lock', async () => {
+    const { svc, client, control } = make(
+      { role: 'TENANT_OWNER', extraRoles: [], status: 'ACTIVE' },
+      [{ issuer: base.issuer, subject: 'sub-other' }],
+    );
+    const r = await svc.revokeRole(client, {
+      ...base,
+      role: 'TENANT_OWNER',
+      revokedByRoles: ['TENANT_OWNER'] as never,
+    });
+    expect(r.roles).toEqual([]);
+    expect(control.$executeRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('revoking a role that is not TENANT_OWNER never needs the owner check', async () => {
+    const { svc, client, control } = make({
+      role: 'AUDITOR',
+      extraRoles: [],
+      status: 'ACTIVE',
+    });
+    await svc.revokeRole(client, { ...base, role: 'AUDITOR' });
+    expect(control.$transaction).not.toHaveBeenCalled();
   });
 });

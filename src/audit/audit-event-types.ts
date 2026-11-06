@@ -105,6 +105,8 @@ export const AUDIT_EVENT_TYPES = {
   USER_ROLE_GRANTED: 'user.role_granted',
   /** `DELETE /users/:id/role-bindings/:role` revoked a role — see `UsersService.revokeRole`. */
   USER_ROLE_REVOKED: 'user.role_revoked',
+  /** `DELETE /users/:id/role-bindings/TENANT_OWNER` refused because the target is the last active owner (nothing changed). */
+  USER_ROLE_REVOKE_REFUSED: 'user.role_revoke_refused',
   /** `PATCH /tenant/settings` updated one or more residency/AI-governance flags — see `TenantSettingsService.updateSettings`. */
   TENANT_SETTINGS_UPDATED: 'tenant.settings_updated',
   /** Manar staff changed this tenant's feature flags, packs or LLM route through manar-fleet (src/platform/catalog.*). */
@@ -218,6 +220,9 @@ export const AUDIT_EVENT_TYPES = {
   PROTECT_TAMPER_SETTINGS_FLAG: 'protect.tamper.settings_flag',
   /** Claude Code ran with CLAUDE_CONFIG_DIR away from ~/.claude. */
   PROTECT_TAMPER_CONFIG_DIR: 'protect.tamper.config_dir',
+
+  /** The device service came back after a crash or kill; data carries how long it was away. */
+  HOST_SERVICE_RESTARTED: 'service.restarted',
 
   // AI spend tracker and secrets-in-prompt guard (DOOR).
   /** DOOR replaced a secret in an outbound prompt with a mask. Data: tool, kind, count, masked sample; never the prompt. */
