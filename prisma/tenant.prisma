@@ -2516,6 +2516,9 @@ model ApprovalAllowGrant {
   /// Which ask this answers (`ceiling`, or a hash of the policy version and the rule that asked).
   /// A scoped grant satisfies only that ask; null never satisfies a scoped lookup.
   askKey          String?
+  /// For a grant made from a linked approval: the canonical real path it was made for. A request for
+  /// the same name that points somewhere else (or nowhere known) is not answered by it.
+  resolvedPath    String?
 
   @@index([hostId, toolId, actionId, expiresAt])
   @@index([sourceId])

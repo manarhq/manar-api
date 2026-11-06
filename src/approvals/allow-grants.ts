@@ -44,6 +44,8 @@ export async function createAllowGrant(
     now?: Date;
     /** The ask an 8-hour grant answers; absent for an agent grant. */
     askKey?: string;
+    /** Canonical real path, when the approval was for a link: the grant answers only that target. */
+    resolvedPath?: string;
     /** A longer-lived, narrow-scope grant ("always allow this here"); default is exact, 8 hours. */
     always?: { origin: 'offer' | 'learning'; pattern: string; askKey: string };
   },
@@ -64,6 +66,7 @@ export async function createAllowGrant(
           (input.always ? ALWAYS_GRANT_TTL_MS : ALLOW_GRANT_TTL_MS),
       ),
       ...(input.askKey ? { askKey: input.askKey } : {}),
+      ...(input.resolvedPath ? { resolvedPath: input.resolvedPath } : {}),
       ...(input.always
         ? {
             origin: input.always.origin,
@@ -80,6 +83,12 @@ export async function findLiveAllowGrant(
   scope: AllowGrantScope,
   target: AllowGrantTarget,
   now: Date = new Date(),
+  /**
+   * The canonical real path the request points to when it is a link, else null: a grant made for
+   * a link answers only that target, and a plain grant never answers a link. Undefined: no
+   * filter (agent grants).
+   */
+  resolved?: string | null,
 ): Promise<{ id: string; expiresAt: Date; askKey: string | null } | null> {
   const where = scopeWhere(scope);
   if (!where) return null;
@@ -89,6 +98,7 @@ export async function findLiveAllowGrant(
       toolId: target.toolId,
       actionId: target.actionId,
       resource: target.resource,
+      ...(resolved === undefined ? {} : { resolvedPath: resolved }),
       effect: 'ALLOW',
       revokedAt: null,
       expiresAt: { gt: now },

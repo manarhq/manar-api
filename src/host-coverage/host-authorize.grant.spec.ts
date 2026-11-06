@@ -21,18 +21,27 @@ function make(opts: {
   grantAsk?: string;
   /** An 8-hour grant's own ask (a grant without one answers any ask). */
   grantKey?: string | null;
+  /** The real path the 8-hour grant was made for (a grant for a link); null/absent for a plain one. */
+  grantResolved?: string | null;
 }) {
   const grants = {
-    findFirst: vi.fn((args?: { where?: { effect?: string } }) =>
-      Promise.resolve(
-        args?.where?.effect === 'BLOCK'
-          ? opts.block
-            ? { id: 'b1' }
-            : null
-          : opts.grant
-            ? { id: 'g1', expiresAt: new Date(), askKey: opts.grantKey ?? null }
-            : null,
-      ),
+    findFirst: vi.fn(
+      (args?: { where?: { effect?: string; resolvedPath?: string | null } }) =>
+        Promise.resolve(
+          args?.where?.effect === 'BLOCK'
+            ? opts.block
+              ? { id: 'b1' }
+              : null
+            : opts.grant &&
+                (args?.where?.resolvedPath === undefined ||
+                  args.where.resolvedPath === (opts.grantResolved ?? null))
+              ? {
+                  id: 'g1',
+                  expiresAt: new Date(),
+                  askKey: opts.grantKey ?? null,
+                }
+              : null,
+        ),
     ),
     findMany: vi.fn((args?: { where?: { askKey?: string } }) =>
       Promise.resolve(
@@ -253,6 +262,120 @@ describe('8-hour grants on /host/v1/authorize', () => {
         expect(r.decision).toBe(want === 'ALLOW' ? r.decision : want);
         if (want !== 'ALLOW') expect(r.cacheable).toBe(false);
         expect(w.evaluate).toHaveBeenCalledTimes(2);
+      });
+      it('the link name matches an ALLOW rule, the target matches none: the risk ceiling asks', async () => {
+        const w = make({
+          policy: (req: { resource: string }) =>
+            req.resource === link
+              ? { effect: 'ALLOW', matchedRule: { name: 'project runs' } }
+              : { effect: 'ALLOW' },
+        });
+        const r = await w.svc.authorize(host, {
+          ...edit(link),
+          resolvedPath: '/home/sara/elsewhere/x',
+        });
+        expect(r.decision).toBe('APPROVAL_REQUIRED');
+        expect(r.reason).toBe('risk_ceiling_exceeded');
+        expect(r.cacheable).toBe(false);
+      });
+      it('the target is a secret and a catch-all rule allows it: it still asks', async () => {
+        const w = make({
+          policy: () => ({
+            effect: 'ALLOW',
+            matchedRule: { name: 'everything else' },
+          }),
+        });
+        const r = await w.svc.authorize(host, {
+          ...edit('/home/sara/proj/docs/authorized_keys'),
+          resolvedPath: '/home/sara/.ssh/authorized_keys',
+        });
+        expect(r.decision).toBe('APPROVAL_REQUIRED');
+        expect(r.riskScore).toBeGreaterThanOrEqual(50);
+      });
+      it("both ask with different rules: the target's key is used, and a grant for the link name does not answer", async () => {
+        const rule = (name: string) => ({
+          effect: 'APPROVAL_REQUIRED',
+          matchedRule: { name },
+          policyVersionId: 'pv1',
+        });
+        const policy = (req: { resource: string }) =>
+          req.resource === link ? rule('link rule') : rule('target rule');
+        const linkKey = policyAskKey(rule('link rule'));
+        const targetKey = policyAskKey(rule('target rule'));
+        const granted = make({
+          policy,
+          grant: true,
+          grantKey: linkKey,
+          grantResolved: real,
+        });
+        const r = await granted.svc.authorize(host, {
+          ...edit(link),
+          resolvedPath: real,
+        });
+        expect(r.decision).toBe('APPROVAL_REQUIRED');
+        expect(r.askKey).toBe(targetKey);
+        // A grant made for the target's ask answers it, if it was recorded for the same target.
+        const same = make({
+          policy,
+          grant: true,
+          grantKey: targetKey,
+          grantResolved: real,
+        });
+        expect(
+          (
+            await same.svc.authorize(host, {
+              ...edit(link),
+              resolvedPath: real,
+            })
+          ).decision,
+        ).toBe('ALLOW');
+      });
+      it('an exact grant answers a link only if it was recorded for the same real target', async () => {
+        const policy = byPath('APPROVAL_REQUIRED');
+        const plain = make({
+          policy: () => ({ effect: 'APPROVAL_REQUIRED' }),
+          grant: true,
+          grantKey: null,
+        });
+        // A plain grant (made for the file itself) does not answer the link.
+        const asked = await plain.svc.authorize(host, {
+          ...edit(link),
+          resolvedPath: real,
+        });
+        expect(asked.decision).toBe('APPROVAL_REQUIRED');
+        expect(plain.grants.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({ resolvedPath: real }),
+          }),
+        );
+        // ... and still answers the plain request.
+        expect((await plain.svc.authorize(host, edit(link))).decision).toBe(
+          'ALLOW',
+        );
+        // Recorded for this target: answers; recorded for another: does not.
+        const mine = make({
+          policy: () => ({ effect: 'APPROVAL_REQUIRED' }),
+          grant: true,
+          grantKey: null,
+          grantResolved: real,
+        });
+        expect(
+          (
+            await mine.svc.authorize(host, {
+              ...edit(link),
+              resolvedPath: real,
+            })
+          ).decision,
+        ).toBe('ALLOW');
+        expect(
+          (
+            await mine.svc.authorize(host, {
+              ...edit(link),
+              resolvedPath: '/home/sara/.aws/credentials',
+            })
+          ).decision,
+        ).toBe('APPROVAL_REQUIRED');
+        void policy;
       });
       it('never loosens: DENY for the asked path stays DENY', async () => {
         const w = make({
